@@ -24,11 +24,11 @@ use buck2_util::hash::BuckHasherBuilder;
 use dice::DiceComputations;
 use dice::LinearRecomputeDiceComputations;
 use dupe::Dupe;
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
 use itertools::Itertools;
 
 use crate::nodes::eval_result::EvaluationResult;
@@ -38,6 +38,7 @@ use crate::nodes::unconfigured::TargetNodeRef;
 use crate::super_package::SuperPackage;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum BuildErrors {
     #[error("Did not find package with name `{0}`.")]
     MissingPackage(PackageLabel),
@@ -232,7 +233,7 @@ fn apply_spec<T: PatternType>(
                 if let Some(missing) = missing {
                     match skip_missing_targets {
                         MissingTargetBehavior::Fail => {
-                            return Err(missing.into_errors().0.into());
+                            return Err(missing.into_first_error().into());
                         }
                         MissingTargetBehavior::Warn => {
                             console_message(missing.missing_targets_warning())

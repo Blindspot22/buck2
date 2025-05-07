@@ -26,22 +26,17 @@ use std::ops::Deref;
 use allocative::Allocative;
 use display_container::fmt_container;
 use serde::Serialize;
-use starlark_map::small_set::SmallSet;
 use starlark_map::Hashed;
+use starlark_map::small_set::SmallSet;
 
 use super::refs::SetRef;
 use crate as starlark;
-use crate::coerce::coerce;
 use crate::coerce::Coerce;
+use crate::coerce::coerce;
 use crate::environment::Methods;
 use crate::environment::MethodsStatic;
 use crate::typing::Ty;
 use crate::util::refcell::unleak_borrow;
-use crate::values::comparison::equals_small_set;
-use crate::values::set::methods;
-use crate::values::starlark_value;
-use crate::values::type_repr::SetType;
-use crate::values::type_repr::StarlarkTypeRepr;
 use crate::values::AllocValue;
 use crate::values::Freeze;
 use crate::values::FreezeResult;
@@ -54,6 +49,11 @@ use crate::values::Trace;
 use crate::values::UnpackValue;
 use crate::values::Value;
 use crate::values::ValueError;
+use crate::values::comparison::equals_small_set;
+use crate::values::set::methods;
+use crate::values::starlark_value;
+use crate::values::type_repr::SetType;
+use crate::values::type_repr::StarlarkTypeRepr;
 
 #[derive(Clone, Default, Trace, Debug, ProvidesStaticType, Allocative)]
 #[repr(transparent)]
@@ -159,7 +159,11 @@ trait SetLike<'v>: Debug + Allocative {
 }
 
 impl<'v> SetLike<'v> for RefCell<SetData<'v>> {
-    type ContentRef<'a> = Ref<'a, SmallSet<Value<'v>>> where Self: 'a, 'v: 'a;
+    type ContentRef<'a>
+        = Ref<'a, SmallSet<Value<'v>>>
+    where
+        Self: 'a,
+        'v: 'a;
 
     fn content<'a>(&'a self) -> Ref<'a, SmallSet<Value<'v>>> {
         Ref::map(self.borrow(), |x| &x.content)
@@ -172,17 +176,23 @@ impl<'v> SetLike<'v> for RefCell<SetData<'v>> {
 
     #[inline]
     unsafe fn iter_stop(&self) {
-        unleak_borrow(self);
+        unsafe {
+            unleak_borrow(self);
+        }
     }
 
     #[inline]
     unsafe fn content_unchecked(&self) -> &SmallSet<Value<'v>> {
-        &self.try_borrow_unguarded().ok().unwrap_unchecked().content
+        unsafe { &self.try_borrow_unguarded().ok().unwrap_unchecked().content }
     }
 }
 
 impl<'v> SetLike<'v> for FrozenSetData {
-    type ContentRef<'a> = &'a SmallSet<Value<'v>> where Self: 'a, 'v: 'a;
+    type ContentRef<'a>
+        = &'a SmallSet<Value<'v>>
+    where
+        Self: 'a,
+        'v: 'a;
 
     fn content(&self) -> &SmallSet<Value<'v>> {
         coerce(&self.content)
@@ -228,8 +238,10 @@ where
     }
 
     unsafe fn iterate(&self, me: Value<'v>, _heap: &'v Heap) -> crate::Result<Value<'v>> {
-        self.0.iter_start();
-        Ok(me)
+        unsafe {
+            self.0.iter_start();
+            Ok(me)
+        }
     }
 
     unsafe fn iter_size_hint(&self, index: usize) -> (usize, Option<usize>) {
@@ -239,11 +251,13 @@ where
     }
 
     unsafe fn iter_next(&self, index: usize, _heap: &'v Heap) -> Option<Value<'v>> {
-        self.0.content_unchecked().iter().nth(index).copied()
+        unsafe { self.0.content_unchecked().iter().nth(index).copied() }
     }
 
     unsafe fn iter_stop(&self) {
-        self.0.iter_stop();
+        unsafe {
+            self.0.iter_stop();
+        }
     }
 
     fn to_bool(&self) -> bool {

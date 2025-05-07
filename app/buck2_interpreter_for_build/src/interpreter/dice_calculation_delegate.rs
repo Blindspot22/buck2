@@ -23,13 +23,16 @@ use buck2_common::package_listing::dice::DicePackageListingResolver;
 use buck2_common::package_listing::listing::PackageListing;
 use buck2_core::build_file_path::BuildFilePath;
 use buck2_core::cells::build_file_cell::BuildFileCell;
-use buck2_core::cells::name::CellName;
+use buck2_core::cells::cell_path::CellPath;
+use buck2_core::fs::paths::file_name::FileName;
 use buck2_core::package::PackageLabel;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::dispatch::span;
 use buck2_events::dispatch::span_async_simple;
 use buck2_futures::cancellation::CancellationContext;
+use buck2_interpreter::allow_relative_paths::HasAllowRelativePaths;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_interpreter::dice::starlark_provider::with_starlark_eval_provider;
 use buck2_interpreter::file_loader::LoadedModule;
 use buck2_interpreter::file_loader::ModuleDeps;
@@ -38,12 +41,10 @@ use buck2_interpreter::load_module::InterpreterCalculation;
 use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
 use buck2_interpreter::paths::module::StarlarkModulePath;
 use buck2_interpreter::paths::package::PackageFilePath;
+use buck2_interpreter::paths::path::OwnedStarlarkPath;
 use buck2_interpreter::paths::path::StarlarkPath;
 use buck2_interpreter::starlark_profiler::config::GetStarlarkProfilerInstrumentation;
-use buck2_interpreter::starlark_profiler::data::ProfileTarget;
-use buck2_interpreter::starlark_profiler::profiler::StarlarkProfiler;
 use buck2_interpreter::starlark_profiler::profiler::StarlarkProfilerOpt;
-use buck2_interpreter::starlark_profiler::profiler::StarlarkProfilerOptVal;
 use buck2_node::nodes::eval_result::EvaluationResult;
 use buck2_node::super_package::SuperPackage;
 use derive_more::Display;
@@ -59,12 +60,13 @@ use crate::interpreter::cell_info::InterpreterCellInfo;
 use crate::interpreter::check_starlark_stack_size::check_starlark_stack_size;
 use crate::interpreter::cycles::LoadCycleDescriptor;
 use crate::interpreter::global_interpreter_state::HasGlobalInterpreterState;
-use crate::interpreter::interpreter_for_cell::InterpreterForCell;
-use crate::interpreter::interpreter_for_cell::ParseData;
-use crate::interpreter::interpreter_for_cell::ParseResult;
+use crate::interpreter::interpreter_for_dir::InterpreterForDir;
+use crate::interpreter::interpreter_for_dir::ParseData;
+use crate::interpreter::interpreter_for_dir::ParseResult;
 use crate::super_package::package_value::SuperPackageValuesImpl;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum DiceCalculationDelegateError {
     #[error("Error evaluating build file: `{0}`")]
     EvalBuildFileError(BuildFilePath),
@@ -80,8 +82,7 @@ pub trait HasCalculationDelegate<'c, 'd> {
     /// per evaluated file (build file or `.bzl`).
     async fn get_interpreter_calculator(
         &'c mut self,
-        cell: CellName,
-        build_file_cell: BuildFileCell,
+        path: OwnedStarlarkPath,
     ) -> buck2_error::Result<DiceCalculationDelegate<'c, 'd>>;
 }
 
@@ -89,16 +90,15 @@ pub trait HasCalculationDelegate<'c, 'd> {
 impl<'c, 'd> HasCalculationDelegate<'c, 'd> for DiceComputations<'d> {
     async fn get_interpreter_calculator(
         &'c mut self,
-        cell: CellName,
-        build_file_cell: BuildFileCell,
+        path: OwnedStarlarkPath,
     ) -> buck2_error::Result<DiceCalculationDelegate<'c, 'd>> {
-        #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+        #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
         #[display("{}@{}", _0, _1)]
-        struct InterpreterConfigForCellKey(CellName, BuildFileCell);
+        struct InterpreterConfigForDirKey(CellPath, BuildFileCell);
 
         #[async_trait]
-        impl Key for InterpreterConfigForCellKey {
-            type Value = buck2_error::Result<Arc<InterpreterForCell>>;
+        impl Key for InterpreterConfigForDirKey {
+            type Value = buck2_error::Result<Arc<InterpreterForDir>>;
             async fn compute(
                 &self,
                 ctx: &mut DiceComputations,
@@ -106,9 +106,12 @@ impl<'c, 'd> HasCalculationDelegate<'c, 'd> for DiceComputations<'d> {
             ) -> Self::Value {
                 let global_state = ctx.get_global_interpreter_state().await?;
 
-                let cell_alias_resolver = ctx.get_cell_alias_resolver(self.0).await?;
+                let cell_alias_resolver = ctx.get_cell_alias_resolver(self.0.cell()).await?;
 
                 let implicit_import_paths = ctx.import_paths_for_cell(self.1).await?;
+
+                let dirs_allowing_relative_paths =
+                    ctx.dirs_allowing_relative_paths(self.0.clone()).await?;
 
                 let cell_info = InterpreterCellInfo::new(
                     self.1,
@@ -116,10 +119,11 @@ impl<'c, 'd> HasCalculationDelegate<'c, 'd> for DiceComputations<'d> {
                     cell_alias_resolver,
                 )?;
 
-                Ok(Arc::new(InterpreterForCell::new(
+                Ok(Arc::new(InterpreterForDir::new(
                     cell_info,
                     global_state.dupe(),
                     implicit_import_paths,
+                    dirs_allowing_relative_paths,
                 )?))
             }
 
@@ -128,8 +132,16 @@ impl<'c, 'd> HasCalculationDelegate<'c, 'd> for DiceComputations<'d> {
             }
         }
 
+        let build_file_cell = path.borrow().build_file_cell();
         let configs = self
-            .compute(&InterpreterConfigForCellKey(cell, build_file_cell))
+            .compute(&InterpreterConfigForDirKey(
+                path.borrow()
+                    .path()
+                    .parent()
+                    .expect("starlark path to have parent")
+                    .to_owned(),
+                build_file_cell,
+            ))
             .await??;
 
         Ok(DiceCalculationDelegate {
@@ -143,7 +155,7 @@ impl<'c, 'd> HasCalculationDelegate<'c, 'd> for DiceComputations<'d> {
 pub struct DiceCalculationDelegate<'c, 'd> {
     build_file_cell: BuildFileCell,
     ctx: &'c mut DiceComputations<'d>,
-    configs: Arc<InterpreterForCell>,
+    configs: Arc<InterpreterForDir>,
 }
 
 impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
@@ -235,7 +247,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         with_starlark_eval_provider(
             ctx,
             &mut StarlarkProfilerOpt::disabled(),
-            format!("load:{}", &starlark_file),
+            &StarlarkEvalKind::Load(Arc::new(starlark_file.to_owned())),
             move |provider, ctx| {
                 let mut buckconfigs =
                     ConfigsOnDiceViewForStarlark::new(ctx, buckconfig, root_buckconfig);
@@ -271,7 +283,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         match proj_rel_path.parent() {
             None => {
                 // We are in the project root, there's no parent.
-                Ok(SuperPackage::empty::<SuperPackageValuesImpl>())
+                Ok(SuperPackage::empty::<SuperPackageValuesImpl>()?)
             }
             Some(parent) => {
                 let parent_cell = cell_resolver.get_cell_path(parent)?;
@@ -287,8 +299,9 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         package: PackageLabel,
     ) -> buck2_error::Result<Option<(PackageFilePath, AstModule, ModuleDeps)>> {
         // Note:
-        // * we are using `read_dir` instead of `read_path_metadata` because
-        //   * it is an extra IO, and `read_dir` is likely already cached.
+        /// To avoid paying the cost of read_dir when computing if any specific file has changed (e.g. PACKAGE),
+        /// we depend on directory_sublisting_matching_any_case_key to invalidate all files that match (regardless of case).
+        /// We need to do this to make sure to work with case-sensitive file paths.
         //   * `read_path_metadata` would not tell us if the file name is `PACKAGE`
         //     and not `package` on case-insensitive filesystems.
         //     We do case-sensitive comparison for `BUCK` files, so we do the same here.
@@ -312,16 +325,23 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
                 ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
-                // This is cached if evaluating a `PACKAGE` file next to a `BUCK` file.
-                let dir = DiceFileComputations::read_dir(ctx, self.0.as_cell_path()).await?;
                 for package_file_path in PackageFilePath::for_dir(self.0.as_cell_path()) {
-                    if !dir.contains(
-                        package_file_path
-                            .path()
-                            .path()
-                            .file_name()
-                            .internal_error("Must have name")?,
-                    ) {
+                    let file_name = package_file_path.file_name();
+                    let lower_case_file_name = file_name.as_str().to_lowercase();
+                    let directory_sublisting_output =
+                        DiceFileComputations::directory_sublisting_matching_any_case(
+                            ctx,
+                            self.0.as_cell_path(),
+                            FileName::unchecked_new(&lower_case_file_name),
+                        )
+                        .await?;
+
+                    let file_exists = directory_sublisting_output
+                        .included
+                        .iter()
+                        .any(|f| f.file_name == file_name);
+
+                    if !file_exists {
                         continue;
                     }
                     return Ok(Some(Arc::new(package_file_path)));
@@ -380,7 +400,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         with_starlark_eval_provider(
             ctx,
             &mut StarlarkProfilerOpt::disabled(),
-            format!("load:{}", path),
+            &StarlarkEvalKind::LoadPackageFile(path.dupe()),
             move |provider, ctx| {
                 let mut buckconfigs =
                     ConfigsOnDiceViewForStarlark::new(ctx, buckconfig, root_buckconfig);
@@ -418,9 +438,10 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
                 ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
-                let cell_name = self.0.as_cell_path().cell();
                 let mut interpreter = ctx
-                    .get_interpreter_calculator(cell_name, BuildFileCell::new(cell_name))
+                    .get_interpreter_calculator(OwnedStarlarkPath::PackageFile(
+                        PackageFilePath::package_file_for_dir(self.0.as_cell_path()),
+                    ))
                     .await?;
                 interpreter
                     .eval_package_file_uncached(self.0.dupe())
@@ -488,24 +509,16 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         package: PackageLabel,
     ) -> (Duration, buck2_error::Result<Arc<EvaluationResult>>) {
         let mut now = None;
+        let eval_kind = StarlarkEvalKind::LoadBuildFile(package.dupe());
         let eval_result: buck2_error::Result<_> = try {
-            let ((), listing, profile_mode) = self
+            let ((), listing, mut profiler) = self
                 .ctx
                 .try_compute3(
                     |ctx| check_starlark_stack_size(ctx).boxed(),
                     |ctx| Self::resolve_package_listing(ctx, package.dupe()).boxed(),
-                    |ctx| ctx.get_profile_mode_for_loading(package).boxed(),
+                    |ctx| ctx.get_starlark_profiler(&eval_kind),
                 )
                 .await?;
-
-            let profiler_opt = profile_mode.profile_mode().map(|profile_mode| {
-                StarlarkProfiler::new(profile_mode.dupe(), false, ProfileTarget::Loading(package))
-            });
-
-            let mut profiler = match profiler_opt {
-                None => StarlarkProfilerOptVal::Disabled,
-                Some(profiler) => StarlarkProfilerOptVal::Profiler(profiler),
-            };
 
             let build_file_path =
                 BuildFilePath::new(package.dupe(), listing.buildfile().to_owned());
@@ -537,7 +550,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
             let mut eval_result = with_starlark_eval_provider(
                 ctx,
                 &mut profiler.as_mut(),
-                format!("load_buildfile:{}", &package),
+                &eval_kind,
                 move |provider, ctx| {
                     let mut buckconfigs =
                         ConfigsOnDiceViewForStarlark::new(ctx, buckconfig, root_buckconfig);
@@ -585,7 +598,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
                 },
             )
             .await?;
-            let profile_data = profiler.finish()?;
+            let profile_data = profiler.finish(None)?;
             if eval_result.starlark_profile.is_some() {
                 return (
                     now.unwrap().elapsed(),

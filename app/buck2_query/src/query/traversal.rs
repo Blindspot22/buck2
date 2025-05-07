@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use async_trait::async_trait;
-use futures::stream::FuturesOrdered;
 use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 use starlark_map::StarlarkHasherBuilder;
 
 use crate::query::graph::graph::Graph;
@@ -301,6 +301,14 @@ mod tests {
             unimplemented!()
         }
 
+        fn map_any_attr<R, F: FnMut(Option<&Self::Attr<'_>>) -> R>(
+            &self,
+            _key: &str,
+            _func: F,
+        ) -> R {
+            unimplemented!()
+        }
+
         fn inputs_for_each<E, F: FnMut(CellPath) -> Result<(), E>>(
             &self,
             _func: F,
@@ -377,7 +385,9 @@ mod tests {
         fn get(&self, label: &Ref) -> buck2_error::Result<Node> {
             self.0
                 .get(label)
-                .ok_or_else(|| buck2_error::buck2_error!([], "missing node"))
+                .ok_or_else(|| {
+                    buck2_error::buck2_error!(buck2_error::ErrorTag::Tier0, "missing node")
+                })
                 .map(|v| v.dupe())
         }
     }

@@ -8,8 +8,8 @@
  */
 
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
-use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::ActionExecutionCtx;
+use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_common::file_ops::FileDigestConfig;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_execute::artifact_value::ArtifactValue;
@@ -26,10 +26,10 @@ pub(crate) async fn declare_copy_to_offline_output_cache(
     output: &BuildArtifact,
     value: ArtifactValue,
 ) -> buck2_error::Result<ProjectRelativePathBuf> {
-    let build_path = ctx.fs().resolve_build(output.get_path());
+    let build_path = ctx.fs().resolve_build(output.get_path())?;
     let offline_cache_path = ctx
         .fs()
-        .resolve_offline_output_cache_path(output.get_path());
+        .resolve_offline_output_cache_path(output.get_path())?;
     declare_copy_materialization(ctx, build_path, offline_cache_path.clone(), value).await?;
 
     Ok(offline_cache_path)
@@ -45,7 +45,7 @@ pub(crate) async fn declare_copy_from_offline_cache(
 ) -> buck2_error::Result<ActionOutputs> {
     let offline_cache_path = ctx
         .fs()
-        .resolve_offline_output_cache_path(output.get_path());
+        .resolve_offline_output_cache_path(output.get_path())?;
 
     let (value, _hashing_time) = build_entry_from_disk(
         ctx.fs().fs().resolve(&offline_cache_path),
@@ -57,7 +57,11 @@ pub(crate) async fn declare_copy_from_offline_cache(
 
     let entry = value
         .ok_or_else(|| {
-            buck2_error::buck2_error!([], "Missing offline cache entry: `{}`", offline_cache_path)
+            buck2_error::buck2_error!(
+                buck2_error::ErrorTag::Tier0,
+                "Missing offline cache entry: `{}`",
+                offline_cache_path
+            )
         })?
         .map_dir(|dir| {
             dir.fingerprint(ctx.digest_config().as_directory_serializer())
@@ -65,7 +69,7 @@ pub(crate) async fn declare_copy_from_offline_cache(
         });
     let value = ArtifactValue::from(entry);
 
-    let build_path = ctx.fs().resolve_build(output.get_path());
+    let build_path = ctx.fs().resolve_build(output.get_path())?;
     declare_copy_materialization(ctx, offline_cache_path, build_path, value.dupe()).await?;
 
     Ok(ActionOutputs::from_single(output.get_path().dupe(), value))

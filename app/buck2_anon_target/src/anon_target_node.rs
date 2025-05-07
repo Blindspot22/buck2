@@ -8,16 +8,16 @@
  */
 
 use std::any::Any;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
 
 use allocative::Allocative;
-use buck2_analysis::analysis::env::get_deps_from_analysis_results;
 use buck2_analysis::analysis::env::RuleAnalysisAttrResolutionContext;
+use buck2_analysis::analysis::env::get_deps_from_analysis_results;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_build_api::anon_target::AnonTargetDependentAnalysisResults;
 use buck2_build_api::anon_target::AnonTargetDyn;
@@ -35,27 +35,31 @@ use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_core::target::label::label::TargetLabel;
-use buck2_data::action_key_owner::BaseDeferredKeyProto;
 use buck2_data::ToProtoMessage;
-use buck2_error::starlark_error::from_starlark;
+use buck2_data::action_key_owner::BaseDeferredKeyProto;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_node::rule_type::StarlarkRuleType;
+use buck2_util::strong_hasher::Blake3StrongHasher;
+use buck2_util::strong_hasher::USE_CORRECT_ANON_TARGETS_HASH;
 use cmp_any::PartialEqAny;
 use dupe::Dupe;
+use fxhash::FxHasher;
 use starlark::collections::SmallMap;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::values::structs::AllocStruct;
-use starlark::values::structs::StructRef;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::structs::AllocStruct;
+use starlark::values::structs::StructRef;
 use starlark_map::sorted_map::SortedMap;
+use strong_hash::StrongHash;
 
 use crate::anon_target_attr::AnonTargetAttr;
 use crate::anon_target_attr_resolve::AnonTargetAttrResolution;
 use crate::anon_target_attr_resolve::AnonTargetAttrResolutionContext;
 
-#[derive(Hash, Eq, PartialEq, Clone, Debug, Allocative)]
+#[derive(Eq, PartialEq, Clone, Debug, Allocative)]
 pub(crate) struct AnonTarget {
     /// Not necessarily a "real" target label that actually exists, but could be.
     name: TargetLabel,
@@ -66,15 +70,26 @@ pub(crate) struct AnonTarget {
     attrs: SortedMap<String, AnonTargetAttr>,
     /// The execution configuration - same as the parent.
     exec_cfg: ConfigurationNoExec,
+    /// Variant of the anon target, either bxl or bzl.
+    variant: AnonTargetVariant,
     /// The hash of the `rule_type` and `attrs` for bzl anon targets.
     /// Or
     /// The hash of the `rule_type`, `attrs` and `global_cfg_options` for bxl anon targets.
-    hash: String,
-    /// Variant of the anon target, either bxl or bzl.
-    variant: AnonTargetVariant,
+    ///
+    /// FIXME(JakobDegen): We use this to disambiguate artifact paths, so hashing only some of these
+    /// values is super dangerous - if there's anything we forget to include in the path, we get
+    /// what is effectively UB
+    ///
+    /// FIXME(JakobDegen): This needs to use a strong hash
+    partial_hash: String,
+    /// The cached strong hash value - we do have to cache this, it's quite perf sensitive
+    strong_hash: u64,
+    strong_hash_str: String,
+    /// Cached hash value
+    hash: u64,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Debug, Allocative)]
+#[derive(Hash, Eq, PartialEq, Clone, Debug, Allocative, StrongHash)]
 pub(crate) enum AnonTargetVariant {
     Bzl,
     Bxl(GlobalCfgOptions),
@@ -86,42 +101,24 @@ impl fmt::Display for AnonTarget {
             f,
             "{} (anon: {}) ({})",
             self.name(),
-            self.partial_hash(),
+            self.path_hash(),
             self.exec_cfg()
         )
     }
 }
 
+impl Hash for AnonTarget {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
 impl AnonTarget {
-    fn mk_hash_bzl(
-        rule_type: &StarlarkRuleType,
-        attrs: &SortedMap<String, AnonTargetAttr>,
-    ) -> String {
-        // This is the same hasher as we use for Configuration, so is probably fine.
-        // But quite possibly should be a crypto hasher in future.
-        let mut hasher = DefaultHasher::new();
-        rule_type.hash(&mut hasher);
-        attrs.hash(&mut hasher);
-        format!("{:x}", hasher.finish())
-    }
-
-    fn mk_hash_bxl(
-        rule_type: &StarlarkRuleType,
-        attrs: &SortedMap<String, AnonTargetAttr>,
-        global_cfg_options: &GlobalCfgOptions,
-    ) -> String {
-        let mut hasher = DefaultHasher::new();
-        rule_type.hash(&mut hasher);
-        attrs.hash(&mut hasher);
-        global_cfg_options.hash(&mut hasher);
-        format!("{:x}", hasher.finish())
-    }
-
     pub(crate) fn as_proto(&self) -> buck2_data::AnonTarget {
         buck2_data::AnonTarget {
             name: Some(self.name().as_proto()),
             execution_configuration: Some(self.exec_cfg().cfg().as_proto()),
-            hash: self.partial_hash().to_owned(),
+            hash: self.path_hash().to_owned(),
         }
     }
 
@@ -130,33 +127,43 @@ impl AnonTarget {
         name: TargetLabel,
         attrs: SortedMap<String, AnonTargetAttr>,
         exec_cfg: ConfigurationNoExec,
+        variant: AnonTargetVariant,
     ) -> Self {
-        let hash = Self::mk_hash_bzl(&rule_type, &attrs);
-        AnonTarget {
-            name,
-            rule_type,
-            attrs,
-            exec_cfg,
-            hash,
-            variant: AnonTargetVariant::Bzl,
+        let mut hasher = DefaultHasher::new();
+        rule_type.hash(&mut hasher);
+        attrs.hash(&mut hasher);
+        if let AnonTargetVariant::Bxl(global_cfg_options) = &variant {
+            global_cfg_options.hash(&mut hasher);
         }
-    }
+        let partial_hash = format!("{:x}", hasher.finish());
 
-    pub(crate) fn new_bxl(
-        rule_type: Arc<StarlarkRuleType>,
-        name: TargetLabel,
-        attrs: SortedMap<String, AnonTargetAttr>,
-        exec_cfg: ConfigurationNoExec,
-        global_cfg_options: GlobalCfgOptions,
-    ) -> Self {
-        let hash = Self::mk_hash_bxl(&rule_type, &attrs, &global_cfg_options);
+        let mut full_hash = FxHasher::default();
+        rule_type.hash(&mut full_hash);
+        name.hash(&mut full_hash);
+        attrs.hash(&mut full_hash);
+        exec_cfg.hash(&mut full_hash);
+        variant.hash(&mut full_hash);
+        let full_hash = full_hash.finish();
+
+        let mut strong_hash = Blake3StrongHasher::new();
+        rule_type.hash(&mut strong_hash);
+        name.hash(&mut strong_hash);
+        attrs.hash(&mut strong_hash);
+        exec_cfg.hash(&mut strong_hash);
+        variant.hash(&mut strong_hash);
+        let strong_hash = strong_hash.finish();
+        let strong_hash_str = format!("{:x}", strong_hash);
+
         AnonTarget {
             name,
             rule_type,
             attrs,
             exec_cfg,
-            hash,
-            variant: AnonTargetVariant::Bxl(global_cfg_options),
+            variant,
+            partial_hash,
+            hash: full_hash,
+            strong_hash,
+            strong_hash_str,
         }
     }
 
@@ -168,11 +175,13 @@ impl AnonTarget {
         &self.attrs
     }
 
-    /// The hash of the rule type and attributes for bzl anon targets.
-    /// Or
-    /// The hash of the rule type, attributes and global_cfg_options for bxl anon targets.
-    fn partial_hash(&self) -> &str {
-        &self.hash
+    /// The hash that is used in anon target artifact paths
+    fn path_hash(&self) -> &str {
+        if *USE_CORRECT_ANON_TARGETS_HASH.get().unwrap() {
+            &self.strong_hash_str
+        } else {
+            &self.partial_hash
+        }
     }
 
     pub(crate) fn exec_cfg(&self) -> &ConfigurationNoExec {
@@ -244,13 +253,11 @@ impl AnonTargetDyn for AnonTarget {
         let mut fulfilled_artifact_mappings = HashMap::new();
 
         for (id, func) in promise_artifact_mappings.values().enumerate() {
-            let artifact = eval
-                .eval_function(*func, &[anon_target_result], &[])
-                .map_err(from_starlark)?;
+            let artifact = eval.eval_function(*func, &[anon_target_result], &[])?;
 
             let promise_id = PromiseArtifactId::new(BaseDeferredKey::AnonTarget(self.dupe()), id);
 
-            match ValueAsArtifactLike::unpack_value(artifact).map_err(from_starlark)? {
+            match ValueAsArtifactLike::unpack_value(artifact)? {
                 Some(artifact) => {
                     fulfilled_artifact_mappings
                         .insert(promise_id.clone(), artifact.0.get_bound_artifact()?);
@@ -265,6 +272,10 @@ impl AnonTargetDyn for AnonTarget {
 
         Ok(fulfilled_artifact_mappings)
     }
+
+    fn eval_kind(self: Arc<Self>) -> StarlarkEvalKind {
+        StarlarkEvalKind::AnonTarget(self)
+    }
 }
 
 impl BaseDeferredKeyDyn for AnonTarget {
@@ -273,9 +284,11 @@ impl BaseDeferredKeyDyn for AnonTarget {
     }
 
     fn hash(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        Hash::hash(self, &mut hasher);
-        hasher.finish()
+        self.hash
+    }
+
+    fn strong_hash(&self) -> u64 {
+        self.strong_hash
     }
 
     fn make_hashed_path(
@@ -304,7 +317,7 @@ impl BaseDeferredKeyDyn for AnonTarget {
             } else {
                 "/"
             },
-            self.partial_hash(),
+            self.path_hash(),
             "/__",
             self.name().name().as_str(),
             "__",
@@ -327,11 +340,6 @@ impl BaseDeferredKeyDyn for AnonTarget {
 
     fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
-    }
-
-    fn execution_platform_resolution(&self) -> &ExecutionPlatformResolution {
-        // TODO(wendyy) support exec platforms for anon targets
-        unimplemented!("Execution platforms are not supported for anon targets (yet)")
     }
 
     fn global_cfg_options(&self) -> Option<GlobalCfgOptions> {

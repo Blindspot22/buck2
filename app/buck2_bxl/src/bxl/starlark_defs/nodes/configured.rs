@@ -17,8 +17,8 @@ use std::sync::OnceLock;
 use allocative::Allocative;
 use buck2_analysis::analysis::calculation::get_dep_analysis;
 use buck2_analysis::analysis::calculation::resolve_queries;
-use buck2_analysis::analysis::env::get_deps_from_analysis_results;
 use buck2_analysis::analysis::env::RuleAnalysisAttrResolutionContext;
+use buck2_analysis::analysis::env::get_deps_from_analysis_results;
 use buck2_analysis::attrs::resolve::configured_attr::ConfiguredAttrExt;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::source_artifact::SourceArtifact;
@@ -30,8 +30,8 @@ use buck2_common::dice::data::HasIoProvider;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
-use buck2_core::package::source_path::SourcePathRef;
 use buck2_core::package::PackageLabel;
+use buck2_core::package::source_path::SourcePathRef;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_error::BuckErrorContext;
@@ -58,10 +58,6 @@ use starlark::environment::Module;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::list::AllocList;
-use starlark::values::none::NoneOr;
-use starlark::values::starlark_value;
-use starlark::values::structs::AllocStruct;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -72,6 +68,10 @@ use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
 use starlark::values::ValueTyped;
+use starlark::values::list::AllocList;
+use starlark::values::none::NoneOr;
+use starlark::values::starlark_value;
+use starlark::values::structs::AllocStruct;
 
 use super::node_attrs::NodeAttributeGetter;
 use crate::bxl::starlark_defs::context::BxlContext;
@@ -591,7 +591,7 @@ impl Serialize for StarlarkConfiguredAttr {
 
 starlark_simple_value!(StarlarkConfiguredAttr);
 
-#[starlark_value(type = "configured_attr")]
+#[starlark_value(type = "bxl.ConfiguredAttr")]
 impl<'v> StarlarkValue<'v> for StarlarkConfiguredAttr {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -611,9 +611,14 @@ fn configured_attr_methods(builder: &mut MethodsBuilder) {
     ///     attrs = node.attrs_eager()
     ///     ctx.output.print(attrs.name.type)
     /// ```
+    // FIXME(JakobDegen): Strings as types are mostly dead, users should be getting the value and
+    // using `isinstance` instead. Remove this.
     #[starlark(attribute)]
-    fn r#type<'v>(this: &StarlarkConfiguredAttr) -> starlark::Result<&'v str> {
-        Ok(this.0.starlark_type()?)
+    fn r#type<'v>(this: &StarlarkConfiguredAttr, heap: &'v Heap) -> starlark::Result<&'v str> {
+        Ok(this
+            .0
+            .to_value(PackageLabelOption::PackageLabel(this.1.dupe()), heap)?
+            .get_type())
     }
 
     /// Returns the value of this attribute. The value here is not fully resolved like in rules.

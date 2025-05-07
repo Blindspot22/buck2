@@ -10,9 +10,8 @@
 use std::cell::OnceCell;
 use std::iter;
 
-use buck2_error::buck2_error;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use starlark::environment::GlobalsBuilder;
 use starlark::starlark_module;
 use starlark::typing::ParamIsRequired;
@@ -44,7 +43,10 @@ pub fn new_dynamic_actions_callable<'v>(
     callback_param: &DynamicActionsCallbackParam,
 ) -> buck2_error::Result<DynamicActionsCallable<'v>> {
     if attrs.contains_key(callback_param.name) {
-        return Err(buck2_error!([], "Cannot define `actions` attribute"));
+        return Err(buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Cannot define `actions` attribute"
+        ));
     }
     let attrs: SmallMap<String, DynamicAttrType> = attrs
         .into_iter()
@@ -66,7 +68,6 @@ pub fn new_dynamic_actions_callable<'v>(
             None,
             &DynamicActionsCallbackReturnType::starlark_type_repr(),
         )
-        .map_err(from_starlark)
         .buck_error_context("`impl` function must be callable with given params")?;
 
     let callable_ty = Ty::function(
@@ -77,7 +78,6 @@ pub fn new_dynamic_actions_callable<'v>(
                 ty.callable_param_ty(),
             )
         }))
-        .map_err(from_starlark)
         .internal_error("Signature must be correct")?,
         StarlarkDynamicActions::starlark_type_repr(),
     );

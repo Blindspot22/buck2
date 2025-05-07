@@ -12,17 +12,17 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_core::buck2_env;
+use buck2_core::cells::CellAliasResolver;
+use buck2_core::cells::CellResolver;
 use buck2_core::cells::alias::NonEmptyCellAlias;
 use buck2_core::cells::cell_root_path::CellRootPath;
 use buck2_core::cells::cell_root_path::CellRootPathBuf;
 use buck2_core::cells::external::ExternalCellOrigin;
 use buck2_core::cells::external::GitCellSetup;
 use buck2_core::cells::name::CellName;
-use buck2_core::cells::CellAliasResolver;
-use buck2_core::cells::CellResolver;
+use buck2_core::fs::paths::RelativePath;
 use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::RelativePath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_error::BuckErrorContext;
@@ -34,23 +34,24 @@ use crate::dice::cells::HasCellResolver;
 use crate::dice::data::HasIoProvider;
 use crate::external_cells::EXTERNAL_CELLS_IMPL;
 use crate::legacy_configs::aggregator::CellsAggregator;
+use crate::legacy_configs::args::ResolvedLegacyConfigArg;
 use crate::legacy_configs::args::resolve_config_args;
 use crate::legacy_configs::args::to_proto_config_args;
-use crate::legacy_configs::args::ResolvedLegacyConfigArg;
 use crate::legacy_configs::configs::LegacyBuckConfig;
 use crate::legacy_configs::dice::HasInjectedLegacyConfigs;
-use crate::legacy_configs::file_ops::push_all_files_from_a_directory;
 use crate::legacy_configs::file_ops::ConfigDirEntry;
 use crate::legacy_configs::file_ops::ConfigParserFileOps;
 use crate::legacy_configs::file_ops::ConfigPath;
 use crate::legacy_configs::file_ops::DefaultConfigParserFileOps;
 use crate::legacy_configs::file_ops::DiceConfigFileOps;
+use crate::legacy_configs::file_ops::push_all_files_from_a_directory;
 use crate::legacy_configs::key::BuckconfigKeyRef;
 use crate::legacy_configs::parser::LegacyConfigParser;
-use crate::legacy_configs::path::ExternalConfigSource;
-use crate::legacy_configs::path::ProjectConfigSource;
 use crate::legacy_configs::path::DEFAULT_EXTERNAL_CONFIG_SOURCES;
 use crate::legacy_configs::path::DEFAULT_PROJECT_CONFIG_SOURCES;
+use crate::legacy_configs::path::DOT_BUCKCONFIG_LOCAL;
+use crate::legacy_configs::path::ExternalConfigSource;
+use crate::legacy_configs::path::ProjectConfigSource;
 
 /// Buckconfigs can partially be loaded from within dice. However, some parts of what makes up the
 /// buckconfig comes from outside the buildgraph, and this type represents those parts.
@@ -115,7 +116,52 @@ impl ExternalBuckconfigData {
         }
     }
 
-    pub fn get_buckconfig_components(&self) -> Vec<buck2_data::BuckconfigComponent> {
+    async fn get_local_config_components(
+        project_root: &ProjectRoot,
+    ) -> Vec<buck2_data::BuckconfigComponent> {
+        use buck2_data::buckconfig_component::Data::GlobalExternalConfigFile;
+        let file_ops = &mut DefaultConfigParserFileOps {
+            project_fs: project_root.dupe(),
+        };
+        let mut local_config_components = Vec::new();
+        if let Ok(legacy_cells) =
+            BuckConfigBasedCells::parse_with_config_args(&project_root, &[]).await
+        {
+            let path = ForwardRelativePath::new(DOT_BUCKCONFIG_LOCAL).expect(
+                "Internal error: .buckconfig.local should always be a valid forward relative path",
+            );
+            for (_cell, cell_instance) in legacy_cells.cell_resolver.cells() {
+                let relative_path = cell_instance.path().as_project_relative_path().join(path);
+                let origin_path = relative_path.to_string();
+                let local_config = ConfigPath::Project(relative_path);
+
+                let mut parser = LegacyConfigParser::new();
+                if parser
+                    .parse_file(&local_config, None, true, file_ops)
+                    .await
+                    .is_ok()
+                {
+                    let values = parser.to_proto_external_config_values(false);
+                    if values.is_empty() {
+                        // Don't create an empty component for cells with non-existing .buckconfig.local
+                        continue;
+                    }
+                    local_config_components.push(buck2_data::BuckconfigComponent {
+                        data: Some(GlobalExternalConfigFile(buck2_data::GlobalExternalConfig {
+                            values,
+                            origin_path,
+                        })),
+                    });
+                }
+            }
+        }
+        local_config_components
+    }
+
+    pub async fn get_buckconfig_components(
+        &self,
+        project_root: &ProjectRoot,
+    ) -> Vec<buck2_data::BuckconfigComponent> {
         use buck2_data::buckconfig_component::Data::GlobalExternalConfigFile;
         let mut res: Vec<buck2_data::BuckconfigComponent> = self
             .external_path_configs
@@ -131,6 +177,8 @@ impl ExternalBuckconfigData {
                 }
             })
             .collect();
+
+        res.extend(Self::get_local_config_components(project_root).await);
         res.extend(to_proto_config_args(&self.args));
         res
     }
@@ -253,9 +301,7 @@ impl BuckConfigBasedCells {
             async fn read_file_lines_if_exists(
                 &mut self,
                 path: &ConfigPath,
-            ) -> buck2_error::Result<
-                Option<Box<dyn Iterator<Item = Result<String, std::io::Error>> + Send>>,
-            > {
+            ) -> buck2_error::Result<Option<Vec<String>>> {
                 let res = self.inner.read_file_lines_if_exists(path).await?;
 
                 if res.is_some() {
@@ -450,6 +496,7 @@ impl BuckConfigBasedCells {
         config: &LegacyBuckConfig,
     ) -> buck2_error::Result<ExternalCellOrigin> {
         #[derive(buck2_error::Error, Debug)]
+        #[buck2(tag = Input)]
         enum ExternalCellOriginParseError {
             #[error("Unknown external cell origin `{0}`")]
             Unknown(String),
@@ -594,8 +641,8 @@ mod tests {
     use indoc::indoc;
 
     use crate::dice::file_ops::delegate::FileOpsDelegate;
-    use crate::external_cells::ExternalCellsImpl;
     use crate::external_cells::EXTERNAL_CELLS_IMPL;
+    use crate::external_cells::ExternalCellsImpl;
     use crate::legacy_configs::cells::BuckConfigBasedCells;
     use crate::legacy_configs::configs::testing::TestConfigParserFileOps;
     use crate::legacy_configs::configs::tests::assert_config_value;
@@ -1090,7 +1137,7 @@ mod tests {
                     Ok(())
                 } else {
                     Err(buck2_error::buck2_error!(
-                        [],
+                        buck2_error::ErrorTag::Input,
                         "No bundled cell with name `{}`",
                         cell_name
                     ))

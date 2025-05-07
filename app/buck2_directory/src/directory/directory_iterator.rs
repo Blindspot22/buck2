@@ -28,7 +28,7 @@ pub trait DirectoryIterator: Sized {
     type Item;
 
     /// Provide the next item.
-    fn next<'a>(&'a mut self) -> Option<(Self::PathStack<'a>, Self::Item)>;
+    fn next(&mut self) -> Option<(Self::PathStack<'_>, Self::Item)>;
 
     /// Compute all paths in this iterator. This returns a regular Iterator since we no longer
     /// need to borrow from self in next.
@@ -60,7 +60,10 @@ pub trait DirectoryIterator: Sized {
             T: DirectoryIterator,
             F: FnMut(T::Item) -> Option<B>,
         {
-            type PathStack<'a> = T::PathStack<'a> where Self: 'a;
+            type PathStack<'a>
+                = T::PathStack<'a>
+            where
+                Self: 'a;
             type Item = B;
 
             fn next<'b>(&'b mut self) -> Option<(T::PathStack<'b>, B)> {
@@ -109,7 +112,7 @@ pub struct DirectoryIteratorPathAccessor<'a, T> {
     pub(super) leaf: Option<&'a FileName>,
 }
 
-impl<'a, T> DirectoryIteratorPathStack for DirectoryIteratorPathAccessor<'a, T>
+impl<T> DirectoryIteratorPathStack for DirectoryIteratorPathAccessor<'_, T>
 where
     T: DirectoryIteratorPathStack,
 {
@@ -127,7 +130,7 @@ where
     }
 }
 
-impl<'a, T> fmt::Display for DirectoryIteratorPathAccessor<'a, T>
+impl<T> fmt::Display for DirectoryIteratorPathAccessor<'_, T>
 where
     T: DirectoryIteratorPathStack,
 {
@@ -136,7 +139,7 @@ where
     }
 }
 
-impl<'a, T> fmt::Debug for DirectoryIteratorPathAccessor<'a, T>
+impl<T> fmt::Debug for DirectoryIteratorPathAccessor<'_, T>
 where
     T: DirectoryIteratorPathStack,
 {

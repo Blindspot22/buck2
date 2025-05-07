@@ -81,10 +81,3 @@ where
         }
     }
 }
-
-impl<T> FromResidual<CommandFailure> for buck2_error::Result<T> {
-    fn from_residual(residual: CommandFailure) -> buck2_error::Result<T> {
-        // Err(residual.0.in)
-        Err(residual.0.into())
-    }
-}

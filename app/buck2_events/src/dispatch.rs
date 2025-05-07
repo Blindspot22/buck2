@@ -24,22 +24,22 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 use buck2_core::event::EventDispatch;
+use buck2_data::SpanEndEvent;
+use buck2_data::SpanStartEvent;
 use buck2_data::buck_event;
 use buck2_data::span_end_event;
 use buck2_data::span_start_event;
-use buck2_data::SpanEndEvent;
-use buck2_data::SpanStartEvent;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
 use futures::Future;
 use pin_project::pin_project;
 use smallvec::SmallVec;
 
-use crate::sink::null::NullEventSink;
-use crate::span::SpanId;
 use crate::BuckEvent;
 use crate::Event;
 use crate::EventSink;
+use crate::sink::null::NullEventSink;
+use crate::span::SpanId;
 
 /// A type-erased and dupe-able container for EventSinks, containing some additional metadata useful for all events
 /// emitted through the dispatcher.
@@ -391,10 +391,7 @@ where
 /// tied to a specific command (e.g. materializer command loop), an ambient dispatcher may not be
 /// available.
 pub fn get_dispatcher_opt() -> Option<EventDispatcher> {
-    match EVENTS.try_with(|dispatcher| dispatcher.dupe()) {
-        Ok(dispatcher) => Some(dispatcher),
-        Err(..) => None,
-    }
+    EVENTS.try_with(|dispatcher| dispatcher.dupe()).ok()
 }
 
 pub fn get_dispatcher() -> EventDispatcher {
@@ -427,6 +424,17 @@ where
     F: FnOnce() -> (R, End),
 {
     get_dispatcher().span(start, func)
+}
+
+/// Simpler version of `span` where the end event
+/// can be constructed without requiring the result of the function.
+pub fn span_simple<Start, End, F, R>(start: Start, func: F, end: End) -> R
+where
+    Start: Into<span_start_event::Data>,
+    End: Into<span_end_event::Data>,
+    F: FnOnce() -> R,
+{
+    span(start, || (func(), end))
 }
 
 /// Emits an InstantEvent annotated with the current trace ID
@@ -618,9 +626,7 @@ mod tests {
             metadata: Default::default(),
         };
         let end = CommandEnd {
-            data: Default::default(),
-            is_success: true,
-            errors: vec![],
+            ..Default::default()
         };
 
         (start, end)

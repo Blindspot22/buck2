@@ -10,14 +10,14 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use buck2_common::invocation_roots::find_invocation_roots;
 use buck2_common::invocation_roots::InvocationRoots;
+use buck2_common::invocation_roots::find_invocation_roots;
 use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
+use buck2_core::cells::CellAliasResolver;
+use buck2_core::cells::CellResolver;
 use buck2_core::cells::name::CellName;
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::cells::paths::CellRelativePathBuf;
-use buck2_core::cells::CellAliasResolver;
-use buck2_core::cells::CellResolver;
 use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
@@ -100,7 +100,10 @@ impl PathSanitizer {
         match given.split("//").collect::<Vec<_>>()[..] {
             [path] => self.sanitize_relative_path(given, path),
             [cell, path] => self.sanitize_cell_based_path(given, cell, path),
-            _ => Err(buck2_error!([], "Poorly formatted BuckPath string")),
+            _ => Err(buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "Poorly formatted BuckPath string"
+            )),
         }
     }
 
@@ -267,7 +270,10 @@ mod tests {
             }
         }
 
-        Err(buck2_error!([], "test_data directory not found"))
+        Err(buck2_error!(
+            buck2_error::ErrorTag::Tier0,
+            "test_data directory not found"
+        ))
     }
 
     fn in_root() -> buck2_error::Result<AbsWorkingDir> {
@@ -280,7 +286,10 @@ mod tests {
             }
         }
 
-        Err(buck2_error!([], "test_data directory not found"))
+        Err(buck2_error!(
+            buck2_error::ErrorTag::Tier0,
+            "test_data directory not found"
+        ))
     }
 
     fn abs_path_from_root(relative: &str) -> buck2_error::Result<AbsNormPathBuf> {

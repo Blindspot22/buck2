@@ -11,7 +11,6 @@
 
 use std::cell::RefCell;
 use std::io::Write;
-use std::iter;
 use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,16 +18,15 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_build_api::analysis::registry::AnalysisRegistry;
-use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::data::HasIoProvider;
 use buck2_common::target_aliases::BuckConfigTargetAliasResolver;
 use buck2_common::target_aliases::HasTargetAliasResolver;
-use buck2_core::cells::cell_path::CellPath;
-use buck2_core::cells::name::CellName;
 use buck2_core::cells::CellAliasResolver;
 use buck2_core::cells::CellResolver;
+use buck2_core::cells::cell_path::CellPath;
+use buck2_core::cells::name::CellName;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
@@ -38,21 +36,17 @@ use buck2_core::global_cfg_options::GlobalCfgOptions;
 use buck2_core::pattern::query_file_literal::parse_query_file_literal;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::target::label::label::TargetLabel;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use buck2_events::dispatch::console_message;
 use buck2_execute::digest_config::DigestConfig;
 use derivative::Derivative;
 use derive_more::Display;
 use dice::DiceComputations;
 use dupe::Dupe;
-use indexmap::IndexSet;
-use itertools::Itertools;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsStatic;
-use starlark::values::starlark_value;
-use starlark::values::structs::StructRef;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -61,11 +55,14 @@ use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueTyped;
+use starlark::values::starlark_value;
+use starlark::values::structs::StructRef;
 
 use crate::bxl::key::BxlKey;
 use crate::bxl::starlark_defs::context::actions::BxlExecutionResolution;
-use crate::bxl::starlark_defs::context::output::EnsuredArtifactOrGroup;
 use crate::bxl::starlark_defs::context::output::OutputStream;
+use crate::bxl::starlark_defs::context::output::OutputStreamOutcome;
+use crate::bxl::starlark_defs::context::output::OutputStreamState;
 use crate::bxl::starlark_defs::context::starlark_async::BxlDiceComputations;
 use crate::bxl::starlark_defs::context::starlark_async::BxlSafeDiceComputations;
 use crate::bxl::value_as_starlark_target_label::ValueAsStarlarkTargetLabel;
@@ -82,6 +79,7 @@ pub(crate) mod starlark_async;
 
 /// Errors that can occur when accessing some field of `BxlContext` for dynamic action or anon target.
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum BxlContextError {
     #[error("`{0}()` is unsupported")]
     Unsupported(String),
@@ -91,19 +89,20 @@ enum BxlContextError {
 
 #[derive(buck2_error::Error, Debug)]
 #[error("Expected a single target as a string literal, not a target pattern")]
+#[buck2(tag = Input)]
 struct NotATargetLabelString;
 
 #[derive(buck2_error::Error, Debug)]
 #[error(
     "Unconfigured target label(s)/node(s) was passed into analysis. Targets passed into analysis should be configured."
 )]
+#[buck2(tag = Input)]
 struct UnconfiguredTargetInAnalysis;
 
 /// Data object for `BxlContextType::Root`.
 #[derive(ProvidesStaticType, Trace, NoSerialize, Allocative, Debug, Derivative)]
 pub(crate) struct RootBxlContextData<'v> {
     output_stream: ValueTyped<'v, OutputStream>,
-    error_stream: ValueTyped<'v, OutputStream>,
     cli_args: ValueOfUnchecked<'v, StructRef<'v>>,
 }
 
@@ -128,8 +127,14 @@ impl<'v> BxlContextType<'v> {
     fn unpack_root(&self) -> buck2_error::Result<&'v RootBxlContextData> {
         match &self {
             BxlContextType::Root(root) => Ok(root),
-            BxlContextType::Dynamic(_) => Err(buck2_error!([], "Expected root BXL context type")),
-            BxlContextType::AnonTarget => Err(buck2_error!([], "Expected root BXL context type")),
+            BxlContextType::Dynamic(_) => Err(buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "Expected root BXL context type"
+            )),
+            BxlContextType::AnonTarget => Err(buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "Expected root BXL context type"
+            )),
         }
     }
 }
@@ -345,10 +350,9 @@ impl<'v> BxlContext<'v> {
     pub(crate) fn new(
         heap: &'v Heap,
         core: Rc<BxlContextCoreData>,
+        stream_state: OutputStreamState,
         cli_args: ValueOfUnchecked<'v, StructRef<'v>>,
         async_ctx: Rc<RefCell<BxlSafeDiceComputations<'v, '_>>>,
-        output_sink: Rc<RefCell<dyn Write>>,
-        error_sink: Rc<RefCell<dyn Write>>,
         digest_config: DigestConfig,
     ) -> buck2_error::Result<Self> {
         let root_data = RootBxlContextData {
@@ -356,12 +360,7 @@ impl<'v> BxlContext<'v> {
             output_stream: heap.alloc_typed(OutputStream::new(
                 core.project_fs.clone(),
                 core.artifact_fs.clone(),
-                output_sink,
-            )),
-            error_stream: heap.alloc_typed(OutputStream::new(
-                core.project_fs.clone(),
-                core.artifact_fs.clone(),
-                error_sink,
+                stream_state,
             )),
         };
         let context_type = BxlContextType::Root(root_data);
@@ -448,7 +447,7 @@ impl<'v> BxlContext<'v> {
     /// Must take an `AnalysisContext` and `OutputStream` which has never had `take_state` called on it before.
     pub(crate) fn take_state(
         value: ValueTyped<'v, BxlContext<'v>>,
-    ) -> buck2_error::Result<(AnalysisRegistry<'v>, IndexSet<ArtifactGroup>)> {
+    ) -> buck2_error::Result<(AnalysisRegistry<'v>, OutputStreamOutcome)> {
         let this = value.as_ref();
         let root_data = this.data.context_type.unpack_root()?;
         let output_stream = &root_data.output_stream;
@@ -475,29 +474,9 @@ impl<'v> BxlContext<'v> {
             })?;
 
         // artifacts should be bound by now as the bxl has finished running
-        let artifacts = output_stream
-            .as_ref()
-            .take_artifacts()
-            .into_iter()
-            .map(|ensured_artifact_type| match ensured_artifact_type {
-                EnsuredArtifactOrGroup::Artifact(artifact) => {
-                    let as_artifact = artifact.as_artifact();
-                    let bound_artifact = as_artifact.get_bound_artifact()?;
-                    let associated_artifacts = as_artifact.get_associated_artifacts();
+        let state = output_stream.as_ref().take_state()?;
 
-                    Ok(associated_artifacts
-                        .iter()
-                        .flat_map(|v| v.iter())
-                        .cloned()
-                        .chain(iter::once(ArtifactGroup::Artifact(bound_artifact)))
-                        .collect::<Vec<_>>())
-                }
-                EnsuredArtifactOrGroup::ArtifactGroup(ag) => Ok(vec![ag]),
-            })
-            .flatten_ok()
-            .collect::<buck2_error::Result<IndexSet<ArtifactGroup>>>()?;
-
-        Ok((analysis_registry, artifacts))
+        Ok((analysis_registry, state))
     }
 
     /// Take the state for dynamic action or anon target
@@ -533,7 +512,7 @@ impl<'v> ErrorPrinter for BxlContextNoDice<'v> {
     // Used for caching error logs emitted from within the BXL core.
     fn print_to_error_stream(&self, msg: String) -> buck2_error::Result<()> {
         match &self.context_type {
-            BxlContextType::Root(root) => writeln!(root.error_stream.sink.borrow_mut(), "{}", msg)?,
+            BxlContextType::Root(root) => writeln!(root.output_stream.error(), "{}", msg)?,
             BxlContextType::Dynamic(_) => console_message(msg),
             BxlContextType::AnonTarget => console_message(msg),
         }

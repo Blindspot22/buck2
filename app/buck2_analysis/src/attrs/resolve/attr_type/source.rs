@@ -12,12 +12,13 @@ use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::Starla
 use buck2_core::package::source_path::SourcePath;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_node::attrs::attr_type::source::SourceAttrType;
-use starlark::values::list::ListRef;
 use starlark::values::Value;
+use starlark::values::list::ListRef;
 
 use crate::attrs::resolve::ctx::AttrResolutionContext;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum SourceLabelResolutionError {
     #[error("Expected a single artifact from {0}, but it returned {1} artifacts")]
     ExpectedSingleValue(String, usize),

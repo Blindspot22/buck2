@@ -15,7 +15,7 @@ ErlangAppCommonFields = [
     "name",
     # mapping from ("application", "basename") -> to header artifact
     "includes",
-    # references to ankers for the include directory
+    # path to include directory
     "include_dir",
     # deps files short_path -> artifact
     "deps_files",
@@ -25,7 +25,10 @@ ErlangAppCommonFields = [
 
 # target type to break circular dependencies
 ErlangAppIncludeInfo = provider(
-    fields = ErlangAppCommonFields,
+    fields = ErlangAppCommonFields + [
+        # original inclues, used for validating _include_only app against the original
+        "_original_includes",
+    ],
 )
 
 ErlangAppInfo = provider(
@@ -43,15 +46,9 @@ ErlangAppInfo = provider(
             "dependencies",
             # Transitive Set for calculating the start order
             "start_dependencies",
-            # reference to the .app file
-            "app_file",
             # additional targets that the application depends on, the
             # default output will end up in priv/
             "resources",
-            # references to ankers for the relevant directories for the application
-            "priv_dir",
-            "private_include_dir",
-            "ebin_dir",
             # applications that are in path but not build by buck2 are virtual
             # the use-case for virtual apps are OTP applications that are shipeped
             # with the Erlang distribution
@@ -104,10 +101,6 @@ ErlangToolchainInfo = provider(
         "release_variables_builder": provider_field(typing.Any, default = None),
         # copying erts
         "include_erts": provider_field(typing.Any, default = None),
-        # edoc-generating escript
-        "edoc": provider_field(typing.Any, default = None),
-        "edoc_options": provider_field(typing.Any, default = None),
-        "edoc_preprocess": provider_field(list[str], default = []),
         # beams we need for various reasons
         "utility_modules": provider_field(typing.Any, default = None),
         # env to be set for toolchain invocations

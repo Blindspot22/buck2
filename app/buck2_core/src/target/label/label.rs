@@ -20,28 +20,29 @@ use buck2_data::ToProtoMessage;
 use buck2_util::hash::BuckHasher;
 use dupe::Dupe;
 use lock_free_hashtable::atomic_value::AtomicValue;
-use ref_cast::ref_cast_custom;
 use ref_cast::RefCastCustom;
+use ref_cast::ref_cast_custom;
 use serde::Serialize;
 use serde::Serializer;
+use strong_hash::StrongHash;
 use triomphe::ThinArc;
 
-use crate::cells::name::CellName;
-use crate::cells::paths::CellRelativePath;
 use crate::cells::CellAliasResolver;
 use crate::cells::CellResolver;
+use crate::cells::name::CellName;
+use crate::cells::paths::CellRelativePath;
 use crate::configuration::data::ConfigurationData;
 use crate::configuration::pair::Configuration;
 use crate::configuration::pair::ConfigurationNoExec;
 use crate::package::PackageLabel;
-use crate::pattern::pattern::lex_target_pattern;
 use crate::pattern::pattern::ParsedPattern;
+use crate::pattern::pattern::lex_target_pattern;
 use crate::pattern::pattern_type::TargetPatternExtra;
 use crate::target::configured_target_label::ConfiguredTargetLabel;
 use crate::target::label::triomphe_thin_arc_borrow::ThinArcBorrow;
 use crate::target::name::TargetNameRef;
 
-#[derive(Eq, PartialEq, Allocative)]
+#[derive(Eq, PartialEq, Allocative, StrongHash)]
 struct TargetLabelHeader {
     /// Hash of target label (not package, not name).
     /// Place hash first to make equality check faster.
@@ -65,6 +66,13 @@ pub struct TargetLabel(
         u8,
     >,
 );
+
+impl StrongHash for TargetLabel {
+    fn strong_hash<H: Hasher>(&self, state: &mut H) {
+        self.pkg().strong_hash(state);
+        self.name().strong_hash(state);
+    }
+}
 
 impl Debug for TargetLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -271,7 +279,7 @@ pub struct TargetLabelBorrow<'a> {
     borrow: ThinArcBorrow<'a, TargetLabelHeader, u8>,
 }
 
-impl<'a> TargetLabelBorrow<'a> {
+impl TargetLabelBorrow<'_> {
     /// Obtain a temporary reference to the `TargetLabel`.
     fn with_target_label<R>(self, mut f: impl FnMut(&TargetLabel) -> R) -> R {
         self.borrow.with_arc(|arc| f(TargetLabel::ref_cast(arc)))
@@ -289,13 +297,13 @@ impl<'a> TargetLabelBorrow<'a> {
     }
 }
 
-impl<'a> PartialEq for TargetLabelBorrow<'a> {
+impl PartialEq for TargetLabelBorrow<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.with_target_label(|a| other.with_target_label(|b| a == b))
     }
 }
 
-impl<'a> Hash for TargetLabelBorrow<'a> {
+impl Hash for TargetLabelBorrow<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.with_target_label(|a| a.hash(state))
     }
@@ -303,7 +311,10 @@ impl<'a> Hash for TargetLabelBorrow<'a> {
 
 impl AtomicValue for TargetLabel {
     type Raw = *const ();
-    type Ref<'a> = TargetLabelBorrow<'a> where Self: 'a;
+    type Ref<'a>
+        = TargetLabelBorrow<'a>
+    where
+        Self: 'a;
 
     fn null() -> Self::Raw {
         ptr::null()

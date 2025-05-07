@@ -12,16 +12,14 @@ use std::borrow::Cow;
 use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_api::actions::Action;
+use buck2_build_api::actions::ActionExecutionCtx;
+use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::actions::box_slice_set::BoxSliceSet;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionKind;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
-use buck2_build_api::actions::Action;
-use buck2_build_api::actions::ActionExecutable;
-use buck2_build_api::actions::ActionExecutionCtx;
-use buck2_build_api::actions::IncrementalActionExecutable;
-use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::interpreter::rule_defs::artifact::associated::AssociatedArtifacts;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
@@ -37,12 +35,13 @@ use dupe::Dupe;
 use gazebo::prelude::*;
 use indexmap::IndexSet;
 use itertools::Itertools;
-use starlark::values::dict::UnpackDictEntries;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::ValueError;
+use starlark::values::dict::UnpackDictEntries;
 use starlark_map::small_set::SmallSet;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum SymlinkedDirError {
     #[error("Paths to symlink_dir must be non-overlapping, but got `{0}` and `{1}`")]
     OverlappingPaths(Box<ForwardRelativePath>, Box<ForwardRelativePath>),
@@ -212,10 +211,6 @@ impl Action for SymlinkedDirAction {
         self.output()
     }
 
-    fn as_executable(&self) -> ActionExecutable<'_> {
-        ActionExecutable::Incremental(self)
-    }
-
     fn category(&self) -> CategoryRef {
         CategoryRef::unchecked_new("symlinked_dir")
     }
@@ -223,16 +218,13 @@ impl Action for SymlinkedDirAction {
     fn identifier(&self) -> Option<&str> {
         Some(self.output().get_path().path().as_str())
     }
-}
 
-#[async_trait]
-impl IncrementalActionExecutable for SymlinkedDirAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
         let fs = ctx.fs().fs();
-        let output = ctx.fs().resolve_build(self.output().get_path());
+        let output = ctx.fs().resolve_build(self.output().get_path())?;
         let mut builder = ArtifactValueBuilder::new(fs, ctx.digest_config());
         let mut srcs = Vec::new();
 

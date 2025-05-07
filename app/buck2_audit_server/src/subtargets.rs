@@ -25,11 +25,11 @@ use buck2_server_ctx::pattern_parse_and_resolve::parse_and_resolve_provider_labe
 use buck2_server_ctx::stdout_partial_output::StdoutPartialOutput;
 use buck2_util::indent::indent;
 use dice::DiceTransaction;
-use futures::stream::FuturesOrdered;
 use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 
-use crate::common::target_resolution_config::audit_command_target_resolution_config;
 use crate::ServerAuditSubcommand;
+use crate::common::target_resolution_config::audit_command_target_resolution_config;
 
 #[async_trait]
 impl ServerAuditSubcommand for AuditSubtargetsCommand {
@@ -176,7 +176,7 @@ async fn server_execute_with_dice(
 
     if at_least_one_evaluation_error {
         Err(buck2_error!(
-            [],
+            buck2_error::ErrorTag::Input,
             "Evaluation of at least one target provider failed"
         ))
     } else {

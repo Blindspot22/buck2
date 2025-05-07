@@ -37,7 +37,8 @@ use crate::package::quoted_display;
     PartialOrd,
     Ord,
     RefCast,
-    Allocative
+    Allocative,
+    strong_hash::StrongHash
 )]
 #[derivative(Debug)]
 #[repr(transparent)]
@@ -277,12 +278,12 @@ impl PackageRelativePath {
     /// # buck2_error::Ok(())
     /// ```
     #[inline]
-    pub fn strip_prefix<'a, P: ?Sized>(
+    pub fn strip_prefix<'a, P>(
         &'a self,
         base: &'a P,
     ) -> buck2_error::Result<&'a ForwardRelativePath>
     where
-        P: AsRef<PackageRelativePath>,
+        P: ?Sized + AsRef<PackageRelativePath>,
     {
         self.0.strip_prefix(&base.as_ref().0)
     }

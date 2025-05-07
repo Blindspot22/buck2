@@ -13,26 +13,26 @@ use std::collections::HashMap;
 
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::project::ProjectRoot;
+use buck2_data::StarlarkUserEvent;
+use buck2_data::StarlarkUserMetadataDictValue;
+use buck2_data::StarlarkUserMetadataListValue;
+use buck2_data::StarlarkUserMetadataValue;
 use buck2_data::starlark_user_metadata_value::Value::BoolValue;
 use buck2_data::starlark_user_metadata_value::Value::DictValue;
 use buck2_data::starlark_user_metadata_value::Value::IntValue;
 use buck2_data::starlark_user_metadata_value::Value::ListValue;
 use buck2_data::starlark_user_metadata_value::Value::StringValue;
-use buck2_data::StarlarkUserEvent;
-use buck2_data::StarlarkUserMetadataDictValue;
-use buck2_data::StarlarkUserMetadataListValue;
-use buck2_data::StarlarkUserMetadataValue;
-use buck2_error::starlark_error::from_starlark;
+use starlark::values::UnpackValue;
+use starlark::values::Value;
 use starlark::values::dict::DictRef;
 use starlark::values::float::UnpackFloat;
 use starlark::values::list::ListRef;
-use starlark::values::UnpackValue;
-use starlark::values::Value;
 
 use super::artifacts::EnsuredArtifact;
 use super::context::output::get_artifact_path_display;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum StarlarkUserEventUnpack {
     #[error(
         "Metadata should be a dict where keys are strings, and values are strings, ints, bools, or dicts/lists of the mentioned types. Got type: `{0}`"
@@ -113,11 +113,11 @@ impl<'v> StarlarkUserEventParser<'v> {
                 value: Some(IntValue(v)),
             })
         // Let's also accept floats since `instant()` methods return floats, but cast them to ints
-        } else if let Some(v) = UnpackFloat::unpack_value(v).map_err(from_starlark)? {
+        } else if let Some(v) = UnpackFloat::unpack_value(v)? {
             Ok(StarlarkUserMetadataValue {
                 value: Some(IntValue(v.0 as i32)),
             })
-        } else if let Some(v) = <&EnsuredArtifact>::unpack_value(v).map_err(from_starlark)? {
+        } else if let Some(v) = <&EnsuredArtifact>::unpack_value(v)? {
             let path = get_artifact_path_display(
                 v.get_artifact_path(),
                 v.abs(),

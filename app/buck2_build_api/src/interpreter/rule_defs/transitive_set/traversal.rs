@@ -13,7 +13,6 @@ use derive_more::Display;
 use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
-use starlark::values::starlark_value;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Heap;
@@ -24,6 +23,7 @@ use starlark::values::Value;
 use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::starlark_value;
 
 use crate::interpreter::rule_defs::transitive_set::FrozenTransitiveSet;
 use crate::interpreter::rule_defs::transitive_set::TransitiveSet;
@@ -77,7 +77,7 @@ pub struct TransitiveSetTraversalGen<V: ValueLifetimeless> {
 
 starlark_complex_value!(pub TransitiveSetTraversal);
 
-#[starlark_value(type = "transitive_set_iterator")]
+#[starlark_value(type = "TransitiveSetIterator")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for TransitiveSetTraversalGen<V>
 where
     Self: ProvidesStaticType<'v>,
@@ -112,7 +112,7 @@ pub struct TransitiveSetProjectionTraversalGen<V: ValueLifetimeless> {
 
 starlark_complex_value!(pub TransitiveSetProjectionTraversal);
 
-#[starlark_value(type = "transitive_set_args_projection_iterator")]
+#[starlark_value(type = "TransitiveSetArgsProjectionIterator")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for TransitiveSetProjectionTraversalGen<V>
 where
     Self: ProvidesStaticType<'v>,

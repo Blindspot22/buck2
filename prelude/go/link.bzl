@@ -27,7 +27,7 @@ load(
     "traverse_shared_library_info",
 )
 load("@prelude//linking:stamp_build_info.bzl", "stamp_build_info")
-load("@prelude//os_lookup:defs.bzl", "OsLookup")
+load("@prelude//os_lookup:defs.bzl", "Os", "OsLookup")
 load(
     "@prelude//utils:utils.bzl",
     "filter_and_map_idx",
@@ -165,9 +165,10 @@ def link(
     if link_mode != None:
         cmd.add("-linkmode", link_mode)
 
-    cxx_toolchain = ctx.attrs._cxx_toolchain[CxxToolchainInfo]
-    if cxx_toolchain != None:
-        is_win = ctx.attrs._exec_os_type[OsLookup].platform == "windows"
+    cxx_toolchain_available = CxxToolchainInfo in ctx.attrs._cxx_toolchain
+    if cxx_toolchain_available:
+        cxx_toolchain = ctx.attrs._cxx_toolchain[CxxToolchainInfo]
+        is_win = ctx.attrs._exec_os_type[OsLookup].os == Os("windows")
 
         # Gather external link args from deps.
         ext_links = get_link_args_for_strategy(ctx, cxx_inherited_link_info(deps), to_link_strategy(link_style))

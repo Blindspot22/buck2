@@ -28,6 +28,8 @@ use buck2_directory::directory::directory_iterator::DirectoryIteratorPathStack;
 use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_directory::directory::walk::unordered_entry_walk;
 use buck2_error::BuckErrorContext;
+use buck2_error::ErrorTag;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest::CasDigestFromReExt;
@@ -62,20 +64,20 @@ use remote_execution::TCode;
 use remote_execution::TDigest;
 use tracing::instrument;
 
-use crate::materializers::deferred::clean_stale::CleanInvalidatedPathRequest;
 use crate::materializers::deferred::ArtifactMaterializationMethod;
 use crate::materializers::deferred::ArtifactMaterializationStage;
 use crate::materializers::deferred::ArtifactTree;
 use crate::materializers::deferred::LowPriorityMaterializerCommand;
-use crate::materializers::deferred::MaterializationMethodToProto;
 use crate::materializers::deferred::MaterializeEntryError;
 use crate::materializers::deferred::MaterializerSender;
 use crate::materializers::deferred::SharedMaterializingError;
 use crate::materializers::deferred::Version;
 use crate::materializers::deferred::WriteFile;
+use crate::materializers::deferred::artifact_tree::MaterializationMethodToProto;
+use crate::materializers::deferred::clean_stale::CleanInvalidatedPathRequest;
 use crate::materializers::immediate;
-use crate::materializers::io::materialize_files;
 use crate::materializers::io::MaterializeTreeStructure;
+use crate::materializers::io::materialize_files;
 
 #[derive(Allocative)]
 pub struct DefaultIoHandler {
@@ -223,34 +225,28 @@ impl DefaultIoHandler {
                     .sum();
 
                 let connection = self.re_client_manager.get_re_connection();
-                let re_client = connection.get_client();
+                let re_client = connection.get_client().with_use_case(info.re_use_case);
 
-                re_client
-                    .materialize_files(files, info.re_use_case)
-                    .await
-                    .map_err(|e| {
-                        let e: buck2_error::Error = e.into();
-                        match e.find_typed_context::<RemoteExecutionError>() {
-                            Some(re_error) if re_error.code == TCode::NOT_FOUND => {
-                                let e: buck2_error::Error = e.into();
-                                MaterializeEntryError::NotFound(CasNotFoundError {
-                                    path: Arc::from(path),
-                                    info: info.dupe(),
-                                    directory: entry,
-                                    error: Arc::from(e),
-                                })
-                            }
-                            _ => MaterializeEntryError::Error(
-                                e.context({
-                                    format!(
-                                        "Error materializing files declared by action: {}",
-                                        info.origin
-                                    )
-                                })
-                                .into(),
-                            ),
+                re_client.materialize_files(files).await.map_err(|e| {
+                    let e: buck2_error::Error = e.into();
+                    match e.find_typed_context::<RemoteExecutionError>() {
+                        Some(re_error) if re_error.code == TCode::NOT_FOUND => {
+                            let e: buck2_error::Error = e.into();
+                            MaterializeEntryError::NotFound(CasNotFoundError {
+                                path: Arc::from(path),
+                                info: info.dupe(),
+                                directory: entry,
+                                error: Arc::from(e),
+                            })
                         }
-                    })?;
+                        _ => MaterializeEntryError::Error(e.context({
+                            format!(
+                                "Error materializing files declared by action: {}",
+                                info.origin
+                            )
+                        })),
+                    }
+                })?;
             }
             ArtifactMaterializationMethod::HttpDownload { info } => {
                 async {
@@ -271,7 +267,7 @@ impl DefaultIoHandler {
                     // our test suite can surface bugs when downloading things locally.
                     if downloaded.size() != info.metadata.digest.size() {
                         return Err(buck2_error::buck2_error!(
-                            [],
+                            ErrorTag::DownloadSizeMismatch,
                             "Downloaded size ({}) does not match expected size ({})",
                             downloaded.size(),
                             info.metadata.digest.size(),
@@ -483,6 +479,7 @@ fn maybe_tombstone_digest(digest: &FileDigest) -> buck2_error::Result<&FileDiges
         val.split(' ')
             .map(|digest| {
                 let digest = TDigest::from_str(digest)
+                    .map_err(|e| from_any_with_tag(e, ErrorTag::InvalidDigest))
                     .with_buck_error_context(|| format!("Invalid digest: `{}`", digest))?;
                 // This code is only used by E2E tests, so while it's not *a test*, testing_default
                 // is an OK choice here.
@@ -525,7 +522,8 @@ pub(super) fn create_ttl_refresh(
                     let mut walk = unordered_entry_walk(entry.as_ref().map_dir(Directory::as_ref));
                     while let Some((_entry_path, entry)) = walk.next() {
                         if let DirectoryEntry::Leaf(ActionDirectoryMember::File(file)) = entry {
-                            let needs_refresh = file.digest.expires() < ttl_deadline;
+                            let needs_refresh =
+                                file.digest.expires().unwrap_or_default() < ttl_deadline;
                             tracing::trace!("{} needs_refresh: {}", file, needs_refresh);
                             if needs_refresh {
                                 digests_to_refresh
@@ -564,7 +562,9 @@ pub(super) fn create_ttl_refresh(
                 tracing::debug!("Update {} TTLs", chunk.len());
 
                 let digests_expires = re_client
-                    .get_digest_expirations(chunk.iter().map(|d| d.to_re()).collect(), use_case)
+                    .dupe()
+                    .with_use_case(use_case)
+                    .get_digest_expirations(chunk.iter().map(|d| d.to_re()).collect())
                     .await?;
 
                 let mut digests_expires = digests_expires.into_try_map(|(digest, expires)| {
@@ -574,7 +574,7 @@ pub(super) fn create_ttl_refresh(
 
                 if chunk.len() != digests_expires.len() {
                     return Err(buck2_error::buck2_error!(
-                        [],
+                        ErrorTag::DigestTtlMismatch,
                         "Invalid response from get_digests_ttl: expected {}, got {} digests",
                         chunk.len(),
                         digests_expires.len()
@@ -584,7 +584,7 @@ pub(super) fn create_ttl_refresh(
                 for (digest, (matching_digest, expires)) in chunk.iter().zip(&digests_expires) {
                     if digest.data() != matching_digest {
                         return Err(buck2_error::buck2_error!(
-                            [],
+                            ErrorTag::DigestTtlInvalidResponse,
                             "Invalid response from get_digests_ttl"
                         ));
                     }

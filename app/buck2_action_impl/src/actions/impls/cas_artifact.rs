@@ -14,15 +14,13 @@ use std::sync::Arc;
 use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_api::actions::Action;
+use buck2_build_api::actions::ActionExecutionCtx;
+use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionKind;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
-use buck2_build_api::actions::Action;
-use buck2_build_api::actions::ActionExecutable;
-use buck2_build_api::actions::ActionExecutionCtx;
-use buck2_build_api::actions::IncrementalActionExecutable;
-use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_common::file_ops::FileDigest;
 use buck2_common::file_ops::FileMetadata;
@@ -33,10 +31,10 @@ use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_error::BuckErrorContext;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest::CasDigestToReExt;
-use buck2_execute::directory::re_directory_to_re_tree;
-use buck2_execute::directory::re_tree_to_directory;
 use buck2_execute::directory::ActionDirectoryEntry;
 use buck2_execute::directory::INTERNER;
+use buck2_execute::directory::re_directory_to_re_tree;
+use buck2_execute::directory::re_tree_to_directory;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::CasDownloadInfo;
 use chrono::DateTime;
@@ -52,19 +50,23 @@ use crate::actions::impls::offline;
 #[derive(Debug, buck2_error::Error)]
 enum CasArtifactActionDeclarationError {
     #[error("CAS artifact action should not have inputs, got {0}")]
+    #[buck2(tag = ReCasArtifactWrongNumberOfInputs)]
     WrongNumberOfInputs(usize),
     #[error("CAS artifact action should have exactly 1 output, got {0}")]
+    #[buck2(tag = ReCasArtifactWrongNumberOfOutputs)]
     WrongNumberOfOutputs(usize),
 }
 
 #[derive(Debug, buck2_error::Error)]
 enum CasArtifactActionExecutionError {
     #[error("Error accessing digest expiration for: `{0}`")]
+    #[buck2(tag = ReCasArtifactGetDigestExpirationError)]
     GetDigestExpirationError(FileDigest),
 
     #[error(
         "The digest `{digest}` was declared to expire after `{declared_expiration}`, but it expires at `{effective_expiration}`"
     )]
+    #[buck2(tag = ReCasArtifactInvalidExpiration)]
     InvalidExpiration {
         digest: FileDigest,
         declared_expiration: DateTime<Utc>,
@@ -181,10 +183,6 @@ impl Action for CasArtifactAction {
         &self.output
     }
 
-    fn as_executable(&self) -> ActionExecutable<'_> {
-        ActionExecutable::Incremental(self)
-    }
-
     fn category(&self) -> CategoryRef {
         CategoryRef::unchecked_new("cas_artifact")
     }
@@ -192,23 +190,19 @@ impl Action for CasArtifactAction {
     fn identifier(&self) -> Option<&str> {
         Some(self.output.get_path().path().as_str())
     }
-}
 
-#[async_trait]
-impl IncrementalActionExecutable for CasArtifactAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
-        // If running in offline environment, try to restore from cached outputs
-        // first. Fallthrough to normal operation if unsuccessful.
+        // If running in offline environment, try to restore from cached outputs.
         if ctx.run_action_knobs().use_network_action_output_cache {
             return self.execute_for_offline(ctx).await.map_err(Into::into);
         }
 
-        let expiration = ctx
-            .re_client()
-            .get_digest_expirations(vec![self.inner.digest.to_re()], self.inner.re_use_case)
+        let re_client = ctx.re_client().with_use_case(self.inner.re_use_case);
+        let expiration = re_client
+            .get_digest_expirations(vec![self.inner.digest.to_re()])
             .await
             .with_buck_error_context(|| {
                 CasArtifactActionExecutionError::GetDigestExpirationError(self.inner.digest.dupe())
@@ -232,13 +226,8 @@ impl IncrementalActionExecutable for CasArtifactAction {
         let value = match self.inner.kind {
             ArtifactKind::Directory(directory_kind) => {
                 let tree = match directory_kind {
-                    DirectoryKind::Tree => ctx
-                        .re_client()
-                        .download_typed_blobs::<RE::Tree>(
-                            None,
-                            vec![self.inner.digest.to_re()],
-                            self.inner.re_use_case,
-                        )
+                    DirectoryKind::Tree => re_client
+                        .download_typed_blobs::<RE::Tree>(None, vec![self.inner.digest.to_re()])
                         .await
                         .map_err(buck2_error::Error::from)
                         .and_then(|trees| {
@@ -251,12 +240,10 @@ impl IncrementalActionExecutable for CasArtifactAction {
                             format!("Error downloading tree: {}", self.inner.digest)
                         })?,
                     DirectoryKind::Directory => {
-                        let re_client = ctx.re_client();
                         let root_directory = re_client
                             .download_typed_blobs::<RE::Directory>(
                                 None,
                                 vec![self.inner.digest.to_re()],
-                                self.inner.re_use_case,
                             )
                             .await
                             .map_err(buck2_error::Error::from)
@@ -268,8 +255,7 @@ impl IncrementalActionExecutable for CasArtifactAction {
                             .with_buck_error_context(|| {
                                 format!("Error downloading dir: {}", self.inner.digest)
                             })?;
-                        re_directory_to_re_tree(root_directory, &re_client, self.inner.re_use_case)
-                            .await?
+                        re_directory_to_re_tree(root_directory, &re_client).await?
                     }
                 };
 
@@ -305,7 +291,7 @@ impl IncrementalActionExecutable for CasArtifactAction {
             }
         };
 
-        let path = ctx.fs().resolve_build(self.output.get_path());
+        let path = ctx.fs().resolve_build(self.output.get_path())?;
         ctx.materializer()
             .declare_cas_many(
                 Arc::new(CasDownloadInfo::new_declared(self.inner.re_use_case)),

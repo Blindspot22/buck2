@@ -28,10 +28,6 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::values::list::UnpackList;
-use starlark::values::none::NoneOr;
-use starlark::values::starlark_value;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -40,11 +36,15 @@ use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueTyped;
+use starlark::values::list::UnpackList;
+use starlark::values::none::NoneOr;
+use starlark::values::starlark_value;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
 use super::file_set::StarlarkFileSet;
 use super::target_list_expr::TargetListExpr;
 use crate::bxl::starlark_defs::context::BxlContext;
-use crate::bxl::starlark_defs::context::BxlContextNoDice;
+use crate::bxl::starlark_defs::context::BxlContextCoreData;
 use crate::bxl::starlark_defs::file_set::FileSetExpr;
 use crate::bxl::starlark_defs::query_util::parse_query_evaluation_result;
 use crate::bxl::starlark_defs::target_list_expr::TargetListExprArg;
@@ -74,8 +74,8 @@ impl<'v> StarlarkValue<'v> for StarlarkUQueryCtx<'v> {
     }
 }
 
-pub(crate) async fn get_uquery_env<'v>(
-    ctx: &BxlContextNoDice<'v>,
+pub(crate) async fn get_uquery_env(
+    ctx: &BxlContextCoreData,
 ) -> buck2_error::Result<Box<dyn BxlUqueryFunctions>> {
     (NEW_BXL_UQUERY_FUNCTIONS.get()?)(
         ctx.project_root().dupe(),
@@ -221,13 +221,14 @@ fn uquery_methods(builder: &mut MethodsBuilder) {
             .map(StarlarkFileSet::from)?)
     }
 
-    /// The kind query for filtering targets by rule type.
+    /// Filter targets by rule type.
+    /// Returns a subset of `targets` where the rule type matches the specified `regex`. The specified pattern can be a regular expression.
     ///
     /// Sample usage:
     /// ```python
     /// def _impl_kind(ctx):
-    ///     kind = ctx.uquery().kind(".*1", "bin/kind/...")
-    ///     ctx.output.print(kind)
+    ///     kind = ctx.uquery().kind("cpp.*", "bin/libs/...")
+    ///     ctx.output.print(nodes)
     /// ```
     fn kind<'v>(
         this: &StarlarkUQueryCtx<'v>,

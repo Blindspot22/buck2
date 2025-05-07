@@ -32,7 +32,8 @@ use crate::target::configured_target_label::ConfiguredTargetLabel;
     Dupe,
     derive_more::Display,
     Debug,
-    Allocative
+    Allocative,
+    strong_hash::StrongHash
 )]
 
 pub enum DeferredHolderKey {
@@ -43,6 +44,14 @@ pub enum DeferredHolderKey {
 assert_eq_size!(DeferredHolderKey, [usize; 3]);
 
 impl DeferredHolderKey {
+    pub fn for_analysis(target: ConfiguredTargetLabel) -> Self {
+        Self::Base(BaseDeferredKey::TargetLabel(target))
+    }
+
+    pub fn for_dynamic_lambda(key: DynamicLambdaResultsKey) -> Self {
+        Self::DynamicLambda(Arc::new(key))
+    }
+
     pub fn testing_new(target_label: &str) -> DeferredHolderKey {
         let target =
             ConfiguredTargetLabel::testing_parse(target_label, ConfigurationData::testing_new());
@@ -55,6 +64,10 @@ impl DeferredHolderKey {
             DeferredHolderKey::Base(base) => base,
             DeferredHolderKey::DynamicLambda(lambda) => lambda.owner(),
         }
+    }
+
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self, DeferredHolderKey::DynamicLambda(_))
     }
 
     fn dynamic_action_id_stack(&self) -> SmallVec<[DynamicLambdaIndex; 5]> {

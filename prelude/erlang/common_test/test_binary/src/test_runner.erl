@@ -8,6 +8,7 @@
 %% % @format
 
 -module(test_runner).
+-eqwalizer(ignore).
 
 -include_lib("common/include/tpx_records.hrl").
 -include_lib("common/include/buck_ct_records.hrl").
@@ -19,7 +20,7 @@
 
 -define(DEFAULT_OUTPUT_FORMAT, json).
 
--spec run_tests([string()], #test_info{}, string(), [#test_spec_test_case{}]) -> ok.
+-spec run_tests([string()], #test_info{}, string(), #test_spec_test_case{}) -> ok.
 run_tests(Tests, #test_info{} = TestInfo, OutputDir, Listing) ->
     check_ct_opts(TestInfo#test_info.ct_opts),
     Suite = binary_to_atom(filename:basename(TestInfo#test_info.test_suite, ".beam")),
@@ -42,7 +43,8 @@ run_tests(Tests, #test_info{} = TestInfo, OutputDir, Listing) ->
                 common_app_env = TestInfo#test_info.common_app_env,
                 erl_cmd = TestInfo#test_info.erl_cmd,
                 extra_flags = TestInfo#test_info.extra_flags,
-                artifact_annotation_mfa = TestInfo#test_info.artifact_annotation_mfa
+                artifact_annotation_mfa = TestInfo#test_info.artifact_annotation_mfa,
+                raw_target = TestInfo#test_info.raw_target
             })
     end.
 
@@ -131,7 +133,7 @@ ensure_test_exec_stopped() ->
     after 5000 -> ok
     end.
 
-%% @doc Provides xml result as specified by the tpx protocol when test failed to ran.
+%% @doc Provides result as specified by the tpx protocol when test failed to ran.
 -spec test_run_fail(#test_env{}, string()) -> ok.
 test_run_fail(#test_env{} = TestEnv, Reason) ->
     provide_output_file(
@@ -146,19 +148,18 @@ test_run_timeout(#test_env{} = TestEnv, Reason) ->
         TestEnv, Reason, timeout
     ).
 
-%% @doc Provides xml result as specified by the tpx protocol when test succeed to ran.
+%% @doc Provides result as specified by the tpx protocol when test succeed to ran.
 -spec test_run_succeed(#test_env{}, string()) -> ok.
 test_run_succeed(#test_env{} = TestEnv, Reason) ->
     provide_output_file(TestEnv, Reason, passed).
 
-%% @doc Provides xml result as specified by the tpx protocol.
+%% @doc Provides result as specified by the tpx protocol.
 -spec provide_output_file(#test_env{}, unicode:chardata(), failed | passed | timeout) -> ok.
 provide_output_file(
     #test_env{
         output_dir = OutputDir,
         tests = Tests,
-        suite = Suite,
-        output_format = OutputFormat
+        suite = Suite
     } = TestEnv,
     ResultExec,
     Status
@@ -175,7 +176,9 @@ provide_output_file(
                 collect_results_broken_run(
                     Tests, Suite, "internal crash", ResultExec, OutLog
                 );
-            Other when Other =:= passed orelse Other =:= timeout ->
+            timeout ->
+                collect_results_broken_run(Tests, Suite, "", ResultExec, StdOut);
+            passed ->
                 % Here we either passed or timeout.
                 case file:read_file(ResultsFile) of
                     {ok, JsonFile} ->
@@ -183,55 +186,25 @@ provide_output_file(
                         case TreeResults of
                             undefined ->
                                 ErrorMsg =
-                                    case Status of
-                                        passed ->
-                                            io_lib:format(
-                                                "ct failed to produced results valid file ~p", [
-                                                    ResultsFile
-                                                ]
-                                            );
-                                        timeout ->
-                                            undefined
-                                    end,
+                                    io_lib:format(
+                                        "ct failed to produced results valid file ~p", [
+                                            ResultsFile
+                                        ]
+                                    ),
                                 collect_results_broken_run(
                                     Tests, Suite, ErrorMsg, ResultExec, OutLog
                                 );
                             _ ->
-                                case Status of
-                                    timeout ->
-                                        % The ct node crashed after having produced results:
-                                        % some post-processing functionalities might be missing.
-                                        % We create a .timeout file at the root of the exec dir
-                                        % To alert tpx on the situation.
-                                        {ok, FileHandle} = file:open(
-                                            filename:join(OutputDir, ".timeout"), [write]
-                                        ),
-                                        io:format(FileHandle, "~p", [Suite]);
-                                    _ ->
-                                        ok
-                                end,
                                 collect_results_fine_run(TreeResults, Tests)
                         end;
                     {error, _Reason} ->
-                        ErrorMsg =
-                            case Status of
-                                timeout ->
-                                    undefined;
-                                _ ->
-                                    io_lib:format("ct failed to produced results file ~p", [
-                                        ResultsFile
-                                    ])
-                            end,
+                        ErrorMsg = io_lib:format("ct failed to produced results file ~p", [
+                            ResultsFile
+                        ]),
                         collect_results_broken_run(Tests, Suite, ErrorMsg, ResultExec, OutLog)
                 end
         end,
-    {ok, _ResultOuptuFile} =
-        case OutputFormat of
-            xml ->
-                junit_interfacer:write_xml_output(OutputDir, Results, Suite, ResultExec, OutLog);
-            json ->
-                json_interfacer:write_json_output(OutputDir, Results)
-        end,
+    {ok, _ResultOuptuFile} = json_interfacer:write_json_output(OutputDir, Results),
     test_artifact_directory:link_to_artifact_dir(test_logger:get_std_out(OutputDir, ct_executor), OutputDir, TestEnv),
     test_artifact_directory:link_to_artifact_dir(test_logger:get_std_out(OutputDir, test_runner), OutputDir, TestEnv),
     test_artifact_directory:prepare(OutputDir, TestEnv).
@@ -256,15 +229,10 @@ trimmed_content_file(File) ->
     end.
 
 %% @doc Provide tpx with a result when CT failed to provide results for tests.
--spec collect_results_broken_run([atom()], atom(), string() | undefined, term(), binary()) ->
+-spec collect_results_broken_run([#ct_test{}], atom(), io_lib:chars(), term(), io_lib:chars()) ->
     [cth_tpx_test_tree:case_result()].
-
 collect_results_broken_run(Tests, _Suite, ErrorMsg, ResultExec, StdOut) ->
-    FormattedErrorMsg =
-        case ErrorMsg of
-            undefined -> "";
-            Msg -> io_lib:format("~ts~n", [Msg])
-        end,
+    FormattedErrorMsg = io_lib:format("~ts~n", [ErrorMsg]),
     lists:map(
         fun(Test) ->
             #{

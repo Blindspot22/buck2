@@ -9,38 +9,25 @@
 
 //! Integrations of `buck2_error::Error` with `anyhow::Error` and `StdError`.
 
-use std::error::request_value;
 use std::error::Error as StdError;
+use std::error::request_value;
 use std::fmt;
 
+use buck2_data::error::ErrorTag;
 use ref_cast::RefCast;
 
 use crate::error::ErrorKind;
-
-// This implementation is fairly magic and is what allows us to bypass the issue with conflicting
-// implementations between `anyhow::Error` and `T: StdError`. The `T: Into<anyhow::Error>` bound is
-// what we actually make use of in the implementation, while the other bound is needed to make sure
-// this impl does not accidentally cover too many types. Importantly, this impl does not conflict
-// with `T: From<T>`
-impl<T: fmt::Debug + fmt::Display + Sync + Send + 'static> From<T> for crate::Error
-where
-    T: Into<anyhow::Error>,
-    Result<(), T>: anyhow::Context<(), T>,
-{
-    #[track_caller]
-    #[cold]
-    fn from(value: T) -> crate::Error {
-        let source_location =
-            crate::source_location::from_file(std::panic::Location::caller().file(), None);
-        let anyhow: anyhow::Error = value.into();
-        recover_crate_error(anyhow.as_ref(), source_location)
-    }
-}
+use crate::source_location::SourceLocation;
 
 fn maybe_add_context_from_metadata(mut e: crate::Error, context: &dyn StdError) -> crate::Error {
     if let Some(metadata) = request_value::<ProvidableMetadata>(context) {
         if !metadata.tags.is_empty() {
             e = e.tag(metadata.tags.iter().copied());
+        }
+        if !metadata.string_tags.is_empty() {
+            for tag in metadata.string_tags.iter() {
+                e = e.string_tag(tag);
+            }
         }
         e
     } else {
@@ -48,9 +35,10 @@ fn maybe_add_context_from_metadata(mut e: crate::Error, context: &dyn StdError) 
     }
 }
 
-pub(crate) fn recover_crate_error(
+pub fn recover_crate_error(
     value: &'_ (dyn StdError + 'static),
-    source_location: Option<String>,
+    source_location: SourceLocation,
+    error_tag: ErrorTag,
 ) -> crate::Error {
     // Instead of just turning this into an error root, we'll extract the whole context stack and
     // convert it manually.
@@ -67,10 +55,7 @@ pub(crate) fn recover_crate_error(
         }
 
         if let Some(metadata) = request_value::<ProvidableMetadata>(cur) {
-            source_location = crate::source_location::from_file(
-                metadata.source_file,
-                metadata.source_location_extra,
-            );
+            source_location = metadata.source_location;
             if metadata.action_error.is_some() {
                 action_error = metadata.action_error;
             }
@@ -88,7 +73,7 @@ pub(crate) fn recover_crate_error(
         // a string. That prevents us from having to deal with the type returned by `source` being
         // potentially non-`Send` or non-`Sync`.
         let description = format!("{}", cur);
-        let e = crate::Error::new(description, source_location, action_error);
+        let e = crate::Error::new(description, error_tag, source_location, action_error);
         break 'base maybe_add_context_from_metadata(e, cur);
     };
     // We've converted the base error to a `buck2_error::Error`. Next, we need to add back any
@@ -105,13 +90,6 @@ pub(crate) fn recover_crate_error(
         }
     }
     e
-}
-
-impl From<crate::Error> for anyhow::Error {
-    #[cold]
-    fn from(value: crate::Error) -> Self {
-        Into::into(CrateAsStdError(value))
-    }
 }
 
 #[derive(derive_more::Display, RefCast)]
@@ -143,10 +121,8 @@ impl StdError for CrateAsStdError {
 #[derive(Clone)]
 pub struct ProvidableMetadata {
     pub tags: Vec<crate::ErrorTag>,
-    pub source_file: &'static str,
-    /// Extra information to add to the end of the source location - typically a type/variant name,
-    /// and the same thing as gets passed to `buck2_error::source_location::from_file`.
-    pub source_location_extra: Option<&'static str>,
+    pub string_tags: Vec<String>,
+    pub source_location: SourceLocation,
     /// The protobuf ActionError, if the root was an action error
     pub action_error: Option<buck2_data::ActionError>,
 }
@@ -160,23 +136,36 @@ mod tests {
     use super::*;
     use crate as buck2_error;
     use crate::TypedContext;
+    use crate::conversion::from_any_with_tag;
 
     #[derive(Debug, derive_more::Display)]
     struct TestError;
+
+    impl From<TestError> for crate::Error {
+        #[cold]
+        fn from(value: TestError) -> Self {
+            let error = anyhow::Error::from(value);
+            let source_location = SourceLocation::new(file!());
+            crate::any::recover_crate_error(error.as_ref(), source_location, ErrorTag::Input)
+        }
+    }
 
     impl StdError for TestError {}
 
     #[test]
     fn test_roundtrip_no_context() {
         let e = crate::Error::from(TestError).context("context 1");
-        let e2 = crate::Error::from(anyhow::Error::from(e.clone()));
+        let e2 = from_any_with_tag(anyhow::Error::from(e.clone()), ErrorTag::Input);
         crate::Error::check_equal(&e, &e2);
     }
 
     #[test]
     fn test_roundtrip_with_context() {
         let e = crate::Error::from(TestError).context("context 1");
-        let e2 = crate::Error::from(anyhow::Error::from(e.clone()).context("context 2"));
+        let e2 = from_any_with_tag(
+            anyhow::Error::from(e.clone()).context("context 2"),
+            ErrorTag::Input,
+        );
         let e3 = e.context("context 2");
         crate::Error::check_equal(&e2, &e3);
     }
@@ -201,7 +190,10 @@ mod tests {
         }
 
         let e = crate::Error::from(TestError).context(T(1));
-        let e2 = crate::Error::from(anyhow::Error::from(e.clone()).context("context 2"));
+        let e2 = from_any_with_tag(
+            anyhow::Error::from(e.clone()).context("context 2"),
+            ErrorTag::Input,
+        );
         let e3 = e.context("context 2");
         crate::Error::check_equal(&e2, &e3);
     }
@@ -209,17 +201,26 @@ mod tests {
     #[derive(Debug, derive_more::Display)]
     struct FullMetadataError;
 
+    impl From<FullMetadataError> for crate::Error {
+        #[cold]
+        fn from(value: FullMetadataError) -> Self {
+            let error = anyhow::Error::from(value);
+            let source_location = SourceLocation::new(file!());
+            crate::any::recover_crate_error(error.as_ref(), source_location, ErrorTag::Input)
+        }
+    }
+
     impl StdError for FullMetadataError {
         fn provide<'a>(&'a self, request: &mut Request<'a>) {
             request.provide_value(ProvidableMetadata {
                 action_error: None,
-                source_file: file!(),
-                source_location_extra: Some("FullMetadataError"),
+                source_location: SourceLocation::new(file!()).with_type_name("FullMetadataError"),
                 tags: vec![
                     crate::ErrorTag::WatchmanTimeout,
                     crate::ErrorTag::StarlarkFail,
                     crate::ErrorTag::WatchmanTimeout,
                 ],
+                string_tags: vec!["StringTag".to_owned()],
             });
         }
     }
@@ -232,12 +233,13 @@ mod tests {
         ] {
             assert_eq!(e.get_tier(), Some(crate::Tier::Tier0));
             assert_eq!(
-                e.source_location(),
-                Some("buck2_error/src/any.rs::FullMetadataError")
+                e.source_location().to_string(),
+                "buck2_error/src/any.rs::FullMetadataError"
             );
             assert_eq!(
                 &e.tags(),
                 &[
+                    crate::ErrorTag::Input,
                     crate::ErrorTag::StarlarkFail,
                     crate::ErrorTag::WatchmanTimeout
                 ]
@@ -249,13 +251,14 @@ mod tests {
     fn test_metadata_through_anyhow() {
         let e: anyhow::Error = FullMetadataError.into();
         let e = e.context("anyhow");
-        let e: crate::Error = e.into();
+        let e: crate::Error = from_any_with_tag(e, ErrorTag::Input);
         assert_eq!(e.get_tier(), Some(crate::Tier::Tier0));
         assert!(format!("{:?}", e).contains("anyhow"));
     }
 
-    #[derive(Debug, thiserror::Error)]
+    #[derive(Debug, buck2_error_derive::Error)]
     #[error("wrapper")]
+    #[buck2(tag = Environment)]
     struct WrapperError(#[source] FullMetadataError);
 
     #[test]
@@ -275,8 +278,8 @@ mod tests {
         let e: crate::Error = FullMetadataContextWrapperError(FullMetadataError).into();
         assert_eq!(e.get_tier(), Some(crate::Tier::Tier0));
         assert_eq!(
-            e.source_location(),
-            Some("buck2_error/src/any.rs::FullMetadataError")
+            e.source_location().to_string(),
+            "buck2_error/src/any.rs::FullMetadataError"
         );
         assert!(format!("{:?}", e).contains("wrapper2"));
     }

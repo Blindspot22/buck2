@@ -7,9 +7,9 @@
  * of this source tree.
  */
 
-use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use buck2_common::buildfiles::parse_buildfile_name;
@@ -93,7 +93,7 @@ impl<'a> CompletionResults<'a> {
     }
 }
 
-impl<'a> From<CompletionResults<'a>> for Vec<String> {
+impl From<CompletionResults<'_>> for Vec<String> {
     fn from(pr: CompletionResults) -> Self {
         pr.results.iter().map(String::from).collect()
     }

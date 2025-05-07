@@ -11,12 +11,14 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Write;
 
+use buck2_client_ctx::client_ctx::BuckSubcommand;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
 use buck2_client_ctx::common::BuckArgMatches;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ClientIoError;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_data::re_platform::Property;
-use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_event_log::stream_value::StreamValue;
 use buck2_event_observer::fmt_duration;
 use buck2_event_observer::what_ran;
@@ -28,15 +30,15 @@ use buck2_event_observer::what_ran::WhatRanOutputWriter;
 use buck2_event_observer::what_ran::WhatRanRelevantAction;
 use buck2_event_observer::what_ran::WhatRanState;
 use buck2_events::span::SpanId;
-use futures::stream::Stream;
 use futures::TryStreamExt;
+use futures::stream::Stream;
 use indexmap::IndexMap;
 
-use crate::commands::log::options::EventLogOptions;
-use crate::commands::log::transform_format;
 use crate::commands::log::LogCommandOutputFormat;
 use crate::commands::log::LogCommandOutputFormatWithWriter;
 use crate::commands::log::OutputFormatWithWriter;
+use crate::commands::log::options::EventLogOptions;
+use crate::commands::log::transform_format;
 /// Output everything Buck2 ran from selected invocation.
 ///
 /// The output is presented as a series of tab-delimited records with the following structure:
@@ -114,8 +116,15 @@ struct WhatRanCommandOptions {
     incomplete: bool,
 }
 
-impl WhatRanCommand {
-    pub fn exec(self, _matches: BuckArgMatches<'_>, ctx: ClientCommandContext<'_>) -> ExitResult {
+impl BuckSubcommand for WhatRanCommand {
+    const COMMAND_NAME: &'static str = "log-what-ran";
+
+    async fn exec_impl(
+        self,
+        _matches: BuckArgMatches<'_>,
+        ctx: ClientCommandContext<'_>,
+        _events_ctx: &mut EventsCtx,
+    ) -> ExitResult {
         let Self {
             common:
                 WhatRanCommandCommon {
@@ -128,74 +137,63 @@ impl WhatRanCommand {
             show_std_err,
             omit_empty_std_err,
         } = self;
-        buck2_client_ctx::stdio::print_with_writer::<buck2_error::Error, _>(|w| {
+        buck2_client_ctx::stdio::print_with_writer::<buck2_error::Error, _>(async move |w| {
             let mut output = OutputFormatWithWriter {
                 format: transform_format(output, w),
                 include_std_err: show_std_err,
                 omit_empty_std_err,
             };
-            ctx.instant_command_no_log("log-what-ran", |ctx| async move {
-                let log_path = event_log.get(&ctx).await?;
+            let log_path = event_log.get(&ctx).await?;
 
-                let (invocation, events) = log_path.unpack_stream().await?;
+            let (invocation, events) = log_path.unpack_stream().await?;
 
-                buck2_client_ctx::eprintln!(
-                    "Showing commands from: {}{}",
-                    invocation.display_command_line(),
-                    if options.filter_category.is_some() {
-                        ", filtered by action category"
-                    } else {
-                        ""
-                    }
-                )?;
+            buck2_client_ctx::eprintln!(
+                "Showing commands from: {}{}",
+                invocation.display_command_line(),
+                if options.filter_category.is_some() {
+                    ", filtered by action category"
+                } else {
+                    ""
+                }
+            )?;
 
-                let options = WhatRanCommandOptions {
-                    options,
-                    failed,
-                    incomplete,
-                };
-                WhatRanCommandState::execute(events, &mut output, &options).await?;
-                buck2_error::Ok(())
-            })
-        })?;
+            let options = WhatRanCommandOptions {
+                options,
+                failed,
+                incomplete,
+            };
+            WhatRanCommandState::execute(events, &mut output, &options).await?;
+            buck2_error::Ok(())
+        })
+        .await?;
         ExitResult::success()
     }
 }
 
 #[allow(clippy::vec_box)]
 struct WhatRanEntry {
-    /// Known to be a WhatRanRelevantAction.
-    event: Box<buck2_data::BuckEvent>,
-
-    /// Known to be a CommandReproducer.
-    reproducers: Vec<Box<buck2_data::BuckEvent>>,
+    action: WhatRanRelevantAction,
+    reproducers: Vec<CommandReproducer>,
 }
 
 impl WhatRanEntry {
     fn emit_what_ran_entry(
-        &self,
+        self,
         output: &mut impl WhatRanOutputWriter,
-        data: &Option<buck2_data::span_end_event::Data>,
         options: &WhatRanCommandOptions,
+        std_err: Option<&str>,
+        duration: Option<std::time::Duration>,
     ) -> Result<(), ClientIoError> {
-        let action = WhatRanRelevantAction::from_buck_data(
-            self.event
-                .data
-                .as_ref()
-                .buck_error_context("Checked above")?,
-        );
+        let action = &self.action;
         let options_regex = what_ran::WhatRanOptionsRegex::from_options(&options.options)?;
-        for repro in self.reproducers.iter() {
+        for repro in self.reproducers.into_iter() {
             what_ran::emit_what_ran_entry(
-                action,
-                CommandReproducer::from_buck_data(
-                    repro.data.as_ref().buck_error_context("Checked above")?,
-                    options_regex.options,
-                )
-                .buck_error_context("Checked above")?,
-                data,
+                Some(action),
+                repro,
                 output,
                 &options_regex,
+                std_err,
+                duration,
             )?;
         }
         Ok(())
@@ -211,11 +209,8 @@ pub struct WhatRanCommandState {
 }
 
 impl WhatRanState for WhatRanCommandState {
-    fn get(&self, span_id: SpanId) -> Option<WhatRanRelevantAction<'_>> {
-        self.known_actions
-            .get(&span_id)
-            .and_then(|e| e.event.data.as_ref())
-            .and_then(WhatRanRelevantAction::from_buck_data)
+    fn get(&self, span_id: SpanId) -> Option<WhatRanRelevantAction> {
+        self.known_actions.get(&span_id).map(|e| e.action.clone())
     }
 }
 
@@ -235,51 +230,82 @@ impl WhatRanCommandState {
         }
 
         // emit remaining
-        for (_, entry) in cmd.known_actions.iter() {
+        cmd.emit_remaining(output, options)?;
+        Ok(())
+    }
+
+    fn emit_remaining(
+        self,
+        output: &mut impl WhatRanOutputWriter,
+        options: &WhatRanCommandOptions,
+    ) -> buck2_error::Result<()> {
+        for (_, entry) in self.known_actions.into_iter() {
             if should_emit_unfinished_action(options) {
-                entry.emit_what_ran_entry(output, &None, options)?;
+                entry.emit_what_ran_entry(output, options, None, None)?;
             }
         }
         Ok(())
     }
 
-    /// Receive a new event. We store it if it's relevant and emmit them latter.
-    /// Note that in practice we don't expect the event to be *both* relevant to emit *and* a
-    /// WhatRanRelevantAction, but it doesn't hurt to always check both.
+    /// Receive a new event. We store it if it's relevant and emit them later.
+    ///
+    /// For each entry we emit we track 4 types of events.
+    /// - action start, to create WhatRanRelevantAction
+    /// - executor stage, to create CommandReproducer to add to WhatRanRelevantAction
+    /// - action end, to emit WhatRanRelevantAction if action finished. If not, action is considered
+    ///   unfinished. We check to emit all unfinished after all events are received
     fn event(
         &mut self,
         event: Box<buck2_data::BuckEvent>,
         output: &mut impl WhatRanOutputWriter,
         options: &WhatRanCommandOptions,
     ) -> buck2_error::Result<()> {
-        if let Some(data) = &event.data {
-            if WhatRanRelevantAction::from_buck_data(data).is_some() {
+        if let Some(data) = event.data {
+            // Create WhatRanRelevantAction on SpanStart to track CommandReproducers as they come
+            if let Some(action) = WhatRanRelevantAction::from_buck_data(&data) {
                 self.known_actions.insert(
                     SpanId::from_u64(event.span_id)?,
                     WhatRanEntry {
-                        event,
+                        action,
                         reproducers: Default::default(),
                     },
                 );
                 return Ok(());
             }
-
-            if CommandReproducer::from_buck_data(data, &options.options).is_some() {
+            // Create CommandReproducers on SpanStart an add them to corresponding WhatRanRelevantAction
+            if let Some(repro) = CommandReproducer::from_buck_data(&data, &options.options) {
                 if let Some(parent_id) = SpanId::from_u64_opt(event.parent_id) {
                     if let Some(entry) = self.known_actions.get_mut(&parent_id) {
-                        entry.reproducers.push(event);
+                        entry.reproducers.push(repro);
                     }
                 }
                 return Ok(());
             }
-
-            match data {
+            // Emit WhatRanRelevantAction when we see the corresponding SpanEnd
+            match &data {
                 buck2_data::buck_event::Data::SpanEnd(span) => {
                     if let Some(entry) =
                         self.known_actions.remove(&SpanId::from_u64(event.span_id)?)
                     {
                         if should_emit_finished_action(&span.data, options) {
-                            entry.emit_what_ran_entry(output, &span.data, options)?;
+                            // Get extra data out of SpanEnd event
+                            let (std_err, duration) = match &span.data {
+                                Some(buck2_data::span_end_event::Data::ActionExecution(
+                                    action_exec,
+                                )) => (
+                                    action_exec.commands.iter().last().and_then(|cmd| {
+                                        cmd.details.as_ref().map(|d| d.stderr.as_ref())
+                                    }),
+                                    action_exec.wall_time.as_ref().map(
+                                        |prost_types::Duration { seconds, nanos }| {
+                                            std::time::Duration::new(*seconds as u64, *nanos as u32)
+                                        },
+                                    ),
+                                ),
+                                _ => (None, None),
+                            };
+
+                            entry.emit_what_ran_entry(output, options, std_err, duration)?;
                         }
                     }
                 }
@@ -315,10 +341,7 @@ fn should_emit_unfinished_action(options: &WhatRanCommandOptions) -> bool {
 /// An output that writes to stdout in a tabulated format.
 impl WhatRanOutputWriter for OutputFormatWithWriter<'_> {
     fn emit_command(&mut self, command: WhatRanOutputCommand<'_>) -> buck2_error::Result<()> {
-        if self.include_std_err
-            && self.omit_empty_std_err
-            && command.std_err.map_or(false, |s| s.is_empty())
-        {
+        if self.include_std_err && self.omit_empty_std_err && command.std_err == Some("") {
             return Ok(());
         }
         let std_err_formatted = if self.include_std_err {
@@ -350,7 +373,7 @@ impl WhatRanOutputWriter for OutputFormatWithWriter<'_> {
                 Ok(())
             }
             LogCommandOutputFormatWithWriter::Json(w) => {
-                let reproducer = match command.repro {
+                let reproducer = match &command.repro {
                     CommandReproducer::CacheQuery(cache_hit) => JsonReproducer::CacheQuery {
                         digest: &cache_hit.action_digest,
                     },
@@ -397,6 +420,7 @@ impl WhatRanOutputWriter for OutputFormatWithWriter<'_> {
                             .map(|entry| (entry.key.as_ref(), entry.value.as_ref()))
                             .collect(),
                     },
+
                     // TODO(ctolliday): use the worker_id as the `identity`, and add it to worker execution events.
                     // Currently the identity is the first target that used the worker, which might be misleading.
                     CommandReproducer::WorkerInit(worker_init) => JsonReproducer::WorkerInit {
@@ -443,13 +467,15 @@ impl WhatRanOutputWriter for OutputFormatWithWriter<'_> {
                     #[serde(skip_serializing_if = "Option::is_none")]
                     std_err: Option<&'a str>,
                 }
-                writer.serialize(Record {
-                    reason: command.reason,
-                    identity: command.identity,
-                    executor: command.repro.executor(),
-                    reproducer: command.repro.as_human_readable().to_string(),
-                    std_err: std_err_formatted,
-                })?;
+                writer
+                    .serialize(Record {
+                        reason: command.reason,
+                        identity: command.identity,
+                        executor: command.repro.executor(),
+                        reproducer: command.repro.to_string(),
+                        std_err: std_err_formatted,
+                    })
+                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::LogCmd))?;
                 Ok(())
             }
         }

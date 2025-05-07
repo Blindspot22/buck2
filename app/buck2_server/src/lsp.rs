@@ -20,9 +20,9 @@ use buck2_common::dice::file_ops::DiceFileComputations;
 use buck2_common::package_listing::dice::DicePackageListingResolver;
 use buck2_core::bxl::BxlFilePath;
 use buck2_core::bzl::ImportPath;
+use buck2_core::cells::CellResolver;
 use buck2_core::cells::build_file_cell::BuildFileCell;
 use buck2_core::cells::cell_path::CellPathRef;
-use buck2_core::cells::CellResolver;
 use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project::ProjectRoot;
@@ -30,18 +30,21 @@ use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::package::package_relative_path::PackageRelativePath;
 use buck2_core::package::source_path::SourcePath;
 use buck2_core::pattern::pattern::ParsedPattern;
+use buck2_core::pattern::pattern::TargetParsingRel;
 use buck2_core::pattern::pattern_type::ProvidersPatternExtra;
 use buck2_core::target::name::TargetName;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_events::dispatch::span_async;
 use buck2_events::dispatch::with_dispatcher;
 use buck2_events::dispatch::with_dispatcher_async;
 use buck2_interpreter::load_module::InterpreterCalculation;
 use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
+use buck2_interpreter::paths::path::OwnedStarlarkPath;
 use buck2_interpreter::prelude_path::prelude_path;
 use buck2_interpreter_for_build::interpreter::dice_calculation_delegate::HasCalculationDelegate;
-use buck2_interpreter_for_build::interpreter::globals::base_globals;
-use buck2_interpreter_for_build::interpreter::interpreter_for_cell::ParseData;
+use buck2_interpreter_for_build::interpreter::global_interpreter_state::HasGlobalInterpreterState;
+use buck2_interpreter_for_build::interpreter::interpreter_for_dir::ParseData;
 use buck2_server_ctx::commands::command_end;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::ctx::ServerCommandDiceContext;
@@ -50,31 +53,32 @@ use buck2_server_ctx::streaming_request_handler::StreamingRequestHandler;
 use dice::DiceEquality;
 use dice::DiceTransaction;
 use dupe::Dupe;
-use futures::channel::mpsc::UnboundedSender;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::StreamExt;
+use futures::channel::mpsc::UnboundedSender;
 use lsp_server::Connection;
 use lsp_server::Message;
 use lsp_types::Url;
 use starlark::analysis::find_call_name::AstModuleFindCallName;
 use starlark::codemap::Span;
-use starlark::docs::markdown::render_doc_item_no_link;
 use starlark::docs::DocModule;
+use starlark::docs::markdown::render_doc_item_no_link;
 use starlark::errors::EvalMessage;
 use starlark::syntax::AstModule;
 use starlark_lsp::error::eval_message_to_lsp_diagnostic;
-use starlark_lsp::server::server_with_connection;
 use starlark_lsp::server::LspContext;
 use starlark_lsp::server::LspEvalResult;
 use starlark_lsp::server::LspUrl;
 use starlark_lsp::server::StringLiteralResult;
+use starlark_lsp::server::server_with_connection;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 
 /// Errors when [`LspContext::resolve_load()`] cannot resolve a given path.
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum ResolveLoadError {
     /// The scheme provided was not correct or supported.
     #[error("Url `{}` was expected to be of type `{}`", .1, .0)]
@@ -121,14 +125,14 @@ impl DocsCacheManager {
         dice_ctx.equivalent(&self.valid_at)
     }
 
-    async fn new_docs_cache<'v>(
+    async fn new_docs_cache(
         fs: &ProjectRoot,
         dice_ctx: &mut DiceTransaction,
     ) -> buck2_error::Result<DocsCache> {
         let mut builtin_docs = Vec::new();
 
         let cell_resolver = dice_ctx.get_cell_resolver().await?;
-        builtin_docs.push((None, get_builtin_globals_docs()));
+        builtin_docs.push((None, get_builtin_globals_docs(dice_ctx).await?));
 
         let builtin_names = builtin_docs
             .iter()
@@ -141,8 +145,14 @@ impl DocsCacheManager {
     }
 }
 
-fn get_builtin_globals_docs() -> DocModule {
-    base_globals().build().documentation()
+async fn get_builtin_globals_docs(
+    dice_ctx: &mut DiceTransaction,
+) -> buck2_error::Result<DocModule> {
+    Ok(dice_ctx
+        .get_global_interpreter_state()
+        .await?
+        .globals()
+        .documentation())
 }
 
 async fn get_prelude_docs(
@@ -183,6 +193,7 @@ struct DocsCache {
 }
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Environment)]
 enum DocsCacheError {
     #[error("Duplicate global symbol `{}` detected. Existing URL was `{}`, new URL was `{}`", .name, .existing, .new)]
     DuplicateGlobalSymbol {
@@ -200,7 +211,10 @@ impl DocsCache {
     ) -> buck2_error::Result<LspUrl> {
         let relative_path = cell_resolver.resolve_path(location.path().as_ref())?;
         let abs_path = fs.resolve(&relative_path);
-        Ok(Url::from_file_path(abs_path).unwrap().try_into()?)
+        Url::from_file_path(abs_path)
+            .unwrap()
+            .try_into()
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))
     }
 
     async fn new(
@@ -255,8 +269,11 @@ impl DocsCache {
                         });
                         let path = Path::new("/native").join(filename);
 
-                        let url =
-                            LspUrl::try_from(Url::parse(&format!("starlark:{}", path.display()))?)?;
+                        let url = LspUrl::try_from(
+                            Url::parse(&format!("starlark:{}", path.display()))
+                                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?,
+                        )
+                        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?;
                         let rendered = render_doc_item_no_link(sym, mem);
                         let prev = native_starlark_files.insert(url.clone(), rendered);
                         assert!(prev.is_none());
@@ -291,6 +308,7 @@ struct BuckLspContext<'a> {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum BuckLspContextError {
     /// The scheme provided was not correct or supported.
     #[error("Url `{}` was expected to be of type `{}`", .1, .0)]
@@ -418,10 +436,7 @@ impl<'a> BuckLspContext<'a> {
 
         self.with_dice_ctx(|mut dice_ctx| async move {
             let calculator = dice_ctx
-                .get_interpreter_calculator(
-                    import_path.borrow().cell(),
-                    import_path.borrow().build_file_cell(),
-                )
+                .get_interpreter_calculator(import_path.clone().into_starlark_path())
                 .await?;
 
             let module_path = import_path.borrow();
@@ -458,7 +473,10 @@ impl<'a> BuckLspContext<'a> {
                     cell_resolver.resolve_path(current_package.join(package_relative).as_ref())?;
 
                 let path = self.fs.resolve(&relative_path);
-                let url = Url::from_file_path(path).unwrap().try_into()?;
+                let url = Url::from_file_path(path)
+                    .unwrap()
+                    .try_into()
+                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?;
                 let string_literal = StringLiteralResult {
                     url,
                     location_finder: None,
@@ -485,10 +503,9 @@ impl<'a> BuckLspContext<'a> {
             })
             .await?;
         let cell_resolver = artifact_fs.cell_resolver();
-        match ParsedPattern::<ProvidersPatternExtra>::parsed_opt_absolute(
+        match ParsedPattern::<ProvidersPatternExtra>::parse_not_relaxed(
             literal,
-            Some(current_package),
-            current_package.cell(),
+            TargetParsingRel::AllowLimitedRelative(current_package),
             &cell_resolver,
             &cell_alias_resolver,
         ) {
@@ -516,7 +533,7 @@ impl<'a> BuckLspContext<'a> {
                                         };
                                         Ok(Some(string_literal))
                                     }
-                                    Err(e) => Err(e.into()),
+                                    Err(e) => Err(from_any_with_tag(e, buck2_error::ErrorTag::Lsp)),
                                 }
                             }))
                     })
@@ -532,7 +549,7 @@ impl<'a> BuckLspContext<'a> {
     }
 }
 
-impl<'a> LspContext for BuckLspContext<'a> {
+impl LspContext for BuckLspContext<'_> {
     fn parse_file_with_contents(&self, uri: &LspUrl, content: String) -> LspEvalResult {
         let dispatcher = self.server_ctx.events().dupe();
         self.runtime
@@ -562,10 +579,9 @@ impl<'a> LspContext for BuckLspContext<'a> {
                         let url = self
                             .with_dice_ctx(|mut dice_ctx| async move {
                                 let calculator = dice_ctx
-                                    .get_interpreter_calculator(
-                                        borrowed_current_import_path.cell(),
-                                        borrowed_current_import_path.build_file_cell(),
-                                    )
+                                    .get_interpreter_calculator(OwnedStarlarkPath::new(
+                                        borrowed_current_import_path.starlark_path(),
+                                    ))
                                     .await?;
 
                                 let starlark_file = borrowed_current_import_path.starlark_path();
@@ -576,16 +592,19 @@ impl<'a> LspContext for BuckLspContext<'a> {
                                     .await?
                                     .resolve_path(loaded_import_path.borrow().path().as_ref())?;
                                 let abs_path = self.fs.resolve(&relative_path);
-                                Ok(Url::from_file_path(abs_path).unwrap().try_into()?)
+                                Url::from_file_path(abs_path)
+                                    .unwrap()
+                                    .try_into()
+                                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))
                             })
                             .await?;
 
                         Ok(url)
                     }
-                    _ => Err(ResolveLoadError::WrongScheme(
+                    _ => Err(buck2_error::Error::from(ResolveLoadError::WrongScheme(
                         "file://".to_owned(),
                         current_file.clone(),
-                    )
+                    ))
                     .into()),
                 }
             }))
@@ -608,7 +627,9 @@ impl<'a> LspContext for BuckLspContext<'a> {
                         "file://".to_owned(),
                         current_file.clone(),
                     )),
-                }?;
+                }
+                .map_err(buck2_error::Error::from)?;
+
                 let current_package = import_path.path();
 
                 // Right now we swallow the errors up as they can happen for a lot of reasons that are
@@ -689,7 +710,11 @@ impl<'a> LspContext for BuckLspContext<'a> {
         _current_file: &LspUrl,
         _workspace_root: Option<&Path>,
     ) -> anyhow::Result<String> {
-        Err(anyhow::anyhow!("Not yet implemented, render_as_load"))
+        Err(buck2_error::buck2_error!(
+            buck2_error::ErrorTag::Unimplemented,
+            "Not yet implemented, render_as_load"
+        )
+        .into())
     }
 
     fn get_environment(&self, _uri: &LspUrl) -> DocModule {
@@ -800,14 +825,16 @@ async fn recv_from_lsp(
     mut event_sender: UnboundedSender<buck2_cli_proto::LspMessage>,
 ) -> buck2_error::Result<()> {
     loop {
-        let msg = to_client.recv()?;
+        let msg = to_client
+            .recv()
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?;
 
         let lsp_json = serde_json::to_string(&msg).unwrap();
         let res = buck2_cli_proto::LspMessage { lsp_json };
         match event_sender.send(res).await {
             Ok(_) => {}
             Err(e) if e.is_disconnected() => break Ok(()),
-            Err(e) => break Err(e.into()),
+            Err(e) => break Err(from_any_with_tag(e, buck2_error::ErrorTag::Lsp)),
         }
     }
 }
@@ -854,6 +881,7 @@ fn handle_outgoing_lsp_message(
 #[cfg(test)]
 mod tests {
     use buck2_core::bzl::ImportPath;
+    use buck2_error::conversion::from_any_with_tag;
     use lsp_types::Url;
     use starlark::docs::DocFunction;
     use starlark::docs::DocItem;
@@ -906,12 +934,20 @@ mod tests {
 
         async fn lookup_function(location: &ImportPath) -> buck2_error::Result<LspUrl> {
             if location == &ImportPath::testing_new(P) {
-                Ok(LspUrl::try_from(Url::parse(
-                    // Make sure we use a Url which is an absolute path on Linux and Windows
-                    "file:////c:/usr/local/dir/prelude.bzl",
-                )?)?)
+                Ok(LspUrl::try_from(
+                    Url::parse(
+                        // Make sure we use a Url which is an absolute path on Linux and Windows
+                        "file:////c:/usr/local/dir/prelude.bzl",
+                    )
+                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?,
+                )
+                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?)
             } else {
-                Err(buck2_error::buck2_error!([], "Unknown path {}", location))
+                Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::Lsp,
+                    "Unknown path {}",
+                    location
+                ))
             }
         }
 
@@ -919,15 +955,27 @@ mod tests {
             runtime.block_on(async { DocsCache::new_with_lookup(&docs, lookup_function).await })?;
 
         assert_eq!(
-            &LspUrl::try_from(Url::parse("starlark:/native/native_function1.bzl")?)?,
+            &LspUrl::try_from(
+                Url::parse("starlark:/native/native_function1.bzl")
+                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?
+            )
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?,
             cache.url_for_symbol("native_function1").unwrap()
         );
         assert_eq!(
-            &LspUrl::try_from(Url::parse("starlark:/native/native_function2.bzl")?)?,
+            &LspUrl::try_from(
+                Url::parse("starlark:/native/native_function2.bzl")
+                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?
+            )
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?,
             cache.url_for_symbol("native_function2").unwrap()
         );
         assert_eq!(
-            &LspUrl::try_from(Url::parse("file:/c:/usr/local/dir/prelude.bzl")?)?,
+            &LspUrl::try_from(
+                Url::parse("file:/c:/usr/local/dir/prelude.bzl")
+                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?
+            )
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Lsp))?,
             cache.url_for_symbol("prelude_function").unwrap()
         );
 

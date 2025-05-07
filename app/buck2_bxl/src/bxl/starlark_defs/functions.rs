@@ -20,13 +20,13 @@ use indexmap::IndexSet;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::values::list::UnpackList;
-use starlark::values::none::NoneType;
-use starlark::values::tuple::UnpackTuple;
 use starlark::values::Heap;
 use starlark::values::StringValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
+use starlark::values::list::UnpackList;
+use starlark::values::none::NoneType;
+use starlark::values::tuple::UnpackTuple;
 
 use super::artifacts::visit_artifact_path_without_associated_deduped;
 use super::context::output::get_artifact_path_display;
@@ -104,6 +104,7 @@ pub(crate) fn register_file_set_function(builder: &mut GlobalsBuilder) {
 
 #[derive(Debug, buck2_error::Error, Clone)]
 #[error("Promise artifacts are not supported in `get_path_without_materialization()`")]
+#[buck2(tag = Input)]
 pub(crate) struct PromiseArtifactsNotSupported;
 
 /// Global methods on artifacts.
@@ -241,7 +242,10 @@ pub(crate) fn register_instant_function(builder: &mut GlobalsBuilder) {
 /// then we hide the stacktrace. Otherwise, we emit the stacktrace to users.
 #[derive(Debug, buck2_error::Error, Clone)]
 #[error("fail:{0}")]
+#[buck2(tag = Tier0)]
 pub(crate) struct BxlErrorWithoutStacktrace(String);
+
+impl std::error::Error for BxlErrorWithoutStacktrace {}
 
 /// Global method for error handling.
 #[starlark_module]

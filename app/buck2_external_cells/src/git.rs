@@ -7,8 +7,8 @@
  * of this source tree.
  */
 
-use std::collections::hash_map;
 use std::collections::HashMap;
+use std::collections::hash_map;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
@@ -22,8 +22,8 @@ use buck2_common::dice::file_ops::delegate::FileOpsDelegate;
 use buck2_common::file_ops::FileDigestConfig;
 use buck2_common::file_ops::RawDirEntry;
 use buck2_common::file_ops::RawPathMetadata;
-use buck2_common::io::fs::FsIoProvider;
 use buck2_common::io::IoProvider;
+use buck2_common::io::fs::FsIoProvider;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::external::ExternalCellOrigin;
 use buck2_core::cells::external::GitCellSetup;
@@ -36,8 +36,8 @@ use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::directory::Directory;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest_config::HasDigestConfig;
 use buck2_execute::directory::INTERNER;
@@ -56,6 +56,7 @@ use dupe::Dupe;
 use tokio::sync::Semaphore;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Tier0)]
 enum GitError {
     #[error("Error fetching external cell with git, exit code: {exit_code:?}, stderr:\n{stderr}")]
     Unsuccessful {
@@ -321,7 +322,7 @@ impl FileOpsDelegate for GitFileOpsDelegate {
             return Ok(None);
         };
         Ok(Some(metadata.try_map(
-            |path| match path.strip_prefix_opt(&self.get_base_path()) {
+            |path| match path.strip_prefix_opt(self.get_base_path()) {
                 Some(path) => Ok(Arc::new(CellPath::new(self.cell, path.to_owned().into()))),
                 None => Err(internal_error!(
                     "Non-cell internal symlink at `{}` in cell `{}`",

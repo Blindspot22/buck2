@@ -20,28 +20,28 @@ use buck2_util::arc_str::ArcStr;
 use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::Demand;
 use starlark::values::FrozenRef;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Value;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::type_repr::StarlarkTypeRepr;
 use static_assertions::assert_eq_size;
 
 use crate::artifact_groups::ArtifactGroup;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
-use crate::interpreter::rule_defs::cmd_args::arg_builder::ArgBuilder;
-use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
-use crate::interpreter::rule_defs::cmd_args::space_separated::SpaceSeparatedCommandLineBuilder;
-use crate::interpreter::rule_defs::cmd_args::value::FrozenCommandLineArg;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
+use crate::interpreter::rule_defs::cmd_args::arg_builder::ArgBuilder;
+use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
+use crate::interpreter::rule_defs::cmd_args::space_separated::SpaceSeparatedCommandLineBuilder;
+use crate::interpreter::rule_defs::cmd_args::value::FrozenCommandLineArg;
 use crate::interpreter::rule_defs::provider::builtin::default_info::FrozenDefaultInfo;
 use crate::interpreter::rule_defs::resolve_query_macro::ResolvedQueryMacro;
 
@@ -53,8 +53,8 @@ use crate::interpreter::rule_defs::resolve_query_macro::ResolvedQueryMacro;
 // point we could get rid of the Query variant for ResolvedMacro.
 
 #[derive(Debug, PartialEq, Allocative)]
-pub enum ResolvedMacro {
-    Location(FrozenRef<'static, FrozenDefaultInfo>),
+pub enum ResolvedMacro<'v> {
+    Location(FrozenRef<'v, FrozenDefaultInfo>),
     Source(Artifact),
     /// Holds an arg-like value
     ArgLike(FrozenCommandLineArg),
@@ -64,7 +64,7 @@ pub enum ResolvedMacro {
 
 assert_eq_size!(ResolvedMacro, [usize; 2]);
 
-impl Display for ResolvedMacro {
+impl<'v> Display for ResolvedMacro<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ResolvedMacro::Location(_) => {
@@ -104,7 +104,7 @@ fn add_outputs_to_arg(
     Ok(())
 }
 
-impl ResolvedMacro {
+impl<'v> ResolvedMacro<'v> {
     pub fn add_to_arg(
         &self,
         builder: &mut dyn ArgBuilder,
@@ -155,12 +155,12 @@ impl ResolvedMacro {
 }
 
 #[derive(Debug, PartialEq, Allocative)]
-pub enum ResolvedStringWithMacrosPart {
+pub enum ResolvedStringWithMacrosPart<'v> {
     String(ArcStr),
-    Macro(/* write_to_file */ bool, ResolvedMacro),
+    Macro(/* write_to_file */ bool, ResolvedMacro<'v>),
 }
 
-impl Display for ResolvedStringWithMacrosPart {
+impl<'v> Display for ResolvedStringWithMacrosPart<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::String(x) => f.write_str(x),
@@ -176,7 +176,7 @@ impl Display for ResolvedStringWithMacrosPart {
 
 #[derive(Debug, PartialEq, ProvidesStaticType, NoSerialize, Allocative)]
 pub struct ResolvedStringWithMacros {
-    parts: Vec<ResolvedStringWithMacrosPart>,
+    parts: Vec<ResolvedStringWithMacrosPart<'static>>,
     configured_macros: Option<ConfiguredStringWithMacros>,
 }
 
@@ -194,7 +194,7 @@ impl Display for ResolvedStringWithMacros {
 
 impl ResolvedStringWithMacros {
     pub fn new(
-        parts: Vec<ResolvedStringWithMacrosPart>,
+        parts: Vec<ResolvedStringWithMacrosPart<'static>>,
         configured_macros: Option<&ConfiguredStringWithMacros>,
     ) -> Self {
         Self {
@@ -309,7 +309,7 @@ impl CommandLineArgLike for ResolvedStringWithMacros {
     }
 }
 
-#[starlark_value(type = "resolved_macro")]
+#[starlark_value(type = "ResolvedStringWithMacros")]
 impl<'v> StarlarkValue<'v> for ResolvedStringWithMacros {
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
         match ResolvedStringWithMacros::from_value(other) {

@@ -15,11 +15,11 @@ use allocative::Allocative;
 use buck2_util::arc_str::ArcSlice;
 use display_container::fmt_container;
 use gazebo::prelude::SliceExt;
-use serde_json::to_value;
 use serde_json::Value;
+use serde_json::to_value;
 
-use crate::attrs::attr_type::any_matches::AnyMatches;
 use crate::attrs::attr_type::AttrType;
+use crate::attrs::attr_type::any_matches::AnyMatches;
 use crate::attrs::display::AttrDisplayWithContext;
 use crate::attrs::display::AttrDisplayWithContextExt;
 use crate::attrs::fmt_context::AttrFmtContext;
@@ -40,7 +40,16 @@ impl ListAttrType {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Allocative, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    Allocative,
+    Default,
+    strong_hash::StrongHash
+)]
 pub struct ListLiteral<C: Eq>(pub ArcSlice<C>);
 
 impl<C: Eq> Deref for ListLiteral<C> {

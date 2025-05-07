@@ -155,10 +155,10 @@ defining platforms
 #//platforms/BUCK
 
 [
-platform(
+    platform(
         name = "{}-{}".format(base, mode)
         deps = [":{}".format(base)],
-        constraint_values = ["//constraints:{}".format(mode)
+        constraint_values = ["//constraints:{}".format(mode)]
     )
     for base in ["mac-x86", "mac-arm64", "windows-x86", "windows-arm64"]
     for mode in ["dev", "opt"]
@@ -169,10 +169,10 @@ platform(
         name = name,
         constraint_values = constraint_values
     ) for name, constraint_values in [
-        "mac-x86", ["//constraints:mac", "//constraints:x86"],
-        "mac-arm64", ["//constraints:mac", "//constraints:arm64"],
-        "windows-x86", ["//constraints:windows", "//constraints:x86"],
-        "windows-arm64", ["//constraints:windows", "//constraints:arm64"],
+        ("mac-x86", ["//constraints:mac", "//constraints:x86"]),
+        ("mac-arm64", ["//constraints:mac", "//constraints:arm64"]),
+        ("windows-x86", ["//constraints:windows", "//constraints:x86"]),
+        ("windows-arm64", ["//constraints:windows", "//constraints:arm64"]),
     ]
 ]
 ```
@@ -311,21 +311,21 @@ Here’s an example definition of execution platforms.
 # //platforms/execution/BUCK
 
 execution_platform(
-name = "mac-exec",
-platform = "//platforms:mac-arm64-opt",
-local_enabled = host_info().os.is_macos,
-remote_enabled = True,
-use_limited_hybrid = False,
-remote_execution_use_case = "buck2-build",
-remote_execution_properties = {
-    "platform": "mac-re"
-},
+    name = "mac-exec",
+    platform = "//platforms:mac-arm64-opt",
+    local_enabled = host_info().os.is_macos,
+    remote_enabled = True,
+    use_limited_hybrid = False,
+    remote_execution_use_case = "buck2-build",
+    remote_execution_properties = {
+        "platform": "mac-re"
+    },
 )
 
 execution_platform(
     name = "windows-exec",
-platform = "//platforms:windows-arm64-opt",
-local_enabled = host_info().os.is_windows,
+    platform = "//platforms:windows-arm64-opt",
+    local_enabled = host_info().os.is_windows,
     ...
 )
 

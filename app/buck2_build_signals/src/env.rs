@@ -34,8 +34,7 @@ pub struct NodeDuration {
 
 impl NodeDuration {
     /// Returns the duration we are using in our critical path calculation. This doesn't really
-    /// *need* to be a function but right now we use user and want to switch to total so it's
-    /// easier to do that if this is in a single function.
+    /// *need* to be a function but is helpful so that not every callsite has to know which one we chose.
     pub fn critical_path_duration(&self) -> Duration {
         self.total
     }
@@ -51,10 +50,9 @@ impl NodeDuration {
 
 #[derive(Copy, Clone, Dupe, derive_more::Display, Allocative)]
 pub enum CriticalPathBackendName {
+    /// This is the default backend.
     #[display("longest-path-graph")]
     LongestPathGraph,
-    #[display("default")]
-    Default,
     #[display("logging")]
     Logging,
 }
@@ -65,28 +63,28 @@ impl FromStr for CriticalPathBackendName {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "longest-path-graph" {
             return Ok(Self::LongestPathGraph);
-        }
-
-        if s == "default" {
-            return Ok(Self::Default);
-        }
-
-        if s == "logging" {
+        } else if s == "logging" {
             return Ok(Self::Logging);
         }
 
         Err(buck2_error::buck2_error!(
-            [],
+            buck2_error::ErrorTag::Input,
             "Invalid backend name: `{}`",
             s
         ))
     }
 }
 
+pub struct EarlyCommandEntry {
+    pub kind: String,
+    pub duration: Duration,
+}
+
 pub struct BuildSignalsContext {
     pub command_name: String,
     pub metadata: HashMap<String, String>,
     pub isolation_prefix: FileNameBuf,
+    pub early_command_entries: Vec<EarlyCommandEntry>,
 }
 
 /// Created along with the BuildSignalsInstaller (ideally, BuildSignalsInstaller's definition would

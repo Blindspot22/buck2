@@ -11,6 +11,7 @@
 import contextlib
 import hashlib
 import json
+
 import os
 import platform
 import shutil
@@ -31,7 +32,6 @@ from typing import (
 )
 
 import __manifest__
-
 import pytest
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.api.executable import WindowsCmdOption
@@ -63,6 +63,7 @@ async def buck_fixture(  # noqa C901 : "too complex"
     # This is necessary for static linking on Linux.
     if platform.system() != "Windows":
         env["BUCKD_STARTUP_TIMEOUT"] = "120"
+        env["BUCKD_STARTUP_INIT_TIMEOUT"] = "120"
 
     # allow_soft_errors will override any existing environment variable behavior
     if marker.allow_soft_errors or marker.inplace:
@@ -82,12 +83,18 @@ async def buck_fixture(  # noqa C901 : "too complex"
     env["BUCK2_TERMINATE_AFTER"] = "650"
     # Timeout Watchman requests because we often see it hang and crash.
     env["BUCK2_WATCHMAN_TIMEOUT"] = "30"
-    # Use little threads. We don't do much work in tests but we do run lots of Bucks.
-    env["BUCK2_RUNTIME_THREADS"] = "2"
+    env["BUCK2_RUNTIME_THREADS"] = "8"
+    # Avoid noise in stderr.
+    env["BUCK2_IGNORE_VERSION_EXTRACTION_FAILURE"] = "true"
 
+    assert (
+        "BUCK2_RUNTIME_THREADS" in env
+    ), "BUCK2_RUNTIME_THREADS should be set by the test macros"
+    assert (
+        "BUCK2_MAX_BLOCKING_THREADS" in env
+    ), "BUCK2_MAX_BLOCKING_THREADS should be set by the test macros"
     # Windows uses blocking threads for subprocess I/O so we can't do this there.
-    if not is_windows:
-        env["BUCK2_MAX_BLOCKING_THREADS"] = "2"
+    del env["BUCK2_MAX_BLOCKING_THREADS"]
 
     # Filter out some environment variables that may interfere with the
     # running of tests. Notably, since this framework is used to write
@@ -151,6 +158,10 @@ async def buck_fixture(  # noqa C901 : "too complex"
             # on a host without this, so just make it the default.
             if sys.platform == "linux":
                 extra_config_lines.append("[host_features]\ngvfs = true\n")
+            # NOTE: This buckconfig is depended on by our CI validation for
+            # CLI modifiers in tools/build_defs/buck2/cfg/validation.bzl. If
+            # the name of this buckconfig ever changes, please update the validation
+            # as well.
             extra_config_lines.append("[buildfile]\nextra_for_test = TARGETS.test\n")
 
         else:
@@ -169,9 +180,13 @@ async def buck_fixture(  # noqa C901 : "too complex"
                         f,
                     )
 
-            # Our mac tests keep failing due to watchman errors, do disable watchman on macs here
+            # `edenfs` watcher requires eden to be setup which is too slow to enable on all tests
+            # use edenfs watcher whenever possible in test, otherwise use `fs_hash_crawler`
             # FYI: if you remove this, make sure to remove it from external_buckconfig tests too
-            if sys.platform == "darwin":
+            if marker.setup_eden:
+                extra_config_lines.append("[buck2]\nfile_watcher = edenfs\n")
+                extra_config_lines.append("[buck2]\nallow_eden_io = true\n")
+            else:
                 extra_config_lines.append("[buck2]\nfile_watcher = fs_hash_crawler\n")
 
             buck_cwd = project_dir
@@ -306,6 +321,22 @@ def _setup_eden(
         env=env,
     )
 
+    # Use .eden-redirections to force redirection to be setup at mount time
+    # The number of concurrent APFS volumes we can create on macOS
+    # is limited. Furthermore, cleaning up disk image redirections is non-trivial.
+    # Let's use symlink redirections to avoid these issues.
+    redirection_type = "symlink" if sys.platform == "darwin" else "bind"
+    with open(temp_repo / ".eden-redirections", "w") as f:
+        f.write(f'[redirections]\n"buck-out" = "{redirection_type}"\n')
+
+    subprocess.check_call(
+        ["hg", "commit", "--addremove", "-m", "init"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        env=env,
+        cwd=temp_repo,
+    )
+
     # Mount the hg repo we created
     project_dir.mkdir(exist_ok=True)
     cmd = _eden_base_cmd(eden_dir) + [
@@ -324,20 +355,6 @@ def _setup_eden(
         stdout=sys.stdout,
         stderr=sys.stderr,
         env=env,
-    )
-
-    subprocess.check_call(
-        _eden_base_cmd(eden_dir)
-        + [
-            "redirect",
-            "add",
-            "buck-out",
-            "bind",
-        ],
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        env=env,
-        cwd=project_dir,
     )
 
 

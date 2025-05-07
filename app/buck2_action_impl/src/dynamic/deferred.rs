@@ -16,8 +16,8 @@ use buck2_artifact::artifact::artifact_type::BoundBuildArtifact;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_build_api::analysis::registry::AnalysisRegistry;
 use buck2_build_api::analysis::registry::RecordedAnalysisValues;
-use buck2_build_api::artifact_groups::calculation::ArtifactGroupCalculation;
 use buck2_build_api::artifact_groups::ArtifactGroup;
+use buck2_build_api::artifact_groups::calculation::ArtifactGroupCalculation;
 use buck2_build_api::dynamic::calculation::dynamic_lambda_result;
 use buck2_build_api::dynamic_value::DynamicValue;
 use buck2_build_api::interpreter::rule_defs::artifact::associated::AssociatedArtifacts;
@@ -33,10 +33,9 @@ use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::deferred::dynamic::DynamicLambdaResultsKey;
 use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
+use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_error::internal_error;
-use buck2_error::starlark_error::from_starlark;
-use buck2_error::BuckErrorContext;
 use buck2_events::dispatch::get_dispatcher;
 use buck2_events::dispatch::span_async;
 use buck2_events::dispatch::span_async_simple;
@@ -45,6 +44,7 @@ use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::digest_config::HasDigestConfig;
 use buck2_execute::materialize::materializer::HasMaterializer;
 use buck2_futures::cancellation::CancellationObserver;
+use buck2_interpreter::from_freeze::from_freeze_error;
 use buck2_interpreter::print_handler::EventDispatcherPrintHandler;
 use buck2_interpreter::soft_error::Buck2StarlarkSoftErrorHandler;
 use dice::CancellationContext;
@@ -54,10 +54,6 @@ use futures::FutureExt;
 use indexmap::IndexSet;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::values::dict::AllocDict;
-use starlark::values::dict::DictType;
-use starlark::values::list::AllocList;
-use starlark::values::tuple::AllocTuple;
 use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::OwnedRefFrozenRef;
@@ -65,6 +61,10 @@ use starlark::values::Value;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueTyped;
 use starlark::values::ValueTypedComplex;
+use starlark::values::dict::AllocDict;
+use starlark::values::dict::DictType;
+use starlark::values::list::AllocList;
+use starlark::values::tuple::AllocTuple;
 use starlark_map::small_map::SmallMap;
 
 use crate::dynamic::attrs::DynamicAttrValue;
@@ -127,15 +127,13 @@ pub fn invoke_dynamic_output_lambda<'v>(
             (&[], &named)
         }
     };
-    let return_value = eval
-        .eval_function(lambda, pos, named)
-        .map_err(from_starlark)?;
+    let return_value = eval.eval_function(lambda, pos, named)?;
 
     let provider_collection = match args {
         DynamicLambdaArgs::OldPositional { .. } => {
             if !return_value.is_none() {
                 return Err(buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::Input,
                     "dynamic_output lambda must return `None`, got: `{0}`",
                     return_value.to_string_for_type_error()
                 ));
@@ -273,8 +271,9 @@ async fn execute_lambda(
 
                 declared_actions = Some(analysis_registry.num_declared_actions());
                 declared_artifacts = Some(analysis_registry.num_declared_artifacts());
-                let (_frozen_env, recorded_values) = analysis_registry.finalize(&env)?(env)?;
-                recorded_values
+                let registry_finalizer = analysis_registry.finalize(&env)?;
+                let frozen_env = env.freeze().map_err(from_freeze_error)?;
+                registry_finalizer(&frozen_env)?
             };
 
             (
@@ -538,7 +537,7 @@ fn new_attr_value<'v>(
             let mut r = SmallMap::with_capacity(xs.len());
             for (k, v) in xs {
                 let prev = r.insert_hashed(
-                    k.to_value().get_hashed().map_err(from_starlark)?,
+                    k.to_value().get_hashed()?,
                     new_attr_value(
                         v,
                         _input_artifacts_materialized,
@@ -549,7 +548,10 @@ fn new_attr_value<'v>(
                     )?,
                 );
                 if prev.is_some() {
-                    return Err(buck2_error!([], "Duplicate key in dict"));
+                    return Err(buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "Duplicate key in dict"
+                    ));
                 }
             }
             Ok(env.heap().alloc(AllocDict(r)))

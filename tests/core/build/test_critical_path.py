@@ -20,7 +20,7 @@ from buck2.tests.e2e_util.helper.utils import filter_events
 
 
 @dataclass
-class critical_path_log:
+class CriticalPathLog:
     kind: str
     name: str
     category: str
@@ -31,23 +31,20 @@ class critical_path_log:
     potential_improvement_duration: str
 
 
-async def do_critical_path(buck: Buck, correct_analysis: bool) -> None:
+async def do_critical_path(buck: Buck) -> None:
     await buck.build("//:step_3", "--no-remote-cache")
 
     critical_path = (await buck.log("critical-path")).stdout.strip().splitlines()
     critical_path = [e.split("\t") for e in critical_path]
 
     trimmed_critical_path = [
-        critical_path_log(e[0], e[1].split(" ")[0], e[2], e[3], e[4], e[5], e[6], e[7])
+        CriticalPathLog(e[0], e[1].split(" ")[0], e[2], e[3], e[4], e[5], e[6], e[7])
         for e in critical_path
     ]
 
-    # There is now non-determism in this test since what we get back depends on
-    # where the analysis becomes the longest path. This gets fixed later in
-    # this stack.
-
-    assert len(trimmed_critical_path) > 0
     expected = [
+        ("synchronizing-and-waiting", ""),
+        ("listing", "root//"),
         ("load", "root//"),
         ("analysis", "root//:step_0"),
         ("analysis", "root//:step_1"),
@@ -60,6 +57,7 @@ async def do_critical_path(buck: Buck, correct_analysis: bool) -> None:
         ("materialization", "root//:step_3"),
         ("compute-critical-path", ""),
     ]
+    assert len(critical_path) == len(expected)
 
     for s, e in zip(reversed(trimmed_critical_path), reversed(expected)):
         if s.kind == "action":
@@ -68,15 +66,8 @@ async def do_critical_path(buck: Buck, correct_analysis: bool) -> None:
         else:
             assert s.execution_kind == ""
 
-        if not correct_analysis and s.kind == "analysis":
-            break
         assert s.kind == e[0]
         assert s.name == e[1]
-
-
-@buck_test()
-async def test_critical_path(buck: Buck) -> None:
-    await do_critical_path(buck, False)
 
 
 @buck_test()
@@ -84,7 +75,7 @@ async def test_critical_path_longest_path_graph(buck: Buck) -> None:
     with open(buck.cwd / ".buckconfig", "a") as f:
         f.write("[buck2]\n")
         f.write("critical_path_backend2 = longest-path-graph\n")
-    await do_critical_path(buck, True)
+    await do_critical_path(buck)
 
 
 @buck_test()
@@ -99,8 +90,9 @@ async def test_critical_path_json(buck: Buck) -> None:
     )
     critical_path = [json.loads(e) for e in critical_path]
 
-    assert len(critical_path) > 0
     expected = [
+        ("synchronizing-and-waiting", None),
+        ("listing", "root//"),
         ("load", "root//"),
         ("analysis", "root//:step_0"),
         ("analysis", "root//:step_1"),
@@ -113,18 +105,16 @@ async def test_critical_path_json(buck: Buck) -> None:
         ("materialization", "root//:step_3"),
         ("compute-critical-path", None),
     ]
+    assert len(critical_path) == len(expected)
 
     for critical, exp in zip(reversed(critical_path), reversed(expected)):
-        if critical["kind"] == "analysis":
-            # There is now non-determism in this test since what we get back depends on
-            # where the analysis becomes the longest path. This gets fixed later in
-            # this stack.
-            break
-
         assert "kind" in critical
         assert critical["kind"] == exp[0]
 
-        if critical["kind"] == "compute-critical-path":
+        if (
+            critical["kind"] == "compute-critical-path"
+            or critical["kind"] == "synchronizing-and-waiting"
+        ):
             assert "name" not in critical
         else:
             assert "name" in critical
@@ -187,7 +177,10 @@ async def test_dynamic_input(buck: Buck) -> None:
         assert "kind" in critical
         t = critical["kind"]
 
-        if critical["kind"] == "compute-critical-path":
+        if (
+            critical["kind"] == "compute-critical-path"
+            or critical["kind"] == "synchronizing-and-waiting"
+        ):
             assert "name" not in critical
         else:
             assert "name" in critical
@@ -305,3 +298,43 @@ async def test_critical_path_action_digest(buck: Buck) -> None:
                 has_action_digest = True
 
     assert has_action_digest
+
+
+@buck_test()
+async def test_critical_path_top_level_targets(buck: Buck) -> None:
+    await buck.build("//:step_1", "//:step_2", "//:step_3", "--no-remote-cache")
+
+    build_graph_info = await filter_events(
+        buck,
+        "Event",
+        "data",
+        "Instant",
+        "data",
+        "BuildGraphInfo",
+    )
+
+    build_graph_info = build_graph_info[0]
+    top_level_targets = build_graph_info["top_level_targets"]
+
+    # Sort by duration.
+    top_level_targets = sorted(top_level_targets, key=lambda x: x["duration_us"])
+    (t0, t1, t2) = [x["target"]["label"]["name"] for x in top_level_targets]
+    (d0, d1, d2) = [x["duration_us"] for x in top_level_targets]
+
+    assert t0 == "step_1"
+    assert t1 == "step_2"
+    assert t2 == "step_3"
+    assert d0 <= d1
+    assert d1 <= d2
+
+    # The duration should match the relevant build steps:
+    total_duration = sum(
+        x["total_duration_us"]
+        for x in build_graph_info["critical_path2"]
+        if len(
+            {"GenericEntry", "ComputeCriticalPath", "FinalMaterialization"}
+            & x["entry"].keys()
+        )
+        == 0
+    )
+    assert total_duration == d2

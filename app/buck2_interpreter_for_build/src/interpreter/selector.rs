@@ -19,12 +19,6 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_complex_value;
 use starlark::starlark_module;
-use starlark::values::dict::Dict;
-use starlark::values::dict::DictRef;
-use starlark::values::dict::DictType;
-use starlark::values::none::NoneOr;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
@@ -42,6 +36,12 @@ use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::dict::Dict;
+use starlark::values::dict::DictRef;
+use starlark::values::dict::DictType;
+use starlark::values::none::NoneOr;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 /// Representation of `select()` in Starlark.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)] // TODO selector should probably support serializing
@@ -174,7 +174,7 @@ impl<'v> StarlarkSelector<'v> {
                 .ok_or_else(|| {
                     starlark::Error::new_kind(starlark::ErrorKind::Native(
                         buck2_error::buck2_error!(
-                            [],
+                            buck2_error::ErrorTag::Input,
                             "Expected testing function to have a boolean return type"
                         )
                         .into(),
@@ -241,7 +241,7 @@ impl StarlarkSelectorBase<'_> for FrozenStarlarkSelector {
     type Item = FrozenValue;
 }
 
-#[starlark_value(type = "selector")] // TODO(nga): rename to `"Select"` to match constant name.
+#[starlark_value(type = "Select")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkSelectorGen<V>
 where
     Self: ProvidesStaticType<'v> + StarlarkSelectorBase<'v, Item = V>,

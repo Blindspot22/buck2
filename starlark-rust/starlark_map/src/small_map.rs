@@ -33,6 +33,7 @@ use hashbrown::HashTable;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::StarlarkHashValue;
 use crate::hashed::Hashed;
 pub use crate::small_map::iter::IntoIter;
 pub use crate::small_map::iter::IntoIterHashed;
@@ -46,7 +47,6 @@ pub use crate::small_map::iter::Keys;
 pub use crate::small_map::iter::Values;
 pub use crate::small_map::iter::ValuesMut;
 use crate::vec_map::VecMap;
-use crate::StarlarkHashValue;
 
 mod iter;
 
@@ -398,10 +398,7 @@ impl<K, V> SmallMap<K, V> {
 
     /// Reserve capacity for at least `additional` more elements to be inserted.
     #[inline]
-    pub fn reserve(&mut self, additional: usize)
-    where
-        K: Eq,
-    {
+    pub fn reserve(&mut self, additional: usize) {
         self.entries.reserve(additional);
         if let Some(index) = &mut self.index {
             index.reserve(additional, Self::hasher(&self.entries));
@@ -724,7 +721,7 @@ impl<K, V> SmallMap<K, V> {
             map: &'a mut SmallMap<K, V>,
         }
 
-        impl<'a, K, V> Drop for RebuildIndexOnDrop<'a, K, V> {
+        impl<K, V> Drop for RebuildIndexOnDrop<'_, K, V> {
             fn drop(&mut self) {
                 self.map.rebuild_index();
             }
@@ -775,7 +772,7 @@ impl<K, V> SmallMap<K, V> {
             map: &'a mut SmallMap<K, V>,
         }
 
-        impl<'a, K, V> Drop for RebuildIndexOnDrop<'a, K, V> {
+        impl<K, V> Drop for RebuildIndexOnDrop<'_, K, V> {
             fn drop(&mut self) {
                 debug_assert!(self.map.entries.len() <= self.original_len);
                 if self.map.len() < self.original_len {
@@ -1012,10 +1009,10 @@ where
 #[macro_export]
 macro_rules! smallmap {
     (@single $($x:tt)*) => (());
-    (@count $($rest:expr),*) => (<[()]>::len(&[$(smallmap!(@single $rest)),*]));
+    (@count $($rest:expr_2021),*) => (<[()]>::len(&[$(smallmap!(@single $rest)),*]));
 
-    ($($key:expr => $value:expr,)+) => { smallmap!($($key => $value),+) };
-    ($($key:expr => $value:expr),*) => {
+    ($($key:expr_2021 => $value:expr_2021,)+) => { smallmap!($($key => $value),+) };
+    ($($key:expr_2021 => $value:expr_2021),*) => {
         {
             let cap = smallmap!(@count $($key),*);
             #[allow(unused_mut)]
@@ -1084,8 +1081,8 @@ where
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
-    use std::panic::catch_unwind;
     use std::panic::AssertUnwindSafe;
+    use std::panic::catch_unwind;
 
     use super::*;
 

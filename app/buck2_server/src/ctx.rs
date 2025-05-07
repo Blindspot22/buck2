@@ -15,15 +15,16 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_build_api::actions::execute::dice_data::set_fallback_executor_config;
 use buck2_build_api::actions::execute::dice_data::SetCommandExecutor;
 use buck2_build_api::actions::execute::dice_data::SetReClient;
+use buck2_build_api::actions::execute::dice_data::set_fallback_executor_config;
 use buck2_build_api::actions::impls::run_action_knobs::HasRunActionKnobs;
 use buck2_build_api::actions::impls::run_action_knobs::RunActionKnobs;
 use buck2_build_api::build::HasCreateUnhashedSymlinkLock;
-use buck2_build_api::build_signals::create_build_signals;
+use buck2_build_api::build::detailed_aggregated_metrics::dice::SetDetailedAggregatedMetricsEventsHolder;
 use buck2_build_api::build_signals::BuildSignalsInstaller;
 use buck2_build_api::build_signals::SetBuildSignals;
+use buck2_build_api::build_signals::create_build_signals;
 use buck2_build_api::context::SetBuildContextData;
 use buck2_build_api::keep_going::HasKeepGoing;
 use buck2_build_api::materialize::HasMaterializationQueueTracker;
@@ -31,17 +32,18 @@ use buck2_build_api::spawner::BuckSpawner;
 use buck2_build_signals::env::CriticalPathBackendName;
 use buck2_build_signals::env::HasCriticalPathBackend;
 use buck2_certs::validate::CertState;
+use buck2_cli_proto::ClientContext;
+use buck2_cli_proto::CommonBuildOptions;
+use buck2_cli_proto::ConfigOverride;
 use buck2_cli_proto::client_context::HostArchOverride;
 use buck2_cli_proto::client_context::HostPlatformOverride;
 use buck2_cli_proto::client_context::PreemptibleWhen;
 use buck2_cli_proto::common_build_options::ExecutionStrategy;
 use buck2_cli_proto::config_override::ConfigType;
-use buck2_cli_proto::ClientContext;
-use buck2_cli_proto::CommonBuildOptions;
-use buck2_cli_proto::ConfigOverride;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::cycles::CycleDetectorAdapter;
 use buck2_common::dice::cycles::PairDiceCycleDetector;
+use buck2_common::file_ops::HasReadDirCache;
 use buck2_common::http::SetHttpClient;
 use buck2_common::init::ResourceControlConfig;
 use buck2_common::invocation_paths::InvocationPaths;
@@ -50,10 +52,9 @@ use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
 use buck2_common::legacy_configs::configs::LegacyBuckConfig;
 use buck2_common::legacy_configs::dice::HasInjectedLegacyConfigs;
 use buck2_common::legacy_configs::dice::HasLegacyConfigs;
-use buck2_common::legacy_configs::diffs::ConfigDiffTracker;
 use buck2_common::legacy_configs::file_ops::ConfigPath;
 use buck2_common::legacy_configs::key::BuckconfigKeyRef;
-use buck2_configured::calculation::ConfiguredGraphCycleDescriptor;
+use buck2_configured::cycle::ConfiguredGraphCycleDescriptor;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_core::facebook_only;
@@ -85,29 +86,29 @@ use buck2_execute_impl::low_pass_filter::LowPassFilter;
 use buck2_file_watcher::mergebase::SetMergebase;
 use buck2_futures::cancellation::CancellationContext;
 use buck2_interpreter::dice::starlark_debug::SetStarlarkDebugger;
-use buck2_interpreter::extra::xcode::XcodeVersionInfo;
 use buck2_interpreter::extra::InterpreterHostArchitecture;
 use buck2_interpreter::extra::InterpreterHostPlatform;
+use buck2_interpreter::extra::xcode::XcodeVersionInfo;
 use buck2_interpreter::prelude_path::prelude_path;
 use buck2_interpreter::starlark_profiler::config::StarlarkProfilerConfiguration;
 use buck2_interpreter_for_build::interpreter::configuror::BuildInterpreterConfiguror;
 use buck2_interpreter_for_build::interpreter::cycles::LoadCycleDescriptor;
 use buck2_interpreter_for_build::interpreter::interpreter_setup::setup_interpreter;
+use buck2_server_ctx::bxl::InitBxlStreamingTracker;
 use buck2_server_ctx::concurrency::DiceUpdater;
 use buck2_server_ctx::ctx::DiceAccessor;
+use buck2_server_ctx::ctx::LockedPreviousCommandData;
 use buck2_server_ctx::ctx::PrivateStruct;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::stderr_output_guard::StderrOutputGuard;
 use buck2_server_ctx::stderr_output_guard::StderrOutputWriter;
-use buck2_server_starlark_debug::create_debugger_handle;
 use buck2_server_starlark_debug::BuckStarlarkDebuggerHandle;
+use buck2_server_starlark_debug::create_debugger_handle;
 use buck2_test::local_resource_registry::InitLocalResourceRegistry;
 use buck2_util::arc_str::ArcS;
 use buck2_util::truncate::truncate_container;
 use buck2_validation::enabled_optional_validations_key::SetEnabledOptionalValidations;
-use buck2_wrapper_common::DOT_BUCKCONFIG_D;
-use buck2_wrapper_common::EXPERIMENTS_FILENAME;
-use const_format::concatcp;
+use dashmap::DashMap;
 use dice::DiceComputations;
 use dice::DiceData;
 use dice::DiceTransactionUpdater;
@@ -120,9 +121,9 @@ use host_sharing::HostSharingStrategy;
 use tracing::warn;
 
 use crate::active_commands::ActiveCommandDropGuard;
+use crate::daemon::common::CommandExecutorFactory;
 use crate::daemon::common::get_default_executor_config;
 use crate::daemon::common::parse_concurrency;
-use crate::daemon::common::CommandExecutorFactory;
 use crate::daemon::state::DaemonStateData;
 use crate::dice_tracker::BuckDiceTracker;
 use crate::heartbeat_guard::HeartbeatGuard;
@@ -130,14 +131,11 @@ use crate::host_info;
 use crate::snapshot::SnapshotCollector;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Environment)]
 enum DaemonCommunicationError {
     #[error("Got invalid working directory `{0}`")]
     InvalidWorkingDirectory(String),
 }
-
-const EXPERIMENT_PATH_SUFFIX: &str = concatcp!("/", DOT_BUCKCONFIG_D, "/", EXPERIMENTS_FILENAME);
-
-const EXPERIMENTS: &str = "experiments";
 
 /// BaseCommandContext provides access to the global daemon state and information specific to a command (like the
 /// EventDispatcher). Most commands use a ServerCommandContext which has more command/client-specific information.
@@ -270,6 +268,7 @@ impl<'a> ServerCommandContext<'a> {
                     .instant_event(buck2_data::RemoteExecutionSessionCreated {
                         session_id: session_id.to_owned(),
                         experiment_name,
+                        persistent_cache_mode: client.get_persistent_cache_mode(),
                     })
             }
         }
@@ -349,7 +348,7 @@ impl<'a> ServerCommandContext<'a> {
             .as_ref()
             .map(|opts| opts.execution_strategy)
             .map_or(ExecutionStrategy::LocalOnly, |strategy| {
-                ExecutionStrategy::from_i32(strategy).expect("execution strategy should be valid")
+                ExecutionStrategy::try_from(strategy).expect("execution strategy should be valid")
             });
 
         let skip_cache_read = self
@@ -371,7 +370,6 @@ impl<'a> ServerCommandContext<'a> {
         };
 
         let run_action_knobs = RunActionKnobs {
-            hash_all_commands: self.base_context.daemon.hash_all_commands,
             use_network_action_output_cache: self
                 .base_context
                 .daemon
@@ -392,7 +390,7 @@ impl<'a> ServerCommandContext<'a> {
         let upload_all_actions = self
             .build_options
             .as_ref()
-            .map_or(false, |opts| opts.upload_all_actions);
+            .is_some_and(|opts| opts.upload_all_actions);
 
         let (interpreter_platform, interpreter_architecture, interpreter_xcode_version) =
             host_info::get_host_info(
@@ -415,14 +413,18 @@ impl<'a> ServerCommandContext<'a> {
             keep_going: self
                 .build_options
                 .as_ref()
-                .map_or(false, |opts| opts.keep_going),
+                .is_some_and(|opts| opts.keep_going),
             materialize_failed_inputs: self
                 .build_options
                 .as_ref()
-                .map_or(false, |opts| opts.materialize_failed_inputs),
+                .is_some_and(|opts| opts.materialize_failed_inputs),
             interpreter_platform,
             interpreter_architecture,
             interpreter_xcode_version,
+            materialize_failed_outputs: self
+                .build_options
+                .as_ref()
+                .is_some_and(|opts| opts.materialize_failed_outputs),
         })
     }
 
@@ -435,30 +437,6 @@ impl<'a> ServerCommandContext<'a> {
 }
 
 impl ServerCommandContext<'_> {
-    fn get_experiment_tags(&self, components: &[buck2_data::BuckconfigComponent]) -> Vec<String> {
-        let mut init = Vec::new();
-        for component in components {
-            use buck2_data::buckconfig_component::Data;
-            match &component.data {
-                Some(Data::GlobalExternalConfigFile(external_config_file)) => {
-                    if external_config_file
-                        .origin_path
-                        .ends_with(EXPERIMENT_PATH_SUFFIX)
-                    {
-                        external_config_file.values.iter().for_each(|config_value| {
-                            if config_value.section == EXPERIMENTS {
-                                // all enabled GK experiments have their value set to true by definition
-                                init.push(format!("{}.{}", EXPERIMENTS, config_value.key.clone()));
-                            }
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-        init
-    }
-
     async fn load_new_configs(
         &self,
         dice_ctx: &mut DiceComputations<'_>,
@@ -470,24 +448,16 @@ impl ServerCommandContext<'_> {
         .await?;
 
         self.report_traced_config_paths(&new_configs.config_paths)?;
-        // Normally, this code should execute only once (hence we should fire only one BuckconfigInputValues event) but there might be an additional call once concurrent command is detected.
-        // Even if there is no concurrent command, we sometimes end up having two events due to a bug where concurrency manager treats many more commands as being concurrent than it's supposed to.
-        let components = new_configs.external_data.get_buckconfig_components();
-        let tags = self.get_experiment_tags(&components);
-        self.events().instant_event(buck2_data::TagEvent { tags });
-        self.events()
-            .instant_event(buck2_data::BuckconfigInputValues { components });
-
         if self.reuse_current_config {
             if dice_ctx
                 .is_injected_external_buckconfig_data_key_set()
                 .await?
             {
                 if !self.config_overrides.is_empty() {
-                    let config_type_str = |c| match ConfigType::from_i32(c) {
-                        Some(ConfigType::Value) => "--config",
-                        Some(ConfigType::File) => "--config-file",
-                        None => "",
+                    let config_type_str = |c| match ConfigType::try_from(c) {
+                        Ok(ConfigType::Value) => "--config",
+                        Ok(ConfigType::File) => "--config-file",
+                        Err(_) => "",
                     };
                     warn!(
                         "Found config overrides while using --reuse-current-config flag. Ignoring overrides [{}] and using current config instead",
@@ -551,6 +521,7 @@ struct DiceCommandUpdater<'s, 'a: 's> {
     skip_cache_write: bool,
     keep_going: bool,
     materialize_failed_inputs: bool,
+    materialize_failed_outputs: bool,
     interpreter_platform: InterpreterHostPlatform,
     interpreter_architecture: InterpreterHostArchitecture,
     interpreter_xcode_version: Option<XcodeVersionInfo>,
@@ -564,7 +535,7 @@ fn create_cycle_detector() -> Arc<dyn UserCycleDetector> {
 }
 
 #[async_trait]
-impl<'s, 'a> DiceUpdater for DiceCommandUpdater<'s, 'a> {
+impl DiceUpdater for DiceCommandUpdater<'_, '_> {
     async fn update(
         &self,
         mut ctx: DiceTransactionUpdater,
@@ -616,18 +587,13 @@ impl<'s, 'a> DiceUpdater for DiceCommandUpdater<'s, 'a> {
             .await?;
 
         let mut user_data = self.make_user_computation_data(&cells_and_configs.root_config)?;
-        ConfigDiffTracker::promote_into(
-            existing_state,
-            &mut user_data,
-            &cells_and_configs.root_config,
-        );
         user_data.set_mergebase(mergebase);
 
         Ok((ctx, user_data))
     }
 }
 
-impl<'a, 's> DiceCommandUpdater<'a, 's> {
+impl DiceCommandUpdater<'_, '_> {
     fn make_user_computation_data(
         &self,
         root_config: &LegacyBuckConfig,
@@ -683,9 +649,16 @@ impl<'a, 's> DiceCommandUpdater<'a, 's> {
             })?
             .or(Some(10));
 
+        let re_cancel_on_estimated_queue_time_exceeds_s =
+            root_config.parse::<u32>(BuckconfigKeyRef {
+                section: "build",
+                property: "remote_execution_cancel_on_estimated_queue_time_exceeds_s",
+            })?;
+
         let executor_global_knobs = ExecutorGlobalKnobs {
             enable_miniperf,
             log_action_keys,
+            re_cancel_on_estimated_queue_time_exceeds_s,
         };
 
         let host_sharing_broker =
@@ -729,6 +702,7 @@ impl<'a, 's> DiceCommandUpdater<'a, 's> {
             activation_tracker: Some(self.build_signals.activation_tracker.dupe()),
             ..Default::default()
         };
+        data.set_detailed_aggregated_metrics_events_holder();
 
         let worker_pool = Arc::new(WorkerPool::new(persistent_worker_shutdown_timeout_s));
 
@@ -737,7 +711,7 @@ impl<'a, 's> DiceCommandUpdater<'a, 's> {
                 section: "buck2",
                 property: "critical_path_backend2",
             })?
-            .unwrap_or(CriticalPathBackendName::Default);
+            .unwrap_or(CriticalPathBackendName::LongestPathGraph);
 
         let override_use_case = root_config.parse::<RemoteExecutorUseCase>(BuckconfigKeyRef {
             section: "buck2_re_client",
@@ -745,11 +719,10 @@ impl<'a, 's> DiceCommandUpdater<'a, 's> {
         })?;
 
         set_fallback_executor_config(&mut data.data, self.executor_config.dupe());
-        data.set_re_client(
-            self.re_connection
-                .get_client()
-                .with_re_use_case_override(override_use_case),
-        );
+        // This client is only used in places that do not use the RE use case specified in the executor config.
+        // They currently use either a usecase specified in actions (cas_artifact), or a global default (buck2.default_remote_execution_use_case).
+        // We should not override the cas_artifact usecase or else the ttl may not match the action declaration.
+        data.set_re_client(self.re_connection.get_client());
         let resource_control_config = ResourceControlConfig::from_config(root_config)?;
         data.set_command_executor(Box::new(CommandExecutorFactory::new(
             self.re_connection.dupe(),
@@ -767,6 +740,7 @@ impl<'a, 's> DiceCommandUpdater<'a, 's> {
             worker_pool,
             self.cmd_ctx.base_context.daemon.paranoid.dupe(),
             self.materialize_failed_inputs,
+            self.materialize_failed_outputs,
             override_use_case,
             self.cmd_ctx.base_context.daemon.memory_tracker.dupe(),
             resource_control_config.hybrid_execution_memory_limit_gibibytes,
@@ -793,6 +767,8 @@ impl<'a, 's> DiceCommandUpdater<'a, 's> {
         data.set_keep_going(self.keep_going);
         data.set_critical_path_backend(critical_path_backend);
         data.init_local_resource_registry();
+        data.init_bxl_streaming_tracker();
+        data.set_read_dir_cache(DashMap::new());
         data.spawner = self.cmd_ctx.base_context.daemon.spawner.dupe();
 
         let tags = vec![
@@ -814,7 +790,7 @@ impl<'a, 's> DiceCommandUpdater<'a, 's> {
     }
 }
 
-impl<'a> Drop for ServerCommandContext<'a> {
+impl Drop for ServerCommandContext<'_> {
     fn drop(&mut self) {
         // Ensure we cancel the heartbeat guard first.
         std::mem::drop(self.heartbeat_guard_handle.take());
@@ -822,7 +798,7 @@ impl<'a> Drop for ServerCommandContext<'a> {
 }
 
 #[async_trait]
-impl<'a> ServerCommandContextTrait for ServerCommandContext<'a> {
+impl ServerCommandContextTrait for ServerCommandContext<'_> {
     fn working_dir(&self) -> &ProjectRelativePath {
         &self.working_dir
     }
@@ -877,6 +853,10 @@ impl<'a> ServerCommandContextTrait for ServerCommandContext<'a> {
 
     fn events(&self) -> &EventDispatcher {
         &self.base_context.events
+    }
+
+    fn previous_command_data(&self) -> Arc<LockedPreviousCommandData> {
+        self.base_context.daemon.previous_command_data.clone()
     }
 
     fn stderr(&self) -> buck2_error::Result<StderrOutputGuard<'_>> {

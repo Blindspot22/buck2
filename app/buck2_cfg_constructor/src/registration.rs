@@ -12,12 +12,11 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_core::cells::cell_path::CellPathRef;
 use buck2_core::cells::paths::CellRelativePath;
-use buck2_error::starlark_error::from_starlark;
 use buck2_interpreter::downstream_crate_starlark_defs::REGISTER_BUCK2_CFG_CONSTRUCTOR_GLOBALS;
 use buck2_interpreter_for_build::interpreter::build_context::BuildContext;
 use buck2_interpreter_for_build::interpreter::build_context::PerFileTypeContext;
-use buck2_interpreter_for_build::interpreter::package_file_extra::PackageFileExtra;
 use buck2_interpreter_for_build::interpreter::package_file_extra::MAKE_CFG_CONSTRUCTOR;
+use buck2_interpreter_for_build::interpreter::package_file_extra::PackageFileExtra;
 use buck2_node::cfg_constructor::CfgConstructorImpl;
 use buck2_node::metadata::key::MetadataKeyRef;
 use dupe::Dupe;
@@ -25,9 +24,6 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::values::none::NoneOr;
-use starlark::values::none::NoneType;
-use starlark::values::starlark_value;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
@@ -37,10 +33,14 @@ use starlark::values::OwnedFrozenValue;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
+use starlark::values::none::NoneOr;
+use starlark::values::none::NoneType;
+use starlark::values::starlark_value;
 
 use crate::CfgConstructor;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum RegisterCfgConstructorError {
     #[error("`set_cfg_constructor()` can only be called from the repository root `PACKAGE` file")]
     NotPackageRoot,
@@ -91,7 +91,7 @@ impl<'v> StarlarkValue<'v> for FrozenStarlarkCfgConstructor {
     type Canonical = StarlarkCfgConstructor<'v>;
 }
 
-impl<'v> Freeze for StarlarkCfgConstructor<'v> {
+impl Freeze for StarlarkCfgConstructor<'_> {
     type Frozen = FrozenStarlarkCfgConstructor;
 
     fn freeze(self, freezer: &Freezer) -> FreezeResult<Self::Frozen> {
@@ -117,9 +117,7 @@ impl<'v> Freeze for StarlarkCfgConstructor<'v> {
 fn make_cfg_constructor(
     cfg_constructor: OwnedFrozenValue,
 ) -> buck2_error::Result<Arc<dyn CfgConstructorImpl>> {
-    let cfg_constructor = cfg_constructor
-        .downcast_starlark::<FrozenStarlarkCfgConstructor>()
-        .map_err(from_starlark)?;
+    let cfg_constructor = cfg_constructor.downcast_starlark::<FrozenStarlarkCfgConstructor>()?;
     let (
         cfg_constructor_pre_constraint_analysis,
         cfg_constructor_post_constraint_analysis,

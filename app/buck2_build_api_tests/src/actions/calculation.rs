@@ -16,45 +16,47 @@ use assert_matches::assert_matches;
 use buck2_analysis::analysis::calculation::AnalysisKey;
 use buck2_artifact::actions::key::ActionIndex;
 use buck2_artifact::actions::key::ActionKey;
-use buck2_artifact::artifact::artifact_type::testing::BuildArtifactTestingExt;
 use buck2_artifact::artifact::artifact_type::Artifact;
+use buck2_artifact::artifact::artifact_type::testing::BuildArtifactTestingExt;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_artifact::artifact::source_artifact::SourceArtifact;
-use buck2_build_api::actions::calculation::command_details;
+use buck2_build_api::actions::Action;
+use buck2_build_api::actions::RegisteredAction;
 use buck2_build_api::actions::calculation::ActionCalculation;
-use buck2_build_api::actions::execute::dice_data::set_fallback_executor_config;
+use buck2_build_api::actions::calculation::command_details;
 use buck2_build_api::actions::execute::dice_data::CommandExecutorResponse;
 use buck2_build_api::actions::execute::dice_data::HasCommandExecutor;
 use buck2_build_api::actions::execute::dice_data::SetCommandExecutor;
 use buck2_build_api::actions::execute::dice_data::SetInvalidationTrackingConfig;
 use buck2_build_api::actions::execute::dice_data::SetReClient;
+use buck2_build_api::actions::execute::dice_data::set_fallback_executor_config;
 use buck2_build_api::actions::impls::run_action_knobs::RunActionKnobs;
 use buck2_build_api::actions::registry::RecordedActions;
-use buck2_build_api::actions::Action;
-use buck2_build_api::actions::RegisteredAction;
-use buck2_build_api::analysis::registry::RecordedAnalysisValues;
 use buck2_build_api::analysis::AnalysisResult;
-use buck2_build_api::artifact_groups::calculation::ArtifactGroupCalculation;
+use buck2_build_api::analysis::registry::RecordedAnalysisValues;
 use buck2_build_api::artifact_groups::ArtifactGroup;
+use buck2_build_api::artifact_groups::calculation::ArtifactGroupCalculation;
+use buck2_build_api::build::detailed_aggregated_metrics::dice::SetDetailedAggregatedMetricsEventHandler;
+use buck2_build_api::build::detailed_aggregated_metrics::dice::SetDetailedAggregatedMetricsEventsHolder;
 use buck2_build_api::context::SetBuildContextData;
 use buck2_build_api::keep_going::HasKeepGoing;
 use buck2_build_api::spawner::BuckSpawner;
 use buck2_common::dice::cells::SetCellResolver;
 use buck2_common::dice::data::testing::SetTestingIoProvider;
 use buck2_common::external_symlink::ExternalSymlink;
-use buck2_common::file_ops::testing::TestFileOps;
 use buck2_common::file_ops::FileMetadata;
 use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::testing::TestFileOps;
 use buck2_common::http::SetHttpClient;
 use buck2_common::legacy_configs::configs::LegacyBuckConfig;
 use buck2_common::legacy_configs::dice::inject_legacy_config_for_test;
-use buck2_configured::nodes::calculation::ConfiguredTargetNodeKey;
+use buck2_configured::nodes::ConfiguredTargetNodeKey;
 use buck2_core::category::CategoryRef;
+use buck2_core::cells::CellResolver;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::cell_root_path::CellRootPathBuf;
 use buck2_core::cells::name::CellName;
 use buck2_core::cells::paths::CellRelativePathBuf;
-use buck2_core::cells::CellResolver;
 use buck2_core::configuration::compatibility::MaybeCompatible;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
@@ -69,15 +71,15 @@ use buck2_core::package::source_path::SourcePath;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_directory::directory::entry::DirectoryEntry;
-use buck2_events::dispatch::with_dispatcher_async;
 use buck2_events::dispatch::EventDispatcher;
+use buck2_events::dispatch::with_dispatcher_async;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::digest_config::SetDigestConfig;
 use buck2_execute::directory::ActionDirectoryMember;
 use buck2_execute::execute::action_digest::ActionDigest;
-use buck2_execute::execute::blocking::testing::DummyBlockingExecutor;
 use buck2_execute::execute::blocking::SetBlockingExecutor;
+use buck2_execute::execute::blocking::testing::DummyBlockingExecutor;
 use buck2_execute::execute::cache_uploader::NoOpCacheUploader;
 use buck2_execute::execute::kind::CommandExecutionKind;
 use buck2_execute::execute::output::CommandStdStreams;
@@ -90,13 +92,13 @@ use buck2_execute::execute::testing_dry_run::DryRunEntry;
 use buck2_execute::execute::testing_dry_run::DryRunExecutor;
 use buck2_execute::materialize::materializer::SetMaterializer;
 use buck2_execute::materialize::nodisk::NoDiskMaterializer;
-use buck2_execute::re::manager::ManagedRemoteExecutionClient;
+use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
 use buck2_file_watcher::mergebase::SetMergebase;
 use buck2_http::HttpClientBuilder;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
-use dice::testing::DiceBuilder;
 use dice::DiceTransaction;
 use dice::UserComputationData;
+use dice::testing::DiceBuilder;
 use dupe::Dupe;
 use indexmap::indexset;
 use maplit::btreemap;
@@ -143,7 +145,7 @@ fn mock_analysis_for_action_resolution(
         action_key.holder_key()
     );
 
-    let mut actions = RecordedActions::new();
+    let mut actions = RecordedActions::new(1);
     actions.insert(action_key.dupe(), registered_action_arc);
 
     dice_builder = dice_builder.mock_and_return(
@@ -170,7 +172,6 @@ fn mock_analysis_for_action_resolution(
                 "foo_lib",
                 ExecutionPlatformResolution::new(None, Vec::new()),
                 vec![],
-                vec![],
                 None,
             ),
         )),
@@ -195,6 +196,7 @@ async fn make_default_dice_state(
         data.set_testing_io_provider(temp_fs);
         data.set_digest_config(DigestConfig::testing_default());
         data.set_invalidation_tracking_config(true);
+        data.set_detailed_aggregated_metrics_event_handler(None);
     });
 
     for mock in mocks.into_iter() {
@@ -218,7 +220,8 @@ async fn make_default_dice_state(
             ));
             Ok(CommandExecutorResponse {
                 executor,
-                cache_checker: Arc::new(NoOpCommandOptionalExecutor {}),
+                action_cache_checker: Arc::new(NoOpCommandOptionalExecutor {}),
+                remote_dep_file_cache_checker: Arc::new(NoOpCommandOptionalExecutor {}),
                 platform: Default::default(),
                 cache_uploader: Arc::new(NoOpCacheUploader {}),
             })
@@ -227,9 +230,10 @@ async fn make_default_dice_state(
 
     set_fallback_executor_config(&mut extra.data, CommandExecutorConfig::testing_local());
     extra.set_command_executor(Box::new(CommandExecutorProvider { dry_run_tracker }));
+    extra.set_detailed_aggregated_metrics_events_holder();
     extra.set_blocking_executor(Arc::new(DummyBlockingExecutor { fs }));
     extra.set_materializer(Arc::new(NoDiskMaterializer));
-    extra.set_re_client(ManagedRemoteExecutionClient::testing_new_dummy());
+    extra.set_re_client(UnconfiguredRemoteExecutionClient::testing_new_dummy());
     extra.set_http_client(HttpClientBuilder::https_with_system_roots().await?.build());
     extra.set_mergebase(Default::default());
     extra.data.set(EventDispatcher::null());

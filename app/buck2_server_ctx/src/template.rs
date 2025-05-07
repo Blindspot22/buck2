@@ -7,8 +7,11 @@
  * of this source tree.
  */
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use buck2_core::logging::log_file::TracingLogFile;
+use buck2_data::BuildResult;
 use buck2_events::dispatch::span_async;
 use buck2_execute::materialize::materializer::HasMaterializer;
 use dice::DiceTransaction;
@@ -46,18 +49,16 @@ pub trait ServerCommandTemplate: Send + Sync {
     /// * and this function returns `true`
     fn is_success(&self, response: &Self::Response) -> bool;
 
-    /// If not `None`, command will block and be blocked by any concurrent commands.
-    fn exclusive_command_name(&self) -> Option<String> {
+    /// Used to report (successful) builds since rebase, only for commands that return a `BuildResult` (build, install, test).
+    /// If the command succeeded in building the target specified, `BuildResult.build_completed` should be true,
+    /// even if the command failed for another reason.
+    fn build_result(&self, _response: &Self::Response) -> Option<BuildResult> {
         None
     }
 
-    /// Additional errors that should be reported via the invocation record, even if the command
-    /// successfully produces a response.
-    fn additional_telemetry_errors(
-        &self,
-        _response: &Self::Response,
-    ) -> Vec<buck2_data::ErrorReport> {
-        Vec::new()
+    /// If not `None`, command will block and be blocked by any concurrent commands.
+    fn exclusive_command_name(&self) -> Option<String> {
+        None
     }
 
     /// Command implementation.
@@ -80,6 +81,7 @@ pub async fn run_server_command<T: ServerCommandTemplate>(
         data: Some(command.start_event().into()),
     };
 
+    let command_start = Instant::now();
     // refresh our tracing log per command
     TracingLogFile::refresh()?;
 
@@ -94,6 +96,7 @@ pub async fn run_server_command<T: ServerCommandTemplate>(
                     command.command(server_ctx, partial_result_dispatcher, ctx)
                 },
                 command.exclusive_command_name(),
+                Some(command_start),
             )
             .await
             .map_err(Into::into);
@@ -101,7 +104,7 @@ pub async fn run_server_command<T: ServerCommandTemplate>(
             &result,
             command.end_event(&result),
             |result| command.is_success(result),
-            |result| command.additional_telemetry_errors(result),
+            |result| command.build_result(result),
         );
         (result.map_err(Into::into), end_event)
     })

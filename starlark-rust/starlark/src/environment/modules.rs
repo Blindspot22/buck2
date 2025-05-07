@@ -36,21 +36,19 @@ use crate::collections::Hashed;
 use crate::docs::DocItem;
 use crate::docs::DocMember;
 use crate::docs::DocModule;
+use crate::docs::DocProperty;
 use crate::docs::DocString;
 use crate::docs::DocStringKind;
+use crate::environment::EnvironmentError;
+use crate::environment::Globals;
 use crate::environment::names::FrozenNames;
 use crate::environment::names::MutableNames;
 use crate::environment::slots::FrozenSlots;
 use crate::environment::slots::ModuleSlotId;
 use crate::environment::slots::MutableSlots;
-use crate::environment::EnvironmentError;
-use crate::environment::Globals;
 use crate::errors::did_you_mean::did_you_mean;
-use crate::eval::runtime::profile::heap::RetainedHeapProfileMode;
 use crate::eval::ProfileData;
-use crate::values::layout::heap::heap_type::HeapKind;
-use crate::values::layout::heap::profile::aggregated::AggregateHeapProfileInfo;
-use crate::values::layout::heap::profile::aggregated::RetainedHeapProfile;
+use crate::eval::runtime::profile::heap::RetainedHeapProfileMode;
 use crate::values::Freeze;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
@@ -64,6 +62,9 @@ use crate::values::OwnedFrozenValue;
 use crate::values::Trace;
 use crate::values::Tracer;
 use crate::values::Value;
+use crate::values::layout::heap::heap_type::HeapKind;
+use crate::values::layout::heap::profile::aggregated::AggregateHeapProfileInfo;
+use crate::values::layout::heap::profile::aggregated::RetainedHeapProfile;
 
 #[derive(Debug, thiserror::Error)]
 enum ModuleError {
@@ -235,13 +236,24 @@ impl FrozenModule {
     pub fn documentation(&self) -> DocModule {
         let members = self
             .all_items()
-            .filter(|n| Module::default_visibility(n.0.as_str()) == Visibility::Public)
+            .filter(|n| {
+                // We only want to show public symbols in the documentation
+                self.get_any_visibility_option(n.0.as_str())
+                    .is_some_and(|(_, vis)| vis == Visibility::Public)
+            })
             // FIXME(JakobDegen): Throws out information
             .map(|(k, v)| {
-                (
-                    k.as_str().to_owned(),
-                    DocItem::Member(DocMember::from_value(v.to_value())),
-                )
+                let doc_item = match v.to_value().documentation() {
+                    doc_module @ DocItem::Module(_) => doc_module,
+                    member @ DocItem::Member(_) => member,
+                    // If we have a value which is a complex type, the right type to put in the docs is not the type
+                    // it represents, but it's just a property we should point at
+                    DocItem::Type(_) => DocItem::Member(DocMember::Property(DocProperty {
+                        docs: None,
+                        typ: v.to_value().get_type_starlark_repr(),
+                    })),
+                };
+                (k.as_str().to_owned(), doc_item)
             })
             .collect();
 
@@ -576,8 +588,8 @@ mod tests {
     use crate::environment::Globals;
     use crate::environment::GlobalsBuilder;
     use crate::environment::Module;
-    use crate::eval::runtime::profile::mode::ProfileMode;
     use crate::eval::Evaluator;
+    use crate::eval::runtime::profile::mode::ProfileMode;
     use crate::syntax::AstModule;
     use crate::syntax::Dialect;
     use crate::values::list::ListRef;
@@ -607,7 +619,7 @@ x = f(1)
             .unwrap();
         }
         let module = module.freeze().unwrap();
-        let heap_summary = module.heap_profile().unwrap().gen().unwrap();
+        let heap_summary = module.heap_profile().unwrap().gen_csv().unwrap();
         // Smoke test.
         assert!(heap_summary.contains("\"x.star.f\""), "{:?}", heap_summary);
     }

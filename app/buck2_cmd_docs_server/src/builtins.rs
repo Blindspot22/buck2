@@ -14,29 +14,27 @@ use buck2_cli_proto::new_generic::DocsStarlarkBuiltinsRequest;
 use buck2_core::fs::fs_util;
 use buck2_core::fs::paths::abs_path::AbsPathBuf;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_interpreter_for_build::interpreter::globals::register_analysis_natives;
 use buck2_interpreter_for_build::interpreter::globals::register_bxl_natives;
 use buck2_interpreter_for_build::interpreter::globals::register_load_natives;
 use buck2_interpreter_for_build::interpreter::globals::starlark_library_extensions_for_buck2;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use dice::DiceTransaction;
-use starlark::docs::multipage::render_markdown_multipage;
-use starlark::docs::multipage::DocModuleInfo;
 use starlark::docs::DocItem;
+use starlark::docs::multipage::DocModuleInfo;
+use starlark::docs::multipage::render_markdown_multipage;
 use starlark::environment::Globals;
 use starlark::environment::GlobalsBuilder;
 
-fn write_docs_to_subdir(
+pub(crate) fn write_docs_to_subdir(
     modules_infos: Vec<DocModuleInfo<'_>>,
     base_path: &str,
+    linked_ty_mapper: Option<fn(&str, &str) -> String>,
 ) -> buck2_error::Result<()> {
     let base_path = AbsPathBuf::new(base_path)?;
-    fn linked_ty_mapper(path: &str, type_name: &str) -> String {
-        format!("<Link to=\"/docs/api/{path}\">{type_name}</Link>")
-    }
-    let mut docs: BTreeMap<_, _> = render_markdown_multipage(modules_infos, Some(linked_ty_mapper))
+    let mut docs: BTreeMap<_, _> = render_markdown_multipage(modules_infos, linked_ty_mapper)
         .into_iter()
         .collect();
     while let Some((mut doc_path, rendered)) = docs.pop_first() {
@@ -116,7 +114,11 @@ pub(crate) async fn docs_starlark_builtins(
         },
     ];
 
-    write_docs_to_subdir(modules_infos, &request.path)?;
+    fn linked_ty_mapper(path: &str, type_name: &str) -> String {
+        format!("<Link to=\"/docs/api/{path}\">{type_name}</Link>")
+    }
+
+    write_docs_to_subdir(modules_infos, &request.path, Some(linked_ty_mapper))?;
 
     Ok(DocsResponse { json_output: None })
 }

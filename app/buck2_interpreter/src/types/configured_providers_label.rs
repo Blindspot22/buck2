@@ -26,9 +26,6 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::none::NoneOr;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Heap;
@@ -36,6 +33,9 @@ use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
 use starlark::values::Value;
+use starlark::values::none::NoneOr;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 use crate::types::cell_path::StarlarkCellPath;
 use crate::types::cell_root::CellRoot;
@@ -79,7 +79,7 @@ impl StarlarkConfiguredProvidersLabel {
     }
 }
 
-#[starlark_value(type = "label")]
+#[starlark_value(type = "Label")]
 impl<'v> StarlarkValue<'v> for StarlarkConfiguredProvidersLabel
 where
     Self: ProvidesStaticType<'v>,
@@ -220,7 +220,7 @@ impl StarlarkProvidersLabel {
     }
 }
 
-#[starlark_value(type = "providers_label")]
+#[starlark_value(type = "ProvidersLabel")]
 impl<'v> StarlarkValue<'v> for StarlarkProvidersLabel
 where
     Self: ProvidesStaticType<'v>,

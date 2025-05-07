@@ -22,9 +22,9 @@ use buck2_common::dice::file_ops::FileChangeTracker;
 use buck2_common::file_ops::FileType;
 use buck2_common::ignores::ignore_set::IgnoreSet;
 use buck2_common::invocation_paths::InvocationPaths;
+use buck2_core::cells::CellResolver;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::name::CellName;
-use buck2_core::cells::CellResolver;
 use buck2_core::fs::fs_util;
 use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_core::fs::paths::file_name::FileNameBuf;
@@ -196,7 +196,7 @@ impl FsSnapshot {
         for event in events.into_iter() {
             let ignore = ignore_specs
                 .get(&event.cell_path.cell())
-                .map_or(false, |i| i.is_match(event.cell_path.path()));
+                .is_some_and(|i| i.is_match(event.cell_path.path()));
 
             if ignore {
                 ignored += 1;
@@ -307,10 +307,10 @@ fn file_hash(path: &Path) -> buck2_error::Result<Hash> {
 mod tests {
     use std::collections::BTreeSet;
 
+    use buck2_core::cells::CellResolver;
     use buck2_core::cells::cell_path::CellPath;
     use buck2_core::cells::cell_root_path::CellRootPathBuf;
     use buck2_core::cells::name::CellName;
-    use buck2_core::cells::CellResolver;
     use buck2_core::fs::fs_util;
     use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
     use buck2_core::fs::paths::abs_path::AbsPathBuf;

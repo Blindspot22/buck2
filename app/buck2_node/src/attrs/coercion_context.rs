@@ -14,8 +14,8 @@ use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_query::query::syntax::simple::functions::QueryLiteralVisitor;
-use buck2_query_parser::spanned::Spanned;
 use buck2_query_parser::Expr;
+use buck2_query_parser::spanned::Spanned;
 use buck2_util::arc_str::ArcSlice;
 use buck2_util::arc_str::ArcStr;
 
@@ -24,6 +24,7 @@ use crate::attrs::coerced_path::CoercedPath;
 use crate::configuration::resolved::ConfigurationSettingKey;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum AttrCoercionContextError {
     #[error("Expected target label without name. Got `{0}`")]
     UnexpectedProvidersName(String),
@@ -79,10 +80,10 @@ pub trait AttrCoercionContext {
         pattern: &str,
     ) -> buck2_error::Result<ParsedPattern<TargetPatternExtra>>;
 
-    fn visit_query_function_literals(
+    fn visit_query_function_literals<'q>(
         &self,
-        visitor: &mut dyn QueryLiteralVisitor,
-        expr: &Spanned<Expr>,
-        query: &str,
+        visitor: &mut dyn QueryLiteralVisitor<'q>,
+        expr: &Spanned<Expr<'q>>,
+        query: &'q str,
     ) -> buck2_error::Result<()>;
 }

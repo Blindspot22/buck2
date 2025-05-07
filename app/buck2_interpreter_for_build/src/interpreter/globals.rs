@@ -33,6 +33,7 @@ use crate::interpreter::functions::load_symbols::register_load_symbols;
 use crate::interpreter::functions::path::register_path;
 use crate::interpreter::functions::read_config::register_read_config;
 use crate::interpreter::functions::regex::register_regex;
+use crate::interpreter::functions::sha1::register_sha1;
 use crate::interpreter::functions::sha256::register_sha256;
 use crate::interpreter::functions::soft_error::register_soft_error;
 use crate::interpreter::functions::starlark::register_set_starlark_peak_allocated_byte_limit;
@@ -78,6 +79,7 @@ pub fn register_load_natives(builder: &mut GlobalsBuilder) {
     register_target_label(builder);
     register_path(builder);
     register_select(builder);
+    register_sha1(builder);
     register_sha256(builder);
     register_dedupe(builder);
     register_set_starlark_peak_allocated_byte_limit(builder);
@@ -113,6 +115,7 @@ pub fn starlark_library_extensions_for_buck2() -> &'static [LibraryExtension] {
         LibraryExtension::Internal,
         LibraryExtension::CallStack,
         LibraryExtension::SetType,
+        LibraryExtension::NamespaceType,
     ]
 }
 
@@ -135,7 +138,11 @@ fn register_all_internals(builder: &mut GlobalsBuilder) {
 ///
 /// This does not include the implicit prelude and cell imports which are only available in `BUCK`
 /// files, but does include everything else.
-pub fn base_globals() -> GlobalsBuilder {
+///
+/// Note: As long as starlark/buck have any notion of reference equality, it is important for
+/// correctness that this be called just once. The result should be accessed via
+/// `ctx.get_global_interpreter_state()`
+pub(crate) fn base_globals() -> GlobalsBuilder {
     let mut global_env = GlobalsBuilder::standard().with(register_all_natives);
     global_env.namespace("__internal__", |x| {
         register_all_internals(x);

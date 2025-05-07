@@ -13,29 +13,26 @@ use std::time::Instant;
 use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_api::actions::Action;
+use buck2_build_api::actions::ActionExecutionCtx;
+use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionKind;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
-use buck2_build_api::actions::Action;
-use buck2_build_api::actions::ActionExecutable;
-use buck2_build_api::actions::ActionExecutionCtx;
-use buck2_build_api::actions::IncrementalActionExecutable;
-use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::artifact_groups::ArtifactGroup;
-use buck2_build_api::interpreter::rule_defs::cmd_args::arg_builder::ArgBuilder;
-use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineLocation;
 use buck2_build_api::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
+use buck2_build_api::interpreter::rule_defs::cmd_args::arg_builder::ArgBuilder;
+use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_build_api::interpreter::rule_defs::resolved_macro::ResolvedMacro;
 use buck2_core::category::CategoryRef;
 use buck2_core::fs::paths::RelativePathBuf;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
-use buck2_error::internal_error;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::WriteRequest;
@@ -78,6 +75,7 @@ impl UnregisteredAction for UnregisteredWriteMacrosToFileAction {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum WriteMacrosActionValidationError {
     #[error("At least one output file must be specified for a write macros action")]
     NoOutputsSpecified,
@@ -104,10 +102,7 @@ impl WriteMacrosToFileAction {
     ) -> buck2_error::Result<Self> {
         if outputs.is_empty() {
             Err(WriteMacrosActionValidationError::NoOutputsSpecified.into())
-        } else if ValueAsCommandLineLike::unpack_value(contents.value())
-            .map_err(from_starlark)?
-            .is_none()
-        {
+        } else if ValueAsCommandLineLike::unpack_value(contents.value())?.is_none() {
             Err(
                 WriteMacrosActionValidationError::ContentsNotCommandLineValue(
                     contents.value().to_repr(),
@@ -143,10 +138,6 @@ impl Action for WriteMacrosToFileAction {
         &self.outputs[0]
     }
 
-    fn as_executable(&self) -> ActionExecutable<'_> {
-        ActionExecutable::Incremental(self)
-    }
-
     fn category(&self) -> CategoryRef {
         CategoryRef::unchecked_new("write_macros_to_file")
     }
@@ -154,10 +145,7 @@ impl Action for WriteMacrosToFileAction {
     fn identifier(&self) -> Option<&str> {
         Some(&self.identifier)
     }
-}
 
-#[async_trait]
-impl IncrementalActionExecutable for WriteMacrosToFileAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
@@ -185,15 +173,15 @@ impl IncrementalActionExecutable for WriteMacrosToFileAction {
                     .into());
                 }
 
-                Ok(
-                    std::iter::zip(self.outputs.iter(), output_contents.into_iter())
-                        .map(|(output, content)| WriteRequest {
-                            path: fs.fs().resolve_build(output.get_path()),
+                std::iter::zip(self.outputs.iter(), output_contents.into_iter())
+                    .map(|(output, content)| {
+                        Ok(WriteRequest {
+                            path: fs.fs().resolve_build(output.get_path())?,
                             content: content.into_bytes(),
                             is_executable: false,
                         })
-                        .collect(),
-                )
+                    })
+                    .collect::<buck2_error::Result<_>>()
             }))
             .await?;
 

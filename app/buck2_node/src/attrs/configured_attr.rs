@@ -11,10 +11,11 @@ use std::fmt::Debug;
 use std::fmt::Display;
 
 use allocative::Allocative;
-use buck2_core::package::source_path::SourcePathRef;
 use buck2_core::package::PackageLabel;
+use buck2_core::package::source_path::SourcePathRef;
 use buck2_core::plugins::PluginKind;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
+use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_error::buck2_error;
 use buck2_error::internal_error;
@@ -25,6 +26,8 @@ use starlark_map::ordered_map::OrderedMap;
 use starlark_map::small_map;
 
 use super::attr_type::arg::ConfiguredStringWithMacros;
+use crate::attrs::attr_type::AttrType;
+use crate::attrs::attr_type::AttrTypeInner;
 use crate::attrs::attr_type::attr_config::source_file_display;
 use crate::attrs::attr_type::bool::BoolLiteral;
 use crate::attrs::attr_type::configured_dep::ConfiguredExplicitConfiguredDep;
@@ -35,9 +38,8 @@ use crate::attrs::attr_type::one_of::OneOfAttrType;
 use crate::attrs::attr_type::query::QueryAttr;
 use crate::attrs::attr_type::split_transition_dep::ConfiguredSplitTransitionDep;
 use crate::attrs::attr_type::string::StringLiteral;
+use crate::attrs::attr_type::transition_dep::ConfiguredTransitionDep;
 use crate::attrs::attr_type::tuple::TupleLiteral;
-use crate::attrs::attr_type::AttrType;
-use crate::attrs::attr_type::AttrTypeInner;
 use crate::attrs::coerced_path::CoercedPath;
 use crate::attrs::configured_traversal::ConfiguredAttrTraversal;
 use crate::attrs::display::AttrDisplayWithContext;
@@ -46,7 +48,6 @@ use crate::attrs::fmt_context::AttrFmtContext;
 use crate::attrs::json::ToJsonWithContext;
 use crate::attrs::serialize::AttrSerializeWithContext;
 use crate::attrs::values::TargetModifiersValue;
-use crate::configuration::resolved::ConfigurationSettingKey;
 use crate::metadata::map::MetadataMap;
 use crate::visibility::VisibilitySpecification;
 use crate::visibility::WithinViewSpecification;
@@ -81,7 +82,8 @@ pub enum ConfiguredAttr {
     WithinView(WithinViewSpecification),
     ExplicitConfiguredDep(Box<ConfiguredExplicitConfiguredDep>),
     SplitTransitionDep(Box<ConfiguredSplitTransitionDep>),
-    ConfigurationDep(ConfigurationSettingKey),
+    TransitionDep(Box<ConfiguredTransitionDep>),
+    ConfigurationDep(ProvidersLabel),
     // Note: Despite being named `PluginDep`, this doesn't really act like a dep but rather like a
     // label
     PluginDep(TargetLabel, PluginKind),
@@ -134,6 +136,7 @@ impl AttrDisplayWithContext for ConfiguredAttr {
             ConfiguredAttr::WithinView(v) => Display::fmt(v, f),
             ConfiguredAttr::ExplicitConfiguredDep(e) => Display::fmt(e, f),
             ConfiguredAttr::SplitTransitionDep(e) => Display::fmt(e, f),
+            ConfiguredAttr::TransitionDep(e) => Display::fmt(e, f),
             ConfiguredAttr::ConfigurationDep(e) => write!(f, "\"{}\"", e),
             ConfiguredAttr::PluginDep(e, _) => write!(f, "\"{}\"", e),
             ConfiguredAttr::Dep(e) => write!(f, "\"{}\"", e),
@@ -150,8 +153,8 @@ impl AttrDisplayWithContext for ConfiguredAttr {
 
 impl ConfiguredAttr {
     /// Traverses the configured attribute and calls the traverse for every encountered target label (in deps, sources, or other places).
-    pub fn traverse<'a>(
-        &'a self,
+    pub fn traverse(
+        &self,
         pkg: PackageLabel,
         traversal: &mut dyn ConfiguredAttrTraversal,
     ) -> buck2_error::Result<()> {
@@ -190,7 +193,8 @@ impl ConfiguredAttr {
                 }
                 Ok(())
             }
-            ConfiguredAttr::ConfigurationDep(dep) => traversal.configuration_dep(&dep.0),
+            ConfiguredAttr::TransitionDep(dep) => dep.traverse(traversal),
+            ConfiguredAttr::ConfigurationDep(dep) => traversal.configuration_dep(dep),
             ConfiguredAttr::PluginDep(dep, kind) => traversal.plugin_dep(dep, kind),
             ConfiguredAttr::Dep(dep) => dep.traverse(traversal),
             ConfiguredAttr::SourceLabel(dep) => traversal.dep(dep),
@@ -210,7 +214,7 @@ impl ConfiguredAttr {
 
     fn concat_not_supported(&self, attr_ty: &'static str) -> buck2_error::Error {
         buck2_error!(
-            [],
+            buck2_error::ErrorTag::Input,
             "addition not supported for these attribute type `{}` and value `{}`",
             attr_ty,
             self.as_display_no_ctx()
@@ -233,7 +237,7 @@ impl ConfiguredAttr {
             let first_t = oneof.get(expected_i)?;
             let next_t = oneof.get(i)?;
             return Err(buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "Cannot concatenate values coerced/configured \
                 to different oneof variants: `{first_t}` and `{next_t}`"
             ));
@@ -302,7 +306,7 @@ impl ConfiguredAttr {
                                         }
                                         small_map::Entry::Occupied(e) => {
                                             return Err(buck2_error!(
-                                                [],
+                                                buck2_error::ErrorTag::Input,
                                                 "got same key in both sides of dictionary concat (key `{}`)",
                                                 e.key().as_display_no_ctx()
                                             ));
@@ -341,7 +345,7 @@ impl ConfiguredAttr {
                     }))
                 }
                 val => Err(buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::Input,
                     "addition not supported for this attribute type `{}`",
                     val.as_display_no_ctx()
                 )),
@@ -349,11 +353,11 @@ impl ConfiguredAttr {
         }
     }
 
-    pub(crate) fn try_into_configuration_dep(self) -> buck2_error::Result<ConfigurationSettingKey> {
+    pub(crate) fn try_into_configuration_dep(self) -> buck2_error::Result<ProvidersLabel> {
         match self {
             ConfiguredAttr::ConfigurationDep(d) => Ok(d),
             s => Err(buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "expecting configuration dep, got `{0}`",
                 s.as_display_no_ctx()
             )),
@@ -371,7 +375,7 @@ impl ConfiguredAttr {
         match self {
             ConfiguredAttr::List(list) => Ok(list.to_vec()),
             a => Err(buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "expecting a list, got `{0}`",
                 a.as_display_no_ctx()
             )),

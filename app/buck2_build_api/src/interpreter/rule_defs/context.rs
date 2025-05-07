@@ -18,7 +18,9 @@ use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_execute::digest_config::DigestConfig;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_interpreter::late_binding_ty::AnalysisContextReprLate;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use buck2_util::late_binding::LateBinding;
@@ -31,11 +33,6 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::typing::Ty;
-use starlark::values::none::NoneOr;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
-use starlark::values::structs::StructRef;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -47,6 +44,11 @@ use starlark::values::ValueLike;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueTyped;
 use starlark::values::ValueTypedComplex;
+use starlark::values::none::NoneOr;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::structs::StructRef;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
 use crate::analysis::registry::AnalysisRegistry;
 use crate::deferred::calculation::GET_PROMISED_ARTIFACT;
@@ -73,6 +75,7 @@ impl<'v> AnalysisActions<'v> {
         let state = self
             .state
             .try_borrow_mut()
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
             .internal_error("AnalysisActions.state is already borrowed")?;
         RefMut::filter_map(state, |x| x.as_mut())
             .ok()
@@ -83,16 +86,14 @@ impl<'v> AnalysisActions<'v> {
         &self,
         dice: &mut DiceComputations<'_>,
         eval: &mut Evaluator<'v, '_, '_>,
-        description: String,
+        eval_kind: &StarlarkEvalKind,
     ) -> buck2_error::Result<()> {
         // We need to loop here because running the promises evaluates promise.map, which might produce more promises.
         // We keep going until there are no promises left.
         loop {
             let promises = self.state()?.take_promises();
             if let Some(promises) = promises {
-                promises
-                    .run_promises(dice, eval, description.clone())
-                    .await?;
+                promises.run_promises(dice, eval, eval_kind).await?;
             } else {
                 break;
             }
@@ -125,7 +126,7 @@ impl<'v> AnalysisActions<'v> {
     }
 }
 
-#[starlark_value(type = "actions", StarlarkTypeRepr, UnpackValue)]
+#[starlark_value(type = "AnalysisActions", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for AnalysisActions<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -241,7 +242,7 @@ impl<'v> AnalysisContext<'v> {
     }
 }
 
-#[starlark_value(type = "context")]
+#[starlark_value(type = "AnalysisContext")]
 impl<'v> StarlarkValue<'v> for AnalysisContext<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -291,7 +292,7 @@ fn analysis_context_methods(builder: &mut MethodsBuilder) {
     /// a `struct` containing a field `foo` of type string.
     #[starlark(attribute)]
     fn attrs<'v>(
-        this: RefAnalysisContext,
+        this: RefAnalysisContext<'v>,
     ) -> starlark::Result<ValueOfUnchecked<'v, StructRef<'static>>> {
         Ok(this
             .0
@@ -303,7 +304,7 @@ fn analysis_context_methods(builder: &mut MethodsBuilder) {
     /// See the `actions` type for the operations that are available.
     #[starlark(attribute)]
     fn actions<'v>(
-        this: RefAnalysisContext,
+        this: RefAnalysisContext<'v>,
     ) -> starlark::Result<ValueTyped<'v, AnalysisActions<'v>>> {
         Ok(this.0.actions)
     }
@@ -312,7 +313,7 @@ fn analysis_context_methods(builder: &mut MethodsBuilder) {
     /// `dynamic_output` in Bxl.
     #[starlark(attribute)]
     fn label<'v>(
-        this: RefAnalysisContext,
+        this: RefAnalysisContext<'v>,
     ) -> starlark::Result<NoneOr<ValueTyped<'v, StarlarkConfiguredProvidersLabel>>> {
         Ok(NoneOr::from_option(this.0.label))
     }
@@ -322,7 +323,7 @@ fn analysis_context_methods(builder: &mut MethodsBuilder) {
     /// declaration.
     #[starlark(attribute)]
     fn plugins<'v>(
-        this: RefAnalysisContext,
+        this: RefAnalysisContext<'v>,
     ) -> starlark::Result<ValueTypedComplex<'v, AnalysisPlugins<'v>>> {
         Ok(this
             .0

@@ -111,21 +111,20 @@ unsafe impl AsciiPattern for AsciiStr2 {
         let mut start = 0;
         loop {
             unsafe {
-                debug_assert!(start <= s.as_bytes().len() - 1);
+                debug_assert!(start <= s.len() - 1);
                 // Find the first char.
-                start = match memchr::memchr(
-                    self.0[0],
-                    s.as_bytes().get_unchecked(start..s.as_bytes().len() - 1),
-                ) {
-                    Some(from_i) => {
-                        // Check the second char.
-                        if *s.as_bytes().get_unchecked(start + from_i + 1) == self.0[1] {
-                            return Some(start + from_i);
+                start =
+                    match memchr::memchr(self.0[0], s.as_bytes().get_unchecked(start..s.len() - 1))
+                    {
+                        Some(from_i) => {
+                            // Check the second char.
+                            if *s.as_bytes().get_unchecked(start + from_i + 1) == self.0[1] {
+                                return Some(start + from_i);
+                            }
+                            start + from_i + 1
                         }
-                        start + from_i + 1
+                        None => return None,
                     }
-                    None => return None,
-                }
             }
         }
     }
@@ -219,10 +218,7 @@ pub(crate) fn trim_prefix_ascii(s: &str, prefix: impl AsciiPattern) -> &str {
 
 /// `s.split_once(needle)`.
 #[inline]
-pub(crate) fn split1_opt_ascii<'a>(
-    s: &'a str,
-    needle: impl AsciiPattern,
-) -> Option<(&'a str, &'a str)> {
+pub(crate) fn split1_opt_ascii(s: &str, needle: impl AsciiPattern) -> Option<(&str, &str)> {
     needle
         .first_index_in(s)
         .map(|i| unsafe { (s.get_unchecked(..i), s.get_unchecked(i + needle.len()..)) })

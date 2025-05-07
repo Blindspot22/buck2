@@ -11,14 +11,17 @@ use buck2_cli_proto::new_generic::ExpandExternalCellsRequest;
 use buck2_cli_proto::new_generic::NewGenericRequest;
 use buck2_cli_proto::new_generic::NewGenericResponse;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::streaming::StreamingCommand;
+use buck2_error::ErrorTag;
+use buck2_error::buck2_error;
 
 /// Expand the contents of an external cell into the repo.
 ///
@@ -43,7 +46,7 @@ const REMINDER_TEXT: &str = "Reminder: For edits to the expanded cell to take ef
 your build, you must additionally remove the entry from the `external_cells` section of your \
 buckconfig";
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 impl StreamingCommand for ExpandExternalCellsCommand {
     const COMMAND_NAME: &'static str = "expand-external-cell";
 
@@ -52,6 +55,7 @@ impl StreamingCommand for ExpandExternalCellsCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let context = ctx.client_context(matches, &self)?;
         let req = if self.all_cells {
@@ -61,10 +65,19 @@ impl StreamingCommand for ExpandExternalCellsCommand {
         };
         let resp = buckd
             .with_flushing()
-            .new_generic(context, NewGenericRequest::ExpandExternalCells(req), None)
+            .new_generic(
+                context,
+                NewGenericRequest::ExpandExternalCells(req),
+                events_ctx,
+                None,
+            )
             .await??;
         let NewGenericResponse::ExpandExternalCells(resp) = resp else {
-            return ExitResult::bail("Unexpected response type from generic command");
+            return buck2_error!(
+                ErrorTag::InvalidEvent,
+                "Unexpected response type from generic command"
+            )
+            .into();
         };
 
         let mut lines: Vec<String> = resp

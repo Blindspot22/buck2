@@ -22,10 +22,10 @@ use dupe::Dupe;
 use crate::docs::DocItem;
 use crate::docs::DocModule;
 use crate::docs::DocType;
-use crate::typing::ty::TypeRenderConfig;
 use crate::typing::Ty;
 use crate::typing::TyBasic;
 use crate::typing::TyStarlarkValue;
+use crate::typing::ty::TypeRenderConfig;
 
 pub struct DocModuleInfo<'a> {
     pub module: &'a DocModule,
@@ -142,12 +142,9 @@ impl<'a> MultipageRender<'a> {
 
             let render_linked_ty_starlark_value = move |ty: &TyStarlarkValue| {
                 let type_name = ty.to_string();
-                if let Some(type_path) =
-                    ty_to_path_map.get(&Ty::basic(TyBasic::StarlarkValue(ty.dupe())))
-                {
-                    linked_ty_mapper(type_path, &type_name)
-                } else {
-                    type_name.to_owned()
+                match ty_to_path_map.get(&Ty::basic(TyBasic::StarlarkValue(ty.dupe()))) {
+                    Some(type_path) => linked_ty_mapper(type_path, &type_name),
+                    _ => type_name.to_owned(),
                 }
             };
 

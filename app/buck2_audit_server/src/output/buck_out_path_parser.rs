@@ -11,23 +11,24 @@ use std::iter::Peekable;
 
 use buck2_build_api::bxl::types::BxlFunctionLabel;
 use buck2_core::bxl::BxlFilePath;
+use buck2_core::cells::CellResolver;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::name::CellName;
 use buck2_core::cells::paths::CellRelativePath;
-use buck2_core::cells::CellResolver;
 use buck2_core::fs::paths::file_name::FileName;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_core::package::PackageLabel;
 use buck2_core::target::label::label::TargetLabel;
-use buck2_core::target::name::TargetNameRef;
 use buck2_core::target::name::EQ_SIGN_SUBST;
-use buck2_error::buck2_error;
+use buck2_core::target::name::TargetNameRef;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use dupe::Dupe;
 use itertools::Itertools;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = InvalidBuckOutPath)]
 enum BuckOutPathParserError {
     #[error(
         "Malformed buck-out path. Expected format: `buck-out/<isolation_prefix>/<gen|tmp|test|gen-anon|gen-bxl>/<cell_name>/<cfg_hash>/<target_path?>/__<target_name>__/<__action__id__?>/<outputs>`. Actual path was: `{0}`"
@@ -99,19 +100,28 @@ fn validate_buck_out_and_isolation_prefix<'v>(
                         BuckOutPathParserError::MaybeBuck1Path(output_path.to_owned()).into(),
                     );
                 } else {
-                    return Err(buck2_error!([], "Path does not start with buck-out"));
+                    return Err(buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "Path does not start with buck-out"
+                    ));
                 }
             }
         }
         None => {
-            return Err(buck2_error!([], "Path does not start with buck-out"));
+            return Err(buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "Path does not start with buck-out"
+            ));
         }
     }
 
     // Advance the iterator to isolation dir.
     match iter.next() {
         Some(_) => Ok(()),
-        None => Err(buck2_error!([], "Path does not have an isolation dir")),
+        None => Err(buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Path does not have an isolation dir"
+        )),
     }
 }
 
@@ -134,7 +144,10 @@ fn get_cell_path<'v>(
     let is_test = generated_prefix == "test";
     // Get cell name and validate it exists
     let Some(cell_name) = iter.next() else {
-        return Err(buck2_error!([], "Invalid cell name"));
+        return Err(buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Invalid cell name"
+        ));
     };
 
     let cell_name = CellName::unchecked_new(cell_name.as_str())?;
@@ -145,7 +158,7 @@ fn get_cell_path<'v>(
     // Advance iterator to the config hash
     let Some(config_hash) = iter.next() else {
         return Err(buck2_error!(
-            [],
+            buck2_error::ErrorTag::Input,
             "Path does not have a platform configuration"
         ));
     };
@@ -198,7 +211,10 @@ fn get_cell_path<'v>(
         };
         Ok(buck_out_path_data)
     } else {
-        Err(buck2_error!([], "Invalid target name"))
+        Err(buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Invalid target name"
+        ))
     }
 }
 
@@ -216,7 +232,12 @@ fn get_target_name<'v>(
                     Some(next) => {
                         target_name_with_underscores = target_name_with_underscores.join(next);
                     }
-                    None => return Err(buck2_error!([], "Invalid target name")),
+                    None => {
+                        return Err(buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "Invalid target name"
+                        ));
+                    }
                 }
             }
 
@@ -225,7 +246,10 @@ fn get_target_name<'v>(
                 &target_name_with_underscores[2..(target_name_with_underscores.len() - 2)];
             Ok(target_name.replace(EQ_SIGN_SUBST, "="))
         }
-        None => Err(buck2_error!([], "Invalid target name")),
+        None => Err(buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Invalid target name"
+        )),
     }
 }
 
@@ -365,19 +389,25 @@ impl BuckOutPathParser {
                         })
                     }
                     _ => Err(buck2_error!(
-                        [],
+                        buck2_error::ErrorTag::InvalidBuckOutPath,
                         "Directory after isolation dir is invalid (should be gen, gen-bxl, gen-anon, tmp, or test)"
                     )),
                 };
 
                 // Validate for non-test outputs that the target name is not the last element in the path
                 if part != "test" && iter.peek().is_none() {
-                    Err(buck2_error!([], "No output artifacts found"))
+                    Err(buck2_error!(
+                        buck2_error::ErrorTag::InvalidBuckOutPath,
+                        "No output artifacts found"
+                    ))
                 } else {
                     result
                 }
             }
-            None => Err(buck2_error!([], "Path is empty")),
+            None => Err(buck2_error!(
+                buck2_error::ErrorTag::InvalidBuckOutPath,
+                "Path is empty"
+            )),
         }
     }
 }
@@ -388,11 +418,11 @@ mod tests {
 
     use buck2_build_api::bxl::types::BxlFunctionLabel;
     use buck2_core::bxl::BxlFilePath;
+    use buck2_core::cells::CellResolver;
     use buck2_core::cells::cell_path::CellPath;
     use buck2_core::cells::cell_root_path::CellRootPath;
     use buck2_core::cells::name::CellName;
     use buck2_core::cells::paths::CellRelativePath;
-    use buck2_core::cells::CellResolver;
     use buck2_core::configuration::data::ConfigurationData;
     use buck2_core::configuration::data::ConfigurationDataData;
     use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;

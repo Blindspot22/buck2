@@ -39,10 +39,10 @@ use starlark_syntax::syntax::module::AstModuleFields;
 use starlark_syntax::syntax::top_level_stmts::top_level_stmts;
 use starlark_syntax::syntax::uniplate::Visit;
 
-use crate::bind::scope;
 use crate::bind::Assigner;
 use crate::bind::Bind;
 use crate::bind::Scope;
+use crate::bind::scope;
 use crate::exported::AstModuleExportedSymbols;
 use crate::exported::Symbol;
 use crate::loaded::AstModuleLoadedSymbols;
@@ -275,7 +275,7 @@ impl LspModule {
 
     /// Look at the given scope and child scopes to try to find where the identifier
     /// accessed at Pos is defined.
-    fn find_definition_in_scope<'a>(scope: &'a Scope, pos: Pos) -> TempDefinition<'a> {
+    fn find_definition_in_scope(scope: &Scope, pos: Pos) -> TempDefinition<'_> {
         /// Look for a name in the given scope, with a given source, and return the right
         /// type of [`TempIdentifierDefinition`] based on whether / how the variable is bound.
         fn resolve_get_in_scope<'a>(
@@ -605,8 +605,8 @@ impl LspModule {
 
 #[cfg(test)]
 pub(crate) mod helpers {
-    use std::collections::hash_map::Entry;
     use std::collections::HashMap;
+    use std::collections::hash_map::Entry;
 
     use starlark::syntax::Dialect;
     use starlark_syntax::codemap::ResolvedPos;

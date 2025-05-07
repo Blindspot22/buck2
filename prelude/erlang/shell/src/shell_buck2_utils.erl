@@ -14,6 +14,10 @@
 
 -module(shell_buck2_utils).
 
+-compile(warn_missing_spec_all).
+
+-eqwalizer(ignore).
+
 %% Public API
 -export([
     project_root/0,
@@ -60,7 +64,7 @@ rebuild_modules(Modules) ->
     {ok, RawQueryResult} = buck2_query("owner(\%s)", RelSources),
     Targets = string:split(string:trim(RawQueryResult), "\n", all),
     case Targets of
-        [] ->
+        [[]] ->
             io:format("ERROR: couldn't find targets for ~w~n", [Modules]),
             error;
         _ ->
@@ -158,5 +162,6 @@ get_additional_paths(Path) ->
     "(\x9B|\x1B\\[)[0-?]*[ -/]*[@-~]"
 ).
 
+-spec filter_escape_chars(String :: string()) -> string().
 filter_escape_chars(String) ->
     lists:flatten(io_lib:format("~s", [re:replace(String, ?ANSI_ESCAPE_REGEX, "", [global])])).

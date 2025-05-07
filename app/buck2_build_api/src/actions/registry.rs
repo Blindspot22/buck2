@@ -30,8 +30,8 @@ use buck2_directory::directory::directory::Directory;
 use buck2_directory::directory::directory_hasher::NoDigest;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
 use buck2_directory::directory::entry::DirectoryEntry;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::execute::request::OutputType;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
@@ -39,7 +39,6 @@ use gazebo::prelude::SliceExt;
 use indexmap::IndexSet;
 use starlark::codemap::FileSpan;
 use starlark::collections::SmallMap;
-use starlark_map::Hashed;
 
 use crate::actions::ActionErrors;
 use crate::actions::ActionToBeRegistered;
@@ -224,9 +223,10 @@ impl ActionsRegistry {
             artifact.ensure_bound()?;
         }
 
-        let mut actions = RecordedActions::new();
+        let num_action_keys = self.declared_dynamic_outputs.len() + self.pending.len();
+        let mut actions = RecordedActions::new(num_action_keys);
 
-        for (key, artifact) in self.declared_dynamic_outputs.into_iter_hashed() {
+        for (key, artifact) in self.declared_dynamic_outputs.into_iter() {
             actions.insert_dynamic_output(key, artifact.ensure_bound()?.action_key().dupe());
         }
 
@@ -300,7 +300,9 @@ impl ActionsRegistry {
 
 #[derive(Debug, Allocative)]
 pub struct RecordedActions {
-    /// ActionLookup::Action would indicate that this analysis created the action.
+    /// Vec of actions indexed by ActionKey::id.
+    ///
+    /// ActionLookup::Action indicates that this analysis created the action.
     ///
     /// It's possible for an Action to appear in this map multiple times. That can
     /// happen for a dynamic_outputs' "outputs" argument when the output is bound to
@@ -308,59 +310,50 @@ pub struct RecordedActions {
     ///
     /// ActionLookup::Deferred is only used for a dynamic_outputs "outputs" argument
     /// that has been re-bound to another dynamic_output.
-    actions: SmallMap<ActionKey, ActionLookup>,
+    actions: Vec<ActionLookup>,
 }
 
 impl RecordedActions {
-    pub fn new() -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
-            actions: SmallMap::new(),
+            actions: Vec::with_capacity(capacity),
         }
     }
 
     pub fn insert(&mut self, key: ActionKey, action: Arc<RegisteredAction>) {
-        assert!(
-            self.actions
-                .insert(key, ActionLookup::Action(action))
-                .is_none()
-        );
+        self.insert_action_lookup(key, ActionLookup::Action(action));
+    }
+
+    fn insert_action_lookup(&mut self, key: ActionKey, action: ActionLookup) {
+        assert!(self.actions.len() == key.action_index().0 as usize);
+        self.actions.push(action);
     }
 
     /// Inserts a binding for a dynamic_outputs' "outputs" arg.
-    pub(crate) fn insert_dynamic_output(
-        &mut self,
-        key: Hashed<ActionKey>,
-        bound_to_key: ActionKey,
-    ) {
-        match self.actions.get(&bound_to_key) {
+    pub fn insert_dynamic_output(&mut self, key: ActionKey, bound_to_key: ActionKey) {
+        // TODO(cjhopman): This doesn't seem to work the way it's intended. We won't ever hit the Some case because we insert all
+        // the dynamic_output "outputs" first before inserting the actual registered actions.
+        match self.actions.get(bound_to_key.action_index().0 as usize) {
             Some(ActionLookup::Action(v)) => {
                 // indicates that a dynamic_output "outputs" has been bound to an action it created
-                assert!(
-                    self.actions
-                        .insert_hashed(key, ActionLookup::Action(v.dupe()))
-                        .is_none()
-                );
+                self.insert_action_lookup(key, ActionLookup::Action(v.dupe()));
             }
             _ => {
-                assert!(
-                    self.actions
-                        .insert_hashed(key, ActionLookup::Deferred(bound_to_key))
-                        .is_none()
-                );
+                self.insert_action_lookup(key, ActionLookup::Deferred(bound_to_key));
             }
         }
     }
 
     pub fn lookup(&self, key: &ActionKey) -> buck2_error::Result<ActionLookup> {
         self.actions
-            .get(key)
+            .get(key.action_index().0 as usize)
             .duped()
             .with_internal_error(|| format!("action key missing in recorded actions {}", key))
     }
 
     /// Iterates over the actions created in this analysis.
     pub fn iter_actions(&self) -> impl Iterator<Item = &Arc<RegisteredAction>> + '_ {
-        self.actions.values().filter_map(|v| match v {
+        self.actions.iter().filter_map(|v| match v {
             ActionLookup::Action(a) => Some(a),
             ActionLookup::Deferred(_) => None,
         })

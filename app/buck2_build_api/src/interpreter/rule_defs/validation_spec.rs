@@ -11,14 +11,12 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 
 use allocative::Allocative;
-use buck2_error::starlark_error::from_starlark;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
-use starlark::values::starlark_value;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::FreezeResult;
@@ -31,12 +29,14 @@ use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::starlark_value;
 
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum ValidationSpecError {
     #[error("Name of validation spec should not be empty")]
     EmptyName,
@@ -112,11 +112,11 @@ fn validate_validation_spec<'v, V>(spec: &StarlarkValidationSpecGen<V>) -> buck2
 where
     V: ValueLike<'v>,
 {
-    let name = spec.name.unpack().map_err(from_starlark)?;
+    let name = spec.name.unpack()?;
     if name.is_empty() {
         return Err(ValidationSpecError::EmptyName.into());
     }
-    let artifact = spec.validation_result.unpack().map_err(from_starlark)?;
+    let artifact = spec.validation_result.unpack()?;
     let artifact = match artifact.0.get_bound_artifact() {
         Ok(bound_artifact) => bound_artifact,
         Err(e) => {

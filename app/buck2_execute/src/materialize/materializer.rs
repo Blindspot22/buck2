@@ -338,7 +338,7 @@ impl dyn Materializer {
 
     /// Declares a list of artifacts whose files can be materialized by
     /// downloading from the CAS.
-    pub async fn declare_cas_many<'a, 'b>(
+    pub async fn declare_cas_many(
         &self,
         info: Arc<CasDownloadInfo>,
         artifacts: Vec<(ProjectRelativePathBuf, ArtifactValue)>,
@@ -360,7 +360,7 @@ impl dyn Materializer {
             DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(external_symlink)) => {
                 if !external_symlink.remaining_path().is_empty() {
                     return Err(buck2_error::buck2_error!(
-                        [],
+                        buck2_error::ErrorTag::Tier0,
                         "Internal error: external symlink should not be declared on materializer with non-empty remaining path: '{}'",
                         external_symlink.dupe().to_path_buf().display()
                     ));
@@ -557,6 +557,7 @@ pub struct HttpDownloadInfo {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 pub enum ArtifactNotMaterializedReason {
     #[error(
         "The artifact at path '{}' ({}) was produced by a RE action ({}), \
@@ -616,8 +617,6 @@ impl HasMaterializer for UserComputationData {
 
 #[derive(Clone, Copy, Debug, Dupe)]
 pub enum MaterializationMethod {
-    /// Materialize all immediately as they are declared
-    Immediate,
     /// Materialize only when needed
     Deferred,
     /// Materialize only when needed, do not materialize final artifacts
@@ -625,6 +624,7 @@ pub enum MaterializationMethod {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 pub enum MaterializationMethodError {
     #[error(
         "Invalid value for buckconfig `[buck2] materializations`. Got `{0}`. Expected one of `all`, `deferred`, or `deferred_skip_final_artifacts`."
@@ -636,7 +636,6 @@ impl MaterializationMethod {
     pub fn try_new_from_config_value(config_value: Option<&str>) -> buck2_error::Result<Self> {
         match config_value {
             None | Some("") | Some("deferred") => Ok(MaterializationMethod::Deferred),
-            Some("all") => Ok(MaterializationMethod::Immediate),
             Some("deferred_skip_final_artifacts") => {
                 Ok(MaterializationMethod::DeferredSkipFinalArtifacts)
             }

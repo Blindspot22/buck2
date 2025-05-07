@@ -9,13 +9,24 @@
 
 use buck2_core::buck2_env;
 use buck2_core::buck2_env_name;
+use buck2_core::soft_error;
+use buck2_error::conversion::from_any_with_tag;
+use buck2_event_observer::event_observer::NoopEventObserverExtra;
+use buck2_event_observer::verbosity::Verbosity;
+use buck2_health_check::report::DisplayReport;
+use buck2_wrapper_common::invocation_id::TraceId;
 use clap::builder::FalseyValueParser;
 use dupe::Dupe;
 use termwiz::istty::IsTty;
+use tokio::sync::mpsc::Receiver;
 
 use crate::final_console::FinalConsole;
-use crate::subscribers::superconsole::SuperConsoleConfig;
+use crate::subscribers::errorconsole::ErrorConsole;
+use crate::subscribers::simpleconsole::SimpleConsole;
+use crate::subscribers::subscriber::EventSubscriber;
 use crate::subscribers::superconsole::BUCK_NO_INTERACTIVE_CONSOLE;
+use crate::subscribers::superconsole::StatefulSuperConsole;
+use crate::subscribers::superconsole::SuperConsoleConfig;
 
 #[derive(
     Debug,
@@ -34,6 +45,99 @@ pub enum ConsoleType {
     SimpleNoTty,
     SimpleTty,
     Super,
+}
+
+/// Given a command name and the command arguments, create a default console / superconsole.
+pub fn get_console_with_root(
+    trace_id: TraceId,
+    console_type: ConsoleType,
+    verbosity: Verbosity,
+    expect_spans: bool,
+    replay_speed: Option<f64>,
+    command_name: &str,
+    config: SuperConsoleConfig,
+    health_check_display_reports_receiver: Option<Receiver<Vec<DisplayReport>>>,
+) -> Box<dyn EventSubscriber> {
+    let result: buck2_error::Result<Box<dyn EventSubscriber>> = match console_type {
+        ConsoleType::Simple => Ok(Box::new(
+            SimpleConsole::<NoopEventObserverExtra>::autodetect(
+                trace_id.dupe(),
+                verbosity,
+                expect_spans,
+                health_check_display_reports_receiver,
+            ),
+        )),
+        ConsoleType::SimpleNoTty => Ok(Box::new(
+            SimpleConsole::<NoopEventObserverExtra>::without_tty(
+                trace_id.dupe(),
+                verbosity,
+                expect_spans,
+                health_check_display_reports_receiver,
+            ),
+        )),
+        ConsoleType::SimpleTty => Ok(Box::new(SimpleConsole::<NoopEventObserverExtra>::with_tty(
+            trace_id.dupe(),
+            verbosity,
+            expect_spans,
+            health_check_display_reports_receiver,
+        ))),
+        ConsoleType::Super => StatefulSuperConsole::new_with_root_forced(
+            trace_id.dupe(),
+            command_name,
+            verbosity,
+            expect_spans,
+            replay_speed,
+            None,
+            config,
+            health_check_display_reports_receiver,
+        )
+        .map(|c| Box::new(c) as Box<dyn EventSubscriber>),
+        ConsoleType::Auto => {
+            match StatefulSuperConsole::console_builder()
+                .build()
+                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
+            {
+                Ok(Some(sc)) => StatefulSuperConsole::new(
+                    command_name,
+                    trace_id.dupe(),
+                    sc,
+                    verbosity,
+                    expect_spans,
+                    replay_speed,
+                    config,
+                    health_check_display_reports_receiver,
+                )
+                .map(|c| Box::new(c) as Box<dyn EventSubscriber>),
+                _ => Ok(Box::new(
+                    SimpleConsole::<NoopEventObserverExtra>::autodetect(
+                        trace_id.dupe(),
+                        verbosity,
+                        expect_spans,
+                        health_check_display_reports_receiver,
+                    ),
+                )),
+            }
+        }
+        ConsoleType::None => Ok(Box::new(ErrorConsole)),
+    };
+
+    match result {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!(
+                "Falling back to simple console, super console initialization failed: {}",
+                e
+            );
+            let _unused = soft_error!("console_init_failed", e);
+            Box::new(SimpleConsole::<NoopEventObserverExtra>::autodetect(
+                trace_id,
+                verbosity,
+                expect_spans,
+                // Maybe refactor and set this.
+                None,
+            ))
+        }
+    }
 }
 
 #[derive(

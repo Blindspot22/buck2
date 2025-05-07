@@ -13,15 +13,15 @@
 use async_trait::async_trait;
 use buck2_cli_proto::GenericRequest;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::daemon::client::StdoutPartialResultHandler;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
-use buck2_client_ctx::streaming::BuckSubcommand;
 use buck2_client_ctx::streaming::StreamingCommand;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
@@ -79,7 +79,7 @@ pub struct StarlarkCommandCommonOptions {
     event_log_opts: CommonEventLogOptions,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StreamingCommand for StarlarkSubcommand {
     const COMMAND_NAME: &'static str = "starlark";
 
@@ -89,6 +89,7 @@ impl StreamingCommand for StarlarkSubcommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let serialized = serde_json::to_string(&self)?;
 
@@ -101,6 +102,7 @@ impl StreamingCommand for StarlarkSubcommand {
                     context: Some(context),
                     serialized_opts: serialized,
                 },
+                events_ctx,
                 ctx.console_interaction_stream(self.console_opts()),
                 &mut StdoutPartialResultHandler,
             )
@@ -129,8 +131,8 @@ impl StarlarkCommand {
     pub fn exec(self, matches: BuckArgMatches<'_>, ctx: ClientCommandContext<'_>) -> ExitResult {
         let matches = matches.unwrap_subcommand();
         match self {
-            StarlarkCommand::Opaque(cmd) => cmd.exec(matches, ctx),
-            StarlarkCommand::DebugAttach(cmd) => cmd.exec(matches, ctx),
+            StarlarkCommand::Opaque(cmd) => ctx.exec(cmd, matches),
+            StarlarkCommand::DebugAttach(cmd) => ctx.exec(cmd, matches),
         }
     }
 

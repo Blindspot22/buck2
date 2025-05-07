@@ -26,12 +26,6 @@ use starlark::typing::ParamIsRequired;
 use starlark::typing::ParamSpec;
 use starlark::typing::Ty;
 use starlark::util::ArcStr;
-use starlark::values::list::ListType;
-use starlark::values::starlark_value;
-use starlark::values::type_repr::StarlarkTypeRepr;
-use starlark::values::typing::FrozenStarlarkCallable;
-use starlark::values::typing::StarlarkCallable;
-use starlark::values::typing::StarlarkCallableParamSpec;
 use starlark::values::AllocValue;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
@@ -44,6 +38,12 @@ use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
+use starlark::values::list::ListType;
+use starlark::values::starlark_value;
+use starlark::values::type_repr::StarlarkTypeRepr;
+use starlark::values::typing::FrozenStarlarkCallable;
+use starlark::values::typing::StarlarkCallable;
+use starlark::values::typing::StarlarkCallableParamSpec;
 use starlark_map::small_map::SmallMap;
 
 use crate::dynamic::attrs::DynamicAttrType;
@@ -83,6 +83,7 @@ impl StarlarkCallableParamSpec for DynamicActionsCallbackParamSpec {
 pub type DynamicActionsCallbackReturnType = ListType<AbstractProvider>;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum DynamicActionCallableError {
     #[error("DynamicActionCallable can be called only if frozen")]
     NotFrozen,
@@ -148,9 +149,9 @@ impl<'v> StarlarkValue<'v> for DynamicActionsCallable<'v> {
         _args: &Arguments<'v, '_>,
         _eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
-        Err(starlark::Error::new_other(
+        Err(starlark::Error::new_other(buck2_error::Error::from(
             DynamicActionCallableError::NotFrozen,
-        ))
+        )))
     }
 
     fn typechecker_ty(&self) -> Option<Ty> {

@@ -30,15 +30,15 @@ use dupe::OptionDupedExt;
 use futures::FutureExt;
 use indexmap::IndexMap;
 
-use crate::analysis::environment::get_from_template_placeholder_info;
 use crate::analysis::environment::ConfiguredGraphQueryEnvironmentDelegate;
+use crate::analysis::environment::get_from_template_placeholder_info;
 
 pub(crate) struct AnalysisDiceQueryDelegate<'c, 'd> {
     pub(crate) ctx: &'c LinearRecomputeDiceComputations<'d>,
 }
 
 impl AnalysisDiceQueryDelegate<'_, '_> {
-    pub(crate) fn ctx<'d>(&'d self) -> DiceComputations<'d> {
+    pub(crate) fn ctx(&self) -> DiceComputations<'_> {
         self.ctx.get()
     }
 }
@@ -54,7 +54,7 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
         self.resolved_literals
             .get(literal)
             .duped()
-            .ok_or_else(|| buck2_error::buck2_error!([], ""))
+            .ok_or_else(|| buck2_error::buck2_error!(buck2_error::ErrorTag::Tier0, ""))
     }
 
     async fn get_targets_from_template_placeholder_info(

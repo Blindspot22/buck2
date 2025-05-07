@@ -17,8 +17,10 @@ use dupe::Dupe;
 use equivalent::Equivalent;
 use static_interner::Intern;
 use static_interner::Interner;
+use strong_hash::StrongHash;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(input)]
 enum CellNameError {
     #[error("Cell name must be non-empty")]
     Empty,
@@ -34,10 +36,16 @@ impl Hash for CellNameData {
     }
 }
 
-#[derive(Clone, Debug, Display, Hash, Eq, PartialEq)]
+impl StrongHash for CellNameData {
+    fn strong_hash<H: Hasher>(&self, state: &mut H) {
+        CellNameDataRef(&self.0).strong_hash(state)
+    }
+}
+
+#[derive(Clone, Debug, Display, Hash, Eq, PartialEq, StrongHash)]
 struct CellNameDataRef<'a>(&'a str);
 
-impl<'a> Equivalent<CellNameData> for CellNameDataRef<'a> {
+impl Equivalent<CellNameData> for CellNameDataRef<'_> {
     fn equivalent(&self, key: &CellNameData) -> bool {
         self.0 == &*key.0
     }
@@ -60,7 +68,7 @@ static INTERNER: Interner<CellNameData, BuckHasher> = Interner::new();
 /// contain any special characters like `/`), so `foo/bar//some:target` has an
 /// invalid cell name of `foo/bar`.
 #[derive(
-    Clone, Dupe, Copy, Debug, Display, Hash, Eq, PartialEq, Ord, PartialOrd, Allocative
+    Clone, Dupe, Copy, Debug, Display, Hash, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash
 )]
 pub struct CellName(Intern<CellNameData>);
 

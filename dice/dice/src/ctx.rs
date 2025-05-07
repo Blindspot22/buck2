@@ -12,10 +12,12 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use dice_error::DiceResult;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use gazebo::variants::UnpackVariants;
 
+use crate::LinearRecomputeDiceComputations;
+use crate::ProjectionKey;
 use crate::api::computations::DiceComputations;
 use crate::api::data::DiceData;
 use crate::api::invalidation_tracking::DiceKeyTrackedInvalidationPaths;
@@ -27,8 +29,6 @@ use crate::impls::ctx::LinearRecomputeModern;
 use crate::impls::ctx::ModernComputeCtx;
 use crate::opaque::OpaqueValueImpl;
 use crate::versions::VersionNumber;
-use crate::LinearRecomputeDiceComputations;
-use crate::ProjectionKey;
 
 /// This is just a dispatcher to either of Legacy or Modern Dice.
 ///
@@ -40,7 +40,7 @@ pub(crate) enum DiceComputationsImpl<'a> {
     Modern(ModernComputeCtx<'a>),
 }
 
-impl<'d> DiceComputationsImpl<'d> {
+impl DiceComputationsImpl<'_> {
     /// Gets all the result of of the given computation key.
     /// recorded as dependencies of the current computation for which this
     /// context is for.
@@ -74,8 +74,8 @@ impl<'d> DiceComputationsImpl<'d> {
         }
     }
 
-    pub fn projection<'a, K: Key, P: ProjectionKey<DeriveFromKey = K>>(
-        &'a mut self,
+    pub fn projection<K: Key, P: ProjectionKey<DeriveFromKey = K>>(
+        &mut self,
         derive_from: &OpaqueValue<K>,
         projection_key: &P,
     ) -> DiceResult<P::Value> {
@@ -87,8 +87,8 @@ impl<'d> DiceComputationsImpl<'d> {
         }
     }
 
-    pub fn opaque_into_value<'a, K: Key>(
-        &'a mut self,
+    pub fn opaque_into_value<K: Key>(
+        &mut self,
         derive_from: OpaqueValue<K>,
     ) -> DiceResult<K::Value> {
         match self {

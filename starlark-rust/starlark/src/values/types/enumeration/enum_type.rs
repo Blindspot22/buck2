@@ -26,13 +26,13 @@ use display_container::fmt_container;
 use dupe::Dupe;
 use either::Either;
 use once_cell::unsync::OnceCell;
-use starlark_derive::starlark_module;
-use starlark_derive::starlark_value;
 use starlark_derive::Coerce;
 use starlark_derive::NoSerialize;
 use starlark_derive::Trace;
-use starlark_map::small_map::SmallMap;
+use starlark_derive::starlark_module;
+use starlark_derive::starlark_value;
 use starlark_map::Equivalent;
+use starlark_map::small_map::SmallMap;
 
 use crate as starlark;
 use crate::any::ProvidesStaticType;
@@ -41,22 +41,13 @@ use crate::environment::MethodsBuilder;
 use crate::environment::MethodsStatic;
 use crate::eval::Arguments;
 use crate::eval::Evaluator;
+use crate::typing::ParamSpec;
+use crate::typing::Ty;
 use crate::typing::callable::TyCallable;
 use crate::typing::starlark_value::TyStarlarkValue;
 use crate::typing::user::TyUser;
 use crate::typing::user::TyUserIndex;
 use crate::typing::user::TyUserParams;
-use crate::typing::ParamSpec;
-use crate::typing::Ty;
-use crate::values::enumeration::matcher::EnumTypeMatcher;
-use crate::values::enumeration::ty_enum_type::TyEnumData;
-use crate::values::enumeration::value::EnumValueGen;
-use crate::values::enumeration::EnumValue;
-use crate::values::function::FUNCTION_TYPE;
-use crate::values::index::convert_index;
-use crate::values::list::AllocList;
-use crate::values::types::type_instance_id::TypeInstanceId;
-use crate::values::typing::type_compiled::type_matcher_factory::TypeMatcherFactory;
 use crate::values::Freeze;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
@@ -66,6 +57,15 @@ use crate::values::StarlarkValue;
 use crate::values::StringValue;
 use crate::values::Value;
 use crate::values::ValueLike;
+use crate::values::ValueTyped;
+use crate::values::enumeration::EnumValue;
+use crate::values::enumeration::matcher::EnumTypeMatcher;
+use crate::values::enumeration::ty_enum_type::TyEnumData;
+use crate::values::function::FUNCTION_TYPE;
+use crate::values::index::convert_index;
+use crate::values::list::AllocList;
+use crate::values::types::type_instance_id::TypeInstanceId;
+use crate::values::typing::type_compiled::type_matcher_factory::TypeMatcherFactory;
 
 #[derive(thiserror::Error, Debug)]
 enum EnumError {
@@ -169,11 +169,14 @@ pub type EnumType<'v> = EnumTypeGen<Value<'v>>;
 pub type FrozenEnumType = EnumTypeGen<FrozenValue>;
 
 impl<'v> EnumType<'v> {
-    pub(crate) fn new(elements: Vec<StringValue<'v>>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn new(
+        elements: Vec<StringValue<'v>>,
+        heap: &'v Heap,
+    ) -> crate::Result<ValueTyped<'v, EnumType<'v>>> {
         // We are constructing the enum and all elements in one go.
         // They both point at each other, which adds to the complexity.
-        let id = TypeInstanceId::gen();
-        let typ = heap.alloc(EnumType {
+        let id = TypeInstanceId::r#gen();
+        let typ = heap.alloc_typed(EnumType {
             id,
             ty_enum_data: OnceCell::new(),
             elements: UnsafeCell::new(SmallMap::new()),
@@ -183,7 +186,7 @@ impl<'v> EnumType<'v> {
         for (i, x) in elements.iter().enumerate() {
             let v = heap.alloc(EnumValue {
                 id,
-                typ,
+                typ: typ.to_value(),
                 index: i as i32,
                 value: x.to_value(),
             });
@@ -195,10 +198,9 @@ impl<'v> EnumType<'v> {
         }
 
         // Here we tie the cycle
-        let t = typ.downcast_ref::<EnumType>().unwrap();
         unsafe {
             // SAFETY: we own unique reference to `t`.
-            *t.elements.get() = res;
+            *typ.elements.get() = res;
         }
         Ok(typ)
     }
@@ -315,7 +317,7 @@ where
             let ty_enum_type = Ty::custom(TyUser::new(
                 format!("enum[{}]", variable_name),
                 TyStarlarkValue::new::<EnumType>(),
-                TypeInstanceId::gen(),
+                TypeInstanceId::r#gen(),
                 TyUserParams {
                     index: Some(TyUserIndex {
                         index: Ty::int(),
@@ -337,16 +339,6 @@ where
             )?);
             Ok(Arc::new(TyEnumData {
                 name: variable_name.to_owned(),
-                variants: self
-                    .elements()
-                    .iter()
-                    .map(|(_, enum_value)| {
-                        let enum_value: &EnumValueGen<_> =
-                            EnumValue::from_value(enum_value.to_value())
-                                .expect("known to be enum value");
-                        Ty::of_value(enum_value.value)
-                    })
-                    .collect(),
                 id: self.id,
                 ty_enum_value,
                 ty_enum_type,

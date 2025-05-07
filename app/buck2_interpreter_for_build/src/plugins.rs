@@ -21,9 +21,6 @@ use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::typing::Ty;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::AllocValue;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
@@ -37,6 +34,9 @@ use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueTypedComplex;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
 use crate::interpreter::build_context::BuildContext;
 
@@ -82,6 +82,7 @@ impl<'v> StarlarkValue<'v> for StarlarkPluginKind {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum PluginKindError {
     #[error("Plugin kind has not yet been assigned to a global")]
     NotBound,
@@ -177,7 +178,7 @@ impl<'v> UnpackValue<'v> for PluginKindArg {
 pub struct AllPlugins;
 starlark_simple_value!(AllPlugins);
 
-#[starlark_value(type = "all_plugins")]
+#[starlark_value(type = "AllPlugins")]
 impl<'v> StarlarkValue<'v> for AllPlugins {}
 
 #[starlark_module]

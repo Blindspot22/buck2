@@ -10,12 +10,13 @@
 #![feature(error_generic_member_access)]
 #![feature(let_chains)]
 #![feature(trait_alias)]
-#![feature(trait_upcasting)]
 
-mod any;
+pub mod any;
 pub mod classify;
 mod context;
 mod context_value;
+pub mod conversion;
+mod conversion_test;
 mod derive_tests;
 mod error;
 mod format;
@@ -67,6 +68,7 @@ pub use buck2_data::error::ErrorTag;
 /// # #![feature(error_generic_member_access)]
 /// #[derive(Debug, buck2_error::Error)]
 /// #[error("My error type")]
+/// #[buck2(tag = buck2_error::ErrorTag::Input)]
 /// struct MyError;
 ///
 /// let e = buck2_error::Error::from(MyError);
@@ -76,27 +78,25 @@ pub use buck2_data::error::ErrorTag;
 pub use buck2_error_derive::Error;
 
 use crate::any::ProvidableMetadata;
+use crate::source_location::SourceLocation;
 
 /// Provide metadata about an error.
 ///
 /// This is a manual alternative to deriving `buck2_error::Error`, which should be preferred if at
 /// all possible. This function has a pretty strict contract: You must call it within the `provide`
 /// implementation for an error type `E`, and must pass `E` as the type parameter.
-///
-/// The `source_file` should just be `std::file!()`; the `source_location_extra` should be the type
-/// - and possibly variant - name, formatted as either `Type` or `Type::Variant`.
-pub fn provide_metadata<'a, 'b>(
-    request: &'b mut Request<'a>,
+pub fn provide_metadata(
+    request: &mut Request<'_>,
     tags: impl IntoIterator<Item = crate::ErrorTag>,
-    source_file: &'static str,
-    source_location_extra: Option<&'static str>,
+    string_tags: impl IntoIterator<Item = String>,
+    source_location: SourceLocation,
     action_error: Option<buck2_data::ActionError>,
 ) {
     let metadata = ProvidableMetadata {
         action_error,
         tags: tags.into_iter().collect(),
-        source_file,
-        source_location_extra,
+        string_tags: string_tags.into_iter().collect(),
+        source_location,
     };
     Request::provide_value(request, metadata);
 }

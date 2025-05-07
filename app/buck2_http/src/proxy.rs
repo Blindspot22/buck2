@@ -11,10 +11,10 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use buck2_error::BuckErrorContext;
+use http::Uri;
 use http::uri::InvalidUri;
 use http::uri::PathAndQuery;
 use http::uri::Scheme;
-use http::Uri;
 use hyper_proxy::Intercept;
 use hyper_proxy::Proxy;
 use ipnetwork::IpNetwork;
@@ -26,7 +26,13 @@ fn env_to_string(env: &'static str) -> buck2_error::Result<Option<String>> {
         .or_else(|| std::env::var_os(env.to_lowercase()))
         .map(|s| s.into_string())
         .transpose()
-        .map_err(|original| buck2_error::buck2_error!([], "Invalid utf8 string: '{:?}'", original))
+        .map_err(|original| {
+            buck2_error::buck2_error!(
+                buck2_error::ErrorTag::Tier0,
+                "Invalid utf8 string: '{:?}'",
+                original
+            )
+        })
 }
 
 fn noproxy_from_env(scheme: Scheme) -> buck2_error::Result<Option<NoProxy>> {
@@ -212,7 +218,7 @@ impl NoProxy {
             // IPv6 addresses are wrapped in [ ] so remove those for equality checks.
             let host = host.map(|h| h.trim_start_matches('[').trim_end_matches(']'));
             let should_bypass_proxy =
-                host.map_or(false, |host| self.should_bypass_proxy_for_host(host));
+                host.is_some_and(|host| self.should_bypass_proxy_for_host(host));
 
             // Negation happens here - true means we're going to proxy the connection.
             !should_bypass_proxy

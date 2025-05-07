@@ -15,10 +15,11 @@ use std::sync::Arc;
 use bincode::Options;
 use buck2_cli_proto::unstable_dice_dump_request::DiceDumpFormat;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use dice::Dice;
 use dupe::Dupe;
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 
 pub(crate) async fn dice_dump_spawn(
     dice: &Arc<Dice>,
@@ -97,6 +98,7 @@ fn dice_dump_tsv(dice: &Arc<Dice>, path: &Path) -> buck2_error::Result<()> {
     );
 
     dice.serialize_tsv(&mut nodes, &mut edges, &mut nodes_currently_running)
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
         .buck_error_context("Failed to serialize")?;
 
     nodes
@@ -129,7 +131,8 @@ fn dice_dump_bincode(dice: &Arc<Dice>, path: &Path) -> buck2_error::Result<()> {
             .with_fixint_encoding()
             .allow_trailing_bytes(),
     );
-    dice.serialize_serde(&mut writer)?;
+    dice.serialize_serde(&mut writer)
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
     Ok(())
 }
 

@@ -12,16 +12,14 @@ use std::borrow::Cow;
 use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_api::actions::Action;
+use buck2_build_api::actions::ActionExecutionCtx;
+use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::actions::box_slice_set::BoxSliceSet;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionKind;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
-use buck2_build_api::actions::Action;
-use buck2_build_api::actions::ActionExecutable;
-use buck2_build_api::actions::ActionExecutionCtx;
-use buck2_build_api::actions::IncrementalActionExecutable;
-use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_core::category::CategoryRef;
 use buck2_error::BuckErrorContext;
@@ -35,6 +33,7 @@ use indexmap::IndexSet;
 use starlark::values::OwnedFrozenValue;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum CopyActionValidationError {
     #[error("Exactly one input file must be specified for a copy action, got {0}")]
     WrongNumberOfInputs(usize),
@@ -139,10 +138,6 @@ impl Action for CopyAction {
         self.output()
     }
 
-    fn as_executable(&self) -> ActionExecutable<'_> {
-        ActionExecutable::Incremental(self)
-    }
-
     fn category(&self) -> CategoryRef {
         CategoryRef::unchecked_new("copy")
     }
@@ -150,10 +145,7 @@ impl Action for CopyAction {
     fn identifier(&self) -> Option<&str> {
         Some(self.output().get_path().path().as_str())
     }
-}
 
-#[async_trait]
-impl IncrementalActionExecutable for CopyAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
@@ -166,7 +158,7 @@ impl IncrementalActionExecutable for CopyAction {
 
         let artifact_fs = ctx.fs();
         let src = input.resolve_path(artifact_fs)?;
-        let dest = artifact_fs.resolve_build(self.output().get_path());
+        let dest = artifact_fs.resolve_build(self.output().get_path())?;
 
         let value = {
             let fs = artifact_fs.fs();

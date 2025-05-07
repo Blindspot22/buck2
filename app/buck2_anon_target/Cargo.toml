@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 derive_more = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
+fxhash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -21,6 +22,7 @@ dupe = { workspace = true }
 gazebo = { workspace = true }
 starlark = { workspace = true }
 starlark_map = { workspace = true }
+strong_hash = { workspace = true }
 
 buck2_analysis = { workspace = true }
 buck2_artifact = { workspace = true }

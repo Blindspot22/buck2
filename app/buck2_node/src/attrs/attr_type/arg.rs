@@ -10,8 +10,8 @@
 pub mod parser;
 
 use allocative::Allocative;
-use buck2_core::package::source_path::SourcePathRef;
 use buck2_core::package::PackageLabel;
+use buck2_core::package::source_path::SourcePathRef;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::provider::label::ProvidersLabelMaybeConfigured;
@@ -36,7 +36,7 @@ pub struct ArgAttrType {
 /// forms). The parsed arg string is held as a sequence of parts (each part either a literal string or a macro). When
 /// being added to a command line, these parts will be concattenated together and added as a single arg.
 /// Each variant takes in a boolean which determines if the resolved form should be compatible with anon targets.
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
 pub enum StringWithMacros<P: ProvidersLabelMaybeConfigured> {
     /// Semantically, StringWithMacros::StringPart(s) is equivalent to
     /// StringWithMacros::ManyParts(vec![StringWithMacrosPart::String(s)]). We special-case this
@@ -73,8 +73,8 @@ impl StringWithMacros<ConfiguredProvidersLabel> {
 }
 
 impl StringWithMacros<ConfiguredProvidersLabel> {
-    pub fn traverse<'a>(
-        &'a self,
+    pub fn traverse(
+        &self,
         traversal: &mut dyn ConfiguredAttrTraversal,
         pkg: PackageLabel,
     ) -> buck2_error::Result<()> {
@@ -138,7 +138,7 @@ impl StringWithMacros<ProvidersLabel> {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
 pub enum StringWithMacrosPart<P: ProvidersLabelMaybeConfigured> {
     String(ArcStr),
     Macro(/* write_to_file */ bool, MacroBase<P>),
@@ -147,15 +147,18 @@ pub enum StringWithMacrosPart<P: ProvidersLabelMaybeConfigured> {
 assert_eq_size!(MacroBase<ProvidersLabel>, [usize; 3]);
 assert_eq_size!(StringWithMacrosPart<ProvidersLabel>, [usize; 4]);
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
 pub struct UnrecognizedMacro {
     pub macro_type: Box<str>,
     pub args: Box<[String]>,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
 pub enum MacroBase<P: ProvidersLabelMaybeConfigured> {
-    Location(P),
+    Location {
+        label: P,
+        exec_dep: bool,
+    },
     /// Represents both $(exe) and $(exe_target) usages.
     Exe {
         label: P,
@@ -177,16 +180,22 @@ pub enum MacroBase<P: ProvidersLabelMaybeConfigured> {
 }
 
 impl MacroBase<ConfiguredProvidersLabel> {
-    pub fn traverse<'a>(
-        &'a self,
+    pub fn traverse(
+        &self,
         traversal: &mut dyn ConfiguredAttrTraversal,
         pkg: PackageLabel,
     ) -> buck2_error::Result<()> {
         // macros can't reference repo inputs (they only reference the outputs of other targets)
         match self {
-            MacroBase::Location(l) | MacroBase::UserKeyedPlaceholder(box (_, l, _)) => {
-                traversal.dep(l)
-            }
+            MacroBase::UserKeyedPlaceholder(box (_, l, _)) => traversal.dep(l),
+            MacroBase::Location {
+                label,
+                exec_dep: true,
+            } => traversal.exec_dep(label),
+            MacroBase::Location {
+                label,
+                exec_dep: false,
+            } => traversal.dep(label),
             MacroBase::Exe {
                 label,
                 exec_dep: true,
@@ -213,9 +222,14 @@ impl MacroBase<ProvidersLabel> {
         ctx: &dyn AttrConfigurationContext,
     ) -> buck2_error::Result<ConfiguredMacro> {
         Ok(match self {
-            UnconfiguredMacro::Location(target) => {
-                ConfiguredMacro::Location(ctx.configure_target(target))
-            }
+            UnconfiguredMacro::Location { label, exec_dep } => ConfiguredMacro::Location {
+                label: if *exec_dep {
+                    ctx.configure_exec_target(label)?
+                } else {
+                    ctx.configure_target(label)
+                },
+                exec_dep: *exec_dep,
+            },
             UnconfiguredMacro::Exe { label, exec_dep } => ConfiguredMacro::Exe {
                 label: if *exec_dep {
                     ctx.configure_exec_target(label)?
@@ -250,17 +264,23 @@ impl MacroBase<ProvidersLabel> {
         pkg: PackageLabel,
     ) -> buck2_error::Result<()> {
         match self {
-            MacroBase::Location(l) | MacroBase::UserKeyedPlaceholder(box (_, l, _)) => {
-                traversal.dep(l.target())
-            }
+            MacroBase::UserKeyedPlaceholder(box (_, l, _)) => traversal.dep(l),
+            MacroBase::Location {
+                label,
+                exec_dep: true,
+            } => traversal.exec_dep(label),
+            MacroBase::Location {
+                label,
+                exec_dep: false,
+            } => traversal.dep(label),
             MacroBase::Exe {
                 label,
                 exec_dep: true,
-            } => traversal.exec_dep(label.target()),
+            } => traversal.exec_dep(label),
             MacroBase::Exe {
                 label,
                 exec_dep: false,
-            } => traversal.dep(label.target()),
+            } => traversal.dep(label),
             MacroBase::Query(query) => query.traverse(traversal),
             MacroBase::Source(path) => {
                 for x in path.inputs() {
@@ -283,7 +303,16 @@ pub type ConfiguredStringWithMacrosPart = StringWithMacrosPart<ConfiguredProvide
 
 pub type UnconfiguredStringWithMacros = StringWithMacros<ProvidersLabel>;
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, Display)]
+#[derive(
+    Debug,
+    Eq,
+    PartialEq,
+    Hash,
+    Clone,
+    Allocative,
+    Display,
+    strong_hash::StrongHash
+)]
 #[display("{}", string_with_macros)]
 pub struct ConfiguredStringWithMacros {
     pub string_with_macros: StringWithMacros<ConfiguredProvidersLabel>,
@@ -296,7 +325,18 @@ impl<P: ProvidersLabelMaybeConfigured> Display for MacroBase<P> {
         // TODO: this should re-escape values in the args that need to be escaped to have returned that arg (it's not possible
         // to tell where there were unnecessary escapes and it's not worth tracking that).
         match self {
-            MacroBase::Location(l) => write!(f, "location {}", l),
+            MacroBase::Location { label, exec_dep } => {
+                write!(
+                    f,
+                    "{} {}",
+                    if *exec_dep {
+                        "location_exec"
+                    } else {
+                        "location"
+                    },
+                    label
+                )
+            }
             MacroBase::Exe { label, exec_dep } => {
                 write!(
                     f,
@@ -371,7 +411,7 @@ impl<P: ProvidersLabelMaybeConfigured> Display for StringWithMacros<P> {
 }
 
 /// Represents the type of a query placeholder (e.g. query_outputs, query_targets, query_targets_and_outputs).
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
 pub enum QueryExpansion {
     Output,
     Target,

@@ -44,26 +44,26 @@ impl QueryTarget for TargetNode {
         TargetNode::buildfile_path(self)
     }
 
-    fn deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         TargetNode::deps(self)
     }
 
-    fn exec_deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn exec_deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         TargetNode::exec_deps(self)
     }
 
-    fn target_deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn target_deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         TargetNode::target_deps(self)
     }
 
-    fn configuration_deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
-        TargetNode::get_configuration_deps(self).map(|k| k.0.target())
+    fn configuration_deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
+        TargetNode::get_configuration_deps(self).map(|k| k.target())
     }
 
-    fn toolchain_deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn toolchain_deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         TargetNode::toolchain_deps(self)
     }
-    fn tests<'a>(&'a self) -> Option<impl Iterator<Item = Self::Key> + Send + 'a> {
+    fn tests(&self) -> Option<impl Iterator<Item = Self::Key> + Send + '_> {
         Some(self.tests().map(|t| t.target().dupe()))
     }
 
@@ -110,6 +110,16 @@ impl QueryTarget for TargetNode {
                 .as_ref()
                 .map(|a| a.value),
         )
+    }
+
+    fn map_any_attr<R, F: FnMut(Option<&Self::Attr<'_>>) -> R>(&self, key: &str, mut func: F) -> R {
+        match self.attr_or_none(key, AttrInspectOptions::All) {
+            Some(attr) => func(Some(attr.value)),
+            None => match self.special_attr_or_none(key) {
+                Some(special) => func(Some(&special)),
+                None => func(None),
+            },
+        }
     }
 
     fn inputs_for_each<E, F: FnMut(CellPath) -> Result<(), E>>(

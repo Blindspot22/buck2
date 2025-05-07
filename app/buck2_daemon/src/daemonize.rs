@@ -20,6 +20,7 @@ use std::fmt;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 
+use buck2_error::conversion::from_any_with_tag;
 use dupe::Dupe;
 
 #[derive(Debug)]
@@ -299,7 +300,7 @@ impl Num for isize {
 
 fn check_err<N: Num, F: FnOnce(Errno) -> ErrorKind>(ret: N, f: F) -> buck2_error::Result<N> {
     if ret.is_err() {
-        Err(f(errno()).into())
+        Err(from_any_with_tag(f(errno()), buck2_error::ErrorTag::Tier0))
     } else {
         Ok(ret)
     }

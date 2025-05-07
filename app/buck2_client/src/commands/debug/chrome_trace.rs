@@ -23,8 +23,8 @@ use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::path_arg::PathArg;
 use buck2_common::convert::ProstDurationExt;
 use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use buck2_event_log::file_names::retrieve_nth_recent_log;
 use buck2_event_log::read::EventLogPathBuf;
 use buck2_event_log::stream_value::StreamValue;
@@ -34,8 +34,8 @@ use buck2_event_observer::display::TargetDisplayOptions;
 use buck2_events::BuckEvent;
 use derive_more::Display;
 use dupe::Dupe;
-use futures::stream::BoxStream;
 use futures::TryStreamExt;
+use futures::stream::BoxStream;
 use serde::Serialize;
 use serde_json::json;
 
@@ -654,7 +654,7 @@ impl ChromeTraceWriter {
             buck2_data::buck_event::Data::SpanStart(buck2_data::SpanStartEvent {
                 data: Some(start_data),
             }) => {
-                let on_critical_path = event.span_id().map_or(false, |span_id| {
+                let on_critical_path = event.span_id().is_some_and(|span_id| {
                     self.first_pass
                         .critical_path_span_ids
                         .contains(&span_id.into())
@@ -823,7 +823,7 @@ impl ChromeTraceWriter {
                     Categorization::ShowIfParent { name } => {
                         let parent_is_open = event
                             .parent_id()
-                            .map_or(false, |id| self.open_spans.contains_key(&id));
+                            .is_some_and(|id| self.open_spans.contains_key(&id));
 
                         if parent_is_open {
                             // Inherit the parent's track.
@@ -982,7 +982,7 @@ impl ChromeTraceCommand {
     ) -> buck2_error::Result<AbsPathBuf> {
         match log.file_name() {
             None => Err(buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "Could not determine filename from event log path: `{:#}`",
                 log.display()
             )),

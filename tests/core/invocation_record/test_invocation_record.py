@@ -16,6 +16,7 @@ from pathlib import Path
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test
+from buck2.tests.e2e_util.helper.golden import golden, sanitize_stderr
 from buck2.tests.e2e_util.helper.utils import read_invocation_record
 
 # FIXME(JakobDegen): Flakey in CI
@@ -75,7 +76,7 @@ async def test_has_no_command_result(buck: Buck, tmp_path: Path) -> None:
     status = json.loads((await buck.status()).stdout)
     pid = status["process_info"]["pid"]
 
-    await expect_failure(
+    result = await expect_failure(
         buck.build(
             ":kill",
             "-c",
@@ -92,6 +93,11 @@ async def test_has_no_command_result(buck: Buck, tmp_path: Path) -> None:
 
     assert record["has_end_of_stream"]
     assert not record["has_command_result"]
+
+    golden(
+        output=sanitize_stderr(result.stderr),
+        rel_path="fixtures/test_has_no_command_result.golden.txt",
+    )
 
 
 @buck_test(skip_for_os=["windows"])  # TODO(T154836632)
@@ -153,8 +159,9 @@ async def test_client_metadata_clean(buck: Buck, tmp_path: Path) -> None:
 @buck_test(skip_for_os=["windows"])
 async def test_client_metadata_debug(buck: Buck, tmp_path: Path) -> None:
     record = tmp_path / "record.json"
+    # buck.debug() doesn't start the daemon, so we need to start it with a build
+    await buck.build()
 
-    # Start the daemon
     await buck.debug(
         "allocator-stats",
         "--client-metadata=foo=bar",
@@ -182,7 +189,6 @@ async def test_action_error_message_in_record(buck: Buck, tmp_path: Path) -> Non
 
     record = read_invocation_record(record)
 
-    assert len(record["command_end"]["errors"]) == 0
     assert len(record["errors"]) == 1
     assert (
         record["errors"][0]["message"]
@@ -204,7 +210,6 @@ async def test_non_action_error_message_in_record(buck: Buck, tmp_path: Path) ->
     assert record["errors"][0]["message"].startswith(
         "Unknown target `missing_target` from package `root//`"
     )
-    assert len(record["command_end"]["errors"]) == 0
 
 
 @buck_test(skip_for_os=["windows"])  # TODO(T154836632)
@@ -311,3 +316,53 @@ async def test_active_networks_kinds(buck: Buck, tmp_path: Path) -> None:
     record = read_invocation_record(record)
 
     assert "active_networks_kinds" in record
+
+
+@buck_test()
+async def test_peak_memory_and_disk(buck: Buck, tmp_path: Path) -> None:
+    record = tmp_path / "record.json"
+
+    # Start the daemon
+    await buck.build("--unstable-write-invocation-record", str(record))
+
+    record = read_invocation_record(record)
+
+    assert (
+        "peak_used_disk_space_bytes" in record and "peak_process_memory_bytes" in record
+    )
+
+
+@buck_test(setup_eden=True, skip_for_os=["darwin"])
+async def test_version_control_collector_slow(buck: Buck, tmp_path: Path) -> None:
+    record = tmp_path / "record.json"
+
+    # Force a 5 second sleep, hg commands should finish within that period of time
+    await buck.build(
+        ":sleep",
+        "--unstable-write-invocation-record",
+        str(record),
+        "--local-only",
+        "--no-remote-cache",
+    )
+
+    record = read_invocation_record(record)
+
+    assert "has_local_changes" in record and "hg_revision" in record
+    assert record["hg_revision"] is not None
+
+
+# NOTE: Delete or disable if flaky, ran a bunch of times on my devserver and it passes fine
+@buck_test(setup_eden=True, skip_for_os=["darwin", "windows"])
+async def test_version_control_collector_fast(buck: Buck, tmp_path: Path) -> None:
+    record = tmp_path / "record.json"
+
+    await buck.targets(
+        ":",
+        "--unstable-write-invocation-record",
+        str(record),
+    )
+
+    record = read_invocation_record(record)
+
+    assert "has_local_changes" in record and "hg_revision" in record
+    assert record["hg_revision"] is not None

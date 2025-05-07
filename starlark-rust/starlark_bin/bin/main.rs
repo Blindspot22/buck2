@@ -25,16 +25,16 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::builder::StringValueParser;
-use clap::builder::TypedValueParser;
 use clap::Parser;
 use clap::ValueEnum;
+use clap::builder::StringValueParser;
+use clap::builder::TypedValueParser;
 use dupe::Dupe;
 use eval::Context;
 use itertools::Either;
 use starlark::analysis::LintMessage;
-use starlark::docs::markdown::render_doc_item_no_link;
 use starlark::docs::DocItem;
+use starlark::docs::markdown::render_doc_item_no_link;
 use starlark::environment::Globals;
 use starlark::errors::EvalMessage;
 use starlark::errors::EvalSeverity;
@@ -171,7 +171,7 @@ enum ArgsDialect {
 
 // Treat directories as things to recursively walk for .<extension> files,
 // and everything else as normal files.
-fn expand_dirs(extension: &str, xs: Vec<PathBuf>) -> impl Iterator<Item = PathBuf> {
+fn expand_dirs(extension: &str, xs: Vec<PathBuf>) -> impl Iterator<Item = PathBuf> + use<> {
     let extension = Arc::new(extension.to_owned());
     xs.into_iter().flat_map(move |x| {
         // Have to keep cloning extension so we keep ownership

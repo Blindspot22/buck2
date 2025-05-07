@@ -15,6 +15,7 @@ use std::process::Stdio;
 
 use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_util::process::background_command;
 use tokio::net::UnixStream;
 use tokio::process::Command;
@@ -79,6 +80,7 @@ pub async fn launch_forkserver(
 
     let channel = buck2_grpc::make_channel(client_io, "forkserver")
         .await
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
         .buck_error_context("Error connecting to Forkserver")?;
 
     Ok(ForkserverClient::new(child, channel))

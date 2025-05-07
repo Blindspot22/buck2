@@ -15,14 +15,13 @@ use std::sync::atomic::Ordering;
 use allocative::Allocative;
 use dupe::Dupe;
 use either::Either;
+use starlark::StarlarkResultExt;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::StarlarkHasher;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::NoSerialize;
@@ -31,10 +30,11 @@ use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
-use starlark::StarlarkResultExt;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
-use crate::interpreter::rule_defs::artifact_tagging::TaggedCommandLine;
-use crate::interpreter::rule_defs::artifact_tagging::TaggedValue;
+use crate::interpreter::rule_defs::artifact_tagging::StarlarkTaggedCommandLine;
+use crate::interpreter::rule_defs::artifact_tagging::StarlarkTaggedValue;
 use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 
 /// ArtifactTag allows wrapping input and output artifacts in a command line with tags. Those tags
@@ -80,7 +80,7 @@ impl fmt::Display for ArtifactTag {
 
 starlark_simple_value!(ArtifactTag);
 
-#[starlark_value(type = "artifact_tag")]
+#[starlark_value(type = "ArtifactTag")]
 impl<'v> StarlarkValue<'v> for ArtifactTag {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -105,15 +105,15 @@ fn artifact_tag_methods(_: &mut MethodsBuilder) {
     fn tag_artifacts<'v>(
         this: &ArtifactTag,
         inner: Value<'v>,
-    ) -> starlark::Result<Either<TaggedValue<'v>, TaggedCommandLine<'v>>> {
-        let value = TaggedValue::new(inner, this.dupe());
+    ) -> starlark::Result<Either<StarlarkTaggedValue<'v>, StarlarkTaggedCommandLine<'v>>> {
+        let value = StarlarkTaggedValue::new(inner, this.dupe());
 
         Ok(
             if ValueAsCommandLineLike::unpack_value(inner)
                 .into_anyhow_result()?
                 .is_some()
             {
-                Either::Right(TaggedCommandLine::new(value))
+                Either::Right(StarlarkTaggedCommandLine::new(value))
             } else {
                 Either::Left(value)
             },
@@ -123,15 +123,15 @@ fn artifact_tag_methods(_: &mut MethodsBuilder) {
     fn tag_inputs<'v>(
         this: &ArtifactTag,
         inner: Value<'v>,
-    ) -> starlark::Result<Either<TaggedValue<'v>, TaggedCommandLine<'v>>> {
-        let value = TaggedValue::inputs_only(inner, this.dupe());
+    ) -> starlark::Result<Either<StarlarkTaggedValue<'v>, StarlarkTaggedCommandLine<'v>>> {
+        let value = StarlarkTaggedValue::inputs_only(inner, this.dupe());
 
         Ok(
             if ValueAsCommandLineLike::unpack_value(inner)
                 .into_anyhow_result()?
                 .is_some()
             {
-                Either::Right(TaggedCommandLine::new(value))
+                Either::Right(StarlarkTaggedCommandLine::new(value))
             } else {
                 Either::Left(value)
             },

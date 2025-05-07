@@ -13,11 +13,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::sync::atomic;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
+use std::sync::atomic;
+use std::sync::atomic::AtomicUsize;
 use std::thread;
 use std::time::Duration;
 
@@ -68,7 +68,7 @@ struct JobArg<'a> {
     barrier_0: &'a Barrier,
 }
 
-impl<'a> JobArg<'a> {
+impl JobArg<'_> {
     /// Generate values unique to this job iteration among all threads.
     fn unique_values(&self, count: u32) -> impl Iterator<Item = u32> + '_ {
         (0..count).map(move |i| self.i + self.thread_i * count + i)

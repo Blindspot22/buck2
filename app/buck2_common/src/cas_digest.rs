@@ -13,9 +13,9 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::io::Read;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use allocative::Allocative;
 use chrono::DateTime;
@@ -135,6 +135,7 @@ pub enum DigestAlgorithmFamily {
 
 #[derive(buck2_error::Error, Debug)]
 #[error("Invalid Digest algorithm: `{0}`")]
+#[buck2(tag = Input)]
 pub struct InvalidDigestAlgorithmFamily(String);
 
 impl std::str::FromStr for DigestAlgorithmFamily {
@@ -344,6 +345,7 @@ impl CasDigestConfigInner {
 }
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Tier0)]
 pub enum CasDigestConfigError {
     #[error("At least one algorithm must be enabled")]
     NotConfigured,
@@ -673,6 +675,7 @@ pub struct TinyDigest<'a, Kind: CasDigestKind> {
 }
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = InvalidDigest)]
 pub enum CasDigestParseError {
     #[error("The digest is missing a size separator, it should look like `HASH:SIZE`")]
     MissingSizeSeparator,
@@ -725,7 +728,7 @@ impl<Kind: CasDigestKind> Borrow<CasDigest<Kind>> for TrackedCasDigest<Kind> {
     }
 }
 
-impl<'a, Kind: CasDigestKind> Borrow<CasDigest<Kind>> for &'a TrackedCasDigest<Kind> {
+impl<Kind: CasDigestKind> Borrow<CasDigest<Kind>> for &TrackedCasDigest<Kind> {
     fn borrow(&self) -> &CasDigest<Kind> {
         self.data()
     }
@@ -848,9 +851,20 @@ impl<Kind: CasDigestKind> TrackedCasDigest<Kind> {
         self.inner.data.size()
     }
 
-    pub fn expires(&self) -> DateTime<Utc> {
-        Utc.timestamp_opt(self.inner.expires.load(Ordering::Relaxed), 0)
-            .unwrap()
+    pub fn expires(&self) -> buck2_error::Result<DateTime<Utc>> {
+        match Utc.timestamp_opt(self.inner.expires.load(Ordering::Relaxed), 0) {
+            chrono::MappedLocalTime::Single(t) => Ok(t),
+            chrono::MappedLocalTime::None => Err(buck2_error::buck2_error!(
+                buck2_error::ErrorTag::Environment,
+                "CAS Digest expiration is an invalid local time"
+            )),
+            chrono::MappedLocalTime::Ambiguous(t1, t2) => Err(buck2_error::buck2_error!(
+                buck2_error::ErrorTag::Environment,
+                "Cas Digest expiration is ambiguous, ranging from {:?} to {:?}",
+                t1,
+                t2
+            )),
+        }
     }
 
     pub fn update_expires(&self, time: DateTime<Utc>) {

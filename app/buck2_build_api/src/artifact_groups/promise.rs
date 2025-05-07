@@ -21,6 +21,7 @@ use dupe::Dupe;
 use starlark::codemap::FileSpan;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 pub enum PromiseArtifactResolveError {
     #[error("Resolved promise of the artifact promise was not an artifact (was `{0}`)")]
     NotAnArtifact(String),
@@ -67,7 +68,16 @@ pub struct PromiseArtifact {
     pub id: Arc<PromiseArtifactId>,
 }
 
-#[derive(Clone, Debug, Dupe, Allocative, Hash, Eq, PartialEq)]
+#[derive(
+    Clone,
+    Debug,
+    Dupe,
+    Allocative,
+    Hash,
+    Eq,
+    PartialEq,
+    strong_hash::StrongHash
+)]
 pub struct PromiseArtifactId {
     owner: BaseDeferredKey,
     id: usize,
@@ -178,7 +188,7 @@ impl Eq for PromiseArtifact {}
 // When passing promise artifacts into anon targets, we will coerce them into this type.
 // During resolve, we look up the analysis of the target that produced the promise artifact,
 // assert short paths, and produce a new `StarlarkPromiseArtifact` with the `OnceLock` resolved.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Allocative)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Allocative, strong_hash::StrongHash)]
 pub struct PromiseArtifactAttr {
     pub id: PromiseArtifactId,
     pub short_path: Option<ForwardRelativePathBuf>,

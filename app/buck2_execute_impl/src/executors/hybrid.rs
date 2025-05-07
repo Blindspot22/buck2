@@ -7,9 +7,9 @@
  * of this source tree.
  */
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use buck2_common::liveliness_observer::CancelledLivelinessGuard;
@@ -34,10 +34,10 @@ use buck2_execute::execute::result::CommandExecutionStatus;
 use buck2_futures::cancellation::CancellationContext;
 use derivative::Derivative;
 use dupe::Dupe;
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::future::Either;
 use futures::future::Future;
-use futures::FutureExt;
 use host_sharing::HostSharingRequirements;
 use tokio::sync::MutexGuard;
 
@@ -255,7 +255,7 @@ where
                     // typically mean the other result asked for cancellation and we're about to
                     // receive the result here, or it could mean we're being asked to cancel by our
                     // caller.
-                    CommandExecutionStatus::Cancelled => true,
+                    CommandExecutionStatus::Cancelled { .. } => true,
                     // If the execution is successful, use the result.
                     CommandExecutionStatus::Success { .. } => false,
                     // Retry commands that failed (i.e. exit 1) only if we're instructed to do so.
@@ -369,7 +369,7 @@ where
             // But if the first result was a cancelled result then we definitely don't want that.
             if matches!(
                 &primary_res.report.status,
-                CommandExecutionStatus::Cancelled
+                CommandExecutionStatus::Cancelled { .. }
             ) {
                 std::mem::swap(&mut primary_res, &mut secondary_res);
             }
@@ -600,7 +600,7 @@ impl FallbackTracker {
         };
 
         #[cfg(not(all(fbcode_build, target_os = "linux")))]
-        let max = None;
+        let max = None::<i64>;
 
         if let Some(max) = max {
             if retried >= max {

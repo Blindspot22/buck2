@@ -17,13 +17,13 @@ use std::hash::Hasher;
 use std::sync::Arc;
 
 use allocative::Allocative;
-use buck2_data::action_key_owner::BaseDeferredKeyProto;
 use buck2_data::ToProtoMessage;
+use buck2_data::action_key_owner::BaseDeferredKeyProto;
 use cmp_any::PartialEqAny;
 use dupe::Dupe;
 use static_assertions::assert_eq_size;
+use strong_hash::StrongHash;
 
-use crate::execution_types::execution::ExecutionPlatformResolution;
 use crate::fs::paths::forward_rel_path::ForwardRelativePath;
 use crate::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use crate::fs::project_rel_path::ProjectRelativePath;
@@ -35,6 +35,7 @@ use crate::target::name::EQ_SIGN_SUBST;
 pub trait BaseDeferredKeyDyn: Debug + Display + Any + Allocative + Send + Sync + 'static {
     fn eq_token(&self) -> PartialEqAny;
     fn hash(&self) -> u64;
+    fn strong_hash(&self) -> u64;
     fn make_hashed_path(
         &self,
         base: &ProjectRelativePath,
@@ -46,7 +47,6 @@ pub trait BaseDeferredKeyDyn: Debug + Display + Any + Allocative + Send + Sync +
     fn configured_label(&self) -> Option<ConfiguredTargetLabel>;
     fn to_proto(&self) -> BaseDeferredKeyProto;
     fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
-    fn execution_platform_resolution(&self) -> &ExecutionPlatformResolution;
     /// bxl anon target or bxl dynamic action node or bxl itself will return cfg else None
     fn global_cfg_options(&self) -> Option<GlobalCfgOptions>;
 }
@@ -97,6 +97,17 @@ impl Hash for BaseDeferredKey {
     }
 }
 
+impl StrongHash for BaseDeferredKey {
+    fn strong_hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            BaseDeferredKey::TargetLabel(a) => a.strong_hash(state),
+            BaseDeferredKey::AnonTarget(d) | BaseDeferredKey::BxlLabel(BaseDeferredKeyBxl(d)) => {
+                d.strong_hash().strong_hash(state)
+            }
+        }
+    }
+}
+
 impl BaseDeferredKey {
     pub fn unpack_target_label(&self) -> Option<&ConfiguredTargetLabel> {
         match self {
@@ -121,7 +132,7 @@ impl BaseDeferredKey {
         action_key: Option<&str>,
         path: &ForwardRelativePath,
         fully_hash_path: bool,
-    ) -> ProjectRelativePathBuf {
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         match self {
             BaseDeferredKey::TargetLabel(target) => {
                 let cell_relative_path = target.pkg().cell_relative_path().as_str();
@@ -177,10 +188,10 @@ impl BaseDeferredKey {
                     path.as_str(),
                 ];
 
-                ProjectRelativePathBuf::unchecked_new(hashed_path.concat())
+                Ok(ProjectRelativePathBuf::unchecked_new(hashed_path.concat()))
             }
             BaseDeferredKey::AnonTarget(d) | BaseDeferredKey::BxlLabel(BaseDeferredKeyBxl(d)) => {
-                d.make_hashed_path(base, prefix, action_key, path)
+                Ok(d.make_hashed_path(base, prefix, action_key, path))
             }
         }
     }

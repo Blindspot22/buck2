@@ -7,6 +7,7 @@
  * of this source tree.
  */
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -53,7 +54,7 @@ use buck2_execute::materialize::materializer::HasMaterializer;
 use buck2_execute::materialize::materializer::Materializer;
 use buck2_execute::output_size::OutputCountAndBytes;
 use buck2_execute::output_size::OutputSize;
-use buck2_execute::re::manager::ManagedRemoteExecutionClient;
+use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
 use buck2_file_watcher::mergebase::GetMergebase;
 use buck2_file_watcher::mergebase::Mergebase;
 use buck2_futures::cancellation::CancellationContext;
@@ -62,11 +63,13 @@ use derivative::Derivative;
 use derive_more::Display;
 use dice::DiceComputations;
 use dupe::Dupe;
-use indexmap::indexmap;
 use indexmap::IndexMap;
+use indexmap::indexmap;
 use itertools::Itertools;
 use remote_execution::TActionResult2;
 
+use crate::actions::ActionExecutionCtx;
+use crate::actions::RegisteredAction;
 use crate::actions::artifact::get_artifact_fs::GetArtifactFs;
 use crate::actions::execute::action_execution_target::ActionExecutionTarget;
 use crate::actions::execute::dice_data::CommandExecutorResponse;
@@ -76,9 +79,6 @@ use crate::actions::execute::dice_data::GetReClient;
 use crate::actions::execute::error::ExecuteError;
 use crate::actions::impls::run_action_knobs::HasRunActionKnobs;
 use crate::actions::impls::run_action_knobs::RunActionKnobs;
-use crate::actions::ActionExecutable;
-use crate::actions::ActionExecutionCtx;
-use crate::actions::RegisteredAction;
 use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::ArtifactGroupValues;
 
@@ -241,7 +241,8 @@ impl HasActionExecutor for DiceComputations<'_> {
         let CommandExecutorResponse {
             executor,
             platform,
-            cache_checker,
+            action_cache_checker,
+            remote_dep_file_cache_checker,
             cache_uploader,
         } = self.get_command_executor_from_dice(executor_config).await?;
         let blocking_executor = self.get_blocking_executor();
@@ -257,7 +258,8 @@ impl HasActionExecutor for DiceComputations<'_> {
         Ok(Arc::new(BuckActionExecutor::new(
             CommandExecutor::new(
                 executor,
-                cache_checker,
+                action_cache_checker,
+                remote_dep_file_cache_checker,
                 cache_uploader,
                 artifact_fs,
                 executor_config.options,
@@ -282,7 +284,7 @@ pub struct BuckActionExecutor {
     blocking_executor: Arc<dyn BlockingExecutor>,
     materializer: Arc<dyn Materializer>,
     events: EventDispatcher,
-    re_client: ManagedRemoteExecutionClient,
+    re_client: UnconfiguredRemoteExecutionClient,
     digest_config: DigestConfig,
     run_action_knobs: RunActionKnobs,
     io_provider: Arc<dyn IoProvider>,
@@ -297,7 +299,7 @@ impl BuckActionExecutor {
         blocking_executor: Arc<dyn BlockingExecutor>,
         materializer: Arc<dyn Materializer>,
         events: EventDispatcher,
-        re_client: ManagedRemoteExecutionClient,
+        re_client: UnconfiguredRemoteExecutionClient,
         digest_config: DigestConfig,
         run_action_knobs: RunActionKnobs,
         io_provider: Arc<dyn IoProvider>,
@@ -368,7 +370,7 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         self.executor.blocking_executor.as_ref()
     }
 
-    fn re_client(&self) -> ManagedRemoteExecutionClient {
+    fn re_client(&self) -> UnconfiguredRemoteExecutionClient {
         self.executor.re_client.dupe()
     }
 
@@ -411,6 +413,28 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         self.executor
             .command_executor
             .action_cache(
+                manager,
+                &PreparedCommand {
+                    target: &action as _,
+                    request,
+                    prepared_action,
+                    digest_config: self.digest_config(),
+                },
+                self.cancellations,
+            )
+            .await
+    }
+
+    async fn remote_dep_file_cache(
+        &mut self,
+        manager: CommandExecutionManager,
+        request: &CommandExecutionRequest,
+        prepared_action: &PreparedAction,
+    ) -> ControlFlow<CommandExecutionResult, CommandExecutionManager> {
+        let action = self.target();
+        self.executor
+            .command_executor
+            .remote_dep_file_cache(
                 manager,
                 &PreparedCommand {
                     target: &action as _,
@@ -536,7 +560,7 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
             .outputs
             .iter()
             .map(|o| self.fs().resolve_build(o.get_path()))
-            .collect::<Vec<_>>();
+            .collect::<buck2_error::Result<Vec<_>>>()?;
 
         // Invalidate all the output paths this action might provide. Note that this is a bit
         // approximative: we might have previous instances of this action that declared
@@ -596,16 +620,7 @@ impl BuckActionExecutor {
                 cancellations,
             };
 
-            let (result, metadata) = match action.as_executable() {
-                ActionExecutable::Pristine(exe) => {
-                    ctx.cleanup_outputs().await?;
-                    exe.execute(&mut ctx).await?
-                }
-                ActionExecutable::Incremental(exe) => {
-                    // Let the action perform clean up in this case.
-                    exe.execute(&mut ctx).await?
-                }
-            };
+            let (result, metadata) = action.execute(&mut ctx).await?;
 
             // Check that all the outputs are the right output_type
             for x in outputs.iter() {
@@ -620,7 +635,7 @@ impl BuckActionExecutor {
                         };
                         if real != declared {
                             return Err(ExecuteError::WrongOutputType {
-                                path: self.command_executor.fs().resolve_build(x.get_path()),
+                                path: self.command_executor.fs().resolve_build(x.get_path())?,
                                 declared,
                                 real,
                             });
@@ -629,18 +644,35 @@ impl BuckActionExecutor {
                 }
             }
 
-            // Check all the outputs were returned, and no additional outputs
+            fn check_all_requested_outputs_returned_without_extra<'a>(
+                outputs: &[BuildArtifact],
+                result_outputs: impl IntoIterator<Item = &'a BuildArtifactPath>,
+            ) -> bool {
+                // Ignore ordering as outputs in original action might be ordered differently from
+                // output paths in action result (they are sorted there).
+                let result_output_paths: HashSet<&BuildArtifactPath> =
+                    result_outputs.into_iter().collect();
+                let mut outputs_count = 0;
+                for output in outputs.iter() {
+                    outputs_count += 1;
+                    let output_path = output.get_path();
+                    if !result_output_paths.contains(output_path) {
+                        return false;
+                    }
+                }
+                outputs_count == result_output_paths.len()
+            }
+
             // TODO (T122966509): Check projections here as well
-            if !outputs
-                .iter()
-                .map(|b| b.get_path())
-                .eq(result.0.outputs.keys())
-            {
+            if !check_all_requested_outputs_returned_without_extra(
+                &outputs,
+                result.0.outputs.keys(),
+            ) {
                 let declared = outputs
                     .iter()
                     .filter(|x| !result.0.outputs.contains_key(x.get_path()))
                     .map(|x| self.command_executor.fs().resolve_build(x.get_path()))
-                    .collect();
+                    .collect::<buck2_error::Result<_>>()?;
                 let real = result
                     .0
                     .outputs
@@ -650,7 +682,7 @@ impl BuckActionExecutor {
                         !outputs.iter().map(|b| b.get_path()).contains(x)
                     })
                     .map(|x| self.command_executor.fs().resolve_build(x))
-                    .collect::<Vec<_>>();
+                    .collect::<buck2_error::Result<Vec<_>>>()?;
                 if real.is_empty() {
                     Err(ExecuteError::MissingOutputs { declared })
                 } else {
@@ -673,25 +705,25 @@ impl BuckActionExecutor {
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
 
     use allocative::Allocative;
     use async_trait::async_trait;
     use buck2_artifact::actions::key::ActionIndex;
     use buck2_artifact::actions::key::ActionKey;
-    use buck2_artifact::artifact::artifact_type::testing::BuildArtifactTestingExt;
     use buck2_artifact::artifact::artifact_type::Artifact;
+    use buck2_artifact::artifact::artifact_type::testing::BuildArtifactTestingExt;
     use buck2_artifact::artifact::build_artifact::BuildArtifact;
     use buck2_artifact::artifact::source_artifact::SourceArtifact;
     use buck2_common::cas_digest::CasDigestConfig;
     use buck2_common::io::fs::FsIoProvider;
     use buck2_core::category::CategoryRef;
+    use buck2_core::cells::CellResolver;
     use buck2_core::cells::cell_root_path::CellRootPathBuf;
     use buck2_core::cells::name::CellName;
-    use buck2_core::cells::CellResolver;
     use buck2_core::configuration::data::ConfigurationData;
     use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
     use buck2_core::deferred::key::DeferredHolderKey;
@@ -706,8 +738,8 @@ mod tests {
     use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
     use buck2_core::package::source_path::SourcePath;
     use buck2_core::target::label::label::TargetLabel;
-    use buck2_events::dispatch::with_dispatcher_async;
     use buck2_events::dispatch::EventDispatcher;
+    use buck2_events::dispatch::with_dispatcher_async;
     use buck2_execute::artifact_value::ArtifactValue;
     use buck2_execute::digest_config::DigestConfig;
     use buck2_execute::execute::blocking::testing::DummyBlockingExecutor;
@@ -723,24 +755,22 @@ mod tests {
     use buck2_execute::execute::request::OutputType;
     use buck2_execute::execute::testing_dry_run::DryRunExecutor;
     use buck2_execute::materialize::nodisk::NoDiskMaterializer;
-    use buck2_execute::re::manager::ManagedRemoteExecutionClient;
+    use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
     use buck2_futures::cancellation::CancellationContext;
     use buck2_http::HttpClientBuilder;
     use dupe::Dupe;
     use indexmap::indexset;
     use sorted_vector_map::SortedVectorMap;
 
+    use crate::actions::Action;
+    use crate::actions::ActionExecutionCtx;
+    use crate::actions::ExecuteError;
+    use crate::actions::RegisteredAction;
     use crate::actions::box_slice_set::BoxSliceSet;
     use crate::actions::execute::action_executor::ActionExecutionKind;
     use crate::actions::execute::action_executor::ActionExecutionMetadata;
     use crate::actions::execute::action_executor::ActionOutputs;
     use crate::actions::execute::action_executor::BuckActionExecutor;
-    use crate::actions::Action;
-    use crate::actions::ActionExecutable;
-    use crate::actions::ActionExecutionCtx;
-    use crate::actions::ExecuteError;
-    use crate::actions::PristineActionExecutable;
-    use crate::actions::RegisteredAction;
     use crate::artifact_groups::ArtifactGroup;
     use crate::artifact_groups::ArtifactGroupValues;
 
@@ -768,11 +798,13 @@ mod tests {
             CommandExecutor::new(
                 Arc::new(DryRunExecutor::new(tracker, artifact_fs.clone())),
                 Arc::new(NoOpCommandOptionalExecutor {}),
+                Arc::new(NoOpCommandOptionalExecutor {}),
                 Arc::new(NoOpCacheUploader {}),
                 artifact_fs,
                 CommandGenerationOptions {
                     path_separator: PathSeparatorKind::Unix,
                     output_paths_behavior: Default::default(),
+                    use_bazel_protocol_remote_persistent_workers: false,
                 },
                 Default::default(),
             ),
@@ -781,7 +813,7 @@ mod tests {
             }),
             Arc::new(NoDiskMaterializer),
             EventDispatcher::null(),
-            ManagedRemoteExecutionClient::testing_new_dummy(),
+            UnconfiguredRemoteExecutionClient::testing_new_dummy(),
             DigestConfig::testing_default(),
             Default::default(),
             Arc::new(FsIoProvider::new(
@@ -821,10 +853,6 @@ mod tests {
                 &self.outputs.as_slice()[0]
             }
 
-            fn as_executable(&self) -> ActionExecutable<'_> {
-                ActionExecutable::Pristine(self)
-            }
-
             fn category(&self) -> CategoryRef {
                 CategoryRef::new("testing").unwrap()
             }
@@ -832,10 +860,7 @@ mod tests {
             fn identifier(&self) -> Option<&str> {
                 None
             }
-        }
 
-        #[async_trait]
-        impl PristineActionExecutable for TestingAction {
             async fn execute(
                 &self,
                 ctx: &mut dyn ActionExecutionCtx,
@@ -878,7 +903,7 @@ mod tests {
                 // Must write out the things we promised to do
                 for x in &self.outputs {
                     let dest = x.get_path();
-                    let dest_path = ctx.fs().resolve_build(dest);
+                    let dest_path = ctx.fs().resolve_build(dest)?;
                     ctx.fs().fs().write_file(&dest_path, "", false)?
                 }
 

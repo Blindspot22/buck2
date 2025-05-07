@@ -10,13 +10,12 @@
 use std::cell::OnceCell;
 
 use allocative::Allocative;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use gazebo::prelude::OptionExt;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::FrozenModule;
 use starlark::environment::Module;
-use starlark::values::any_complex::StarlarkAnyComplex;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::FreezeResult;
@@ -26,6 +25,7 @@ use starlark::values::OwnedFrozenValueTyped;
 use starlark::values::Trace;
 use starlark::values::ValueLike;
 use starlark::values::ValueTyped;
+use starlark::values::any_complex::StarlarkAnyComplex;
 
 use crate::analysis::registry::AnalysisValueStorage;
 use crate::analysis::registry::FrozenAnalysisValueStorage;
@@ -79,11 +79,13 @@ impl<'v> AnalysisExtraValue<'v> {
         if let Some(extra) = Self::get(module)? {
             return Ok(extra);
         }
-        module.set_extra_value_no_overwrite(
-            module
-                .heap()
-                .alloc(StarlarkAnyComplex::new(AnalysisExtraValue::default())),
-        )?;
+        module
+            .set_extra_value_no_overwrite(
+                module
+                    .heap()
+                    .alloc(StarlarkAnyComplex::new(AnalysisExtraValue::default())),
+            )
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
         Self::get(module)?.internal_error("extra_value must be set")
     }
 }
@@ -93,10 +95,9 @@ impl FrozenAnalysisExtraValue {
         module: &FrozenModule,
     ) -> buck2_error::Result<OwnedFrozenValueTyped<StarlarkAnyComplex<FrozenAnalysisExtraValue>>>
     {
-        module
+        Ok(module
             .owned_extra_value()
             .internal_error("extra_value not set")?
-            .downcast_starlark()
-            .map_err(from_starlark)
+            .downcast_starlark()?)
     }
 }

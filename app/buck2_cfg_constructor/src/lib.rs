@@ -25,14 +25,14 @@ use buck2_common::dice::cells::HasCellResolver;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::unsafe_send_future::UnsafeSendFuture;
-use buck2_error::starlark_error::from_starlark;
 use buck2_events::dispatch::get_dispatcher;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_interpreter::dice::starlark_provider::with_starlark_eval_provider;
 use buck2_interpreter::print_handler::EventDispatcherPrintHandler;
 use buck2_interpreter::soft_error::Buck2StarlarkSoftErrorHandler;
 use buck2_interpreter::starlark_profiler::profiler::StarlarkProfilerOpt;
-use buck2_node::cfg_constructor::CfgConstructorImpl;
 use buck2_node::cfg_constructor::CFG_CONSTRUCTOR_CALCULATION_IMPL;
+use buck2_node::cfg_constructor::CfgConstructorImpl;
 use buck2_node::metadata::key::MetadataKey;
 use buck2_node::metadata::key::MetadataKeyRef;
 use buck2_node::metadata::value::MetadataValue;
@@ -45,15 +45,16 @@ use futures::FutureExt;
 use starlark::collections::SmallMap;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::values::list_or_tuple::UnpackListOrTuple;
-use starlark::values::none::NoneOr;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
+use starlark::values::list_or_tuple::UnpackListOrTuple;
+use starlark::values::none::NoneOr;
 
 use crate::registration::init_registration;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum CfgConstructorError {
     #[error(
         "Parameter `refs` to post-constraint analysis function must only contain configuration rules. {0} is not a configuration rule."
@@ -87,7 +88,7 @@ async fn eval_pre_constraint_analysis<'v>(
         ctx,
         // TODO: pass proper profiler (T163570348)
         &mut StarlarkProfilerOpt::disabled(),
-        "pre constraint-analysis invocation".to_owned(),
+        &StarlarkEvalKind::Unknown("pre constraint-analysis invocation".into()),
         |provider, _| {
             let (mut eval, _) = provider.make(module)?;
             eval.set_print_handler(print);
@@ -131,14 +132,12 @@ async fn eval_pre_constraint_analysis<'v>(
             ];
 
             // Type check + unpack
-            let (refs, params) = <(UnpackListOrTuple<String>, Value)>::unpack_value_err(
-                eval.eval_function(
+            let (refs, params) =
+                <(UnpackListOrTuple<String>, Value)>::unpack_value_err(eval.eval_function(
                     cfg_constructor_pre_constraint_analysis,
                     &[],
                     &pre_constraint_analysis_args,
-                )
-                .map_err(from_starlark)?,
-            )?;
+                )?)?;
 
             // `params` Value lives on eval.heap() so we need to move eval out of the closure to keep it alive
             Ok((refs.items, params, eval))
@@ -198,7 +197,7 @@ async fn eval_post_constraint_analysis<'v>(
         ctx,
         // TODO: pass proper profiler (T163570348)
         &mut StarlarkProfilerOpt::disabled(),
-        "post constraint-analysis invocation for cfg".to_owned(),
+        &StarlarkEvalKind::Unknown("post constraint-analysis invocation for cfg".into()),
         |_, _| -> buck2_error::Result<ConfigurationData> {
             let post_constraint_analysis_args = vec![
                 (
@@ -215,13 +214,11 @@ async fn eval_post_constraint_analysis<'v>(
                 ("params", params),
             ];
 
-            let post_constraint_analysis_result = eval
-                .eval_function(
-                    cfg_constructor_post_constraint_analysis,
-                    &[],
-                    &post_constraint_analysis_args,
-                )
-                .map_err(from_starlark)?;
+            let post_constraint_analysis_result = eval.eval_function(
+                cfg_constructor_post_constraint_analysis,
+                &[],
+                &post_constraint_analysis_args,
+            )?;
 
             // Type check + unpack
             <&PlatformInfo>::unpack_value_err(post_constraint_analysis_result)?.to_configuration()

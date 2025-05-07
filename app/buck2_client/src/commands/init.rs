@@ -11,8 +11,8 @@ use std::io::ErrorKind;
 use std::io::Write;
 
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::exit_result::ExitCode;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::final_console::FinalConsole;
@@ -21,8 +21,8 @@ use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
 use buck2_core::fs::fs_util;
 use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use buck2_util::process::background_command;
 
 /// Initializes a buck2 project at the provided path.
@@ -82,7 +82,7 @@ fn exec_impl(
 
     if absolute.is_file() {
         return Err(buck2_error!(
-            [],
+            buck2_error::ErrorTag::Input,
             "Target path {} cannot be an existing file",
             absolute.display()
         ));
@@ -112,7 +112,7 @@ fn exec_impl(
 
         if let (Some(true), false) = (changes, cmd.allow_dirty) {
             return Err(buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "Refusing to initialize in a dirty repo. Stash your changes or use `--allow-dirty` to override."
             ));
         }
@@ -230,7 +230,10 @@ fn set_up_project(repo_root: &AbsPath, git: bool, prelude: bool) -> buck2_error:
             .status()?
             .success()
         {
-            return Err(buck2_error!([], "Failure when running `git init`."));
+            return Err(buck2_error!(
+                buck2_error::ErrorTag::Tier0,
+                "Failure when running `git init`."
+            ));
         };
         set_up_gitignore(repo_root)?;
     }

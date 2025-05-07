@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
 use buck2_analysis::attrs::resolve::ctx::AnalysisQueryResult;
 use buck2_analysis::attrs::resolve::ctx::AttrResolutionContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::value::FrozenCommandLineArg;
@@ -21,6 +20,7 @@ use buck2_build_api::interpreter::rule_defs::provider::registration::register_bu
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
+use buck2_error::BuckErrorContext;
 use buck2_interpreter::types::provider::callable::ValueAsProviderCallableLike;
 use buck2_interpreter_for_build::attrs::coerce;
 use buck2_interpreter_for_build::attrs::coerce::testing;
@@ -33,20 +33,20 @@ use starlark::environment::FrozenModule;
 use starlark::environment::Globals;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Module;
-use starlark::values::dict::FrozenDictRef;
 use starlark::values::FrozenValueTyped;
+use starlark::values::dict::FrozenDictRef;
 use starlark_map::small_map::SmallMap;
 use starlark_map::smallmap;
 
 use crate::interpreter::rule_defs::artifact::testing::artifactory;
 
-pub(crate) fn resolution_ctx<'v>(module: &'v Module) -> impl AttrResolutionContext<'v> {
+pub(crate) fn resolution_ctx(module: &Module) -> impl AttrResolutionContext<'_> {
     resolution_ctx_with_providers(module).0
 }
 
-pub(crate) fn resolution_ctx_with_providers<'v>(
-    module: &'v Module,
-) -> (impl AttrResolutionContext<'v>, ProviderIdSet) {
+pub(crate) fn resolution_ctx_with_providers(
+    module: &Module,
+) -> (impl AttrResolutionContext<'_>, ProviderIdSet) {
     struct Ctx<'v> {
         module: &'v Module,
         // This module needs to be kept alive in order for the FrozenValues to stick around
@@ -54,7 +54,7 @@ pub(crate) fn resolution_ctx_with_providers<'v>(
         deps: SmallMap<ConfiguredProvidersLabel, FrozenProviderCollectionValue>,
     }
 
-    impl<'v> Ctx<'v> {
+    impl Ctx<'_> {
         fn eval(env: &Module, globals: &Globals) {
             testing::to_value(
                 env,
@@ -222,7 +222,7 @@ pub(crate) fn resolution_ctx_with_providers<'v>(
                 .deps
                 .get(target)
                 .duped()
-                .context("missing dep")?
+                .buck_error_context("missing dep")?
                 .add_heap_ref(self.module.frozen_heap()))
         }
 

@@ -10,10 +10,10 @@
 use buck2_interpreter::types::cell_path::StarlarkCellPath;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
-use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
+use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 
 impl CommandLineArgLike for StarlarkCellPath {
     fn register_me(&self) {
@@ -25,8 +25,7 @@ impl CommandLineArgLike for StarlarkCellPath {
         cli: &mut dyn CommandLineBuilder,
         ctx: &mut dyn CommandLineContext,
     ) -> buck2_error::Result<()> {
-        let path = ctx.resolve_cell_path(self.0.as_ref())?.into_string();
-        cli.push_arg(path);
+        cli.push_location(ctx.resolve_cell_path(self.0.as_ref())?);
         Ok(())
     }
 

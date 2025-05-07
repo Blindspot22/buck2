@@ -14,24 +14,29 @@ use std::time::Instant;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_build_api::analysis::calculation::RuleAnalsysisCalculationImpl;
-use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
+use buck2_build_api::analysis::AnalysisResult;
 use buck2_build_api::analysis::calculation::EVAL_ANALYSIS_QUERY;
 use buck2_build_api::analysis::calculation::RULE_ANALYSIS_CALCULATION;
-use buck2_build_api::analysis::AnalysisResult;
+use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
+use buck2_build_api::analysis::calculation::RuleAnalysisCalculationImpl;
+use buck2_build_api::build::detailed_aggregated_metrics::dice::HasDetailedAggregatedMetrics;
+use buck2_build_api::deferred::calculation::DeferredHolder;
 use buck2_build_api::keep_going::KeepGoing;
 use buck2_core::configuration::compatibility::MaybeCompatible;
+use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
+use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
-use buck2_data::error::ErrorTag;
 use buck2_data::ToProtoMessage;
-use buck2_error::internal_error;
+use buck2_data::error::ErrorTag;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::dispatch::async_record_root_spans;
 use buck2_events::dispatch::record_root_spans;
 use buck2_events::dispatch::span_async;
 use buck2_events::dispatch::span_async_simple;
 use buck2_events::span::SpanId;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_interpreter::file_loader::LoadedModule;
 use buck2_interpreter::load_module::InterpreterCalculation;
 use buck2_interpreter::paths::module::StarlarkModulePath;
@@ -55,9 +60,9 @@ use dupe::IterDupedExt;
 use futures::FutureExt;
 use smallvec::SmallVec;
 
+use crate::analysis::env::RuleSpec;
 use crate::analysis::env::get_user_defined_rule_spec;
 use crate::analysis::env::run_analysis;
-use crate::analysis::env::RuleSpec;
 use crate::attrs::resolve::ctx::AnalysisQueryResult;
 
 struct RuleAnalysisCalculationInstance;
@@ -87,9 +92,15 @@ impl Key for AnalysisKey {
         ctx: &mut DiceComputations,
         _cancellation: &CancellationContext,
     ) -> Self::Value {
-        Ok(get_analysis_result(ctx, &self.0)
+        let deferred_key = DeferredHolderKey::Base(BaseDeferredKey::TargetLabel(self.0.dupe()));
+        ctx.analysis_started(&deferred_key)?;
+        let res = get_analysis_result(ctx, &self.0)
             .await
-            .with_buck_error_context(|| format!("Error running analysis for `{}`", &self.0))?)
+            .with_buck_error_context(|| format!("Error running analysis for `{}`", &self.0))?;
+        if let MaybeCompatible::Compatible(v) = &res {
+            ctx.analysis_complete(&deferred_key, &DeferredHolder::Analysis(v.dupe()))?;
+        }
+        Ok(res)
     }
 
     fn equality(_: &Self::Value, _: &Self::Value) -> bool {
@@ -100,15 +111,13 @@ impl Key for AnalysisKey {
 }
 
 #[async_trait]
-impl RuleAnalsysisCalculationImpl for RuleAnalysisCalculationInstance {
+impl RuleAnalysisCalculationImpl for RuleAnalysisCalculationInstance {
     async fn get_analysis_result(
         &self,
         ctx: &mut DiceComputations<'_>,
         target: &ConfiguredTargetLabel,
     ) -> buck2_error::Result<MaybeCompatible<AnalysisResult>> {
-        ctx.compute(&AnalysisKey(target.dupe()))
-            .await?
-            .map_err(buck2_error::Error::from)
+        ctx.compute(&AnalysisKey(target.dupe())).await?
     }
 }
 
@@ -150,11 +159,12 @@ async fn resolve_queries_impl(
                 async move {
                     let mut resolved_literals =
                         HashMap::with_capacity(resolved_literals_labels.0.len());
-                    for (literal, label) in resolved_literals_labels.0 {
+                    for ((offset, len), label) in resolved_literals_labels.0 {
+                        let literal = &query[offset..offset + len];
                         let node = deps.get(label.target()).with_internal_error(|| {
                             format!("Literal `{literal}` not found in `deps`")
                         })?;
-                        resolved_literals.insert(literal, node.dupe());
+                        resolved_literals.insert(literal.to_owned(), node.dupe());
                     }
 
                     let result =
@@ -208,7 +218,7 @@ pub async fn get_dep_analysis<'v>(
     .await
 }
 
-pub async fn get_loaded_module<'v>(
+pub async fn get_loaded_module(
     ctx: &mut DiceComputations<'_>,
     func: &StarlarkRuleType,
 ) -> buck2_error::Result<LoadedModule> {
@@ -259,14 +269,10 @@ async fn get_analysis_result_inner(
     let ((res, now), spans): ((buck2_error::Result<_>, Instant), _) =
         match configured_node.rule_type() {
             RuleType::Starlark(func) => {
-                let (dep_analysis, query_results, profile_mode) = ctx
-                    .try_compute3(
+                let (dep_analysis, query_results) = ctx
+                    .try_compute2(
                         |ctx| get_dep_analysis(configured_node, ctx).boxed(),
                         |ctx| resolve_queries(ctx, configured_node).boxed(),
-                        |ctx| {
-                            ctx.get_profile_mode_for_analysis(configured_node.label())
-                                .boxed()
-                        },
                     )
                     .await?;
 
@@ -298,7 +304,6 @@ async fn get_analysis_result_inner(
                                     configured_node.execution_platform_resolution(),
                                     &rule_spec,
                                     configured_node,
-                                    &profile_mode,
                                 ),
                                 buck2_data::AnalysisStageEnd {},
                             )
@@ -391,7 +396,9 @@ pub async fn profile_analysis(
 ) -> buck2_error::Result<StarlarkProfileDataAndStats> {
     // Self check.
     for target in targets {
-        let profile_mode = ctx.get_profile_mode_for_analysis(target).await?;
+        let profile_mode = ctx
+            .get_starlark_profiler_mode(&StarlarkEvalKind::Analysis(target.dupe()))
+            .await?;
         if !matches!(profile_mode, StarlarkProfileMode::Profile(_)) {
             return Err(internal_error!("recursive analysis configured incorrectly"));
         }

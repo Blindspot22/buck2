@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use allocative::Allocative;
+use buck2_common::directory_metadata::DirectoryMetadata;
 use buck2_common::external_symlink::ExternalSymlink;
 use buck2_common::file_ops::FileDigest;
 use buck2_common::file_ops::FileMetadata;
@@ -26,6 +27,7 @@ use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::directory::ActionDirectoryMember;
 use buck2_execute::directory::Symlink;
@@ -42,8 +44,7 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
-use crate::materializers::deferred::ArtifactMetadata;
-use crate::materializers::deferred::DirectoryMetadata;
+use crate::materializers::deferred::artifact_tree::ArtifactMetadata;
 
 #[derive(Display, Allocative, Clone, From, PartialEq, Eq, Debug)]
 pub struct MaterializerStateIdentity(String);
@@ -61,6 +62,7 @@ const IDENTITY_KEY: &str = "timestamp_on_initialization";
 pub type MaterializerState = Vec<(ProjectRelativePathBuf, (ArtifactMetadata, DateTime<Utc>))>;
 
 #[derive(buck2_error::Error, Debug, PartialEq, Eq)]
+#[buck2(tag = Tier0)]
 pub(crate) enum ArtifactMetadataSqliteConversionError {
     #[error("Internal error: expected field `{}` to be not null for artifact type '{}'", .field, .artifact_type)]
     ExpectedNotNull {
@@ -213,9 +215,12 @@ fn convert_artifact_metadata(
                 artifact_type: artifact_type.to_owned(),
             }
         })?;
-        let entry_hash_kind = entry_hash_kind.try_into().with_buck_error_context(|| {
-            format!("Invalid entry_hash_kind: `{}`", entry_hash_kind)
-        })?;
+        let entry_hash_kind = entry_hash_kind
+            .try_into()
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
+            .with_buck_error_context(|| {
+                format!("Invalid entry_hash_kind: `{}`", entry_hash_kind)
+            })?;
 
         let file_digest = FileDigest::from_digest_bytes(entry_hash_kind, &entry_hash, size)?;
         Ok(TrackedFileDigest::new(
@@ -475,6 +480,7 @@ impl MaterializerStateSqliteTable {
 }
 
 #[derive(buck2_error::Error, Debug, PartialEq, Eq)]
+#[buck2(tag = Input)]
 enum MaterializerStateSqliteDbError {
     #[error("Path {} does not exist", .0)]
     PathDoesNotExist(AbsNormPathBuf),
@@ -905,16 +911,15 @@ mod tests {
         assert_eq!(artifacts, state.into_iter().collect::<HashMap<_, _>>());
     }
 
-    // Only implementing for tests, actual code should use `matches_entry` (and not check total_size)
-    impl PartialEq for DirectoryMetadata {
-        fn eq(&self, other: &DirectoryMetadata) -> bool {
-            self.fingerprint == other.fingerprint && self.total_size == other.total_size
-        }
-    }
-
     impl PartialEq for ArtifactMetadata {
         fn eq(&self, other: &ArtifactMetadata) -> bool {
-            self.0 == other.0
+            match (&self.0, &other.0) {
+                (DirectoryEntry::Dir(d1), DirectoryEntry::Dir(d2)) => {
+                    d1.fingerprint == d2.fingerprint && d1.total_size == d2.total_size
+                }
+                (DirectoryEntry::Leaf(l1), DirectoryEntry::Leaf(l2)) => l1 == l2,
+                (_, _) => false,
+            }
         }
     }
 

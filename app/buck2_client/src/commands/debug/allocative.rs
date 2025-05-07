@@ -10,13 +10,14 @@
 use async_trait::async_trait;
 use buck2_cli_proto::AllocativeRequest;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::daemon::client::NoPartialResultHandler;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::path_arg::PathArg;
 use buck2_client_ctx::streaming::StreamingCommand;
@@ -35,7 +36,7 @@ pub struct AllocativeCommand {
     output: PathArg,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StreamingCommand for AllocativeCommand {
     const COMMAND_NAME: &'static str = "allocative";
 
@@ -48,6 +49,7 @@ impl StreamingCommand for AllocativeCommand {
         buckd: &mut BuckdClientConnector,
         _matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let context = ctx.empty_client_context("debug-allocative")?;
         buckd
@@ -57,6 +59,7 @@ impl StreamingCommand for AllocativeCommand {
                     context: Some(context),
                     output_path: self.output.resolve(&ctx.working_dir).into_string()?,
                 },
+                events_ctx,
                 ctx.console_interaction_stream(self.console_opts()),
                 &mut NoPartialResultHandler,
             )

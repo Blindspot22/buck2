@@ -14,9 +14,9 @@ use buck2_node::attrs::coercion_context::AttrCoercionContext;
 use buck2_node::attrs::configurable::AttrIsConfigurable;
 use starlark::values::Value;
 
+use crate::attrs::coerce::AttrTypeCoerce;
 use crate::attrs::coerce::attr_type::ty_maybe_select::TyMaybeSelect;
 use crate::attrs::coerce::coerced_attr::CoercedAttrExr;
-use crate::attrs::coerce::AttrTypeCoerce;
 
 pub mod any;
 pub mod arg;
@@ -37,6 +37,7 @@ pub mod source;
 pub mod split_transition_dep;
 mod string;
 mod target_modifiers;
+mod transition_dep;
 mod tuple;
 pub(crate) mod ty_maybe_select;
 mod visibility;
@@ -120,6 +121,7 @@ impl AttrTypeInnerExt for AttrTypeInner {
             Self::ConfiguredDep(x) => x.coerce_item(configurable, ctx, value),
             Self::PluginDep(x) => x.coerce_item(configurable, ctx, value),
             Self::Enum(x) => x.coerce_item(configurable, ctx, value),
+            Self::TransitionDep(x) => x.coerce_item(configurable, ctx, value),
             Self::SplitTransitionDep(x) => x.coerce_item(configurable, ctx, value),
             Self::Label(x) => x.coerce_item(configurable, ctx, value),
             Self::Visibility(x) => x.coerce_item(configurable, ctx, value),
@@ -150,6 +152,7 @@ impl AttrTypeInnerExt for AttrTypeInner {
             AttrTypeInner::PluginDep(x) => x.starlark_type(),
             AttrTypeInner::Source(x) => x.starlark_type(),
             AttrTypeInner::String(x) => x.starlark_type(),
+            AttrTypeInner::TransitionDep(x) => x.starlark_type(),
             AttrTypeInner::SplitTransitionDep(x) => x.starlark_type(),
             AttrTypeInner::Label(x) => x.starlark_type(),
             AttrTypeInner::Visibility(x) => x.starlark_type(),

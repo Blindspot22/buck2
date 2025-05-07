@@ -23,17 +23,17 @@ use buck2_common::file_ops::PathMetadata;
 use buck2_common::file_ops::PathMetadataOrRedirection;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_directory::directory::directory_data::DirectoryData;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest_config::HasDigestConfig;
-use buck2_execute::directory::extract_artifact_value;
-use buck2_execute::directory::insert_artifact;
 use buck2_execute::directory::ActionDirectoryBuilder;
 use buck2_execute::directory::ActionDirectoryEntry;
 use buck2_execute::directory::ActionDirectoryMember;
 use buck2_execute::directory::ActionSharedDirectory;
 use buck2_execute::directory::INTERNER;
+use buck2_execute::directory::extract_artifact_value;
+use buck2_execute::directory::insert_artifact;
 use buck2_futures::cancellation::CancellationContext;
 use derive_more::Display;
 use dice::DiceComputations;
@@ -173,6 +173,7 @@ fn ensure_source_artifact_staged<'a>(
 // These errors should be unreachable, they indicate misuse of the staged ensure artifact (or other buck
 // invariant violations), but it's still better to propagate them as Error than to panic!().
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 pub enum EnsureArtifactStagedError {
     #[error("Tried to unpack single artifact, but got transitive set")]
     UnpackSingleTransitiveSet,
@@ -386,7 +387,7 @@ impl Key for EnsureProjectedArtifactKey {
         let digest_config = ctx.global_data().get_digest_config();
 
         let base_path = match base {
-            BaseArtifactKind::Build(built) => artifact_fs.resolve_build(built.get_path()),
+            BaseArtifactKind::Build(built) => artifact_fs.resolve_build(built.get_path())?,
             BaseArtifactKind::Source(source) => artifact_fs.resolve_source(source.get_path())?,
         };
 
@@ -395,7 +396,7 @@ impl Key for EnsureProjectedArtifactKey {
 
         let value = extract_artifact_value(&builder, &base_path.join(path), digest_config)
             .with_buck_error_context(|| {
-                format!("The path `{path}` cannot be projected in the artifact `{base}`")
+                format!("The path `{path}` cannot be projected in the artifact `{base}`. Are you calling project() on a symlink?")
             })?
             .with_buck_error_context(|| {
                 format!("The path `{path}` does not exist in the artifact `{base}`")

@@ -15,11 +15,11 @@ use buck2_futures::drop::DropTogether;
 use buck2_futures::spawn::spawn_dropcancel;
 use dice::DiceTransaction;
 use dupe::Dupe;
+use futures::Stream;
+use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::future::FutureExt;
 use futures::stream::FuturesUnordered;
-use futures::Stream;
-use futures::StreamExt;
 use gazebo::prelude::*;
 use once_cell::sync::Lazy;
 use tokio::sync::Semaphore;
@@ -32,10 +32,10 @@ use crate::find_buildfile::find_buildfile;
 /// packages recursively contained in the paths (used for resolving patterns
 /// like `//module/...`). There's no guarantees about the order that results
 /// are returned, if ordering is important the caller needs to handle it.
-pub fn find_package_roots_stream<'a>(
-    ctx: &'a DiceTransaction,
+pub fn find_package_roots_stream(
+    ctx: &DiceTransaction,
     paths: Vec<CellPath>,
-) -> impl Stream<Item = buck2_error::Result<PackageLabel>> + 'a {
+) -> impl Stream<Item = buck2_error::Result<PackageLabel>> + '_ {
     // Ideally we wouldn't take a Transaction here, but if we pull things like the package_listing_resolver
     // out of the ctx, that resolver would have a lifetime bound to the ctx and then we couldn't
     // do a tokio::spawn. So, we need to only pull those things out within the spawned task.
@@ -163,7 +163,7 @@ pub(crate) async fn find_package_roots(
     let mut results = Vec::new();
     collect_package_roots(fs, vec![cell_path], |res| {
         results.push(res);
-        Result::<_, !>::Ok(())
+        buck2_error::Ok(())
     })
     .await?;
     let mut results: Vec<_> = results.into_try_map(|v| v)?;

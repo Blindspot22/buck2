@@ -16,27 +16,27 @@ use std::io::BufWriter;
 use std::io::Write;
 
 use async_trait::async_trait;
+use buck2_cli_proto::TargetsRequest;
+use buck2_cli_proto::TargetsResponse;
 use buck2_cli_proto::targets_request;
 use buck2_cli_proto::targets_request::Compression;
 use buck2_cli_proto::targets_request::TargetHashGraphType;
-use buck2_cli_proto::TargetsRequest;
-use buck2_cli_proto::TargetsResponse;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::pattern::parse_from_cli::parse_patterns_from_cli_args;
 use buck2_core::pattern::pattern_type::TargetPatternExtra;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::global_cfg_options::global_cfg_options_from_client_context;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
-use buck2_server_ctx::template::run_server_command;
 use buck2_server_ctx::template::ServerCommandTemplate;
+use buck2_server_ctx::template::run_server_command;
 use dice::DiceTransaction;
 use flate2::write::GzEncoder;
 use zstd::stream::write as zstd;
 
-use crate::commands::targets::default::targets_batch;
 use crate::commands::targets::default::TargetHashOptions;
+use crate::commands::targets::default::targets_batch;
 use crate::commands::targets::fmt::create_formatter;
 use crate::commands::targets::resolve_alias::targets_resolve_aliases;
 use crate::commands::targets::streaming::targets_streaming;
@@ -101,7 +101,7 @@ fn outputter<'a, W: Write + Send + 'a>(
         }
     };
 
-    let compression = Compression::from_i32(request.compression)
+    let compression = Compression::try_from(request.compression)
         .internal_error("buck cli should send valid compression type")?;
     let output = match compression {
         Compression::Uncompressed => output,
@@ -212,7 +212,7 @@ async fn targets_with_output(
         Some(targets_request::Targets::Other(other)) => {
             if other.streaming {
                 let formatter = create_formatter(request, other)?;
-                let hashing = match TargetHashGraphType::from_i32(other.target_hash_graph_type)
+                let hashing = match TargetHashGraphType::try_from(other.target_hash_graph_type)
                     .expect("buck cli should send valid target hash graph type")
                 {
                     TargetHashGraphType::None => None,
@@ -231,9 +231,9 @@ async fn targets_with_output(
                     hashing,
                     request.concurrency.as_ref().map(|x| x.concurrency as usize),
                 )
-                .await;
+                .await?;
                 Ok(TargetsResponse {
-                    error_count: res?.errors,
+                    error_count: res.errors,
                     serialized_targets_output: String::new(),
                 })
             } else {

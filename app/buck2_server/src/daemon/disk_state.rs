@@ -23,9 +23,9 @@ use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::materialize::materializer::MaterializationMethod;
 use buck2_execute_impl::materializers::deferred::DeferredMaterializerConfigs;
+use buck2_execute_impl::materializers::sqlite::DB_SCHEMA_VERSION;
 use buck2_execute_impl::materializers::sqlite::MaterializerState;
 use buck2_execute_impl::materializers::sqlite::MaterializerStateSqliteDb;
-use buck2_execute_impl::materializers::sqlite::DB_SCHEMA_VERSION;
 
 use crate::daemon::server::BuckdServerInitPreferences;
 
@@ -49,7 +49,7 @@ impl DiskStateOptions {
                 section: "buck2",
                 property: "sqlite_materializer_state",
             })?
-            .unwrap_or_else(RolloutPercentage::never)
+            .unwrap_or_else(RolloutPercentage::always)
             .roll();
         Ok(Self {
             sqlite_materializer_state,
@@ -71,7 +71,7 @@ pub(crate) async fn maybe_initialize_materializer_sqlite_db(
         // Otherwise, artifacts in buck-out will diverge from the state stored in db.
         io_executor
             .execute_io_inline(|| {
-                fs_util::remove_all(&paths.materializer_state_path())
+                fs_util::remove_all(paths.materializer_state_path())
                     .map_err(buck2_error::Error::from)
             })
             .await?;
@@ -112,13 +112,10 @@ pub(crate) async fn maybe_initialize_materializer_sqlite_db(
     )
     .await?;
 
-    let materializer_state = match load_result {
-        Ok(s) => Some(s),
-        // We know path not found or version mismatch is normal, but some sqlite failures
-        // are worth logging here. TODO(scottcao): Refine our error types and figure out what
-        // errors to log
-        Err(_e) => None,
-    };
+    // We know path not found or version mismatch is normal, but some sqlite failures
+    // are worth logging here. TODO(scottcao): Refine our error types and figure out what
+    // errors to log
+    let materializer_state = load_result.ok();
     Ok((Some(db), materializer_state))
 }
 
@@ -155,7 +152,7 @@ pub(crate) fn delete_unknown_disk_state(
 
                 // known_dir_names is always small, so this contains isn't expensive
                 if !known_dir_names.contains(&filename) || !entry.path().is_dir() {
-                    fs_util::remove_all(&cache_dir_path.join(filename))?;
+                    fs_util::remove_all(cache_dir_path.join(filename))?;
                 }
             }
         }

@@ -13,21 +13,14 @@ use std::iter::once;
 use allocative::Allocative;
 use buck2_build_api_derive::internal_provider;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
-use buck2_error::buck2_error;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use either::Either;
 use indexmap::IndexMap;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
-use starlark::values::dict::DictRef;
-use starlark::values::dict::DictType;
-use starlark::values::list::ListRef;
-use starlark::values::none::NoneOr;
-use starlark::values::none::NoneType;
-use starlark::values::tuple::TupleRef;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::FreezeResult;
@@ -39,12 +32,19 @@ use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::dict::DictRef;
+use starlark::values::dict::DictType;
+use starlark::values::list::ListRef;
+use starlark::values::none::NoneOr;
+use starlark::values::none::NoneType;
+use starlark::values::tuple::TupleRef;
 
-use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
+use crate as buck2_build_api;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
+use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use crate::interpreter::rule_defs::command_executor_config::StarlarkCommandExecutorConfig;
 use crate::interpreter::rule_defs::provider::builtin::worker_info::FrozenWorkerInfo;
 use crate::interpreter::rule_defs::provider::builtin::worker_info::WorkerInfo;
@@ -279,7 +279,7 @@ fn iter_test_env<'v>(
         Some(env) => env,
         None => {
             return Either::Left(Either::Right(once(Err(buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "Invalid `env`: Expected a dict, got: `{}`",
                 env
             )))));
@@ -338,7 +338,7 @@ fn iter_executor_overrides<'v>(
         Some(executor_overrides) => executor_overrides,
         None => {
             return Either::Left(Either::Right(once(Err(buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "Invalid `executor_overrides`: Expected a dict, got: `{}`",
                 executor_overrides
             )))));
@@ -375,7 +375,7 @@ fn iter_local_resources<'v>(
         Some(local_resources) => local_resources,
         None => {
             return Either::Left(Either::Right(once(Err(buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "Invalid `local_resources`: Expected a dict, got: `{}`",
                 local_resources
             )))));
@@ -399,7 +399,7 @@ fn iter_local_resources<'v>(
                 StarlarkConfiguredProvidersLabel::from_value(value)
                     .ok_or_else(|| {
                         buck2_error!(
-                            [],
+                            buck2_error::ErrorTag::Input,
                             "{}",
                             format!("Invalid value in `local_resources` for key `{}`", key)
                         )
@@ -478,10 +478,10 @@ where
     if !required_local_resources.is_none() {
         for resource_type in iter_value(required_local_resources).buck_error_context("`required_local_resources` should be a list or a tuple of `RequiredTestLocalResource` objects")? {
             let resource_type = StarlarkRequiredTestLocalResource::from_value(resource_type)
-                .ok_or_else(|| buck2_error!([], "`required_local_resources` should only contain `RequiredTestLocalResource` values, got {}", resource_type))?;
+                .ok_or_else(|| buck2_error!(buck2_error::ErrorTag::Input, "`required_local_resources` should only contain `RequiredTestLocalResource` values, got {}", resource_type))?;
             if !provided_local_resources.contains_key(&resource_type.name as &str) {
                 return Err(buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::Input,
                     "`required_local_resources` contains `{}` which is not present in `local_resources`",
                     resource_type.name
                 ));
@@ -489,11 +489,9 @@ where
         }
     }
 
-    NoneOr::<bool>::unpack_value(info.use_project_relative_paths.get().to_value())
-        .map_err(from_starlark)?
+    NoneOr::<bool>::unpack_value(info.use_project_relative_paths.get().to_value())?
         .buck_error_context("`use_project_relative_paths` must be a bool if provided")?;
-    NoneOr::<bool>::unpack_value(info.run_from_project_root.get().to_value())
-        .map_err(from_starlark)?
+    NoneOr::<bool>::unpack_value(info.run_from_project_root.get().to_value())?
         .buck_error_context("`run_from_project_root` must be a bool if provided")?;
     unpack_opt_executor(info.default_executor.get().to_value())
         .buck_error_context("Invalid `default_executor`")?;

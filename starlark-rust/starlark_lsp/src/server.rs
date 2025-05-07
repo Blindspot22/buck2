@@ -37,14 +37,6 @@ use lsp_server::Request;
 use lsp_server::RequestId;
 use lsp_server::Response;
 use lsp_server::ResponseError;
-use lsp_types::notification::DidChangeTextDocument;
-use lsp_types::notification::DidCloseTextDocument;
-use lsp_types::notification::DidOpenTextDocument;
-use lsp_types::notification::LogMessage;
-use lsp_types::notification::PublishDiagnostics;
-use lsp_types::request::Completion;
-use lsp_types::request::GotoDefinition;
-use lsp_types::request::HoverRequest;
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionOptions;
@@ -81,18 +73,26 @@ use lsp_types::TextEdit;
 use lsp_types::Url;
 use lsp_types::WorkDoneProgressOptions;
 use lsp_types::WorkspaceFolder;
-use serde::de::DeserializeOwned;
+use lsp_types::notification::DidChangeTextDocument;
+use lsp_types::notification::DidCloseTextDocument;
+use lsp_types::notification::DidOpenTextDocument;
+use lsp_types::notification::LogMessage;
+use lsp_types::notification::PublishDiagnostics;
+use lsp_types::request::Completion;
+use lsp_types::request::GotoDefinition;
+use lsp_types::request::HoverRequest;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
+use serde::de::DeserializeOwned;
 use starlark::codemap::ResolvedSpan;
 use starlark::codemap::Span;
-use starlark::docs::markdown::render_doc_item_no_link;
-use starlark::docs::markdown::render_doc_param;
 use starlark::docs::DocItem;
 use starlark::docs::DocMember;
 use starlark::docs::DocModule;
+use starlark::docs::markdown::render_doc_item_no_link;
+use starlark::docs::markdown::render_doc_param;
 use starlark::syntax::AstModule;
 use starlark_syntax::codemap::ResolvedPos;
 use starlark_syntax::syntax::ast::AstPayload;
@@ -211,7 +211,8 @@ impl TryFrom<Url> for LspUrl {
                 }
             }
             "starlark" => {
-                let path = PathBuf::from(url.path());
+                // Need to perform the replace to standardize on / instead of \ on windows.
+                let path = PathBuf::from(url.path().replace('\\', "/"));
                 // Use "starts with a /" because, while leading slashes are accepted on
                 // windows, they do not report "true" from `is_absolute()`.
                 if path.to_string_lossy().starts_with('/') {
@@ -906,7 +907,7 @@ impl<T: LspContext> Backend<T> {
     pub(crate) fn get_global_symbol_completion_items(
         &self,
         current_document: &LspUrl,
-    ) -> impl Iterator<Item = CompletionItem> + '_ {
+    ) -> impl Iterator<Item = CompletionItem> + '_ + use<'_, T> {
         self.context
             .get_environment(current_document)
             .members
@@ -1133,10 +1134,11 @@ impl<T: LspContext> Backend<T> {
                     }) => {
                         // If there's an error loading the file to parse it, at least
                         // try to get to the file.
-                        let module = if let Ok(Some(ast)) = self.get_ast_or_load_from_disk(&url) {
-                            ast
-                        } else {
-                            return Ok(None);
+                        let module = match self.get_ast_or_load_from_disk(&url) {
+                            Ok(Some(ast)) => ast,
+                            _ => {
+                                return Ok(None);
+                            }
                         };
                         let result = location_finder(&module.ast)?;
 
@@ -1374,7 +1376,6 @@ mod tests {
     use anyhow::Context;
     use lsp_server::Request;
     use lsp_server::RequestId;
-    use lsp_types::request::GotoDefinition;
     use lsp_types::GotoDefinitionParams;
     use lsp_types::GotoDefinitionResponse;
     use lsp_types::LocationLink;
@@ -1383,6 +1384,7 @@ mod tests {
     use lsp_types::TextDocumentIdentifier;
     use lsp_types::TextDocumentPositionParams;
     use lsp_types::Url;
+    use lsp_types::request::GotoDefinition;
     use starlark::codemap::ResolvedSpan;
     use starlark::wasm::is_wasm;
     use textwrap::dedent;
@@ -1464,7 +1466,7 @@ mod tests {
 
     #[cfg(windows)]
     fn temp_file_uri(rel_path: &str) -> Url {
-        Url::from_file_path(&PathBuf::from("C:/tmp").join(rel_path)).unwrap()
+        Url::from_file_path(PathBuf::from("C:/tmp").join(rel_path)).unwrap()
     }
 
     #[cfg(not(windows))]

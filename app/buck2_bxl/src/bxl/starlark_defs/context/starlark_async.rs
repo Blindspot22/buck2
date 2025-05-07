@@ -19,12 +19,13 @@ use dice::DiceComputations;
 use dice::DiceData;
 use dice::UserComputationData;
 use dupe::Dupe;
-use futures::future::select;
+use futures::FutureExt;
 use futures::future::Either;
 use futures::future::LocalBoxFuture;
-use futures::FutureExt;
+use futures::future::select;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Tier0)]
 enum ViaError {
     #[error("The owning DICE evaluation has been cancelled")]
     Cancelled,

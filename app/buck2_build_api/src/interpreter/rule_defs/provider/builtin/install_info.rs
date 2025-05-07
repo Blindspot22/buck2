@@ -11,14 +11,11 @@ use allocative::Allocative;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_build_api_derive::internal_provider;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
-use starlark::values::dict::DictRef;
-use starlark::values::dict::DictType;
 use starlark::values::Coerce;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
@@ -29,12 +26,16 @@ use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::dict::DictRef;
+use starlark::values::dict::DictType;
 
+use crate as buck2_build_api;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
 
 // Provider that signals a rule is installable (ex. android_binary)
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum InstallInfoProviderErrors {
     #[error("expected a label, got `{0}` (type `{1}`)")]
     ExpectedLabel(String, String),
@@ -84,12 +85,12 @@ impl<'v, V: ValueLike<'v>> InstallInfoGen<V> {
                 .ok_or_else(|| InstallInfoProviderErrors::ExpectedStringKey(k.to_string()))?;
             Ok((
                 k,
-                ValueAsArtifactLike::unpack_value(v)
-                    .map_err(from_starlark)?
-                    .ok_or_else(|| InstallInfoProviderErrors::ExpectedArtifact {
+                ValueAsArtifactLike::unpack_value(v)?.ok_or_else(|| {
+                    InstallInfoProviderErrors::ExpectedArtifact {
                         key: k.to_owned(),
                         got: v.get_type().to_owned(),
-                    })?,
+                    }
+                })?,
             ))
         })
     }

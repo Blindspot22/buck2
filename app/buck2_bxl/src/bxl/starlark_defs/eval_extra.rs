@@ -15,12 +15,13 @@ use buck2_events::dispatch::console_message;
 use starlark::eval::Evaluator;
 use starlark::values::ProvidesStaticType;
 
-use crate::bxl::starlark_defs::context::starlark_async::BxlDiceComputations;
 use crate::bxl::starlark_defs::context::BxlContextCoreData;
 use crate::bxl::starlark_defs::context::ErrorPrinter;
+use crate::bxl::starlark_defs::context::output::OutputStreamState;
+use crate::bxl::starlark_defs::context::starlark_async::BxlDiceComputations;
 
 enum BxlEvalExtraType {
-    Root { error_sink: Rc<RefCell<dyn Write>> },
+    Root { stream_state: OutputStreamState },
     Dynamic,
     AnonTarget,
 }
@@ -35,7 +36,8 @@ pub(crate) struct BxlEvalExtra<'e> {
 }
 
 #[derive(Debug, buck2_error::Error)]
-pub(crate) enum BxlContextError {
+#[buck2(tag = Input)]
+pub(crate) enum BxlScopeError {
     #[error("This function can only be called from Bxl")]
     UnavailableOutsideBxl,
 }
@@ -44,12 +46,12 @@ impl<'e> BxlEvalExtra<'e> {
     pub(crate) fn new(
         dice: Rc<RefCell<dyn BxlDiceComputations + 'e>>,
         core: Rc<BxlContextCoreData>,
-        error_sink: Rc<RefCell<dyn Write>>,
+        stream_state: OutputStreamState,
     ) -> Self {
         Self {
             dice,
             core,
-            eval_extra_type: BxlEvalExtraType::Root { error_sink },
+            eval_extra_type: BxlEvalExtraType::Root { stream_state },
         }
     }
 
@@ -79,7 +81,7 @@ impl<'e> BxlEvalExtra<'e> {
         eval: &Evaluator<'v, 'a, 'e>,
     ) -> buck2_error::Result<&'a BxlEvalExtra<'e>> {
         let f = || eval.extra?.downcast_ref::<BxlEvalExtra>();
-        f().ok_or_else(|| BxlContextError::UnavailableOutsideBxl.into())
+        f().ok_or_else(|| BxlScopeError::UnavailableOutsideBxl.into())
     }
 
     pub(crate) fn via_dice<'a, T>(
@@ -97,7 +99,7 @@ impl<'e> BxlEvalExtra<'e> {
 impl<'e> ErrorPrinter for BxlEvalExtra<'e> {
     fn print_to_error_stream(&self, msg: String) -> buck2_error::Result<()> {
         match &self.eval_extra_type {
-            BxlEvalExtraType::Root { error_sink } => writeln!(error_sink.borrow_mut(), "{}", msg)?,
+            BxlEvalExtraType::Root { stream_state } => writeln!(stream_state.error(), "{}", msg)?,
             BxlEvalExtraType::Dynamic => console_message(msg),
             BxlEvalExtraType::AnonTarget => console_message(msg),
         }

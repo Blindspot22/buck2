@@ -19,9 +19,9 @@ pub mod retries;
 mod stats;
 mod x2p;
 
-pub use client::to_bytes;
 pub use client::HttpClient;
 pub use client::HttpClientBuilder;
+pub use client::to_bytes;
 
 fn http_error_label(status: StatusCode) -> &'static str {
     if status.is_server_error() {
@@ -33,13 +33,13 @@ fn http_error_label(status: StatusCode) -> &'static str {
     }
 }
 
-fn tag_from_status(status: StatusCode) -> Option<buck2_error::ErrorTag> {
+fn tag_from_status(status: StatusCode) -> buck2_error::ErrorTag {
     if status.is_server_error() {
-        Some(buck2_error::ErrorTag::HttpServer)
+        buck2_error::ErrorTag::HttpServer
     } else if status.is_client_error() {
-        Some(buck2_error::ErrorTag::HttpClient)
+        buck2_error::ErrorTag::HttpClient
     } else {
-        None
+        buck2_error::ErrorTag::Http
     }
 }
 
@@ -68,7 +68,7 @@ pub enum HttpError {
         source: hyper::Error,
     },
     #[error("HTTP {} Error ({status}) when querying URI: {uri}. Response text: {text}", http_error_label(*.status))]
-    #[buck2(tag = tag_from_status(*status))]
+    #[buck2(tag = tag_from_status(status))]
     Status {
         status: StatusCode,
         uri: String,

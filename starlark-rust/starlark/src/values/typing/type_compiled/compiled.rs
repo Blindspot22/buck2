@@ -39,18 +39,6 @@ use crate::environment::MethodsBuilder;
 use crate::environment::MethodsStatic;
 use crate::private::Private;
 use crate::typing::Ty;
-use crate::values::dict::DictRef;
-use crate::values::layout::avalue::alloc_static;
-use crate::values::layout::avalue::AValueBasic;
-use crate::values::layout::avalue::AValueImpl;
-use crate::values::layout::heap::repr::AValueRepr;
-use crate::values::list::ListRef;
-use crate::values::none::NoneType;
-use crate::values::type_repr::StarlarkTypeRepr;
-use crate::values::types::tuple::value::Tuple;
-use crate::values::typing::type_compiled::factory::TypeCompiledFactory;
-use crate::values::typing::type_compiled::matcher::TypeMatcher;
-use crate::values::typing::type_compiled::matchers::IsAny;
 use crate::values::AllocValue;
 use crate::values::Demand;
 use crate::values::Freeze;
@@ -65,6 +53,18 @@ use crate::values::Trace;
 use crate::values::Value;
 use crate::values::ValueLifetimeless;
 use crate::values::ValueLike;
+use crate::values::dict::DictRef;
+use crate::values::layout::avalue::AValueBasic;
+use crate::values::layout::avalue::AValueImpl;
+use crate::values::layout::avalue::alloc_static;
+use crate::values::layout::heap::repr::AValueRepr;
+use crate::values::list::ListRef;
+use crate::values::none::NoneType;
+use crate::values::type_repr::StarlarkTypeRepr;
+use crate::values::types::tuple::value::Tuple;
+use crate::values::typing::type_compiled::factory::TypeCompiledFactory;
+use crate::values::typing::type_compiled::matcher::TypeMatcher;
+use crate::values::typing::type_compiled::matchers::IsAny;
 
 #[derive(Debug, Error)]
 enum TypingError {
@@ -458,10 +458,11 @@ impl<'v> TypeCompiled<Value<'v>> {
             // This branch is optimization: `TypeCompiledAsStarlarkValue` implements `eval_type`,
             // but this branch avoids copying the type.
             Ok(TypeCompiled(ty))
-        } else if let Some(ty) = ty.get_ref().eval_type() {
-            Ok(TypeCompiled::from_ty(&ty, heap))
         } else {
-            Err(invalid_type_annotation(ty, heap).into())
+            match ty.get_ref().eval_type() {
+                Some(ty) => Ok(TypeCompiled::from_ty(&ty, heap)),
+                _ => Err(invalid_type_annotation(ty, heap).into()),
+            }
         }
     }
 }

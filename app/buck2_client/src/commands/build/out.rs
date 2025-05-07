@@ -11,8 +11,8 @@ use std::borrow::Cow;
 use std::io;
 use std::path::Path;
 
-use buck2_cli_proto::build_target::BuildOutput;
 use buck2_cli_proto::BuildTarget;
+use buck2_cli_proto::build_target::BuildOutput;
 use buck2_client_ctx::exit_result::ClientIoError;
 use buck2_client_ctx::output_destination_arg::OutputDestinationArg;
 use buck2_core::fs::async_fs_util;
@@ -23,8 +23,8 @@ use buck2_core::fs::paths::abs_path::AbsPathBuf;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::working_dir::AbsWorkingDir;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use futures::TryStreamExt;
 
 #[derive(Clone)]
@@ -72,14 +72,14 @@ pub(super) async fn copy_to_out(
                 output
                     .providers
                     .as_ref()
-                    .map_or(true, |p| p.default_info && !p.other)
+                    .is_none_or(|p| p.default_info && !p.other)
             })
             .collect();
 
         let single_default_output = match default_outputs.len() {
             0 => {
                 return Err(buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::CopyOutputs,
                     "target {} produced zero default outputs",
                     target.target
                 ));
@@ -87,7 +87,7 @@ pub(super) async fn copy_to_out(
             1 => &default_outputs[0],
             n => {
                 return Err(buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::CopyOutputs,
                     "target {} produced {} outputs, choice of output is ambiguous",
                     target.target,
                     n
@@ -115,7 +115,7 @@ pub(super) async fn copy_to_out(
             // files (including 0) to stdout.
             if let Some(dir_i) = outputs_to_be_copied.iter().position(|o| o.is_dir) {
                 return Err(buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::CopyOutputs,
                     "target {} produces a default output that is a directory, and cannot be sent to stdout",
                     targets[dir_i].target,
                 ));
@@ -125,7 +125,7 @@ pub(super) async fn copy_to_out(
             // Check we are outputting exactly 1 target. Okay if directory.
             if outputs_to_be_copied.len() != 1 {
                 return Err(buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::CopyOutputs,
                     "build command built multiple top-level targets, choice of output is ambiguous"
                 ));
             }
@@ -195,14 +195,11 @@ fn copy_symlink<P: AsRef<AbsPath>, Q: AsRef<AbsPath>>(
 
 /// Recursively copies a directory to the output path, rooted at `dst`.
 #[async_recursion::async_recursion]
-async fn copy_directory<
+async fn copy_directory<P, Q>(src: P, dst: Q, context: &CopyContext) -> buck2_error::Result<()>
+where
     P: AsRef<AbsPath> + std::marker::Send,
     Q: AsRef<AbsPath> + std::marker::Send + std::marker::Copy + std::marker::Sync,
->(
-    src: P,
-    dst: Q,
-    context: &CopyContext,
-) -> buck2_error::Result<()> {
+{
     tokio::fs::create_dir_all(dst.as_ref()).await?;
     let stream = tokio_stream::wrappers::ReadDirStream::new(
         tokio::fs::read_dir(src.as_ref())
@@ -339,7 +336,7 @@ mod tests {
         assert!(dst_dir.path().join("bar/some_file").is_file());
         assert!(dst_dir.path().join("bar/qux/buzz").is_file());
 
-        let copied_fool_path = std::fs::read_link(&dst_dir.path().join("fool"))?;
+        let copied_fool_path = std::fs::read_link(dst_dir.path().join("fool"))?;
         #[cfg(unix)]
         {
             assert_eq!(PathBuf::from("foo"), copied_fool_path);
@@ -351,7 +348,7 @@ mod tests {
             assert_eq!(dst_dir_canon_path.as_path().join("foo"), copied_fool_path);
         }
 
-        let copied_foo_abs_path = std::fs::read_link(&dst_dir.path().join("foo_abs"))?;
+        let copied_foo_abs_path = std::fs::read_link(dst_dir.path().join("foo_abs"))?;
         #[cfg(unix)]
         {
             assert_eq!(src_dir.path().join("foo"), copied_foo_abs_path);
@@ -366,7 +363,7 @@ mod tests {
             );
         }
 
-        let copied_bax_path = std::fs::read_link(&dst_dir.path().join("bax"))?;
+        let copied_bax_path = std::fs::read_link(dst_dir.path().join("bax"))?;
         #[cfg(unix)]
         {
             assert_eq!(PathBuf::from("bar/qux"), copied_bax_path);
@@ -381,7 +378,7 @@ mod tests {
             );
         }
 
-        let copied_foo_in_bar_path = std::fs::read_link(&dst_dir.path().join("bar/foo_in_bar"))?;
+        let copied_foo_in_bar_path = std::fs::read_link(dst_dir.path().join("bar/foo_in_bar"))?;
         #[cfg(unix)]
         {
             assert_eq!(PathBuf::from("../foo"), copied_foo_in_bar_path);
@@ -440,10 +437,10 @@ mod tests {
 
         // Check both symlinks are valid and are absolute.
 
-        let copied_foo_target = std::fs::read_link(&dst_dir.path().join("qux/foo"))?;
+        let copied_foo_target = std::fs::read_link(dst_dir.path().join("qux/foo"))?;
         assert_eq!(src_path.as_path().join("foo"), copied_foo_target);
 
-        let copied_bar_target = std::fs::read_link(&dst_dir.path().join("qux/bar"))?;
+        let copied_bar_target = std::fs::read_link(dst_dir.path().join("qux/bar"))?;
         assert_eq!(src_path.as_path().join("bar"), copied_bar_target);
 
         Ok(())

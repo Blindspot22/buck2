@@ -23,11 +23,9 @@ use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::codemap::FileSpan;
 use starlark::collections::StarlarkHasher;
+use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsStatic;
-use starlark::values::list::UnpackList;
-use starlark::values::starlark_value;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::Demand;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -35,27 +33,32 @@ use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
 use starlark::values::Value;
+use starlark::values::list::UnpackList;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
-use crate::artifact_groups::promise::PromiseArtifact;
 use crate::artifact_groups::ArtifactGroup;
+use crate::artifact_groups::promise::PromiseArtifact;
+use crate::interpreter::rule_defs::artifact::ArtifactError;
 use crate::interpreter::rule_defs::artifact::associated::AssociatedArtifacts;
-use crate::interpreter::rule_defs::artifact::methods::artifact_methods;
 use crate::interpreter::rule_defs::artifact::methods::EitherStarlarkArtifact;
+use crate::interpreter::rule_defs::artifact::methods::artifact_methods;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifactHelpers;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ArtifactFingerprint;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
 use crate::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
-use crate::interpreter::rule_defs::artifact::ArtifactError;
-use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
+use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum PromiseArtifactError {
     #[error("cannot access {1} on unresolved promise artifact ({0})")]
     MethodUnsupported(StarlarkPromiseArtifact, &'static str),
@@ -265,7 +268,7 @@ impl CommandLineArgLike for StarlarkPromiseArtifact {
     ) -> buck2_error::Result<()> {
         match self.artifact.get() {
             Some(v) => {
-                cli.push_arg(ctx.resolve_artifact(v)?.into_string());
+                cli.push_location(ctx.resolve_artifact(v)?);
                 Ok(())
             }
             None => Err(PromiseArtifactError::UnresolvedAddedToCommandLine(self.clone()).into()),
@@ -292,7 +295,7 @@ impl CommandLineArgLike for StarlarkPromiseArtifact {
     }
 }
 
-#[starlark_value(type = "promise_artifact")]
+#[starlark_value(type = "PromiseArtifact")]
 impl<'v> StarlarkValue<'v> for StarlarkPromiseArtifact {
     type Canonical = StarlarkArtifact;
 
@@ -312,4 +315,10 @@ impl<'v> StarlarkValue<'v> for StarlarkPromiseArtifact {
     fn provide(&'v self, demand: &mut Demand<'_, 'v>) {
         demand.provide_value::<&dyn CommandLineArgLike>(self);
     }
+}
+
+#[starlark_module]
+pub(crate) fn register_promise_artifact(globals: &mut GlobalsBuilder) {
+    const PromiseArtifact: StarlarkValueAsType<StarlarkPromiseArtifact> =
+        StarlarkValueAsType::new();
 }

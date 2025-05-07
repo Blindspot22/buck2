@@ -117,25 +117,25 @@ impl QueryTarget for ConfiguredGraphNodeRef {
         self.0.buildfile_path()
     }
 
-    fn deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         self.0.deps().map(ConfiguredGraphNodeRef::ref_cast)
     }
 
-    fn exec_deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn exec_deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         self.0.exec_deps().map(ConfiguredGraphNodeRef::ref_cast)
     }
 
-    fn target_deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn target_deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         self.0.target_deps().map(ConfiguredGraphNodeRef::ref_cast)
     }
 
-    fn configuration_deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn configuration_deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         self.0
             .configuration_deps()
             .map(ConfiguredGraphNodeRef::ref_cast)
     }
 
-    fn toolchain_deps<'a>(&'a self) -> impl Iterator<Item = &'a Self::Key> + Send + 'a {
+    fn toolchain_deps(&self) -> impl Iterator<Item = &Self::Key> + Send + '_ {
         self.0
             .toolchain_deps()
             .map(ConfiguredGraphNodeRef::ref_cast)
@@ -194,5 +194,17 @@ impl QueryTarget for ConfiguredGraphNodeRef {
             func(input)?;
         }
         Ok(())
+    }
+
+    fn map_any_attr<R, F: FnMut(Option<&Self::Attr<'_>>) -> R>(&self, key: &str, mut func: F) -> R {
+        match self
+            .0
+            .get(key, AttrInspectOptions::All)
+            .as_ref()
+            .map(|a| &a.value)
+        {
+            Some(attr) => func(Some(attr)),
+            None => func(self.special_attr_or_none(key).as_ref()),
+        }
     }
 }

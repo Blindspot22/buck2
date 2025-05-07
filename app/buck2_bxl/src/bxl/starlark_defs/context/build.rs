@@ -12,27 +12,24 @@
 
 use allocative::Allocative;
 use buck2_artifact::artifact::artifact_type::Artifact;
-use buck2_build_api::build::build_configured_label;
+use buck2_build_api::build::AsyncBuildTargetResultBuilder;
 use buck2_build_api::build::BuildConfiguredLabelOptions;
-use buck2_build_api::build::BuildEvent;
-use buck2_build_api::build::BuildTargetResult;
-use buck2_build_api::build::ConfiguredBuildEvent;
 use buck2_build_api::build::ProvidersToBuild;
+use buck2_build_api::build::build_configured_label;
 use buck2_build_api::bxl::build_result::BxlBuildResult;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
 use buck2_cli_proto::build_request::Materializations;
+use buck2_cli_proto::build_request::Uploads;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use derive_more::Display;
 use dupe::Dupe;
 use futures::FutureExt;
-use futures::StreamExt;
 use itertools::Itertools;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::eval::Evaluator;
 use starlark::starlark_complex_value;
-use starlark::values::starlark_value;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Heap;
@@ -45,6 +42,7 @@ use starlark::values::ValueError;
 use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueTyped;
+use starlark::values::starlark_value;
 use starlark_map::small_map::SmallMap;
 
 use crate::bxl::starlark_defs::build_result::StarlarkBxlBuildResult;
@@ -88,7 +86,7 @@ where
     }
 }
 
-#[starlark_value(type = "bxl_built_artifacts_iterable")]
+#[starlark_value(type = "bxl.BuiltArtifactsIterable")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkProvidersArtifactIterableGen<V>
 where
     Self: ProvidesStaticType<'v>,
@@ -149,7 +147,7 @@ where
     }
 }
 
-#[starlark_value(type = "bxl_failed_artifacts_iterable")]
+#[starlark_value(type = "bxl.FailedArtifactsIterable")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkFailedArtifactIterableGen<V>
 where
     Self: ProvidesStaticType<'v>,
@@ -178,6 +176,7 @@ pub(crate) fn build<'v>(
     spec: AnyProvidersExprArg<'v>,
     target_platform: ValueAsStarlarkTargetLabel<'v>,
     materializations: Materializations,
+    uploads: Uploads,
     eval: &Evaluator<'v, '_, '_>,
 ) -> buck2_error::Result<
     SmallMap<
@@ -198,48 +197,43 @@ pub(crate) fn build<'v>(
                 )
                 .await?;
 
-                let per_spec_results: Vec<Vec<ConfiguredBuildEvent>> = dice
-                    .compute_join(build_spec.labels().unique(), |ctx, target| {
-                        async move {
-                            let target = target.clone();
+                let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new();
+                result_builder
+                    .wait_for(
+                        // TODO (torozco): support --fail-fast in BXL.
+                        false,
+                        dice.compute_join(build_spec.labels().unique(), |ctx, target| {
+                            let consumer = consumer.clone();
+                            async move {
+                                let target = target.clone();
 
-                            ctx.with_linear_recompute(|ctx| async move {
-                                build_configured_label(
-                                    &ctx,
-                                    &materializations.into(),
-                                    target,
-                                    &ProvidersToBuild {
-                                        default: true,
-                                        default_other: true,
-                                        run: true,
-                                        tests: true,
-                                    }, // TODO support skipping/configuring?
-                                    BuildConfiguredLabelOptions {
-                                        skippable: false,
-                                        want_configured_graph_size: false,
-                                    },
-                                )
+                                ctx.with_linear_recompute(|ctx| async move {
+                                    build_configured_label(
+                                        &consumer,
+                                        &ctx,
+                                        &(materializations, uploads).into(),
+                                        target,
+                                        &ProvidersToBuild {
+                                            default: true,
+                                            default_other: true,
+                                            run: true,
+                                            tests: true,
+                                        }, // TODO support skipping/configuring?
+                                        BuildConfiguredLabelOptions {
+                                            skippable: false,
+                                            graph_properties: Default::default(),
+                                        },
+                                        None, // TODO: support timeouts?
+                                    )
+                                    .await
+                                })
                                 .await
-                                .collect::<Vec<_>>()
-                                .await
-                            })
-                            .await
-                        }
-                        .boxed()
-                    })
-                    .await;
-
-                // TODO (torozco): support --fail-fast in BXL.
-                BuildTargetResult::collect_stream(
-                    futures::stream::iter(
-                        per_spec_results
-                            .into_iter()
-                            .flatten()
-                            .map(BuildEvent::Configured),
-                    ),
-                    false,
-                )
-                .await
+                            }
+                            .boxed()
+                        })
+                        .map(|_| ()),
+                    )
+                    .await
             }
             .boxed_local()
         })

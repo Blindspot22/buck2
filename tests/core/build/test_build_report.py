@@ -9,123 +9,105 @@
 
 
 import json
+from pathlib import Path
+from typing import List
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test
-from buck2.tests.e2e_util.helper.utils import replace_hashes
+from buck2.tests.e2e_util.helper.golden import golden
+from buck2.tests.e2e_util.helper.utils import replace_digest, replace_hash
 
 
-@buck_test()
-async def test_build_report_format(buck: Buck) -> None:
-    await buck.build(
+def build_report_test(name: str, command: List[str]) -> None:
+    async def impl(buck: Buck, tmp_path: Path) -> None:
+        report = tmp_path / "build-report.json"
+        await buck.build("--build-report", str(report), *command)
+
+        with open(report) as file:
+            report = json.loads(file.read())
+        del report["trace_id"]
+        del report["project_root"]
+
+        # Build report errors can change based on minor test changes such as
+        # 1. Adding a target in TARGETS.fixture
+        # 2. Line number changing due to code moving around
+        # Sanitize so that we only check the important bits of the error message
+        golden(
+            output=replace_digest(
+                replace_hash(json.dumps(report, indent=2, sort_keys=True))
+            ),
+            rel_path="fixtures/" + name + ".golden.json",
+        )
+
+    globals()[name] = impl
+
+    return buck_test()(impl)
+
+
+build_report_test(
+    "test_build_report_format",
+    [
         "//:rule1",
         "//:rule2",
-        "--build-report",
-        "report",
         "//:rule2[out1]",
         "-c",
         "buck2.log_configured_graph_size=true",
-    )
-    with open(buck.cwd / "report") as file:
-        report = json.load(file)
+    ],
+)
 
-        assert report["success"]
-        assert report["failures"] == {}
-
-        results = report["results"]
-
-        rule1 = results["root//:rule1"]
-        assert replace_hashes(rule1["outputs"]["DEFAULT"]) == [
-            "buck-out/v2/gen/root/<HASH>/__rule1__/out.txt"
-        ]
-        assert rule1["other_outputs"] == {}
-        rule1_configured = rule1["configured"]["<unspecified>"]
-        assert rule1_configured["success"] == "SUCCESS"
-        assert replace_hashes(rule1_configured["outputs"]["DEFAULT"]) == [
-            "buck-out/v2/gen/root/<HASH>/__rule1__/out.txt"
-        ]
-        assert rule1_configured["other_outputs"] == {}
-
-        assert rule1["configured_graph_size"] == 2
-        assert rule1_configured["configured_graph_size"] == 2
-
-        rule2 = results["root//:rule2"]
-        assert rule2["success"] == "SUCCESS"
-        assert replace_hashes(rule2["outputs"]["DEFAULT"]) == [
-            "buck-out/v2/gen/root/<HASH>/__rule2__/out1.txt"
-        ]
-        assert replace_hashes(rule2["outputs"]["out1"]) == [
-            "buck-out/v2/gen/root/<HASH>/__rule2__/out1.txt"
-        ]
-        assert rule2["other_outputs"] == {}
-
-        rule2_configured = rule2["configured"]["<unspecified>"]
-        assert rule2_configured["success"] == "SUCCESS"
-        assert replace_hashes(rule2_configured["outputs"]["DEFAULT"]) == [
-            "buck-out/v2/gen/root/<HASH>/__rule2__/out1.txt"
-        ]
-        assert replace_hashes(rule2_configured["outputs"]["out1"]) == [
-            "buck-out/v2/gen/root/<HASH>/__rule2__/out1.txt"
-        ]
-        assert rule2_configured["other_outputs"] == {}
-
-        assert rule2["configured_graph_size"] == 3
-        assert rule2_configured["configured_graph_size"] == 3
-
-
-@buck_test()
-async def test_build_report_format_skip_unconfigured(buck: Buck) -> None:
-    await buck.build(
+build_report_test(
+    "test_build_report_format_skip_unconfigured",
+    [
         "//:rule1",
-        "--build-report",
-        "report",
         "-c",
         "build_report.print_unconfigured_section=false",
-    )
-    with open(buck.cwd / "report") as file:
-        report = json.load(file)
+    ],
+)
 
-        assert report["success"]
-        assert report["failures"] == {}
+build_report_test(
+    "test_build_report_format_package_relative_paths",
+    [
+        "//:rule1",
+        "//subdir:rule",
+        "--build-report-options",
+        "package-project-relative-paths",
+    ],
+)
 
-        results = report["results"]
 
-        rule1 = results["root//:rule1"]
-        assert "success" not in rule1
-        assert "outputs" not in rule1
-        assert "other_outputs" not in rule1
-        rule1_configured = rule1["configured"]["<unspecified>"]
-        assert rule1_configured["success"] == "SUCCESS"
-        assert replace_hashes(rule1_configured["outputs"]["DEFAULT"]) == [
-            "buck-out/v2/gen/root/<HASH>/__rule1__/out.txt"
-        ]
-        assert rule1_configured["other_outputs"] == {}
+build_report_test(
+    "test_build_report_format_artifact_hash_information",
+    [
+        "//:rule1",
+        "//:dir1",
+        "//subdir:rule",
+        "--build-report-options",
+        "include-artifact-hash-information",
+    ],
+)
+
+build_report_test(
+    "test_build_report_format_configured_graph_sketch",
+    [
+        "//:rule1",
+        "//:dir1",
+        "//subdir:rule",
+        "-c",
+        "buck2.log_configured_graph_sketch=true",
+    ],
+)
 
 
 @buck_test()
-async def test_build_report_package_project_relative_path(buck: Buck) -> None:
-    await buck.build(
-        "//:rule1",
-        "//subdir:rule",
-        "--build-report",
-        "report",
-    )
-
-    with open(buck.cwd / "report") as file:
-        results = json.load(file)["results"]
-        assert "package_project_relative_path" not in results["root//:rule1"]
-        assert "package_project_relative_path" not in results["root//subdir:rule"]
+async def test_build_report_non_existent_directory(buck: Buck) -> None:
+    build_report = "non_existent_dir/report"
 
     await buck.build(
         "//:rule1",
-        "//subdir:rule",
         "--build-report",
-        "report",
-        "--build-report-options",
-        "package-project-relative-paths",
+        build_report,
     )
 
-    with open(buck.cwd / "report") as file:
-        results = json.load(file)["results"]
-        assert results["root//:rule1"]["package_project_relative_path"] == ""
-        assert results["root//subdir:rule"]["package_project_relative_path"] == "subdir"
+    with open(buck.cwd / build_report) as file:
+        report = json.load(file)
+        assert report["success"]

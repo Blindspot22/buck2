@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_core::cells::cell_root_path::CellRootPath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_core::fs::paths::RelativePath;
+use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_error::BuckErrorContext;
 use dupe::Dupe;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -323,19 +323,13 @@ impl<'p> LegacyConfigFileParser<'p> {
         }
     }
 
-    async fn parse_lines<T, E>(
+    async fn parse_lines(
         &mut self,
         config_path: &ConfigPath,
-        lines: T,
+        lines: Vec<String>,
         parse_includes: bool,
         file_ops: &mut dyn ConfigParserFileOps,
-    ) -> buck2_error::Result<()>
-    where
-        T: IntoIterator<Item = Result<String, E>>,
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        let lines: Vec<String> = lines.into_iter().collect::<Result<Vec<_>, _>>()?;
-
+    ) -> buck2_error::Result<()> {
         let lines = lines
             .into_iter()
             // Trim leading/trailing whitespace.

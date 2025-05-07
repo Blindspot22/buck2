@@ -29,7 +29,7 @@ pub(crate) fn derive_starlark_value(
     let attr = syn::parse_macro_input!(attr as StarlarkValueAttrs);
     let input = syn::parse_macro_input!(input as syn::ItemImpl);
     match derive_starlark_value_impl(attr, input) {
-        Ok(gen) => gen.into(),
+        Ok(r#gen) => r#gen.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
@@ -433,7 +433,7 @@ impl ImplStarlarkValue {
             lifetime: &'a syn::Lifetime,
         }
 
-        impl<'a> syn::visit_mut::VisitMut for PatchTypesVisitor<'a> {
+        impl syn::visit_mut::VisitMut for PatchTypesVisitor<'_> {
             fn visit_type_mut(&mut self, i: &mut syn::Type) {
                 let lifetime = self.lifetime;
                 *i = syn::parse_quote_spanned! { i.span() =>

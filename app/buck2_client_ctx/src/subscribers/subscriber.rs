@@ -16,6 +16,7 @@ use buck2_events::BuckEvent;
 use dupe::Dupe;
 
 use crate::console_interaction_stream::SuperConsoleToggle;
+use crate::exit_result::ExitResult;
 use crate::subscribers::observer::ErrorObserver;
 
 /// Information about tick timing.
@@ -40,6 +41,11 @@ impl Tick {
 /// Each method will be called whenever an event occurs.
 #[async_trait]
 pub trait EventSubscriber: Send {
+    /// Name for debugging, only used for subscribers that have a finalize step.
+    fn name(&self) -> &'static str {
+        "default"
+    }
+
     /// Fired by the tailer for stdout, or by PartialResultHandler instances that wish to write to
     /// stdout.
     async fn handle_output(&mut self, _raw_output: &[u8]) -> buck2_error::Result<()> {
@@ -85,6 +91,15 @@ pub trait EventSubscriber: Send {
         None
     }
 
-    fn handle_daemon_connection_failure(&mut self, _error: &buck2_error::Error) {}
+    fn handle_daemon_connection_failure(&mut self) {}
     fn handle_daemon_started(&mut self, _reason: buck2_data::DaemonWasStartedReason) {}
+    fn handle_should_restart(&mut self) {}
+    fn handle_instant_command_outcome(&mut self, _is_success: bool) {}
+
+    fn handle_exit_result(&mut self, _result: &ExitResult) {}
+
+    /// Perform final clean up before exiting, upload logs etc.
+    async fn finalize(&mut self) -> buck2_error::Result<()> {
+        Ok(())
+    }
 }

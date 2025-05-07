@@ -12,13 +12,14 @@ use std::io::Write;
 use async_trait::async_trait;
 use buck2_cli_proto::DapRequest;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
-use buck2_client_ctx::common::ui::ConsoleType;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
+use buck2_client_ctx::common::ui::ConsoleType;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::events_ctx::PartialResultCtx;
 use buck2_client_ctx::events_ctx::PartialResultHandler;
 use buck2_client_ctx::exit_result::ExitResult;
@@ -26,8 +27,8 @@ use buck2_client_ctx::ide_support::ide_message_stream;
 use buck2_client_ctx::stream_util::reborrow_stream_for_static;
 use buck2_client_ctx::streaming::StreamingCommand;
 use buck2_client_ctx::subscribers::subscriber::EventSubscriber;
-use buck2_event_observer::unpack_event::unpack_event;
 use buck2_event_observer::unpack_event::UnpackedBuckEvent;
+use buck2_event_observer::unpack_event::unpack_event;
 use buck2_events::BuckEvent;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
@@ -65,7 +66,7 @@ fn send_message_to_dap_client(msg: &[u8]) -> buck2_error::Result<()> {
     Ok(())
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StreamingCommand for StarlarkDebugAttachCommand {
     const COMMAND_NAME: &'static str = "starlark-debug-attach";
 
@@ -74,6 +75,7 @@ impl StreamingCommand for StarlarkDebugAttachCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let client_context = ctx.client_context(matches, &self)?;
 
@@ -101,7 +103,12 @@ impl StreamingCommand for StarlarkDebugAttachCommand {
             |stream| async move {
                 buckd
                     .with_flushing()
-                    .dap(client_context, stream, &mut partial_result_handler)
+                    .dap(
+                        client_context,
+                        stream,
+                        events_ctx,
+                        &mut partial_result_handler,
+                    )
                     .await
             },
             // The DAP server side does not handle hangups. So, until it does... we never hang up:
@@ -232,7 +239,7 @@ impl PartialResultHandler for DapPartialResultHandler {
 
     async fn handle_partial_result(
         &mut self,
-        mut _ctx: PartialResultCtx<'_, '_>,
+        mut _ctx: PartialResultCtx<'_>,
         partial_res: buck2_cli_proto::DapMessage,
     ) -> buck2_error::Result<()> {
         Ok(send_message_to_dap_client(&partial_res.dap_json)?)

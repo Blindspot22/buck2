@@ -12,8 +12,8 @@ use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 
 use crate::execute::blocking::IoRequest;
 
@@ -79,7 +79,7 @@ pub fn cleanup_path(fs: &ProjectRoot, path: &ProjectRelativePath) -> buck2_error
             Some(path) => path,
             None => {
                 return Err(buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::CleanOutputs,
                     "Internal Error: reached root before finding a directory that exists!"
                 ));
             }

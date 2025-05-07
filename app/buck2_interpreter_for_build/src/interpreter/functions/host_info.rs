@@ -8,20 +8,20 @@
  */
 
 use allocative::Allocative;
-use buck2_interpreter::extra::xcode::XcodeVersionInfo;
 use buck2_interpreter::extra::InterpreterHostArchitecture;
 use buck2_interpreter::extra::InterpreterHostPlatform;
+use buck2_interpreter::extra::xcode::XcodeVersionInfo;
 use derivative::Derivative;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::values::structs::AllocStruct;
-use starlark::values::structs::StructRef;
 use starlark::values::AllocFrozenValue;
 use starlark::values::FrozenHeap;
 use starlark::values::FrozenValue;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::ValueOfUnchecked;
+use starlark::values::structs::AllocStruct;
+use starlark::values::structs::StructRef;
 
 use crate::interpreter::build_context::BuildContext;
 
@@ -150,9 +150,9 @@ pub(crate) fn register_host_info(builder: &mut GlobalsBuilder) {
 
 #[derive(Derivative, Clone, Debug, Allocative)]
 #[derivative(PartialEq)]
-pub(crate) struct HostInfo {
+pub struct HostInfo {
     // These first three fields are for equality only, otherwise not used
-    platform: InterpreterHostPlatform,
+    pub platform: InterpreterHostPlatform,
     arch: InterpreterHostArchitecture,
     xcode: Option<XcodeVersionInfo>,
     // The actual value which we ignore for equality, which is OK because of above

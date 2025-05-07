@@ -18,8 +18,8 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::provider::id::ProviderId;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_interpreter::build_context::starlark_path_from_build_context;
 use buck2_interpreter::types::provider::callable::ProviderCallableLike;
 use dupe::Dupe;
@@ -33,25 +33,14 @@ use starlark::docs::DocProperty;
 use starlark::docs::DocString;
 use starlark::docs::DocStringKind;
 use starlark::environment::GlobalsBuilder;
-use starlark::eval::param_specs;
 use starlark::eval::Arguments;
 use starlark::eval::Evaluator;
 use starlark::eval::ParametersSpec;
 use starlark::eval::ParametersSpecParam;
+use starlark::eval::param_specs;
 use starlark::typing::Ty;
 use starlark::typing::TyCallable;
 use starlark::typing::TyStarlarkValue;
-use starlark::values::dict::AllocDict;
-use starlark::values::dict::DictRef;
-use starlark::values::list::AllocList;
-use starlark::values::list::ListRef;
-use starlark::values::list_or_tuple::UnpackListOrTuple;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
-use starlark::values::typing::TypeCompiled;
-use starlark::values::typing::TypeInstanceId;
-use starlark::values::typing::TypeMatcher;
-use starlark::values::typing::TypeMatcherFactory;
 use starlark::values::AllocValue;
 use starlark::values::Demand;
 use starlark::values::Freeze;
@@ -66,19 +55,31 @@ use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLike;
-use starlark_map::small_map::SmallMap;
-use starlark_map::small_set::SmallSet;
+use starlark::values::dict::AllocDict;
+use starlark::values::dict::DictRef;
+use starlark::values::list::AllocList;
+use starlark::values::list::ListRef;
+use starlark::values::list_or_tuple::UnpackListOrTuple;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::typing::TypeCompiled;
+use starlark::values::typing::TypeInstanceId;
+use starlark::values::typing::TypeMatcher;
+use starlark::values::typing::TypeMatcherFactory;
 use starlark_map::StarlarkHasher;
 use starlark_map::StarlarkHasherBuilder;
+use starlark_map::small_map::SmallMap;
+use starlark_map::small_set::SmallSet;
 
 use crate::interpreter::rule_defs::provider::doc::provider_callable_documentation;
 use crate::interpreter::rule_defs::provider::ty::abstract_provider::AbstractProvider;
 use crate::interpreter::rule_defs::provider::ty::provider::ty_provider;
 use crate::interpreter::rule_defs::provider::ty::provider_callable::ty_provider_callable;
-use crate::interpreter::rule_defs::provider::user::user_provider_creator;
 use crate::interpreter::rule_defs::provider::user::UserProvider;
+use crate::interpreter::rule_defs::provider::user::user_provider_creator;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum ProviderCallableError {
     #[error(
         "The result of `provider()` must be assigned to a top-level variable before it can be called"
@@ -144,7 +145,6 @@ fn create_callable_function_signature(
         }),
         None,
     )
-    .map_err(from_starlark)
     .internal_error("Must have created correct signature")?;
 
     Ok((parameters_spec, TyCallable::new(param_spec, ret_ty)))
@@ -345,7 +345,7 @@ impl TypeMatcher for UserProviderMatcher {
     }
 }
 
-#[starlark_value(type = "provider_callable")]
+#[starlark_value(type = "ProviderCallable")]
 impl<'v> StarlarkValue<'v> for UserProviderCallable {
     type Canonical = FrozenUserProviderCallable;
 
@@ -402,7 +402,9 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
     ) -> starlark::Result<Value<'v>> {
         match self.callable.get() {
             Some(callable) => callable.invoke(args, eval),
-            None => Err(starlark::Error::new_other(ProviderCallableError::NotBound)),
+            None => Err(starlark::Error::new_other(buck2_error::Error::from(
+                ProviderCallableError::NotBound,
+            ))),
         }
     }
 
@@ -477,7 +479,7 @@ impl ProviderCallableLike for FrozenUserProviderCallable {
     }
 }
 
-#[starlark_value(type = "provider_callable")]
+#[starlark_value(type = "ProviderCallable")]
 impl<'v> StarlarkValue<'v> for FrozenUserProviderCallable {
     type Canonical = Self;
 
@@ -519,7 +521,9 @@ fn provider_field_parse_type<'v>(
     ty: Value<'v>,
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> buck2_error::Result<TypeCompiled<FrozenValue>> {
-    Ok(TypeCompiled::new(ty, eval.heap()).map(|ty| ty.to_frozen(eval.frozen_heap()))?)
+    TypeCompiled::new(ty, eval.heap())
+        .map(|ty| ty.to_frozen(eval.frozen_heap()))
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Interpreter))
 }
 
 #[starlark_module]
@@ -536,9 +540,9 @@ pub fn register_provider(builder: &mut GlobalsBuilder) {
             Some(x) => {
                 if let Some(x) = x.unpack_frozen() {
                     Some(x)
-                } else if ListRef::from_value(x).map_or(false, |x| x.is_empty()) {
+                } else if ListRef::from_value(x).is_some_and(|x| x.is_empty()) {
                     Some(eval.frozen_heap().alloc(AllocList::EMPTY))
-                } else if DictRef::from_value(x).map_or(false, |x| x.is_empty()) {
+                } else if DictRef::from_value(x).is_some_and(|x| x.is_empty()) {
                     Some(eval.frozen_heap().alloc(AllocDict::EMPTY))
                 } else {
                     // Dealing only with frozen values is much easier.

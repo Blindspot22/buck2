@@ -12,7 +12,6 @@ use std::iter;
 use std::sync::Arc;
 
 use allocative::Allocative;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
 use display_container::display_pair;
 use display_container::fmt_container;
@@ -20,19 +19,15 @@ use display_container::iter_display_chain;
 use dupe::Dupe;
 use either::Either;
 use gazebo::prelude::*;
-use serde::ser::SerializeMap;
 use serde::Serialize;
 use serde::Serializer;
+use serde::ser::SerializeMap;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
-use starlark::values::list::AllocList;
-use starlark::values::starlark_value;
-use starlark::values::typing::TypeInstanceId;
-use starlark::values::typing::TypeMatcher;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
@@ -47,18 +42,19 @@ use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueTypedComplex;
+use starlark::values::list::AllocList;
+use starlark::values::starlark_value;
+use starlark::values::typing::TypeInstanceId;
+use starlark::values::typing::TypeMatcher;
 
+use crate::actions::impls::json::JsonUnpack;
 use crate::actions::impls::json::validate_json;
 use crate::actions::impls::json::visit_json_artifacts;
-use crate::actions::impls::json::JsonUnpack;
-use crate::artifact_groups::deferred::TransitiveSetKey;
 use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::TransitiveSetProjectionKey;
+use crate::artifact_groups::deferred::TransitiveSetKey;
+use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::SimpleCommandLineArtifactVisitor;
-use crate::interpreter::rule_defs::transitive_set::transitive_set_definition::TransitiveSetDefinitionLike;
-use crate::interpreter::rule_defs::transitive_set::transitive_set_definition::TransitiveSetProjectionKind;
-use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetOrdering;
-use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetTraversal;
 use crate::interpreter::rule_defs::transitive_set::BfsTransitiveSetIteratorGen;
 use crate::interpreter::rule_defs::transitive_set::FrozenTransitiveSetDefinition;
 use crate::interpreter::rule_defs::transitive_set::PostorderTransitiveSetIteratorGen;
@@ -69,6 +65,10 @@ use crate::interpreter::rule_defs::transitive_set::TransitiveSetDefinition;
 use crate::interpreter::rule_defs::transitive_set::TransitiveSetError;
 use crate::interpreter::rule_defs::transitive_set::TransitiveSetIteratorLike;
 use crate::interpreter::rule_defs::transitive_set::TransitiveSetJsonProjection;
+use crate::interpreter::rule_defs::transitive_set::transitive_set_definition::TransitiveSetDefinitionLike;
+use crate::interpreter::rule_defs::transitive_set::transitive_set_definition::TransitiveSetProjectionKind;
+use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetOrdering;
+use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetTraversal;
 
 #[derive(Clone, Debug, Allocative)]
 pub(crate) struct TransitiveSetMatcher {
@@ -227,6 +227,18 @@ impl<'v, V: ValueLike<'v>> TransitiveSetGen<V> {
 }
 
 impl FrozenTransitiveSet {
+    pub fn visit_projection_direct_inputs<V: CommandLineArtifactVisitor>(
+        &self,
+        projection: usize,
+        visitor: &mut V,
+    ) -> buck2_error::Result<()> {
+        if let Some(projection) = self.get_projection_value(projection)? {
+            // It's either an args-like or a json projection. visit_json_artifacts handles both the way we want.
+            visit_json_artifacts(projection.to_value(), visitor)?;
+        }
+        Ok(())
+    }
+
     pub fn get_projection_sub_inputs(
         &self,
         projection: usize,
@@ -339,7 +351,7 @@ impl<'v> TransitiveSetLike<'v> for FrozenTransitiveSet {
 
 starlark_complex_value!(pub TransitiveSet);
 
-#[starlark_value(type = "transitive_set")]
+#[starlark_value(type = "TransitiveSet")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for TransitiveSetGen<V>
 where
     Self: ProvidesStaticType<'v> + TransitiveSetLike<'v>,
@@ -414,7 +426,7 @@ impl<'v> TransitiveSet<'v> {
                     let projected_value = eval
                         .eval_function(spec.projection.get(), &[value], &[])
                         .map_err(|error| TransitiveSetError::ProjectionError {
-                            error: from_starlark(error).into(),
+                            error: error.into(),
                             name: name.clone(),
                         })?;
                     match spec.kind {
@@ -450,7 +462,7 @@ impl<'v> TransitiveSet<'v> {
                 let reduced = eval
                     .eval_function(reduce.get(), &[children_values, value], &[])
                     .map_err(|error| TransitiveSetError::ReductionError {
-                        error: from_starlark(error).into(),
+                        error: error.into(),
                         name: name.clone(),
                     })?;
 

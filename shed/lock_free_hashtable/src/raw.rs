@@ -102,7 +102,7 @@ impl<T: AtomicValue> LockFreeRawTable<T> {
 
     /// Find an entry.
     #[inline]
-    pub fn lookup<'a>(&'a self, hash: u64, eq: impl Fn(T::Ref<'_>) -> bool) -> Option<T::Ref<'a>> {
+    pub fn lookup(&self, hash: u64, eq: impl Fn(T::Ref<'_>) -> bool) -> Option<T::Ref<'_>> {
         let current = self.current.load(Ordering::Acquire);
 
         if current.is_null() {
@@ -119,13 +119,13 @@ impl<T: AtomicValue> LockFreeRawTable<T> {
     /// and a pointer to the inserted entry is returned.
     ///
     /// Otherwise the pointer to existing entry along with the given value is returned.
-    pub fn insert<'a>(
-        &'a self,
+    pub fn insert(
+        &self,
         hash: u64,
         mut value: T,
         eq: impl Fn(T::Ref<'_>, T::Ref<'_>) -> bool,
         hash_fn: impl Fn(T::Ref<'_>) -> u64,
-    ) -> (T::Ref<'a>, Option<T>) {
+    ) -> (T::Ref<'_>, Option<T>) {
         loop {
             // Acquire shared lock.
             let guard = self.write_lock.read();
@@ -141,7 +141,7 @@ impl<T: AtomicValue> LockFreeRawTable<T> {
 
             let current = unsafe { &*current };
             match current.table.insert(hash, value, |a, b| eq(a, b)) {
-                Ok((referece, value)) => {
+                Ok((reference, value)) => {
                     drop(guard);
                     // Insert was successful. However, we or other threads
                     // may have exceeded the load factor.
@@ -149,7 +149,7 @@ impl<T: AtomicValue> LockFreeRawTable<T> {
                     if current.table.need_resize() {
                         self.resize_if_needed(|v| hash_fn(v));
                     }
-                    return (referece, value);
+                    return (reference, value);
                 }
                 Err(ret_value) => {
                     drop(guard);

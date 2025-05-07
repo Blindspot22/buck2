@@ -52,17 +52,20 @@ use buck2_execute::execute::request::CommandExecutionRequest;
 use buck2_execute::execute::request::ExecutorPreference;
 use buck2_execute::execute::result::CommandExecutionResult;
 use buck2_execute::materialize::materializer::Materializer;
-use buck2_execute::re::manager::ManagedRemoteExecutionClient;
+use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
 use buck2_file_watcher::mergebase::Mergebase;
 use buck2_futures::cancellation::CancellationContext;
 use buck2_http::HttpClient;
 use derivative::Derivative;
 use derive_more::Display;
-use indexmap::indexmap;
 use indexmap::IndexMap;
 use indexmap::IndexSet;
+use indexmap::indexmap;
 use remote_execution::TActionResult2;
+use starlark::values::Heap;
 use starlark::values::OwnedFrozenValue;
+use starlark::values::ValueOfUnchecked;
+use starlark::values::dict::DictType;
 use static_assertions::_core::ops::Deref;
 
 use crate::actions::execute::action_execution_target::ActionExecutionTarget;
@@ -72,6 +75,8 @@ use crate::actions::execute::error::ExecuteError;
 use crate::actions::impls::run_action_knobs::RunActionKnobs;
 use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::ArtifactGroupValues;
+use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_value::StarlarkArtifactValue;
 
 pub mod artifact;
 pub mod box_slice_set;
@@ -113,14 +118,18 @@ pub trait Action: Allocative + Debug + Send + Sync + 'static {
     fn inputs(&self) -> buck2_error::Result<Cow<'_, [ArtifactGroup]>>;
 
     /// All the outputs this 'Artifact' will generate. Just like inputs, this should be a pure
-    /// function.
+    /// function. Note that outputs in action result might be ordered differently.
     fn outputs(&self) -> Cow<'_, [BuildArtifact]>;
 
     /// Returns a reference to an output of the action. All actions are required to have at least one output.
     fn first_output(&self) -> &BuildArtifact;
 
-    /// Obtains an executable for this action.
-    fn as_executable(&self) -> ActionExecutable<'_>;
+    /// Runs the 'Action', where all inputs are available but the output directory may not have
+    /// been cleaned up. Upon success, it is expected that all outputs will be available
+    async fn execute(
+        &self,
+        ctx: &mut dyn ActionExecutionCtx,
+    ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError>;
 
     /// A machine-readable category for this action, intended to be used when analyzing actions outside of buck2 itself.
     ///
@@ -161,33 +170,16 @@ pub trait Action: Allocative + Debug + Send + Sync + 'static {
         None
     }
 
+    fn failed_action_output_artifacts<'v>(
+        &self,
+        _artifact_fs: &ArtifactFs,
+        _heap: &'v Heap,
+    ) -> buck2_error::Result<ValueOfUnchecked<'v, DictType<StarlarkArtifact, StarlarkArtifactValue>>>
+    {
+        Ok(ValueOfUnchecked::new(starlark::values::Value::new_none()))
+    }
+
     // TODO this probably wants more data for execution, like printing a short_name and the target
-}
-
-pub enum ActionExecutable<'a> {
-    // FIXME(JakobDegen): This is only used in tests. Delete?
-    Pristine(&'a dyn PristineActionExecutable),
-    Incremental(&'a dyn IncrementalActionExecutable),
-}
-
-#[async_trait]
-pub trait PristineActionExecutable: Send + Sync + 'static {
-    /// Runs the 'Action', where all inputs are available and the output directory has been cleaned
-    /// up. Upon success, it is expected that all outputs will be available
-    async fn execute(
-        &self,
-        ctx: &mut dyn ActionExecutionCtx,
-    ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError>;
-}
-
-#[async_trait]
-pub trait IncrementalActionExecutable: Send + Sync + 'static {
-    /// Runs the 'Action', where all inputs are available but the output directory may not have
-    /// been cleaned up. Upon success, it is expected that all outputs will be available
-    async fn execute(
-        &self,
-        ctx: &mut dyn ActionExecutionCtx,
-    ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError>;
 }
 
 /// The context for actions to use when executing
@@ -215,6 +207,13 @@ pub trait ActionExecutionCtx: Send + Sync {
     ) -> buck2_error::Result<PreparedAction>;
 
     async fn action_cache(
+        &mut self,
+        manager: CommandExecutionManager,
+        request: &CommandExecutionRequest,
+        prepared_action: &PreparedAction,
+    ) -> ControlFlow<CommandExecutionResult, CommandExecutionManager>;
+
+    async fn remote_dep_file_cache(
         &mut self,
         manager: CommandExecutionManager,
         request: &CommandExecutionRequest,
@@ -258,7 +257,7 @@ pub trait ActionExecutionCtx: Send + Sync {
 
     fn blocking_executor(&self) -> &dyn BlockingExecutor;
 
-    fn re_client(&self) -> ManagedRemoteExecutionClient;
+    fn re_client(&self) -> UnconfiguredRemoteExecutionClient;
 
     fn re_platform(&self) -> &remote_execution::Platform;
 
@@ -336,7 +335,7 @@ impl RegisteredAction {
     }
 
     /// Gets the action key, uniquely identifying this action in a target.
-    pub fn action_key(&self) -> ForwardRelativePathBuf {
+    pub(crate) fn action_key(&self) -> ForwardRelativePathBuf {
         // We want the action key to not cause instability in the RE action.
         // As an artifact can only be bound as an output to one action, we know it uniquely identifies the action and we can
         // derive the scratch path from that and that will be no unstable than the artifact already is.
@@ -354,7 +353,7 @@ impl RegisteredAction {
         &self.key
     }
 
-    pub fn execution_config(&self) -> &CommandExecutorConfig {
+    pub(crate) fn execution_config(&self) -> &CommandExecutorConfig {
         &self.executor_config
     }
 
@@ -400,7 +399,7 @@ impl ActionToBeRegistered {
         }
     }
 
-    pub fn key(&self) -> &ActionKey {
+    pub(crate) fn key(&self) -> &ActionKey {
         &self.key
     }
 

@@ -29,16 +29,16 @@ use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::tag_error;
 use buck2_core::tag_result;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
-use buck2_events::dispatch::get_dispatcher_opt;
+use buck2_error::buck2_error;
 use buck2_events::dispatch::EventDispatcher;
+use buck2_events::dispatch::get_dispatcher_opt;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::directory::extract_artifact_value;
 use buck2_execute::directory::insert_entry;
-use buck2_execute::entry::build_entry_from_disk;
 use buck2_execute::entry::HashingInfo;
+use buck2_execute::entry::build_entry_from_disk;
 use buck2_execute::execute::action_digest::ActionDigest;
 use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::execute::clean_output_paths::CleanOutputPaths;
@@ -63,23 +63,23 @@ use buck2_execute::knobs::ExecutorGlobalKnobs;
 use buck2_execute::materialize::materializer::MaterializationError;
 use buck2_execute::materialize::materializer::Materializer;
 use buck2_forkserver::client::ForkserverClient;
+use buck2_forkserver::run::GatherOutputStatus;
 use buck2_forkserver::run::gather_output;
 use buck2_forkserver::run::maybe_absolutize_exe;
 use buck2_forkserver::run::timeout_into_cancellation;
-use buck2_forkserver::run::GatherOutputStatus;
 use buck2_futures::cancellation::CancellationContext;
 use buck2_futures::cancellation::CancellationObserver;
 use buck2_util::process::background_command;
 use derive_more::From;
 use dupe::Dupe;
 use futures::future;
-use futures::future::select;
 use futures::future::FutureExt;
+use futures::future::select;
 use futures::stream::StreamExt;
 use gazebo::prelude::*;
-use host_sharing::host_sharing::HostSharingGuard;
 use host_sharing::HostSharingBroker;
 use host_sharing::HostSharingRequirements;
+use host_sharing::host_sharing::HostSharingGuard;
 use indexmap::IndexMap;
 use tracing::info;
 
@@ -176,7 +176,10 @@ impl LocalExecutor {
                     #[cfg(not(unix))]
                     {
                         let _unused = (forkserver, disable_miniperf, action_digest);
-                        Err(buck2_error!([], "Forkserver is not supported off-UNIX"))
+                        Err(buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "Forkserver is not supported off-UNIX"
+                        ))
                     }
                 }
 
@@ -241,12 +244,13 @@ impl LocalExecutor {
                         // output from previous run of that action could actually be used as the
                         // input during current run (e.g. extra output which is an incremental state describing the actual output).
                         if !request.outputs_cleanup {
-                            materialize_build_outputs_from_previous_run(
+                            materialize_build_outputs(
                                 &self.artifact_fs,
                                 self.materializer.as_ref(),
                                 request,
                             )
-                            .await
+                            .await?;
+                            buck2_error::Ok(())
                         } else {
                             Ok(())
                         }
@@ -316,7 +320,7 @@ impl LocalExecutor {
                     return manager.error(
                         "scratch_dir_too_long",
                         buck2_error!(
-                            [],
+                            buck2_error::ErrorTag::Environment,
                             "Scratch directory path is longer than MAX_PATH: {}",
                             scratch_path_abs
                         ),
@@ -349,7 +353,13 @@ impl LocalExecutor {
         let dispatcher = match get_dispatcher_opt() {
             Some(dispatcher) => dispatcher,
             None => {
-                return manager.error("no_dispatcher", buck2_error!([], "No dispatcher available"));
+                return manager.error(
+                    "no_dispatcher",
+                    buck2_error!(
+                        buck2_error::ErrorTag::DispatcherUnavailable,
+                        "No dispatcher available"
+                    ),
+                );
             }
         };
         let build_id: &str = &dispatcher.trace_id().to_string();
@@ -580,7 +590,7 @@ impl LocalExecutor {
         let mut total_hashing_time = Duration::ZERO;
         let mut total_hashed_outputs = 0;
         for output in request.outputs() {
-            let path = output.resolve(&self.artifact_fs).into_path();
+            let path = output.resolve(&self.artifact_fs)?.into_path();
             let abspath = self.root.join(&path);
             let (entry, hashing_info) = build_entry_from_disk(
                 abspath,
@@ -866,14 +876,14 @@ pub async fn materialize_inputs(
             CommandExecutionInput::ActionMetadata(metadata) => {
                 let path = artifact_fs
                     .buck_out_path_resolver()
-                    .resolve_gen(&metadata.path);
+                    .resolve_gen(&metadata.path)?;
                 CleanOutputPaths::clean(std::iter::once(path.as_ref()), artifact_fs.fs())?;
                 artifact_fs
                     .fs()
                     .write_file(&path, &metadata.data.0.0, false)?;
             }
             CommandExecutionInput::ScratchPath(path) => {
-                let path = artifact_fs.buck_out_path_resolver().resolve_scratch(path);
+                let path = artifact_fs.buck_out_path_resolver().resolve_scratch(path)?;
 
                 // Clean and produce it.
                 CleanOutputPaths::clean(std::iter::once(path.as_ref()), artifact_fs.fs())?;
@@ -961,15 +971,17 @@ async fn check_inputs(
     }
 }
 
-/// Materialize build outputs from the previous run of the same command.
-/// Useful when executing incremental actions first remotely and then locally.
+/// Materialize all output artifact for CommandExecutionRequest.
+///
+/// Note that the outputs could be from the previous run of the same command if cleanup on the action was not performed.
+/// The above is useful when executing incremental actions first remotely and then locally.
 /// In that case output from remote execution which is incremental state should be materialized prior local execution.
 /// Such incremental state in fact serves as the input while being output as well.
-pub async fn materialize_build_outputs_from_previous_run(
+pub(crate) async fn materialize_build_outputs(
     artifact_fs: &ArtifactFs,
     materializer: &dyn Materializer,
     request: &CommandExecutionRequest,
-) -> buck2_error::Result<()> {
+) -> buck2_error::Result<Vec<ProjectRelativePathBuf>> {
     let mut paths = vec![];
 
     for output in request.outputs() {
@@ -977,14 +989,14 @@ pub async fn materialize_build_outputs_from_previous_run(
             CommandExecutionOutputRef::BuildArtifact {
                 path,
                 output_type: _,
-            } => {
-                paths.push(artifact_fs.resolve_build(path));
-            }
+            } => paths.push(artifact_fs.resolve_build(path)?),
             CommandExecutionOutputRef::TestPath { path: _, create: _ } => {}
         }
     }
 
-    materializer.ensure_materialized(paths).await
+    materializer.ensure_materialized(paths.clone()).await?;
+
+    Ok(paths)
 }
 
 /// Create any output dirs requested by the command. Note that this makes no effort to delete
@@ -1000,7 +1012,7 @@ pub async fn create_output_dirs(
     let outputs: Vec<_> = request
         .outputs()
         .map(|output| output.resolve(artifact_fs))
-        .collect();
+        .collect::<buck2_error::Result<Vec<_>>>()?;
 
     // Invalidate all the output paths this action might provide. Note that this is a bit
     // approximative: we might have previous instances of this action that declared
@@ -1184,9 +1196,9 @@ mod tests {
     use std::str;
 
     use buck2_common::liveliness_observer::NoopLivelinessObserver;
+    use buck2_core::cells::CellResolver;
     use buck2_core::cells::cell_root_path::CellRootPathBuf;
     use buck2_core::cells::name::CellName;
-    use buck2_core::cells::CellResolver;
     use buck2_core::fs::buck_out_path::BuckOutPathResolver;
     use buck2_core::fs::project::ProjectRoot;
     use buck2_core::fs::project::ProjectRootTemp;

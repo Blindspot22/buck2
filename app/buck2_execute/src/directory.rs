@@ -22,13 +22,12 @@ use buck2_common::external_symlink::ExternalSymlink;
 use buck2_common::file_ops::FileDigest;
 use buck2_common::file_ops::FileMetadata;
 use buck2_common::file_ops::TrackedFileDigest;
-use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
+use buck2_core::fs::paths::RelativePath;
+use buck2_core::fs::paths::RelativePathBuf;
 use buck2_core::fs::paths::file_name::FileName;
 use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
-use buck2_core::fs::paths::RelativePath;
-use buck2_core::fs::paths::RelativePathBuf;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_directory::directory::builder::DirectoryBuilder;
 use buck2_directory::directory::dashmap_directory_interner::DashMapDirectoryInterner;
@@ -40,14 +39,14 @@ use buck2_directory::directory::directory_ref::DirectoryRef;
 use buck2_directory::directory::directory_ref::FingerprintedDirectoryRef;
 use buck2_directory::directory::directory_selector::DirectorySelector;
 use buck2_directory::directory::entry::DirectoryEntry;
-use buck2_directory::directory::find::find;
 use buck2_directory::directory::find::DirectoryFindError;
+use buck2_directory::directory::find::find;
 use buck2_directory::directory::fingerprinted_directory::FingerprintedDirectory;
 use buck2_directory::directory::immutable_directory::ImmutableDirectory;
 use buck2_directory::directory::shared_directory::SharedDirectory;
 use buck2_directory::directory::walk::unordered_entry_walk;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use chrono::DateTime;
 use chrono::Utc;
 use derive_more::Display;
@@ -248,7 +247,6 @@ where
 pub async fn re_directory_to_re_tree(
     directory: RE::Directory,
     client: &ManagedRemoteExecutionClient,
-    use_case: RemoteExecutorUseCase,
 ) -> buck2_error::Result<RE::Tree> {
     let mut children: Vec<RE::Directory> = vec![];
     let mut frontier = directory.directories.clone();
@@ -263,7 +261,7 @@ pub async fn re_directory_to_re_tree(
             })
             .collect();
         let mut retrieved = client
-            .download_typed_blobs::<RE::Directory>(None, digests, use_case)
+            .download_typed_blobs::<RE::Directory>(None, digests)
             .await?;
         frontier = retrieved
             .iter()
@@ -323,10 +321,10 @@ pub fn re_tree_to_directory(
     }
 
     // Recursively builds the directory
-    fn dfs_build<'a>(
+    fn dfs_build(
         re_dir: &'_ RE::Directory,
         re_dir_name: &'_ (impl fmt::Display + ?Sized),
-        dirmap: &'_ mut DirMap<'a>,
+        dirmap: &'_ mut DirMap<'_>,
         leaf_expires: &DateTime<Utc>,
         digest_config: DigestConfig,
     ) -> buck2_error::Result<ActionDirectoryBuilder> {
@@ -432,6 +430,7 @@ pub fn re_tree_to_directory(
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Tier0)]
 pub enum DirectoryReConversionError {
     // Conversion from RE::Tree errors (these shouldn't happen unless something is broken on RE side)
     #[error("Converting RE::Tree to Directory, dir `{dir}` has child `{name}` with digest=None.")]
@@ -775,7 +774,7 @@ mod tests {
 
     use super::*;
 
-    fn path<'a>(s: &'a str) -> &'a ProjectRelativePath {
+    fn path(s: &str) -> &ProjectRelativePath {
         ProjectRelativePath::new(s).unwrap()
     }
 

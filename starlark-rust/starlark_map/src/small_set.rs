@@ -93,6 +93,12 @@ impl<T> SmallSet<T> {
         Self(SmallMap::with_capacity(n))
     }
 
+    /// Reserve capacity for at least `additional` more elements to be inserted.
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+
     /// Current capacity of the set.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -535,10 +541,10 @@ where
 #[macro_export]
 macro_rules! smallset {
     (@single $($x:tt)*) => (());
-    (@count $($rest:expr),*) => (<[()]>::len(&[$(smallset!(@single $rest)),*]));
+    (@count $($rest:expr_2021),*) => (<[()]>::len(&[$(smallset!(@single $rest)),*]));
 
-    ($($key:expr,)+) => { smallset!($($key),+) };
-    ($($key:expr),*) => {
+    ($($key:expr_2021,)+) => { smallset!($($key),+) };
+    ($($key:expr_2021),*) => {
         {
             let cap = smallset!(@count $($key),*);
             let mut set = $crate::small_set::SmallSet::with_capacity(cap);

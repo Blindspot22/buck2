@@ -14,9 +14,9 @@ use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
-use starlark::values::starlark_value;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
+use starlark::values::starlark_value;
 
 /// Object describing which local resources are needed for a given test rule.
 #[derive(Debug, Display, NoSerialize, ProvidesStaticType, Allocative)]
@@ -55,7 +55,7 @@ pub fn register_required_test_local_resource(builder: &mut GlobalsBuilder) {
     ) -> starlark::Result<StarlarkRequiredTestLocalResource> {
         if !(listing || execution) {
             return Err(buck2_error::buck2_error!(
-                [],
+                buck2_error::ErrorTag::StarlarkError,
                 "`RequiredTestLocalResource` should not be disabled for both listing and execution stages",
             ).into());
         }

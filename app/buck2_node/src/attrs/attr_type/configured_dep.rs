@@ -13,9 +13,10 @@ use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::target::label::label::TargetLabel;
 use dupe::Dupe;
 
-use crate::attrs::attr_type::dep::ExplicitConfiguredDepMaybeConfigured;
+use crate::attrs::attr_type::configuration_dep::ConfigurationDepKind;
 use crate::attrs::configuration_context::AttrConfigurationContext;
 use crate::attrs::configured_attr::ConfiguredAttr;
+use crate::attrs::configured_traversal::ConfiguredAttrTraversal;
 use crate::attrs::traversal::CoercedAttrTraversal;
 use crate::provider_id_set::ProviderIdSet;
 
@@ -72,41 +73,47 @@ impl ConfiguredExplicitConfiguredDep {
     }
 }
 
-impl UnconfiguredExplicitConfiguredDep {
-    pub fn traverse<'a>(
-        &'a self,
-        traversal: &mut dyn CoercedAttrTraversal<'a>,
-    ) -> buck2_error::Result<()> {
-        traversal.dep(self.label.target())?;
-        traversal.platform_dep(&self.platform)
-    }
-}
-
-impl ExplicitConfiguredDepMaybeConfigured for ConfiguredExplicitConfiguredDep {
-    fn to_json(&self) -> buck2_error::Result<serde_json::Value> {
+impl ConfiguredExplicitConfiguredDep {
+    pub(crate) fn to_json(&self) -> buck2_error::Result<serde_json::Value> {
         Ok(serde_json::to_value(self.to_string())?)
     }
 
-    fn any_matches(
+    pub(crate) fn any_matches(
         &self,
         filter: &dyn Fn(&str) -> buck2_error::Result<bool>,
     ) -> buck2_error::Result<bool> {
         filter(&self.to_string())
     }
+
+    pub(crate) fn traverse(
+        &self,
+        traversal: &mut dyn ConfiguredAttrTraversal,
+    ) -> buck2_error::Result<()> {
+        traversal.dep(&self.label)
+    }
 }
 
-impl ExplicitConfiguredDepMaybeConfigured for UnconfiguredExplicitConfiguredDep {
-    fn to_json(&self) -> buck2_error::Result<serde_json::Value> {
+impl UnconfiguredExplicitConfiguredDep {
+    pub(crate) fn to_json(&self) -> buck2_error::Result<serde_json::Value> {
         Ok(serde_json::to_value([
             self.label.to_string(),
             self.platform.to_string(),
         ])?)
     }
 
-    fn any_matches(
+    pub(crate) fn any_matches(
         &self,
         filter: &dyn Fn(&str) -> buck2_error::Result<bool>,
     ) -> buck2_error::Result<bool> {
         filter(&self.to_string())
+    }
+
+    pub fn traverse<'a>(
+        &'a self,
+        traversal: &mut dyn CoercedAttrTraversal<'a>,
+    ) -> buck2_error::Result<()> {
+        traversal.dep(&self.label)?;
+        let label = ProvidersLabel::default_for(self.platform.dupe());
+        traversal.configuration_dep(&label, ConfigurationDepKind::ConfiguredDepPlatform)
     }
 }

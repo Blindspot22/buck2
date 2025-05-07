@@ -25,8 +25,8 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_error::BuckErrorContext;
 use buck2_interpreter::types::target_label::StarlarkConfiguredTargetLabel;
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
-use buck2_node::load_patterns::load_patterns;
 use buck2_node::load_patterns::MissingTargetBehavior;
+use buck2_node::load_patterns::load_patterns;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::configured_frontend::ConfiguredTargetNodeCalculation;
 use buck2_node::nodes::frontend::TargetGraphCalculation;
@@ -41,12 +41,12 @@ use dupe::IterDupedExt;
 use either::Either;
 use futures::FutureExt;
 use starlark::collections::SmallSet;
-use starlark::values::list::UnpackList;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::Heap;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueOf;
+use starlark::values::list::UnpackList;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
 use crate::bxl::starlark_defs::context::BxlContextCoreData;
 use crate::bxl::starlark_defs::context::BxlContextNoDice;
@@ -189,6 +189,7 @@ impl<'v> TargetListExpr<'v, TargetNode> {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 pub(crate) enum TargetExprError {
     #[error(
         "Expected a single target like item, but was `{0}`. If you have passed in a `label`, make sure to call `configured_target()` to get the underlying configured target label."
@@ -250,7 +251,7 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
             .collect()
     }
 
-    pub(crate) async fn unpack_opt<'c>(
+    pub(crate) async fn unpack_opt(
         arg: ConfiguredTargetListExprArg<'v>,
         global_cfg_options: &GlobalCfgOptions,
         ctx: &BxlContextNoDice<'v>,
@@ -273,7 +274,7 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
         }
     }
 
-    pub(crate) async fn unpack<'c>(
+    pub(crate) async fn unpack(
         // TODO(nga): this does not accept unconfigured targets, so should be narrower type here.
         arg: ConfiguredTargetListExprArg<'v>,
         global_cfg_options: &GlobalCfgOptions,
@@ -283,7 +284,7 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
         Self::unpack_opt(arg, global_cfg_options, ctx, dice, false).await
     }
 
-    pub(crate) async fn unpack_allow_unconfigured<'c>(
+    pub(crate) async fn unpack_allow_unconfigured(
         arg: ConfiguredTargetListExprArg<'v>,
         global_cfg_options: &GlobalCfgOptions,
         ctx: &BxlContextNoDice<'v>,
@@ -344,7 +345,7 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
 
     // Ideally we refactor the entire unpacking logic for configured targets to make this easier,
     // but let's support keep_going for string literals for now.
-    pub(crate) async fn unpack_keep_going<'c>(
+    pub(crate) async fn unpack_keep_going(
         arg: ConfiguredTargetListExprArg<'v>,
         global_cfg_options: &GlobalCfgOptions,
         ctx: &BxlContextNoDice<'v>,
@@ -391,14 +392,14 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
                             Err(e) => Err(e),
                         }
                     }
-                    Err(e) => Err(e.into()),
+                    Err(e) => Err(e),
                 };
 
                 result.or_else(|e| {
                     if keep_going {
                         Ok(TargetListExpr::Iterable(Vec::new()))
                     } else {
-                        Err(e.into())
+                        Err(e)
                     }
                 })
             }
@@ -426,7 +427,7 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
         }
     }
 
-    async fn unpack_iterable<'c>(
+    async fn unpack_iterable(
         value: ValueOf<'v, ConfiguredTargetListArg<'v>>,
         global_cfg_options: &GlobalCfgOptions,
         ctx: &BxlContextNoDice<'_>,
@@ -496,7 +497,7 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
 }
 
 impl<'v> TargetListExpr<'v, TargetNode> {
-    pub(crate) async fn unpack<'c>(
+    pub(crate) async fn unpack(
         value: TargetListExprArg<'v>,
         ctx: &BxlContextNoDice<'_>,
         dice: &mut DiceComputations<'_>,
@@ -547,7 +548,7 @@ impl<'v> TargetListExpr<'v, TargetNode> {
         }
     }
 
-    async fn unpack_iterable<'c>(
+    async fn unpack_iterable(
         value: TargetSetOrTargetList<'v>,
         ctx: &BxlContextNoDice<'_>,
         dice: &mut DiceComputations<'_>,
@@ -603,7 +604,7 @@ impl SingleOrCompatibleConfiguredTargets {
     }
 }
 
-async fn unpack_string_literal<'v>(
+async fn unpack_string_literal(
     val: &str,
     global_cfg_options: &GlobalCfgOptions,
     ctx: &BxlContextCoreData,
@@ -808,6 +809,17 @@ impl OwnedTargetNodeArg {
                     }
                 }
             }
+        }
+    }
+
+    pub(crate) async fn to_unconfigured_target_set(
+        &self,
+        ctx: &BxlContextCoreData,
+        dice: &mut DiceComputations<'_>,
+    ) -> buck2_error::Result<StarlarkTargetSet<TargetNode>> {
+        match self.to_unconfigured_target_node(ctx, dice).await? {
+            Either::Left(node) => Ok(StarlarkTargetSet(TargetSet::from_iter(vec![node.0]))),
+            Either::Right(target_set) => Ok(target_set),
         }
     }
 }

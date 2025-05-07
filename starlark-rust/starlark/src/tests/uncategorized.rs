@@ -38,8 +38,6 @@ use crate::starlark_simple_value;
 use crate::syntax::AstModule;
 use crate::syntax::Dialect;
 use crate::tests::util::trim_rust_backtrace;
-use crate::values::list_or_tuple::UnpackListOrTuple;
-use crate::values::none::NoneType;
 use crate::values::Freeze;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
@@ -49,6 +47,8 @@ use crate::values::StarlarkValue;
 use crate::values::Trace;
 use crate::values::UnpackValue;
 use crate::values::Value;
+use crate::values::list_or_tuple::UnpackListOrTuple;
+use crate::values::none::NoneType;
 
 #[test]
 fn alias_test() {
@@ -172,7 +172,7 @@ def loop():
         if len(xs) == 3:
             xs.append(4)
 loop()"#,
-        "mutate an iterable",
+        "mutates an iterable",
     );
 }
 
@@ -272,7 +272,7 @@ def foo():
         break
 foo()
 "#,
-        "mutate an iterable",
+        "mutates an iterable",
     );
     assert::fail(
         r#"
@@ -743,7 +743,7 @@ fn test_label_assign() {
     }
 
     #[starlark_module]
-    fn module<'v>(builder: &mut GlobalsBuilder) {
+    fn module(builder: &mut GlobalsBuilder) {
         fn wrapper<'v>(heap: &'v Heap) -> anyhow::Result<Value<'v>> {
             Ok(heap.alloc_complex(Wrapper(RefCell::new(SmallMap::new()))))
         }

@@ -43,8 +43,8 @@ pub struct QueryAttr<P: ProvidersLabelMaybeConfigured> {
 }
 
 impl QueryAttr<ConfiguredProvidersLabel> {
-    pub(crate) fn traverse<'a>(
-        &'a self,
+    pub(crate) fn traverse(
+        &self,
         traversal: &mut dyn ConfiguredAttrTraversal,
     ) -> buck2_error::Result<()> {
         self.query.traverse(traversal)
@@ -71,7 +71,7 @@ impl QueryAttr<ProvidersLabel> {
 }
 
 /// Query in target node attribute, like `$(query_outputs ...)`.
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
 pub struct QueryMacroBase<P: ProvidersLabelMaybeConfigured> {
     pub expansion_type: QueryExpansion,
     pub query: QueryAttrBase<P>,
@@ -85,8 +85,8 @@ impl<P: ProvidersLabelMaybeConfigured> Display for QueryMacroBase<P> {
 }
 
 impl QueryMacroBase<ConfiguredProvidersLabel> {
-    pub(crate) fn traverse<'a>(
-        &'a self,
+    pub(crate) fn traverse(
+        &self,
         traversal: &mut dyn ConfiguredAttrTraversal,
     ) -> buck2_error::Result<()> {
         self.query.traverse(traversal)
@@ -117,18 +117,22 @@ impl QueryMacroBase<ProvidersLabel> {
 /// Used in either:
 /// * Attribute created with `attrs.query(...)`
 /// * Query inside macros like `$(query_targets ...)`
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
 pub struct QueryAttrBase<P: ProvidersLabelMaybeConfigured> {
     pub query: String,
     pub resolved_literals: ResolvedQueryLiterals<P>,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative)]
-pub struct ResolvedQueryLiterals<P: ProvidersLabelMaybeConfigured>(pub BTreeMap<String, P>);
+type OffsetAndLength = (usize, usize);
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
+pub struct ResolvedQueryLiterals<P: ProvidersLabelMaybeConfigured>(
+    pub BTreeMap<OffsetAndLength, P>,
+);
 
 impl QueryAttrBase<ConfiguredProvidersLabel> {
-    pub(crate) fn traverse<'a>(
-        &'a self,
+    pub(crate) fn traverse(
+        &self,
         traversal: &mut dyn ConfiguredAttrTraversal,
     ) -> buck2_error::Result<()> {
         // queries have no inputs.
@@ -151,7 +155,7 @@ impl QueryAttrBase<ProvidersLabel> {
                 self.resolved_literals
                     .0
                     .iter()
-                    .map(|(key, value)| Ok((key.clone(), ctx.configure_target(value))))
+                    .map(|(key, value)| Ok((*key, ctx.configure_target(value))))
                     .collect::<buck2_error::Result<_>>()?,
             ),
         })
@@ -163,7 +167,7 @@ impl QueryAttrBase<ProvidersLabel> {
     ) -> buck2_error::Result<()> {
         // queries don't have any configuration_deps or inputs currently.
         for dep in self.resolved_literals.0.values() {
-            traversal.dep(dep.target())?;
+            traversal.dep(dep)?;
         }
         Ok(())
     }

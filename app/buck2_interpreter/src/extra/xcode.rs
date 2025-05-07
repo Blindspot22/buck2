@@ -15,10 +15,12 @@ use buck2_core::fs::fs_util;
 use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use regex::Regex;
 use serde::Deserialize;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum XcodeVersionError {
     #[error("XCode select symlink `{}` resolved to path without parent: `{}`", XCODE_SELECT_SYMLINK, _0.display())]
     XcodeSelectSymlinkResolvedToPathWithoutParent(AbsNormPathBuf),
@@ -79,12 +81,12 @@ impl XcodeVersionInfo {
             Ok(plist) => plist,
             Err(e)
                 if e.as_io()
-                    .map_or(false, |e| e.kind() == io::ErrorKind::NotFound) =>
+                    .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) =>
             {
                 return Ok(None);
             }
             Err(e) => {
-                return Err(buck2_error::Error::from(e)
+                return Err(from_any_with_tag(e, buck2_error::ErrorTag::Tier0)
                     .context("Error deserializing Xcode `version.plist`"));
             }
         };

@@ -17,9 +17,6 @@
 
 use proc_macro2::Ident;
 use proc_macro2::Span;
-use syn::parse::ParseStream;
-use syn::spanned::Spanned;
-use syn::visit::Visit;
 use syn::Attribute;
 use syn::Expr;
 use syn::FnArg;
@@ -31,12 +28,15 @@ use syn::PathArguments;
 use syn::ReturnType;
 use syn::Token;
 use syn::Type;
+use syn::parse::ParseStream;
+use syn::spanned::Spanned;
+use syn::visit::Visit;
 
+use crate::module::parse::ModuleKind;
 use crate::module::parse::is_attribute_docstring;
 use crate::module::parse::is_mut_something;
 use crate::module::parse::is_ref_something;
 use crate::module::parse::parse_visibility;
-use crate::module::parse::ModuleKind;
 use crate::module::simple_param::SimpleParam;
 use crate::module::typ::RegularParams;
 use crate::module::typ::SpecialParam;
@@ -697,22 +697,28 @@ fn parse_arg(
     check_lifetimes_in_type(&param.ty, has_v)?;
     let (param_attrs, param) = parse_fn_param_attrs(param)?;
 
-    if let Some(heap) = is_heap(&param, &param_attrs)? {
-        if this {
-            return Err(syn::Error::new(
-                span,
-                "Receiver parameter cannot be `&Heap`",
-            ));
+    match is_heap(&param, &param_attrs)? {
+        Some(heap) => {
+            if this {
+                return Err(syn::Error::new(
+                    span,
+                    "Receiver parameter cannot be `&Heap`",
+                ));
+            }
+            return Ok(StarArgOrSpecial::Heap(heap));
         }
-        return Ok(StarArgOrSpecial::Heap(heap));
-    } else if let Some(eval) = is_eval(&param, &param_attrs)? {
-        if this {
-            return Err(syn::Error::new(
-                span,
-                "Receiver parameter cannot be `&mut Evaluator`",
-            ));
-        }
-        return Ok(StarArgOrSpecial::Eval(eval));
+        _ => match is_eval(&param, &param_attrs)? {
+            Some(eval) => {
+                if this {
+                    return Err(syn::Error::new(
+                        span,
+                        "Receiver parameter cannot be `&mut Evaluator`",
+                    ));
+                }
+                return Ok(StarArgOrSpecial::Eval(eval));
+            }
+            _ => {}
+        },
     }
 
     if this {

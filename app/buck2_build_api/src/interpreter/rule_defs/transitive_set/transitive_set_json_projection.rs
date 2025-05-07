@@ -22,7 +22,6 @@ use starlark::coerce::Coerce;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
-use starlark::values::starlark_value;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Heap;
@@ -36,12 +35,13 @@ use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::starlark_value;
 
 use crate::artifact_groups::TransitiveSetProjectionKey;
-use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetOrdering;
-use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetProjectionTraversal;
 use crate::interpreter::rule_defs::transitive_set::FrozenTransitiveSet;
 use crate::interpreter::rule_defs::transitive_set::TransitiveSet;
+use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetOrdering;
+use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetProjectionTraversal;
 
 /// TransitiveSetJsonProjection is the starlark value returned from the starlark method `transitive_set.project_as_json()`
 ///
@@ -71,7 +71,7 @@ impl<'v, V: ValueLike<'v>> Display for TransitiveSetJsonProjectionGen<V> {
             ")",
             iter_display_chain(
                 iter::once(projection_name),
-                iter::once(display_pair("transitive_set", "=", &self.transitive_set)),
+                iter::once(display_pair("TransitiveSet", "=", &self.transitive_set)),
             ),
         )
     }
@@ -110,7 +110,7 @@ impl<'v, V: ValueLike<'v>> TransitiveSetJsonProjectionGen<V> {
 
 starlark_complex_value!(pub TransitiveSetJsonProjection);
 
-#[starlark_value(type = "transitive_set_json_projection")]
+#[starlark_value(type = "TransitiveSetJsonProjection")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for TransitiveSetJsonProjectionGen<V>
 where
     Self: ProvidesStaticType<'v>,

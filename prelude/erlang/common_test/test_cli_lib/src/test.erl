@@ -14,6 +14,7 @@
 %%% % @format
 
 -module(test).
+-eqwalizer(ignore).
 
 -include_lib("common/include/buck_ct_records.hrl").
 
@@ -356,7 +357,7 @@ init_group_leader() ->
 
 -spec print_tests([{module(), [{non_neg_integer(), string()}]}]) -> string().
 print_tests([]) ->
-    lists:flatten(io_lib:format("no tests found~n"));
+    "no tests found\n";
 print_tests(Tests) ->
     lists:flatten(print_tests_impl(lists:reverse(Tests))).
 
@@ -386,10 +387,16 @@ collect_results(PerSuite) ->
                 erlang:length(Tests), Suite, ct_daemon:output_dir()
             ]),
             %% run all tests for the current SUITE
-            maps:merge(
-                Acc,
-                ct_daemon:run({discovered, [#{suite => Suite, name => Test} || Test <- Tests]})
-            )
+            case ct_daemon:run({discovered, [#{suite => Suite, name => Test} || Test <- Tests]}) of
+                node_down ->
+                    io:format("test node shut down during test execution, aborting~n", []),
+                    Acc;
+                RunResult ->
+                    maps:merge(
+                        Acc,
+                        RunResult
+                    )
+            end
         end,
         #{},
         PerSuite
@@ -413,12 +420,13 @@ ensure_per_suite_encapsulation(Suite) ->
 
 -spec discover(string() | non_neg_integer() | atom()) -> [test_info()].
 discover(RegExOrId) ->
-    StringOrId = case is_atom(RegExOrId) of
-        true ->
-            atom_to_list(RegExOrId);
-        false ->
-            RegExOrId
-    end,
+    StringOrId =
+        case is_atom(RegExOrId) of
+            true ->
+                atom_to_list(RegExOrId);
+            false ->
+                RegExOrId
+        end,
     case ct_daemon:discover(StringOrId) of
         {error, not_listed_yet} ->
             ct_daemon:list(""),

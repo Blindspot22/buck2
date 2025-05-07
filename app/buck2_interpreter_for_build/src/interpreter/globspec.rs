@@ -15,6 +15,7 @@ use buck2_common::package_listing::file_listing::PackageFileListing;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::package::package_relative_path::PackageRelativePath;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use derivative::Derivative;
 
 #[derive(Debug, buck2_error::Error)]
@@ -51,6 +52,7 @@ impl Debug for GlobPattern {
 impl GlobPattern {
     fn new(pattern: &str) -> buck2_error::Result<GlobPattern> {
         let parsed_pattern = glob::Pattern::new(pattern)
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Input))
             .with_buck_error_context(|| format!("Error creating globspec for `{}`", pattern))?;
         if pattern.contains("//") {
             return Err(GlobError::DoubleSlash(pattern.to_owned()).into());

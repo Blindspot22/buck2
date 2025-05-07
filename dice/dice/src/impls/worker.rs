@@ -15,13 +15,13 @@ use std::future;
 use dice_error::result::CancellableResult;
 use dice_error::result::CancellationReason;
 use dupe::Dupe;
+use futures::Future;
+use futures::FutureExt;
+use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::pin_mut;
 use futures::stream;
 use futures::stream::FuturesUnordered;
-use futures::Future;
-use futures::FutureExt;
-use futures::StreamExt;
 use gazebo::variants::VariantName;
 use itertools::Either;
 use tracing::Instrument;
@@ -40,12 +40,12 @@ use crate::impls::evaluator::SyncEvaluator;
 use crate::impls::events::DiceEventDispatcher;
 use crate::impls::key::DiceKey;
 use crate::impls::key::ParentKey;
+use crate::impls::task::PreviouslyCancelledTask;
 use crate::impls::task::dice::DiceTask;
 use crate::impls::task::handle::DiceTaskHandle;
 use crate::impls::task::promise::DicePromise;
 use crate::impls::task::promise::DiceSyncResult;
 use crate::impls::task::spawn_dice_task;
-use crate::impls::task::PreviouslyCancelledTask;
 use crate::impls::user_cycle::KeyComputingUserCycleDetectorData;
 use crate::impls::user_cycle::UserCycleDetectorData;
 use crate::impls::value::DiceComputedValue;
@@ -319,7 +319,7 @@ impl DiceTaskWorker {
     skip(eval, cycles),
     fields(version = %eval.per_live_version_ctx.get_version(), version = %version)
 ))]
-pub(crate) async fn check_dependencies<'a>(
+async fn check_dependencies<'a>(
     eval: &'a AsyncEvaluator,
     parent_key: ParentKey,
     deps: &'a SeriesParallelDeps,
@@ -539,7 +539,6 @@ pub(crate) fn project_for_key(
 
 #[cfg(test)]
 pub(crate) mod testing {
-
     use crate::impls::worker::CheckDependenciesResult;
 
     pub(crate) trait CheckDependenciesResultExt {

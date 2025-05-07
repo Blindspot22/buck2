@@ -9,12 +9,13 @@
 
 use allocative::Allocative;
 use buck2_core::cells::paths::CellRelativePath;
+use buck2_error::conversion::from_any_with_tag;
 use globset::Candidate;
 use globset::GlobSetBuilder;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Clone, Allocative)]
 pub struct IgnoreSet {
     #[allocative(skip)]
     globset: globset::GlobSet,
@@ -71,16 +72,22 @@ impl IgnoreSet {
                 patterns_builder.add(
                     globset::GlobBuilder::new(val)
                         .literal_separator(true)
-                        .build()?,
+                        .build()
+                        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?,
                 );
             } else {
-                patterns_builder.add(globset::Glob::new(&format!("{{{},{}/**}}", val, val))?);
+                patterns_builder.add(
+                    globset::Glob::new(&format!("{{{},{}/**}}", val, val))
+                        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?,
+                );
             }
             patterns.push(val.to_owned());
         }
 
         Ok(Self {
-            globset: patterns_builder.build()?,
+            globset: patterns_builder
+                .build()
+                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?,
             patterns,
         })
     }

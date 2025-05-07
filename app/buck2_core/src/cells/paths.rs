@@ -24,17 +24,18 @@ use gazebo::transmute;
 use ref_cast::RefCast;
 use relative_path::RelativePath;
 use serde::Serialize;
+use strong_hash::StrongHash;
 
+use crate::fs::paths::RelativePathBuf;
 use crate::fs::paths::file_name::FileName;
 use crate::fs::paths::fmt::quoted_display;
 use crate::fs::paths::forward_rel_path::ForwardRelativePath;
 use crate::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use crate::fs::paths::forward_rel_path::ForwardRelativePathIter;
-use crate::fs::paths::RelativePathBuf;
 
 /// A un-owned forward pointing, fully normalized path that is relative to the cell
 #[derive(
-    Display, Derivative, Hash, PartialEq, Eq, RefCast, PartialOrd, Ord, Allocative
+    Display, Derivative, Hash, PartialEq, Eq, RefCast, PartialOrd, Ord, Allocative, StrongHash
 )]
 #[derivative(Debug)]
 #[repr(transparent)]
@@ -226,9 +227,9 @@ impl CellRelativePath {
     ///
     /// # buck2_error::Ok(())
     /// ```
-    pub fn strip_prefix<P: ?Sized>(&self, base: &P) -> buck2_error::Result<&ForwardRelativePath>
+    pub fn strip_prefix<P>(&self, base: &P) -> buck2_error::Result<&ForwardRelativePath>
     where
-        P: AsRef<CellRelativePath>,
+        P: ?Sized + AsRef<CellRelativePath>,
     {
         self.0.strip_prefix(&base.as_ref().0)
     }

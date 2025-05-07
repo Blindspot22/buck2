@@ -8,12 +8,15 @@
  */
 
 use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
 
+use buck2_cli_proto::ClientContext;
 use buck2_cli_proto::client_context::HostArchOverride as GrpcHostArchOverride;
 use buck2_cli_proto::client_context::HostPlatformOverride as GrpcHostPlatformOverride;
 use buck2_cli_proto::client_context::PreemptibleWhen as GrpcPreemptibleWhen;
-use buck2_cli_proto::ClientContext;
 use buck2_common::argv::Argv;
+use buck2_common::init::LogDownloadMethod;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_common::invocation_paths_result::InvocationPathsResult;
 use buck2_core::error::buck2_hard_error_env;
@@ -21,27 +24,28 @@ use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::BuckErrorContext;
 use buck2_event_observer::verbosity::Verbosity;
-use buck2_util::cleanup_ctx::AsyncCleanupContext;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex;
 
 use crate::client_metadata::ClientMetadata;
-use crate::common::ui::CommonConsoleOptions;
 use crate::common::BuckArgMatches;
 use crate::common::CommonEventLogOptions;
 use crate::common::HostArchOverride;
 use crate::common::HostPlatformOverride;
 use crate::common::PreemptibleWhen;
+use crate::common::ui::CommonConsoleOptions;
 use crate::console_interaction_stream::ConsoleInteractionStream;
-use crate::daemon::client::connect::BuckdConnectOptions;
-use crate::daemon::client::BuckdClientConnector;
 use crate::daemon_constraints::get_possibly_nested_invocation_daemon_uuid;
+use crate::events_ctx::EventsCtx;
+use crate::exit_result::ExitResult;
 use crate::immediate_config::ImmediateConfigContext;
 use crate::restarter::Restarter;
 use crate::stdin::Stdin;
 use crate::streaming::StreamingCommand;
-use crate::subscribers::recorder::try_get_invocation_recorder;
+use crate::subscribers::recorder::get_invocation_recorder;
+use crate::subscribers::subscribers::EventSubscribers;
 
 pub struct ClientCommandContext<'a> {
     init: fbinit::FacebookInit,
@@ -56,7 +60,6 @@ pub struct ClientCommandContext<'a> {
         Option<Box<dyn FnOnce() -> buck2_error::Result<()> + Send + Sync>>,
     pub(crate) argv: Argv,
     pub trace_id: TraceId,
-    async_cleanup: AsyncCleanupContext<'a>,
     stdin: &'a mut Stdin,
     pub(crate) restarter: &'a mut Restarter,
     pub(crate) restarted_trace_id: Option<TraceId>,
@@ -64,6 +67,7 @@ pub struct ClientCommandContext<'a> {
     oncall: Option<String>,
     pub(crate) client_metadata: Vec<ClientMetadata>,
     pub(crate) isolation: FileNameBuf,
+    pub(crate) start_time: u64,
 }
 
 impl<'a> ClientCommandContext<'a> {
@@ -76,7 +80,6 @@ impl<'a> ClientCommandContext<'a> {
         start_in_process_daemon: Option<Box<dyn FnOnce() -> buck2_error::Result<()> + Send + Sync>>,
         argv: Argv,
         trace_id: TraceId,
-        async_cleanup: AsyncCleanupContext<'a>,
         stdin: &'a mut Stdin,
         restarter: &'a mut Restarter,
         restarted_trace_id: Option<TraceId>,
@@ -84,6 +87,7 @@ impl<'a> ClientCommandContext<'a> {
         oncall: Option<String>,
         client_metadata: Vec<ClientMetadata>,
         isolation: FileNameBuf,
+        start_time: u64,
     ) -> Self {
         ClientCommandContext {
             init,
@@ -94,7 +98,6 @@ impl<'a> ClientCommandContext<'a> {
             start_in_process_daemon,
             argv,
             trace_id,
-            async_cleanup,
             stdin,
             restarter,
             restarted_trace_id,
@@ -102,6 +105,7 @@ impl<'a> ClientCommandContext<'a> {
             oncall,
             client_metadata,
             isolation,
+            start_time,
         }
     }
 
@@ -134,52 +138,65 @@ impl<'a> ClientCommandContext<'a> {
         self.runtime.block_on(func(self))
     }
 
-    pub fn instant_command<Fut, F>(
-        self,
-        command_name: &'static str,
-        event_log_opts: &CommonEventLogOptions,
-        func: F,
-    ) -> buck2_error::Result<()>
-    where
-        Fut: Future<Output = buck2_error::Result<()>> + 'a,
-        F: FnOnce(ClientCommandContext<'a>) -> Fut,
-    {
-        let mut recorder = try_get_invocation_recorder(
-            &self,
-            &event_log_opts,
-            command_name,
-            std::env::args().collect(),
-            Vec::new(),
-            None,
-        )?;
-
-        recorder.update_metadata_from_client_metadata(&self.client_metadata);
-
-        let result = self.with_runtime(func);
-
-        recorder.instant_command_outcome(result.is_ok());
-        result.into()
+    pub fn exec<T: BuckSubcommand>(self, cmd: T, matches: BuckArgMatches<'_>) -> ExitResult {
+        self.with_runtime(|ctx| ctx.exec_async(cmd, matches))
     }
 
-    /// Invoke a command without writing event log.
-    /// (For example, we don't write logs in `buck2 log` command.)
-    pub fn instant_command_no_log<Fut, F>(
+    // Handles setting up subscribers, executing a command and finalizing logging.
+    pub async fn exec_async<T: BuckSubcommand>(
         self,
-        command_name: &'static str,
-        func: F,
-    ) -> buck2_error::Result<()>
-    where
-        Fut: Future<Output = buck2_error::Result<()>> + 'a,
-        F: FnOnce(ClientCommandContext<'a>) -> Fut,
-    {
-        self.instant_command(
-            command_name,
-            &CommonEventLogOptions {
-                no_event_log: true,
-                ..CommonEventLogOptions::default()
-            },
-            func,
-        )
+        cmd: T,
+        matches: BuckArgMatches<'_>,
+    ) -> ExitResult {
+        let buck_log_dir = self.paths().map(|paths| paths.log_dir()).ok();
+        let command_report_path = cmd
+            .event_log_opts()
+            .command_report_path
+            .as_ref()
+            .map(|path| path.resolve(&self.working_dir));
+        let trace_id = self.trace_id.clone();
+
+        let events_ctx = Arc::new(Mutex::new(EventsCtx::new(cmd.subscribers(matches, &self))));
+        let exec_events_ctx = events_ctx.dupe();
+
+        let result = async {
+            let mut events_ctx = exec_events_ctx.lock().await;
+            let is_streaming_command = cmd.is_streaming_command();
+            let result = cmd.exec_impl(matches, self, &mut events_ctx).await;
+            events_ctx.subscribers.handle_exit_result(&result);
+
+            // TODO(ctolliday) always send ExitResult to recorder and remove this check.
+            if !is_streaming_command {
+                events_ctx
+                    .subscribers
+                    .handle_instant_command_outcome(result.is_success());
+            }
+            result
+        }
+        .await;
+
+        let finalize_events = async {
+            let mut events_ctx = events_ctx.lock().await;
+            events_ctx.finalize().await
+        };
+
+        let logging_timeout = Duration::from_secs(30);
+        let finalizing_errors = tokio::time::timeout(logging_timeout, finalize_events)
+            .await
+            .unwrap_or_else(|_| {
+                vec![format!(
+                    "Timeout after {:?} waiting for logging cleanup",
+                    logging_timeout
+                )]
+            });
+        // Don't fail the command if command report fails to write. TODO(ctolliday) show a warning?
+        let _unused = result.write_command_report(
+            trace_id,
+            buck_log_dir,
+            command_report_path,
+            finalizing_errors,
+        );
+        result
     }
 
     pub fn stdin(&mut self) -> &mut Stdin {
@@ -196,15 +213,6 @@ impl<'a> ClientCommandContext<'a> {
         }
 
         ConsoleInteractionStream::new(self.stdin)
-    }
-
-    pub async fn connect_buckd(
-        &self,
-        options: BuckdConnectOptions<'a>,
-    ) -> buck2_error::Result<BuckdClientConnector<'a>> {
-        BuckdConnectOptions { ..options }
-            .connect(self.paths()?)
-            .await
     }
 
     pub fn client_context<T: StreamingCommand>(
@@ -256,6 +264,7 @@ impl<'a> ClientCommandContext<'a> {
                 .map(|path| path.to_string())
                 .collect(),
             target_call_stacks: starlark_opts.target_call_stacks,
+            representative_config_flags: arg_matches.get_representative_config_flags_by_source(),
             ..self.empty_client_context(cmd.logging_name())?
         })
     }
@@ -264,6 +273,7 @@ impl<'a> ClientCommandContext<'a> {
     pub fn empty_client_context(&self, command_name: &str) -> buck2_error::Result<ClientContext> {
         #[derive(Debug, buck2_error::Error)]
         #[error("Current directory is not UTF-8")]
+        #[buck2(tag = Input)]
         struct CurrentDirIsNotUtf8;
 
         Ok(ClientContext {
@@ -296,10 +306,69 @@ impl<'a> ClientCommandContext<'a> {
                 .map(ClientMetadata::to_proto)
                 .collect(),
             preemptible: Default::default(),
+            representative_config_flags: Vec::new(),
         })
     }
 
-    pub fn async_cleanup_context(&self) -> &AsyncCleanupContext<'a> {
-        &self.async_cleanup
+    pub fn log_download_method(&self) -> buck2_error::Result<LogDownloadMethod> {
+        Ok(self
+            .immediate_config
+            .daemon_startup_config()?
+            .log_download_method
+            .clone())
+    }
+}
+
+/// Provides a common interface for buck subcommands that use event subscribers for logging.
+/// Executed by a ClientCommandContext.
+#[allow(async_fn_in_trait)]
+pub trait BuckSubcommand {
+    /// Give the command a name for printing, debugging, etc.
+    const COMMAND_NAME: &'static str;
+
+    async fn exec_impl(
+        self,
+        matches: BuckArgMatches<'_>,
+        ctx: ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
+    ) -> ExitResult;
+
+    fn logging_name(&self) -> &'static str {
+        Self::COMMAND_NAME
+    }
+
+    // Don't return an error, all logging will break if this fails.
+    fn subscribers(
+        &self,
+        _matches: BuckArgMatches<'_>,
+        ctx: &ClientCommandContext,
+    ) -> EventSubscribers {
+        let paths = ctx.paths().ok();
+        let mut recorder = get_invocation_recorder(
+            ctx,
+            self.event_log_opts(),
+            None,
+            self.logging_name(),
+            std::env::args().collect(),
+            Vec::new(),
+            None,
+            None,
+            paths,
+        );
+
+        recorder.update_metadata_from_client_metadata(&ctx.client_metadata);
+
+        EventSubscribers::new(vec![recorder])
+    }
+
+    fn event_log_opts(&self) -> &CommonEventLogOptions {
+        CommonEventLogOptions::no_event_log_ref()
+    }
+
+    // The outcome of a streaming command is based on the CommandEnd event.
+    // If a command is not a streaming command it should send instant_command_success.
+    // TODO(ctolliday): send ExitResult and clean this up.
+    fn is_streaming_command(&self) -> bool {
+        false
     }
 }

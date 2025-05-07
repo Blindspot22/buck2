@@ -16,6 +16,7 @@ use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::Starla
 use buck2_core::configuration::compatibility::MaybeCompatible;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_node::nodes::unconfigured::TargetNode;
 use cquery::LazyCqueryOperation;
 use cquery::LazyCqueryResult;
@@ -32,18 +33,20 @@ use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::list::AllocList;
-use starlark::values::starlark_value;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
+use starlark::values::list::AllocList;
+use starlark::values::starlark_value;
 
 use crate::bxl::starlark_defs::analysis_result::StarlarkAnalysisResult;
 use crate::bxl::starlark_defs::artifacts::LazyBuildArtifact;
 use crate::bxl::starlark_defs::context::BxlContextCoreData;
 use crate::bxl::starlark_defs::eval_extra::BxlEvalExtra;
+use crate::bxl::starlark_defs::lazy_ctx::operation::uquery::LazyUqueryOperation;
+use crate::bxl::starlark_defs::lazy_ctx::operation::uquery::LazyUqueryResult;
 use crate::bxl::starlark_defs::nodes::unconfigured::StarlarkTargetNode;
 use crate::bxl::starlark_defs::result::StarlarkResultGen;
 use crate::bxl::starlark_defs::target_list_expr::OwnedConfiguredTargetNodeArg;
@@ -52,6 +55,7 @@ use crate::bxl::starlark_defs::target_list_expr::SingleOrCompatibleConfiguredTar
 use crate::bxl::starlark_defs::targetset::StarlarkTargetSet;
 
 pub(crate) mod cquery;
+pub(crate) mod uquery;
 
 #[derive(Derivative, Debug, Allocative)]
 enum LazyOperation {
@@ -61,6 +65,7 @@ enum LazyOperation {
         global_cfg_options: buck2_error::Result<GlobalCfgOptions>,
     },
     UnconfiguredTargetNode(OwnedTargetNodeArg),
+    Uquery(LazyUqueryOperation),
     Cquery(LazyCqueryOperation),
     BuildArtifact(LazyBuildArtifact),
     Join(Arc<LazyOperation>, Arc<LazyOperation>),
@@ -73,6 +78,7 @@ enum LazyResult {
     ConfiguredTargetNode(SingleOrCompatibleConfiguredTargets),
     UnconfiguredTargetNode(Either<StarlarkTargetNode, StarlarkTargetSet<TargetNode>>),
     BuildArtifact(StarlarkArtifact),
+    Uquery(LazyUqueryResult),
     Cquery(LazyCqueryResult),
     Join(Box<(LazyResult, LazyResult)>),
     Batch(Vec<LazyResult>),
@@ -90,6 +96,7 @@ impl LazyResult {
             LazyResult::ConfiguredTargetNode(res) => res.into_value(heap, bxl_eval_extra),
             LazyResult::UnconfiguredTargetNode(node) => Ok(heap.alloc(node)),
             LazyResult::BuildArtifact(artifact) => Ok(heap.alloc(artifact)),
+            LazyResult::Uquery(res) => res.into_value(heap),
             LazyResult::Cquery(res) => res.into_value(heap),
             LazyResult::Join(res) => Ok(heap.alloc((
                 res.0.into_value(heap, bxl_eval_extra)?,
@@ -136,9 +143,13 @@ impl LazyOperation {
                 let node = expr.to_unconfigured_target_node(core_data, dice).await?;
                 Ok(LazyResult::UnconfiguredTargetNode(node))
             }
+            LazyOperation::Uquery(op) => op.resolve(dice, core_data).await.map(LazyResult::Uquery),
             LazyOperation::Cquery(op) => op.resolve(dice, core_data).await.map(LazyResult::Cquery),
             LazyOperation::BuildArtifact(artifact) => {
-                artifact.build_artifacts(dice).await?;
+                artifact
+                    .build_artifacts(dice)
+                    .await
+                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
                 Ok(LazyResult::BuildArtifact(artifact.artifact()))
             }
             LazyOperation::Join(lazy0, lazy1) => {
@@ -224,6 +235,12 @@ impl StarlarkLazy {
         }
     }
 
+    pub(crate) fn new_uquery(op: LazyUqueryOperation) -> Self {
+        Self {
+            lazy: Arc::new(LazyOperation::Uquery(op)),
+        }
+    }
+
     pub(crate) fn new_cquery(op: LazyCqueryOperation) -> Self {
         Self {
             lazy: Arc::new(LazyOperation::Cquery(op)),
@@ -245,7 +262,7 @@ impl<'v> StarlarkValue<'v> for StarlarkLazy {
     }
 }
 
-async fn analysis<'v>(
+async fn analysis(
     dice: &mut DiceComputations<'_>,
     label: &ConfiguredProvidersLabel,
 ) -> buck2_error::Result<StarlarkAnalysisResult> {

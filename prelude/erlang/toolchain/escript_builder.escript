@@ -19,7 +19,7 @@
 %%%    escript_builder.escript escript_build_spec.term
 %%% @end
 
--module(app_src_builder).
+-module(escript_builder).
 -author("loscher@fb.com").
 
 -export([main/1]).
@@ -27,7 +27,7 @@
 -include_lib("kernel/include/file.hrl").
 
 -type escript_artifact_spec() :: #{
-    ArchivePath :: file:filename() => FileSystemPath :: file:filename()
+    ArchivePath :: file:filename_all() => FileSystemPath :: file:filename_all()
 }.
 -type escript_load_spec() :: [{ArchivePath :: file:filename(), FileSystemPath :: file:filename()}].
 -type escript_archive_spec() :: [{ArchivePath :: file:filename(), binary()}].
@@ -35,9 +35,9 @@
 -spec main([string()]) -> ok.
 main([Spec]) ->
     try
-        io:format("~p ~p~n", [Spec, file:consult(Spec)]),
-        {ok, [Terms]} = file:consult(Spec),
-        do(Terms)
+        {ok, Contents} = file:read_file(Spec, [raw]),
+        Decoded = json:decode(Contents),
+        do(Decoded)
     catch
         Type:{abort, Reason} ->
             io:format(standard_error, "~s: ~s~n", [Type, Reason]),
@@ -50,18 +50,18 @@ main(_) ->
 usage() ->
     io:format("escript_builder.escript build_spec.term ~n").
 
--spec do(#{}) -> ok.
+-spec do(map()) -> ok.
 do(#{
-    "artifacts" := Artifacts,
-    "emu_args" := EmuArgs0,
-    "output" := EscriptPath
+    <<"artifacts">> := Artifacts,
+    <<"emu_args">> := EmuArgs0,
+    <<"output">> := EscriptPath
 }) ->
     ArchiveSpec = prepare_files(Artifacts),
     Shebang = "/usr/bin/env escript",
     Comment = "",
-    EmuArgs1 = [string:strip(Arg) || Arg <- EmuArgs0],
+    EmuArgs1 = [string:trim(Arg) || Arg <- EmuArgs0],
     FinalEmuArgs = unicode:characters_to_list(
-        [" ", string:join(EmuArgs1, " ")]
+        [" ", lists:join(" ", EmuArgs1)]
     ),
     EscriptSections =
         [
@@ -75,7 +75,7 @@ do(#{
         ok ->
             ok;
         {error, EscriptError} ->
-            error(io_lib:format("could not create escript: ~p", [EscriptError]))
+            error(unicode:characters_to_binary(io_lib:format("could not create escript: ~p", [EscriptError])))
     end,
 
     %% set executable bits (unix only)
@@ -90,10 +90,11 @@ prepare_files(Artifacts) ->
 -spec expand_to_files_list(escript_artifact_spec()) -> escript_load_spec().
 expand_to_files_list(Artifacts) ->
     maps:fold(
-        fun(ArchivePath, FSPath, AccOuter) ->
+        fun(ArchivePathBin, FSPath, AccOuter) ->
+            ArchivePath = binary_to_list(ArchivePathBin),
             case filelib:is_dir(FSPath) of
                 true ->
-                    Files = filelib:wildcard("**", FSPath),
+                    Files = filelib:wildcard("**", binary_to_list(FSPath)),
                     lists:foldl(
                         fun(FileShortPath, AccInner) ->
                             FileOrDirPath = filename:join(FSPath, FileShortPath),
@@ -125,8 +126,8 @@ load_parallel(Files) ->
     Self = self(),
     F = fun() -> worker(Self) end,
     Jobs = min(length(Files), erlang:system_info(schedulers)),
-    Pids = [spawn_monitor(F) || _I <- lists:seq(1, Jobs)],
-    queue(Files, Pids, []).
+    Refs = #{element(2,spawn_monitor(F)) => [] || _I <- lists:seq(1, Jobs)},
+    queue(Files, Refs, maps:size(Refs), []).
 
 -spec worker(pid()) -> ok.
 worker(QueuePid) ->
@@ -141,29 +142,35 @@ worker(QueuePid) ->
 
 -spec file_contents(file:filename()) -> binary().
 file_contents(Filename) ->
-    case file:read_file(Filename) of
+    case file:read_file(Filename, [raw]) of
         {ok, Bin} -> Bin;
         Error -> error({read_file, Filename, Error})
     end.
 
--spec queue(escript_load_spec(), [pid()], escript_archive_spec()) -> escript_archive_spec().
-queue([], [], Acc) ->
+-spec queue(escript_load_spec(), #{reference() => []}, non_neg_integer(), escript_archive_spec()) -> escript_archive_spec().
+queue([], _JobRefs, 0, Acc) ->
     Acc;
-queue(Files, Pids, Acc) ->
+queue(Files, JobRefs, NumLeft, Acc) ->
     receive
-        Worker when is_pid(Worker), Files =:= [] ->
-            Worker ! empty,
-            queue(Files, Pids, Acc);
-        Worker when is_pid(Worker) ->
-            Worker ! {load, hd(Files)},
-            queue(tl(Files), Pids, Acc);
         {done, File, Res} ->
             io:format("Loaded ~ts~n", [File]),
-            queue(Files, Pids, [Res | Acc]);
-        {'DOWN', Mref, _, Pid, normal} ->
-            Pids2 = lists:delete({Pid, Mref}, Pids),
-            queue(Files, Pids2, Acc);
-        {'DOWN', _Mref, _, _Pid, Info} ->
-            io:format("ERROR: Compilation failed: ~p", [Info]),
-            erlang:halt(1)
+            queue(Files, JobRefs, NumLeft, [Res | Acc]);
+        {'DOWN', Mref, _, _Pid, Info} ->
+            case Info of
+                normal when is_map_key(Mref, JobRefs) ->
+                    queue(Files, JobRefs, NumLeft-1, Acc);
+                _ ->
+                    io:format("ERROR: Compilation failed: ~p", [Info]),
+                    erlang:halt(1)
+            end;
+        Worker when is_pid(Worker) ->
+            case Files of
+                [] ->
+                    Worker ! empty,
+                    queue(Files, JobRefs, NumLeft, Acc);
+                [_|_] ->
+                    [NextFile | MoreFiles] = Files,
+                    Worker ! {load, NextFile},
+                    queue(MoreFiles,JobRefs,  NumLeft, Acc)
+            end
     end.

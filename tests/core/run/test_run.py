@@ -15,6 +15,7 @@ from typing import List
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test
+from buck2.tests.e2e_util.helper.utils import read_invocation_record
 
 
 @buck_test()
@@ -35,11 +36,33 @@ async def test_emit_shell(buck: Buck) -> None:
 
 
 @buck_test()
-async def test_run_non_executable_fails(buck: Buck) -> None:
+async def test_run_non_executable_fails(buck: Buck, tmp_path: Path) -> None:
+    record_path = tmp_path / "record.json"
+
     await expect_failure(
-        buck.run("root//:no_run_info"),
+        buck.run(
+            "root//:no_run_info",
+            "--unstable-write-invocation-record",
+            str(record_path),
+        ),
         stderr_regex=r"Target `[^`]+` is not a binary rule \(only binary rules can be `run`\)",
     )
+
+    record = read_invocation_record(record_path)
+    [error] = record["errors"]
+
+    assert error["category_key"] == "RunCommandError::NonBinaryRule"
+    assert error["category"] == "USER"
+
+
+@buck_test()
+async def test_run_exit_result(buck: Buck, tmp_path: Path) -> None:
+    record_path = tmp_path / "record.json"
+    await buck.run(
+        "root//:print_hello", "--unstable-write-invocation-record", str(record_path)
+    )
+    record = read_invocation_record(record_path)
+    assert record["exit_result_name"] == "EXEC"
 
 
 @buck_test()

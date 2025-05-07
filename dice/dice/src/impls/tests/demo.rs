@@ -23,12 +23,12 @@ use derive_more::Display;
 use dupe::Dupe;
 use tempfile::NamedTempFile;
 
+use crate::Dice;
 use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::injected::InjectedKey;
 use crate::api::key::Key;
 use crate::api::transaction::DiceTransactionUpdater;
-use crate::Dice;
 
 #[derive(Debug, Clone, Dupe, PartialEq, Allocative)]
 enum Encoding {
@@ -50,7 +50,7 @@ impl InjectedKey for EncodingConfig {
 
 struct Encodings<'c, 'd>(&'c mut DiceComputations<'d>);
 
-impl<'c, 'd> Encodings<'c, 'd> {
+impl Encodings<'_, '_> {
     async fn get(&mut self) -> Result<Encoding, Arc<anyhow::Error>> {
         self.0
             .compute(&EncodingConfig())
@@ -111,7 +111,7 @@ impl Key for File {
     }
 }
 
-impl<'c, 'd> Filesystem<'c, 'd> {
+impl Filesystem<'_, '_> {
     async fn read_file(&mut self, file: &Path) -> Result<Arc<String>, Arc<anyhow::Error>> {
         self.0
             .compute(&File(file.to_path_buf()))

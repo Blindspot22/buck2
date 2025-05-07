@@ -24,16 +24,17 @@
 //! for `cell//bar/foo/...` has no effect because buck will pick the first matching spec).
 
 use allocative::Allocative;
-use buck2_core::cells::cell_path::CellPath;
-use buck2_core::cells::name::CellName;
 use buck2_core::cells::CellAliasResolver;
 use buck2_core::cells::CellResolver;
+use buck2_core::cells::cell_path::CellPath;
+use buck2_core::cells::name::CellName;
 use buck2_core::pattern::pattern::ParsedPattern;
 use buck2_core::pattern::pattern_type::TargetPatternExtra;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_error::BuckErrorContext;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum DetectorSpecParseError {
     #[error(
         "`target:` platform detector only supports a recursive pattern matcher (like `cell//package/...`) but got `{0}`"

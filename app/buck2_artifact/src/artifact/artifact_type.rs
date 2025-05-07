@@ -43,11 +43,30 @@ use crate::artifact::source_artifact::SourceArtifact;
 /// An 'Artifact' that can be materialized at its path. The underlying data is not very large here,
 /// but we do store many copies of it, which is why we store this as an Arc.
 #[derive(
-    Clone, Debug, Display, Dupe, Allocative, Derivative, PartialEq, Eq, Hash
+    Clone,
+    Debug,
+    Display,
+    Dupe,
+    Allocative,
+    Derivative,
+    PartialEq,
+    Eq,
+    Hash,
+    strong_hash::StrongHash
 )]
 pub struct Artifact(Arc<ArtifactData>);
 
-#[derive(Clone, Debug, Display, Dupe, Allocative, Hash, Eq, PartialEq)]
+#[derive(
+    Clone,
+    Debug,
+    Display,
+    Dupe,
+    Allocative,
+    Hash,
+    Eq,
+    PartialEq,
+    strong_hash::StrongHash
+)]
 #[display("{}", data)]
 struct ArtifactData {
     data: Hashed<ArtifactKind>,
@@ -186,7 +205,18 @@ impl ArtifactDyn for Artifact {
     }
 }
 
-#[derive(Clone, Debug, Display, Dupe, PartialEq, Eq, Hash, From, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Display,
+    Dupe,
+    PartialEq,
+    Eq,
+    Hash,
+    From,
+    Allocative,
+    strong_hash::StrongHash
+)]
 pub enum BaseArtifactKind {
     Source(SourceArtifact),
     Build(BuildArtifact),
@@ -194,7 +224,16 @@ pub enum BaseArtifactKind {
 
 assert_eq_size!(BaseArtifactKind, [usize; 6]);
 
-#[derive(Clone, Debug, Dupe, PartialEq, Eq, Hash, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Dupe,
+    PartialEq,
+    Eq,
+    Hash,
+    Allocative,
+    strong_hash::StrongHash
+)]
 pub struct ArtifactKind {
     pub base: BaseArtifactKind,
     /// When non-empty, the artifact is considered "projected".
@@ -557,7 +596,7 @@ pub mod testing {
                     BaseDeferredKey::TargetLabel(target.dupe()),
                     ForwardRelativePath::new(path).unwrap().to_buf(),
                 ),
-                ActionKey::unchecked_new(
+                ActionKey::new(
                     DeferredHolderKey::Base(BaseDeferredKey::TargetLabel(target)),
                     id,
                 ),
@@ -571,9 +610,9 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use assert_matches::assert_matches;
+    use buck2_core::cells::CellResolver;
     use buck2_core::cells::cell_root_path::CellRootPathBuf;
     use buck2_core::cells::name::CellName;
-    use buck2_core::cells::CellResolver;
     use buck2_core::configuration::data::ConfigurationData;
     use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
     use buck2_core::deferred::key::DeferredHolderKey;
@@ -596,10 +635,10 @@ mod tests {
 
     use crate::actions::key::ActionIndex;
     use crate::actions::key::ActionKey;
-    use crate::artifact::artifact_type::testing::BuildArtifactTestingExt;
     use crate::artifact::artifact_type::Artifact;
     use crate::artifact::artifact_type::DeclaredArtifact;
     use crate::artifact::artifact_type::DeclaredArtifactKind;
+    use crate::artifact::artifact_type::testing::BuildArtifactTestingExt;
     use crate::artifact::build_artifact::BuildArtifact;
     use crate::artifact::source_artifact::SourceArtifact;
 
@@ -615,7 +654,7 @@ mod tests {
             OutputType::File,
             0,
         );
-        let key = ActionKey::unchecked_new(
+        let key = ActionKey::new(
             DeferredHolderKey::Base(BaseDeferredKey::TargetLabel(target.dupe())),
             ActionIndex::new(0),
         );
@@ -637,7 +676,7 @@ mod tests {
         out.bind(key)?;
 
         // Binding again to a different key should fail
-        let other_key = ActionKey::unchecked_new(
+        let other_key = ActionKey::new(
             DeferredHolderKey::Base(BaseDeferredKey::TargetLabel(target)),
             ActionIndex::new(1),
         );
@@ -693,20 +732,20 @@ mod tests {
             BuckOutPathResolver::new(ProjectRelativePathBuf::unchecked_new("buck_out".into())),
             project_fs.dupe(),
         );
-        let expected_path1 = project_fs.resolve(&fs.resolve_build(artifact1.get_path()));
-        let expected_path2 = project_fs.resolve(&fs.resolve_build(artifact2.get_path()));
+        let expected_path1 = project_fs.resolve(fs.resolve_build(artifact1.get_path())?);
+        let expected_path2 = project_fs.resolve(fs.resolve_build(artifact2.get_path())?);
 
-        let dest_path = fs.resolve_build(artifact1.get_path());
+        let dest_path = fs.resolve_build(artifact1.get_path())?;
         fs.fs().write_file(&dest_path, "artifact1", false)?;
 
         assert_eq!("artifact1", fs_util::read_to_string(&expected_path1)?);
 
-        let dest_path = fs.resolve_build(artifact2.get_path());
+        let dest_path = fs.resolve_build(artifact2.get_path())?;
         fs.fs().write_file(&dest_path, "artifact2", true)?;
 
         assert_eq!("artifact2", fs_util::read_to_string(&expected_path2)?);
 
-        let dest_path = fs.resolve_build(artifact3.get_path());
+        let dest_path = fs.resolve_build(artifact3.get_path())?;
         fs.fs()
             .write_file(&dest_path, "artifact3", false)
             .expect_err("should fail because bar.cpp is a file");

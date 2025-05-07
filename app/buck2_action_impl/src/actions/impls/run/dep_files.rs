@@ -19,12 +19,12 @@ use buck2_action_metadata_proto::RemoteDepFile;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_api::actions::ActionExecutionCtx;
 use buck2_build_api::actions::execute::action_execution_target::ActionExecutionTarget;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionKind;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::impls::expanded_command_line::ExpandedCommandLineDigest;
-use buck2_build_api::actions::ActionExecutionCtx;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::interpreter::rule_defs::artifact_tagging::ArtifactTag;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
@@ -44,13 +44,14 @@ use buck2_directory::directory::fingerprinted_directory::FingerprintedDirectory;
 use buck2_error::BuckErrorContext;
 use buck2_events::dispatch::span_async_simple;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
+use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest::CasDigestToReExt;
 use buck2_execute::digest_config::DigestConfig;
-use buck2_execute::directory::expand_selector_for_dependencies;
 use buck2_execute::directory::ActionDirectoryBuilder;
 use buck2_execute::directory::ActionImmutableDirectory;
 use buck2_execute::directory::ActionSharedDirectory;
 use buck2_execute::directory::INTERNER;
+use buck2_execute::directory::expand_selector_for_dependencies;
 use buck2_execute::execute::action_digest_and_blobs::ActionDigestAndBlobs;
 use buck2_execute::execute::action_digest_and_blobs::ActionDigestAndBlobsBuilder;
 use buck2_execute::execute::cache_uploader::IntoRemoteDepFile;
@@ -771,8 +772,8 @@ async fn outputs_match(
     let output_matches = previous_state
         .result
         .iter()
-        .map(|(path, value)| (fs.buck_out_path_resolver().resolve_gen(path), value.dupe()))
-        .collect();
+        .map(|(path, value)| Ok((fs.buck_out_path_resolver().resolve_gen(path)?, value.dupe())))
+        .collect::<buck2_error::Result<Vec<(ProjectRelativePathBuf, ArtifactValue)>>>()?;
 
     let materializer_accepts = ctx
         .materializer()
@@ -1287,7 +1288,7 @@ impl DeclaredDepFiles {
                         soft_error!(
                             "missing_dep_file",
                             buck2_error::buck2_error!(
-                                [],
+                                buck2_error::ErrorTag::Input,
                                 "Dep file is missing at {}",
                                 dep_file_path
                             )
@@ -1334,6 +1335,7 @@ impl DeclaredDepFiles {
 }
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Tier0)]
 enum MaterializeDepFilesError {
     #[error("Error materializing dep file")]
     MaterializationFailed {

@@ -7,20 +7,25 @@
  * of this source tree.
  */
 
-use std::io::sink;
 use std::io::Write;
+use std::io::sink;
 use std::sync::Arc;
 
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_error::BuckErrorContext;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::artifact::fs::ExecutorFs;
+use buck2_interpreter::types::cell_path::StarlarkCellPath;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
 use dupe::Dupe;
 use either::Either;
 use serde::Serialize;
 use serde::Serializer;
+use starlark::values::UnpackValue;
+use starlark::values::Value;
+use starlark::values::ValueLike;
+use starlark::values::ValueTypedComplex;
 use starlark::values::dict::DictRef;
 use starlark::values::enumeration::EnumValue;
 use starlark::values::list::ListRef;
@@ -29,24 +34,22 @@ use starlark::values::record::Record;
 use starlark::values::structs::StructRef;
 use starlark::values::tuple::TupleRef;
 use starlark::values::type_repr::StarlarkTypeRepr;
-use starlark::values::UnpackValue;
-use starlark::values::Value;
-use starlark::values::ValueLike;
-use starlark::values::ValueTypedComplex;
 
 use crate::artifact_groups::ArtifactGroup;
+use crate::bxl::select::StarlarkSelectConcat;
+use crate::bxl::select::StarlarkSelectDict;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
 use crate::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
-use crate::interpreter::rule_defs::artifact_tagging::TaggedValue;
-use crate::interpreter::rule_defs::cmd_args::value::CommandLineArg;
-use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
+use crate::interpreter::rule_defs::artifact_tagging::StarlarkTaggedValue;
 use crate::interpreter::rule_defs::cmd_args::AbsCommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::FrozenStarlarkCmdArgs;
 use crate::interpreter::rule_defs::cmd_args::StarlarkCmdArgs;
+use crate::interpreter::rule_defs::cmd_args::value::CommandLineArg;
+use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use crate::interpreter::rule_defs::provider::ValueAsProviderLike;
 use crate::interpreter::rule_defs::transitive_set::TransitiveSetJsonProjection;
 
@@ -150,10 +153,13 @@ pub enum JsonUnpack<'v> {
     TransitiveSetJsonProjection(&'v TransitiveSetJsonProjection<'v>),
     TargetLabel(&'v StarlarkTargetLabel),
     ConfiguredProvidersLabel(&'v StarlarkConfiguredProvidersLabel),
+    CellPath(&'v StarlarkCellPath),
     Artifact(JsonArtifact<'v>),
     CommandLine(CommandLineArg<'v>),
     Provider(ValueAsProviderLike<'v>),
-    TaggedValue(&'v TaggedValue<'v>),
+    TaggedValue(&'v StarlarkTaggedValue<'v>),
+    BxlSelectConcat(&'v StarlarkSelectConcat),
+    BxlSelectDict(&'v StarlarkSelectDict),
 }
 
 impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
@@ -191,6 +197,7 @@ impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
                 // Users could do this with `str(ctx.label)`, but a bit wasteful
                 x.serialize(serializer)
             }
+            JsonUnpack::CellPath(x) => x.serialize(serializer),
             JsonUnpack::Artifact(x) => {
                 match self.fs {
                     None => {
@@ -243,6 +250,8 @@ impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
                 serializer.collect_map(x.0.items().iter().map(|(k, v)| (k, self.with_value(*v))))
             }
             JsonUnpack::TaggedValue(x) => self.with_value(*x.value()).serialize(serializer),
+            JsonUnpack::BxlSelectConcat(x) => x.serialize(serializer),
+            JsonUnpack::BxlSelectDict(x) => x.serialize(serializer),
         }
     }
 }
@@ -298,7 +307,10 @@ pub fn visit_json_artifacts(
         | JsonUnpack::Bool(_)
         | JsonUnpack::TargetLabel(_)
         | JsonUnpack::Enum(_)
-        | JsonUnpack::ConfiguredProvidersLabel(_) => {}
+        | JsonUnpack::ConfiguredProvidersLabel(_)
+        | JsonUnpack::BxlSelectConcat(_)
+        | JsonUnpack::BxlSelectDict(_)
+        | JsonUnpack::CellPath(_) => {}
 
         JsonUnpack::List(x) => {
             for x in x.iter() {

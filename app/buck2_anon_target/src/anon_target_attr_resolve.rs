@@ -27,7 +27,6 @@ use buck2_build_api::keep_going::KeepGoing;
 use buck2_core::package::PackageLabel;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
-use buck2_error::starlark_error::from_starlark;
 use buck2_interpreter::types::configured_providers_label::StarlarkProvidersLabel;
 use buck2_node::attrs::attr_type::dep::DepAttrType;
 use buck2_node::attrs::attr_type::query::ResolvedQueryLiterals;
@@ -35,15 +34,15 @@ use buck2_node::attrs::configured_traversal::ConfiguredAttrTraversal;
 use dice::DiceComputations;
 use dupe::Dupe;
 use futures::FutureExt;
+use starlark::values::Value;
 use starlark::values::dict::Dict;
 use starlark::values::tuple::AllocTuple;
-use starlark::values::Value;
 use starlark_map::small_map::SmallMap;
 
 use crate::anon_target_attr::AnonTargetAttr;
-use crate::anon_targets::get_artifact_from_anon_target_analysis;
 use crate::anon_targets::AnonTargetKey;
 use crate::anon_targets::AnonTargetsError;
+use crate::anon_targets::get_artifact_from_anon_target_analysis;
 
 // No macros in anon targets, so query results are empty. Execution platform resolution should
 // always be inherited from the anon target.
@@ -113,9 +112,7 @@ impl AnonTargetAttrResolution for AnonTargetAttr {
                 let mut res = SmallMap::with_capacity(dict.len());
                 for (k, v) in dict.iter() {
                     res.insert_hashed(
-                        k.resolve_single(pkg, anon_resolution_ctx)?
-                            .get_hashed()
-                            .map_err(from_starlark)?,
+                        k.resolve_single(pkg, anon_resolution_ctx)?.get_hashed()?,
                         v.resolve_single(pkg, anon_resolution_ctx)?,
                     );
                 }

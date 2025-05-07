@@ -17,12 +17,11 @@ use buck2_core::fs::paths::RelativePath;
 use buck2_core::fs::paths::RelativePathBuf;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_interpreter::types::cell_root::CellRoot;
 use buck2_interpreter::types::project_root::StarlarkProjectRoot;
-use buck2_interpreter::types::regex::BuckStarlarkRegex;
+use buck2_interpreter::types::regex::StarlarkBuckRegex;
 use buck2_util::thin_box::ThinBoxSlice;
 use derive_more::Display;
 use display_container::fmt_container;
@@ -32,8 +31,6 @@ use gazebo::prelude::*;
 use regex::Regex;
 use serde::Serialize;
 use serde::Serializer;
-use starlark::values::string::StarlarkStr;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
@@ -45,15 +42,17 @@ use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueOfUnchecked;
+use starlark::values::string::StarlarkStr;
+use starlark::values::type_repr::StarlarkTypeRepr;
 use static_assertions::assert_eq_size;
 
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
+use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
+use crate::interpreter::rule_defs::cmd_args::CommandLineLocation;
 use crate::interpreter::rule_defs::cmd_args::regex::CmdArgsRegex;
 use crate::interpreter::rule_defs::cmd_args::regex::FrozenCmdArgsRegex;
 use crate::interpreter::rule_defs::cmd_args::shlex_quote::shlex_quote;
 use crate::interpreter::rule_defs::cmd_args::traits::CommandLineContext;
-use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
-use crate::interpreter::rule_defs::cmd_args::CommandLineLocation;
 
 /// Supported ways of quoting arguments.
 #[derive(Debug, Clone, Copy, Dupe, Trace, Freeze, Serialize, Allocative)]
@@ -72,6 +71,7 @@ impl Display for QuoteStyle {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum CommandLineArgError {
     #[error("Unknown quoting style `{0}`")]
     UnknownQuotingStyle(String),
@@ -608,7 +608,7 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
                     let re = match &pattern {
                         CmdArgsRegex::Str(pattern) => {
                             // We checked that regex is valid in replace_regex(), so unwrap is safe.
-                            re = BuckStarlarkRegex::Regular(Regex::new(pattern.as_str()).unwrap());
+                            re = StarlarkBuckRegex::Regular(Regex::new(pattern.as_str()).unwrap());
                             &re
                         }
                         CmdArgsRegex::Regex(regex) => regex,
@@ -685,7 +685,6 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
 
         let origin = value
             .unpack()
-            .map_err(from_starlark)
             .internal_error("Must be a valid RelativeOrigin as this was checked in the setter")?;
         let mut relative_path = origin.resolve(ctx)?;
         for _ in 0..parent {

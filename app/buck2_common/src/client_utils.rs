@@ -91,7 +91,7 @@ pub async fn get_channel_uds(
     _chg_dir: bool,
 ) -> buck2_error::Result<Channel> {
     Err(buck2_error::buck2_error!(
-        [],
+        buck2_error::ErrorTag::WindowsUnsupported,
         "Unix domain sockets are not supported on Windows",
     ))
 }
@@ -105,6 +105,7 @@ pub async fn get_channel_tcp(socket_addr: Ipv4Addr, port: u16) -> buck2_error::R
 }
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Environment)]
 pub enum RetryError<E> {
     #[error("Timed out after {0:.2}s")]
     Timeout(f64),
@@ -161,8 +162,8 @@ pub async fn retrying<L, E, Fut: Future<Output = Result<L, E>>, F: FnMut() -> Fu
 mod tests {
     use std::time::Duration;
 
-    use crate::client_utils::retrying;
     use crate::client_utils::RetryError;
+    use crate::client_utils::retrying;
 
     #[tokio::test]
     async fn test_retrying_error_forever() {
@@ -172,7 +173,12 @@ mod tests {
             Duration::from_millis(1),
             Duration::from_millis(1),
             Duration::from_millis(1),
-            || async { Err(buck2_error::buck2_error!([], "test")) },
+            || async {
+                Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::Input,
+                    "test"
+                ))
+            },
         );
         let result: Result<(), RetryError<buck2_error::Error>> = future.await;
         assert!(result.is_err());

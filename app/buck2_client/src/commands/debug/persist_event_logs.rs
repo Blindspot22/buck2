@@ -18,14 +18,15 @@ use buck2_common::manifold::ManifoldChunkedUploader;
 use buck2_common::manifold::ManifoldClient;
 use buck2_core::fs::paths::abs_path::AbsPathBuf;
 use buck2_core::soft_error;
-use buck2_data::instant_event::Data;
 use buck2_data::InstantEvent;
 use buck2_data::PersistEventLogSubprocess;
+use buck2_data::instant_event::Data;
 use buck2_error::BuckErrorContext;
 use buck2_event_log::ttl::manifold_event_log_ttl;
-use buck2_events::sink::remote::new_remote_event_sink_if_enabled;
-use buck2_events::sink::remote::RemoteEventSink;
 use buck2_events::BuckEvent;
+use buck2_events::sink::remote::RemoteEventSink;
+use buck2_events::sink::remote::ScribeConfig;
+use buck2_events::sink::remote::new_remote_event_sink_if_enabled;
 use buck2_wrapper_common::invocation_id::TraceId;
 use tokio::fs::File;
 use tokio::fs::OpenOptions;
@@ -34,13 +35,14 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio::time::sleep;
 
 const MAX_WAIT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Tier0)]
 pub(crate) enum PersistEventLogError {
     #[error("Read more bytes than are available")]
     ReadBytesOverflow,
@@ -55,7 +57,7 @@ pub struct PersistEventLogsCommand {
     #[clap(long, help = "Name this log will take in Manifold")]
     manifold_name: String,
     #[clap(long, help = "Where to write this log to on disk")]
-    local_path: AbsPathBuf,
+    local_path: String,
     #[clap(long, help = "If present, only write to disk and don't upload")]
     no_upload: bool,
     #[clap(
@@ -100,7 +102,15 @@ impl PersistEventLogsCommand {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let file = match create_log_file(self.local_path).await {
             Ok(f) => Mutex::new(f),
-            Err(e) => return (Err(e), Err(buck2_error::buck2_error!([], "Not tried"))),
+            Err(e) => {
+                return (
+                    Err(e),
+                    Err(buck2_error::buck2_error!(
+                        buck2_error::ErrorTag::Tier0,
+                        "Not tried"
+                    )),
+                );
+            }
         };
         let write = write_task(&file, tx, stdin);
         let upload = upload_task(&file, rx, self.manifold_name, self.no_upload);
@@ -133,7 +143,9 @@ async fn write_task(
     Ok(())
 }
 
-async fn create_log_file(local_path: AbsPathBuf) -> Result<tokio::fs::File, buck2_error::Error> {
+async fn create_log_file(local_path: String) -> Result<tokio::fs::File, buck2_error::Error> {
+    let local_path = AbsPathBuf::new(local_path)?;
+
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -331,27 +343,22 @@ async fn dispatch_event_to_scribe(
     let data = Some(Data::PersistEventLogSubprocess(result));
     let event = InstantEvent { data };
     if let Some(sink) = sink {
-        sink.send_now(BuckEvent::new(
-            SystemTime::now(),
-            invocation_id.to_owned(),
-            None,
-            None,
-            event.into(),
-        ))
-        .await;
+        let _res = sink
+            .send_now(BuckEvent::new(
+                SystemTime::now(),
+                invocation_id.to_owned(),
+                None,
+                None,
+                event.into(),
+            ))
+            .await;
     } else {
         tracing::warn!("Couldn't send log upload result to scribe")
     };
 }
 
 fn create_scribe_sink(ctx: &ClientCommandContext) -> buck2_error::Result<Option<RemoteEventSink>> {
-    new_remote_event_sink_if_enabled(
-        ctx.fbinit(),
-        /* buffer size */ 100,
-        /* retry_backoff */ Duration::from_millis(500),
-        /* retry_attempts */ 5,
-        /* message_batch_size */ None,
-    )
+    new_remote_event_sink_if_enabled(ctx.fbinit(), ScribeConfig::default())
 }
 
 #[cfg(test)]
@@ -362,10 +369,10 @@ mod tests {
 
     #[test]
     fn test_categorize_error() {
-        let err = buck2_error!([], "CertificateRequired");
+        let err = buck2_error!(buck2_error::ErrorTag::Environment, "CertificateRequired");
         assert_eq!(categorize_error(&err), "persist_log_certificate_required");
 
-        let err = buck2_error!([], "Some other error");
+        let err = buck2_error!(buck2_error::ErrorTag::Tier0, "Some other error");
         assert_eq!(categorize_error(&err), "persist_log_other");
     }
 }

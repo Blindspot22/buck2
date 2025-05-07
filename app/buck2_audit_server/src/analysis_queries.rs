@@ -22,8 +22,8 @@ use buck2_server_ctx::ctx::ServerCommandDiceContext;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
 use dupe::Dupe;
 
-use crate::common::target_resolution_config::audit_command_target_resolution_config;
 use crate::ServerAuditSubcommand;
+use crate::common::target_resolution_config::audit_command_target_resolution_config;
 
 #[async_trait]
 impl ServerAuditSubcommand for AuditAnalysisQueriesCommand {
@@ -81,7 +81,10 @@ impl ServerAuditSubcommand for AuditAnalysisQueriesCommand {
                             }
                         }
                         buck2_core::pattern::pattern::PackageSpec::All => {
-                            unimplemented!()
+                            return Err(buck2_error::buck2_error!(
+                                buck2_error::ErrorTag::Unimplemented,
+                                "PackageSpec::All not implemented"
+                            ));
                         }
                     }
                 }

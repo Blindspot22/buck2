@@ -8,23 +8,24 @@
  */
 
 use async_trait::async_trait;
+use buck2_cli_proto::TargetsRequest;
 use buck2_cli_proto::targets_request;
 use buck2_cli_proto::targets_request::OutputFormat;
-use buck2_cli_proto::TargetsRequest;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::build::CommonOutputOptions;
-use buck2_client_ctx::common::target_cfg::TargetCfgOptions;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonCommandOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
 use buck2_client_ctx::common::PrintOutputsFormat;
+use buck2_client_ctx::common::build::CommonOutputOptions;
+use buck2_client_ctx::common::target_cfg::TargetCfgOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::console_interaction_stream::ConsoleInteractionStream;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::daemon::client::NoPartialResultHandler;
 use buck2_client_ctx::daemon::client::StdoutPartialResultHandler;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ClientIoError;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::path_arg::PathArg;
@@ -37,6 +38,7 @@ use gazebo::prelude::*;
 use crate::print::PrintOutputs;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum TargetsError {
     /// Clap should report it, but if we missed something, this is a fallback.
     #[error("Flags are mutually exclusive")]
@@ -223,7 +225,7 @@ pub struct TargetsCommand {
     compression: Compression,
 
     /// Patterns to interpret
-    #[clap(name = "TARGET_PATTERNS")]
+    #[clap(name = "TARGET_PATTERNS", value_hint = clap::ValueHint::Other)]
     patterns: Vec<String>,
 
     /// Number of threads to use during execution (default is # cores)
@@ -279,7 +281,7 @@ impl TargetsCommand {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StreamingCommand for TargetsCommand {
     const COMMAND_NAME: &'static str = "targets";
 
@@ -288,6 +290,7 @@ impl StreamingCommand for TargetsCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let target_hash_use_fast_hash = match self.target_hash_function {
             TargetHashFunction::Sha1 | TargetHashFunction::Sha256 => {
@@ -363,6 +366,7 @@ impl StreamingCommand for TargetsCommand {
             targets_show_outputs(
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
                 buckd,
+                events_ctx,
                 target_request,
                 self.show_output.is_full().then(|| project_root.root()),
                 format,
@@ -372,6 +376,7 @@ impl StreamingCommand for TargetsCommand {
             targets(
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
                 buckd,
+                events_ctx,
                 target_request,
             )
             .await
@@ -397,7 +402,8 @@ impl StreamingCommand for TargetsCommand {
 
 async fn targets_show_outputs(
     console_interaction: Option<ConsoleInteractionStream<'_>>,
-    buckd: &mut BuckdClientConnector<'_>,
+    buckd: &mut BuckdClientConnector,
+    events_ctx: &mut EventsCtx,
     target_request: TargetsRequest,
     root_path: Option<&AbsNormPath>,
     format: PrintOutputsFormat,
@@ -406,34 +412,38 @@ async fn targets_show_outputs(
         .with_flushing()
         .targets_show_outputs(
             target_request,
+            events_ctx,
             console_interaction,
             &mut NoPartialResultHandler,
         )
         .await??;
 
-    buck2_client_ctx::stdio::print_with_writer::<ClientIoError, _>(|out| {
+    buck2_client_ctx::stdio::print_with_writer::<ClientIoError, _>(async move |w| {
         let root_path = root_path.map(|root| root.to_path_buf());
-        let mut print = PrintOutputs::new(out, root_path, format)?;
+        let mut print = PrintOutputs::new(w, root_path, format)?;
         for target_paths in response.targets_paths {
             for path in target_paths.paths {
                 print.output(&target_paths.target, Some(&path))?;
             }
         }
         print.finish()
-    })?;
+    })
+    .await?;
 
     ExitResult::success()
 }
 
 async fn targets(
     console_interaction: Option<ConsoleInteractionStream<'_>>,
-    buckd: &mut BuckdClientConnector<'_>,
+    buckd: &mut BuckdClientConnector,
+    events_ctx: &mut EventsCtx,
     target_request: TargetsRequest,
 ) -> ExitResult {
     let response = buckd
         .with_flushing()
         .targets(
             target_request,
+            events_ctx,
             console_interaction,
             &mut StdoutPartialResultHandler,
         )

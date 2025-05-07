@@ -15,12 +15,13 @@ use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProvide
 use buck2_build_api::query::oneshot::QUERY_FRONTEND;
 use buck2_cli_proto::CqueryRequest;
 use buck2_cli_proto::CqueryResponse;
+use buck2_cli_proto::HasClientContext;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_core::configuration::compatibility::MaybeCompatible;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_node::attrs::display::AttrDisplayWithContext;
 use buck2_node::attrs::display::AttrDisplayWithContextExt;
 use buck2_node::attrs::fmt_context::AttrFmtContext;
@@ -31,8 +32,8 @@ use buck2_query::query::syntax::simple::eval::values::QueryEvaluationResult;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::global_cfg_options::global_cfg_options_from_client_context;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
-use buck2_server_ctx::template::run_server_command;
 use buck2_server_ctx::template::ServerCommandTemplate;
+use buck2_server_ctx::template::run_server_command;
 use buck2_util::truncate::truncate;
 use dice::DiceTransaction;
 use dice::LinearRecomputeDiceComputations;
@@ -148,6 +149,7 @@ async fn cquery(
         &cell_resolver,
         &request.output_attributes,
         request.unstable_output_format,
+        request.client_context()?.trace_id.clone(),
     )?;
 
     let CqueryRequest {
@@ -180,7 +182,7 @@ async fn cquery(
 
     let profile_mode = request
         .profile_mode
-        .map(|i| buck2_cli_proto::ProfileMode::from_i32(i).internal_error("Invalid profile mode"))
+        .map(|i| buck2_cli_proto::ProfileMode::try_from(i).internal_error("Invalid profile mode"))
         .transpose()?;
 
     let (query_result, universes) = QUERY_FRONTEND

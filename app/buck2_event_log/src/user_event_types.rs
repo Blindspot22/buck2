@@ -15,14 +15,15 @@ use buck2_data::ActionName;
 use buck2_data::BuckEvent;
 use buck2_data::StarlarkUserEvent;
 use buck2_error::BuckErrorContext;
-use buck2_event_observer::display::display_action_owner;
 use buck2_event_observer::display::TargetDisplayOptions;
+use buck2_event_observer::display::display_action_owner;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::stream_value::StreamValue;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = InvalidEvent)]
 pub(crate) enum SerializeUserEventError {
     #[error("Internal error: Missing `data` in `{0}`")]
     MissingData(String),
@@ -189,11 +190,11 @@ pub(crate) fn try_get_user_event(buck_event: &BuckEvent) -> buck2_error::Result<
 mod tests {
     use std::collections::HashMap;
 
-    use buck2_data::starlark_user_metadata_value::Value;
     use buck2_data::StarlarkUserEvent;
     use buck2_data::StarlarkUserMetadataDictValue;
     use buck2_data::StarlarkUserMetadataListValue;
     use buck2_data::StarlarkUserMetadataValue;
+    use buck2_data::starlark_user_metadata_value::Value;
     use maplit::hashmap;
 
     #[test]

@@ -25,13 +25,13 @@ use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
-use starlark::values::dict::Dict;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Value;
+use starlark::values::dict::Dict;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 /// The Starlark representation of an `Artifact` on disk which can be accessed.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
@@ -57,7 +57,7 @@ impl StarlarkArtifactValue {
     }
 }
 
-#[starlark_value(type = "artifact_value")]
+#[starlark_value(type = "ArtifactValue")]
 impl<'v> StarlarkValue<'v> for StarlarkArtifactValue {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -66,6 +66,7 @@ impl<'v> StarlarkValue<'v> for StarlarkArtifactValue {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum JsonError {
     #[error("JSON number is outside the bounds that Starlark supports, `{0}`")]
     NumberOutOfBounds(String),
@@ -81,8 +82,8 @@ fn json_convert<'v>(v: serde_json::Value, heap: &'v Heap) -> starlark::Result<Va
             } else if let Some(x) = x.as_f64() {
                 Ok(heap.alloc(x))
             } else {
-                Err(starlark::Error::new_other(JsonError::NumberOutOfBounds(
-                    x.to_string(),
+                Err(starlark::Error::new_other(buck2_error::Error::from(
+                    JsonError::NumberOutOfBounds(x.to_string()),
                 )))
             }
         }

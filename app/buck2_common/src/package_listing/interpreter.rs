@@ -12,14 +12,14 @@ use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::cell_path::CellPathRef;
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_core::package::PackageLabel;
 use buck2_core::package::package_relative_path::PackageRelativePath;
 use buck2_core::package::package_relative_path::PackageRelativePathBuf;
-use buck2_core::package::PackageLabel;
 use buck2_util::arc_str::ArcS;
 use dice::DiceComputations;
 use dupe::Dupe;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use itertools::Itertools;
 use starlark_map::sorted_set::SortedSet;
 use starlark_map::sorted_vec::SortedVec;
@@ -32,6 +32,7 @@ use crate::package_listing::listing::PackageListing;
 use crate::package_listing::resolver::PackageListingResolver;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum PackageListingError {
     #[error("Expected `{0}` to be within a package directory, but there was no buildfile in any parent directories. Expected one of `{}`", .1.join("`, `"))]
     NoContainingPackage(CellPath, Vec<FileNameBuf>),
@@ -103,6 +104,7 @@ pub struct InterpreterPackageListingResolver<'c, 'd> {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 pub enum GatherPackageListingError {
     #[buck2(input)]
     NoBuildFile {
@@ -332,7 +334,7 @@ impl<'c, 'd> InterpreterPackageListingResolver<'c, 'd> {
         Self { ctx }
     }
 
-    pub async fn gather_package_listing<'a>(
+    pub async fn gather_package_listing(
         &mut self,
         root: PackageLabel,
     ) -> Result<PackageListing, GatherPackageListingError> {
@@ -417,8 +419,8 @@ impl Directory {
         }))
     }
 
-    fn gather_subdirs<'a, 'd>(
-        ctx: &'a mut DiceComputations<'d>,
+    fn gather_subdirs<'a>(
+        ctx: &'a mut DiceComputations<'_>,
         buildfile_candidates: &'a [FileNameBuf],
         root: CellPathRef<'a>,
         subdirs: Vec<PackageRelativePathBuf>,

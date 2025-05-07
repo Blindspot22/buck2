@@ -9,8 +9,8 @@
 
 use std::mem;
 use std::process::Stdio;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use buck2_cli_proto::*;
 use buck2_common::argv::SanitizedArgv;
@@ -25,6 +25,7 @@ use prost::Message;
 use serde::Serialize;
 use tokio::fs::OpenOptions;
 
+use crate::FutureChildOutput;
 use crate::file_names::get_logfile_name;
 use crate::file_names::remove_old_logs;
 use crate::read::EventLogPathBuf;
@@ -38,7 +39,6 @@ use crate::wait_for_child_and_log;
 use crate::writer::EventLogType;
 use crate::writer::NamedEventLogWriter;
 use crate::writer::SerializeForLog;
-use crate::FutureChildOutput;
 
 enum LogWriterState {
     Unopened {
@@ -71,8 +71,8 @@ impl WriteEventLog {
         sanitized_argv: SanitizedArgv,
         command_name: String,
         log_size_counter_bytes: Option<Arc<AtomicU64>>,
-    ) -> buck2_error::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             state: LogWriterState::Unopened {
                 logdir,
                 extra_path,
@@ -83,7 +83,7 @@ impl WriteEventLog {
             working_dir,
             buf: Vec::new(),
             log_size_counter_bytes,
-        })
+        }
     }
 
     /// Get the command line arguments and cwd and serialize them for replaying later.
@@ -149,7 +149,7 @@ impl WriteEventLog {
             LogWriterState::Opened { .. } => return Ok(()),
             LogWriterState::Closed => {
                 return Err(buck2_error::buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::Tier0,
                     "Received events after logs were closed"
                 ));
             }
@@ -408,7 +408,7 @@ pub enum StreamValueForWrite<'a> {
     Event(&'a buck2_data::BuckEvent),
 }
 
-impl<'a> SerializeForLog for StreamValueForWrite<'a> {
+impl SerializeForLog for StreamValueForWrite<'_> {
     fn serialize_to_json(&self, buf: &mut Vec<u8>) -> buck2_error::Result<()> {
         serde_json::to_writer(buf, &self).buck_error_context("Failed to serialize event")
     }

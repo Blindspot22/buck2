@@ -16,19 +16,19 @@ use buck2_event_observer::display::TargetDisplayOptions;
 use buck2_event_observer::fmt_duration;
 use buck2_event_observer::span_tracker::BuckEventSpanHandle;
 use buck2_event_observer::span_tracker::BuckEventSpanTracker;
-use superconsole::components::DrawVertical;
-use superconsole::style::Stylize;
 use superconsole::Component;
 use superconsole::Dimensions;
 use superconsole::DrawMode;
 use superconsole::Line;
 use superconsole::Lines;
 use superconsole::Span;
+use superconsole::components::DrawVertical;
+use superconsole::style::Stylize;
 
 use self::table_builder::Table;
+use crate::subscribers::superconsole::SuperConsoleState;
 use crate::subscribers::superconsole::timed_list::table_builder::Row;
 use crate::subscribers::superconsole::timed_list::table_builder::TimedRow;
-use crate::subscribers::superconsole::SuperConsoleState;
 
 mod table_builder;
 
@@ -54,7 +54,7 @@ struct TimedListBody<'c> {
     state: &'c SuperConsoleState,
 }
 
-impl<'c> TimedListBody<'c> {
+impl TimedListBody<'_> {
     /// Render a root  as `root [first child + remaining children]`
     fn draw_root_first_child(
         &self,
@@ -149,7 +149,7 @@ impl<'c> TimedListBody<'c> {
     }
 }
 
-impl<'c> Component for TimedListBody<'c> {
+impl Component for TimedListBody<'_> {
     fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
         let config = &self.state.config;
         let max_lines = config.max_lines;
@@ -213,7 +213,7 @@ impl<'a> TimedList<'a> {
     }
 }
 
-impl<'a> Component for TimedList<'a> {
+impl Component for TimedList<'_> {
     fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
         let span_tracker: &BuckEventSpanTracker = self.state.simple_console.observer().spans();
 
@@ -243,10 +243,11 @@ mod tests {
 
     use buck2_data::FakeStart;
     use buck2_data::SpanStartEvent;
+    use buck2_error::conversion::from_any_with_tag;
     use buck2_event_observer::action_stats::ActionStats;
     use buck2_event_observer::verbosity::Verbosity;
-    use buck2_events::span::SpanId;
     use buck2_events::BuckEvent;
+    use buck2_events::span::SpanId;
     use buck2_wrapper_common::invocation_id::TraceId;
     use dupe::Dupe;
     use itertools::Itertools;
@@ -350,6 +351,7 @@ mod tests {
             cached_actions: 1,
             fallback_actions: 0,
             remote_dep_file_cached_actions: 0,
+            excess_cache_misses: 0,
         };
 
         let timed_list_state = SuperConsoleConfig {
@@ -367,7 +369,8 @@ mod tests {
                 height: 10,
             },
             DrawMode::Normal,
-        )?;
+        )
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
         let expected = [
 
             "----------------------------------------",
@@ -435,6 +438,7 @@ mod tests {
             cached_actions: 1,
             fallback_actions: 0,
             remote_dep_file_cached_actions: 0,
+            excess_cache_misses: 0,
         };
 
         let timed_list_state = SuperConsoleConfig {
@@ -452,7 +456,8 @@ mod tests {
                 height: 10,
             },
             DrawMode::Normal,
-        )?;
+        )
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
         let expected = [
             "----------------------------------------",
             "e1 -- speak of the devil            1.0s",
@@ -499,13 +504,15 @@ mod tests {
             .await?;
 
         {
-            let output = TimedList::new(&CUTOFFS, &state).draw(
-                Dimensions {
-                    width: 60,
-                    height: 10,
-                },
-                DrawMode::Normal,
-            )?;
+            let output = TimedList::new(&CUTOFFS, &state)
+                .draw(
+                    Dimensions {
+                        width: 60,
+                        height: 10,
+                    },
+                    DrawMode::Normal,
+                )
+                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
 
             let expected = [
                 "------------------------------------------------------------",
@@ -518,13 +525,15 @@ mod tests {
         {
             state.config.max_lines = 1; // With fewer lines now
 
-            let output = TimedList::new(&CUTOFFS, &state).draw(
-                Dimensions {
-                    width: 60,
-                    height: 10,
-                },
-                DrawMode::Normal,
-            )?;
+            let output = TimedList::new(&CUTOFFS, &state)
+                .draw(
+                    Dimensions {
+                        width: 60,
+                        height: 10,
+                    },
+                    DrawMode::Normal,
+                )
+                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
 
             let expected = [
                 "------------------------------------------------------------",
@@ -576,6 +585,7 @@ mod tests {
             cached_actions: 1,
             fallback_actions: 0,
             remote_dep_file_cached_actions: 0,
+            excess_cache_misses: 0,
         };
 
         let timed_list_state = SuperConsoleConfig {
@@ -599,7 +609,8 @@ mod tests {
                 height: 10,
             },
             DrawMode::Normal,
-        )?;
+        )
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
         let expected = [
             "--------------------------------------------------------------------------------",
             "<span fg=dark_red>pkg:target -- action (category identifier) [prepare 5.0s]</span>                  <span fg=dark_red>10.0s</span>",
@@ -643,7 +654,8 @@ mod tests {
                 height: 10,
             },
             DrawMode::Normal,
-        )?;
+        )
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
         let expected = [
             "--------------------------------------------------------------------------------",
             "<span fg=dark_red>pkg:target -- action (category identifier) [prepare 5.0s + 1]</span>              <span fg=dark_red>10.0s</span>",

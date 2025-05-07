@@ -8,19 +8,20 @@
  */
 
 use async_trait::async_trait;
-use buck2_cli_proto::trace_io_request;
 use buck2_cli_proto::TraceIoRequest;
 use buck2_cli_proto::TraceIoResponse;
+use buck2_cli_proto::trace_io_request;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
 use buck2_client_ctx::command_outcome::CommandOutcome;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
-use buck2_client_ctx::daemon::client::connect::DesiredTraceIoState;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::daemon::client::NoPartialResultHandler;
+use buck2_client_ctx::daemon::client::connect::DesiredTraceIoState;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::path_arg::PathArg;
 use buck2_client_ctx::streaming::StreamingCommand;
@@ -63,13 +64,15 @@ impl TraceIoCommand {
     async fn send_request(
         &self,
         req: TraceIoRequest,
-        buckd: &mut BuckdClientConnector<'_>,
+        buckd: &mut BuckdClientConnector,
+        events_ctx: &mut EventsCtx,
         ctx: &mut ClientCommandContext<'_>,
     ) -> buck2_error::Result<CommandOutcome<TraceIoResponse>> {
         buckd
             .with_flushing()
             .trace_io(
                 req,
+                events_ctx,
                 ctx.console_interaction_stream(self.console_opts()),
                 &mut NoPartialResultHandler,
             )
@@ -77,7 +80,7 @@ impl TraceIoCommand {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StreamingCommand for TraceIoCommand {
     const COMMAND_NAME: &'static str = "trace-io";
 
@@ -86,6 +89,7 @@ impl StreamingCommand for TraceIoCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let context = ctx.client_context(matches, &self)?;
         match &self.trace_io_action {
@@ -94,7 +98,7 @@ impl StreamingCommand for TraceIoCommand {
                     context: Some(context),
                     read_state: Some(trace_io_request::ReadIoTracingState { with_trace: false }),
                 };
-                let resp = self.send_request(req, buckd, ctx).await??;
+                let resp = self.send_request(req, buckd, events_ctx, ctx).await??;
                 buck2_client_ctx::println!("I/O tracing status: {}", resp.enabled)?;
             }
             Subcommand::ExportManifest { out } => {
@@ -102,7 +106,7 @@ impl StreamingCommand for TraceIoCommand {
                     context: Some(context),
                     read_state: Some(trace_io_request::ReadIoTracingState { with_trace: true }),
                 };
-                let resp = self.send_request(req, buckd, ctx).await??;
+                let resp = self.send_request(req, buckd, events_ctx, ctx).await??;
 
                 let manifest = OfflineArchiveManifest {
                     paths: resp

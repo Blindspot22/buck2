@@ -26,11 +26,10 @@ use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::soft_error;
 use buck2_data::CleanStaleResultKind;
 use buck2_data::CleanStaleStats;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
+use buck2_error::buck2_error;
 use buck2_events::dispatch::EventDispatcher;
-use buck2_events::errors::create_error_report;
 use buck2_events::metadata;
 use buck2_execute::execute::blocking::IoRequest;
 use buck2_execute::execute::clean_output_paths::cleanup_path;
@@ -40,18 +39,18 @@ use chrono::DateTime;
 use chrono::Utc;
 use derivative::Derivative;
 use dupe::Dupe;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use tokio::sync::oneshot::Sender;
 use tracing::error;
 
+use crate::materializers::deferred::ArtifactMaterializationStage;
+use crate::materializers::deferred::DeferredMaterializerCommandProcessor;
+use crate::materializers::deferred::artifact_tree::ArtifactMaterializationData;
+use crate::materializers::deferred::artifact_tree::ArtifactTree;
 use crate::materializers::deferred::extension::ExtensionCommand;
 use crate::materializers::deferred::io_handler::IoHandler;
 use crate::materializers::deferred::join_all_existing_futs;
-use crate::materializers::deferred::ArtifactMaterializationData;
-use crate::materializers::deferred::ArtifactMaterializationStage;
-use crate::materializers::deferred::ArtifactTree;
-use crate::materializers::deferred::DeferredMaterializerCommandProcessor;
 use crate::materializers::sqlite::MaterializerStateSqliteDb;
 
 #[derive(Debug, Clone)]
@@ -128,7 +127,7 @@ fn create_result(
         Err(e) => (
             CleanStaleResultKind::Failed,
             CleanStaleStats::default(),
-            Some(create_error_report(&e)),
+            Some((&e).into()),
         ),
     };
     stats.total_duration_s = total_duration_s;
@@ -150,7 +149,7 @@ impl<T: IoHandler> ExtensionCommand<T> for CleanStaleArtifactsExtensionCommand {
 }
 
 impl CleanStaleArtifactsCommand {
-    pub(crate) fn create_clean_fut<T: IoHandler>(
+    pub(super) fn create_clean_fut<T: IoHandler>(
         &self,
         processor: &mut DeferredMaterializerCommandProcessor<T>,
         trace_id: Option<TraceId>,
@@ -313,6 +312,7 @@ impl CleanStaleArtifactsCommand {
 
 #[derive(Debug, Clone, buck2_error::Error)]
 #[error("Internal error: materializer state exists (num db entries: {}) but no artifacts were found by clean ({:?}). Not cleaning untracked artifacts.", .db_size, .stats)]
+#[buck2(tag = CleanStale)]
 pub(crate) struct CleanStaleError {
     db_size: usize,
     stats: buck2_data::CleanStaleStats,
@@ -449,7 +449,7 @@ pub struct CleanInvalidatedPathRequest {
 impl IoRequest for CleanInvalidatedPathRequest {
     fn execute(self: Box<Self>, project_fs: &ProjectRoot) -> buck2_error::Result<()> {
         if !self.liveliness_observer.is_alive_sync() {
-            return Err(buck2_error!([ErrorTag::CleanInterrupt], "Interrupt").into());
+            return Err(buck2_error!(ErrorTag::CleanInterrupt, "Interrupt").into());
         }
         cleanup_path(project_fs, &self.path)?;
         Ok(())
@@ -485,12 +485,12 @@ enum FoundPath {
     Retained(u64),
 }
 
-impl<'a, T: IoHandler> StaleFinder<'a, T> {
+impl<T: IoHandler> StaleFinder<'_, T> {
     /// Start from `path` and `subtree` and visit everything below.
-    fn visit_recursively<'t>(
+    fn visit_recursively(
         &mut self,
         path: ProjectRelativePathBuf,
-        subtree: &'t HashMap<FileNameBuf, ArtifactTree>,
+        subtree: &HashMap<FileNameBuf, ArtifactTree>,
     ) -> buck2_error::Result<()> {
         let mut queue = vec![(path, subtree)];
 

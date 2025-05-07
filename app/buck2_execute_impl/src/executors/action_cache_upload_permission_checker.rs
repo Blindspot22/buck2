@@ -14,6 +14,7 @@ use buck2_core::async_once_cell::AsyncOnceCell;
 use buck2_core::execution_types::executor_config::RePlatformFields;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_error::BuckErrorContext;
+use buck2_execute::re::client::ActionCacheWriteType;
 use buck2_execute::re::error::RemoteExecutionError;
 use buck2_execute::re::manager::ManagedRemoteExecutionClient;
 use dashmap::DashMap;
@@ -35,45 +36,37 @@ struct CacheValue {
 
 /// Check permission to upload to action cache and cache result.
 pub struct ActionCacheUploadPermissionChecker {
-    re_client: ManagedRemoteExecutionClient,
     /// Permission check does not depend on RE use case,
     /// but since we use these to upload, it is safer to cache the result by them.
     has_permission_to_upload_to_cache: DashMap<CacheKey, Arc<CacheValue>>,
 }
 
 impl ActionCacheUploadPermissionChecker {
-    pub fn new(re_client: ManagedRemoteExecutionClient) -> ActionCacheUploadPermissionChecker {
+    pub fn new() -> ActionCacheUploadPermissionChecker {
         ActionCacheUploadPermissionChecker {
-            re_client,
             has_permission_to_upload_to_cache: DashMap::new(),
         }
     }
 
     async fn do_has_permission_to_upload_to_cache(
         &self,
-        re_use_case: RemoteExecutorUseCase,
+        re_client: &ManagedRemoteExecutionClient,
         platform: &RePlatformFields,
     ) -> buck2_error::Result<Result<(), String>> {
         let (action, action_result) = empty_action_result(platform)?;
 
         // This is CAS upload, if it fails, something is very broken.
-        self.re_client
-            .upload_files_and_directories(
-                Vec::new(),
-                Vec::new(),
-                action.blobs.to_inlined_blobs(),
-                re_use_case,
-            )
+        re_client
+            .upload_files_and_directories(Vec::new(), Vec::new(), action.blobs.to_inlined_blobs())
             .await?;
 
         // This operation requires permission to write.
-        let result = self
-            .re_client
+        let result = re_client
             .write_action_result(
                 action.action,
                 action_result.clone(),
-                re_use_case,
                 &platform.to_re_platform(),
+                ActionCacheWriteType::PermissionCheck,
             )
             .await;
         match result {
@@ -105,13 +98,13 @@ impl ActionCacheUploadPermissionChecker {
 
     pub(crate) async fn has_permission_to_upload_to_cache(
         &self,
-        re_use_case: RemoteExecutorUseCase,
+        re_client: &ManagedRemoteExecutionClient,
         platform: &RePlatformFields,
     ) -> buck2_error::Result<Result<(), String>> {
-        let cache_value = self.cache_value(re_use_case, platform);
+        let cache_value = self.cache_value(re_client.use_case, platform);
         cache_value
             .has_permission_to_upload_to_cache
-            .get_or_try_init(self.do_has_permission_to_upload_to_cache(re_use_case, platform))
+            .get_or_try_init(self.do_has_permission_to_upload_to_cache(re_client, platform))
             .await
             .cloned()
             .buck_error_context("Upload for permission check")

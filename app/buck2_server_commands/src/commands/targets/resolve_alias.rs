@@ -10,6 +10,7 @@
 //! Server-side implementation of `buck2 targets --resolve-alias` command.
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum ResolveAliasError {
     #[error("`--stat` format is not supported by `--resolve-alias`")]
     StatFormatNotSupported,
@@ -19,14 +20,14 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write;
 
-use buck2_cli_proto::targets_request::OutputFormat;
 use buck2_cli_proto::TargetsRequest;
 use buck2_cli_proto::TargetsResponse;
+use buck2_cli_proto::targets_request::OutputFormat;
 use buck2_core::pattern::pattern::ParsedPattern;
 use buck2_core::pattern::pattern_type::TargetPatternExtra;
 use buck2_core::target::label::label::TargetLabel;
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_node::nodes::attributes::PACKAGE;
 use buck2_node::nodes::frontend::TargetGraphCalculation;
 use dice::DiceTransaction;
@@ -113,7 +114,7 @@ pub(crate) async fn targets_resolve_aliases(
                 Ok((package, target_name))
             }
             _ => Err(buck2_error::buck2_error!(
-                [],
+                buck2_error::ErrorTag::Input,
                 "Invalid alias (does not expand to a single target): `{}`",
                 alias
             )),
@@ -143,7 +144,7 @@ pub(crate) async fn targets_resolve_aliases(
 
     let mut buffer = String::new();
 
-    let output_format = OutputFormat::from_i32(request.output_format)
+    let output_format = OutputFormat::try_from(request.output_format)
         .internal_error("Invalid value of `output_format`")?;
 
     let json_writer;

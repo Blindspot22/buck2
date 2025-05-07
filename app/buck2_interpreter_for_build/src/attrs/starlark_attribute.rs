@@ -21,12 +21,13 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum StarlarkAttributeError {
     #[error("`attrs.default_only()` cannot be used in nested attributes")]
     DefaultOnlyInNested,
@@ -47,7 +48,7 @@ starlark_simple_value!(StarlarkAttribute);
 #[starlark_module]
 fn starlark_attribute_methods(builder: &mut MethodsBuilder) {}
 
-#[starlark_value(type = "attribute")]
+#[starlark_value(type = "Attr")]
 impl<'v> StarlarkValue<'v> for StarlarkAttribute {
     // Used to add type documentation to the generated documentation
     fn get_methods() -> Option<&'static Methods> {

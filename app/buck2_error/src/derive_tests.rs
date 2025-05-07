@@ -9,6 +9,8 @@
 
 #![cfg(test)]
 
+use buck2_data::error::ErrorTag;
+
 use crate as buck2_error;
 
 #[derive(buck2_error_derive::Error, Debug)]
@@ -19,10 +21,6 @@ pub struct Error1;
 #[test]
 fn test_derive_error1() {
     let e: crate::Error = Error1.into();
-    assert_eq!(e.get_tier(), Some(crate::Tier::Input));
-
-    let e: anyhow::Error = Error1.into();
-    let e: crate::Error = e.into();
     assert_eq!(e.get_tier(), Some(crate::Tier::Input));
 }
 
@@ -47,6 +45,7 @@ pub enum Error3 {
     #[buck2(tier0)]
     VariantB,
     #[error("baz")]
+    #[buck2(tag = Environment)]
     VariantC,
 }
 
@@ -59,11 +58,12 @@ fn test_derive_error3() {
     assert_eq!(e.get_tier(), Some(crate::Tier::Tier0));
 
     let e: crate::Error = Error3::VariantC.into();
-    assert_eq!(e.get_tier(), None);
+    assert_eq!(e.get_tier(), Some(crate::Tier::Environment));
 }
 
 #[derive(buck2_error_derive::Error, Debug)]
 #[error("Generic error")]
+#[buck2(tag = Environment)]
 pub struct GenericError<G>(G);
 
 #[test]
@@ -74,6 +74,7 @@ fn test_generic_error() {
 /// Test that no unused fields warning is emitted.
 #[derive(buck2_error_derive::Error, Debug)]
 #[error("Unused")]
+#[buck2(tag = Environment)]
 pub struct WithField {
     x: u8,
 }
@@ -85,10 +86,12 @@ fn test_with_field() {
 
 #[derive(buck2_error_derive::Error, Debug)]
 #[error("Unused")]
+#[buck2(tag = Environment)]
 struct NoAttrsStruct;
 
 #[derive(buck2_error_derive::Error, Debug)]
 #[error("Unused")]
+#[buck2(tag = TestOnly)]
 enum NoAttrsEnum {
     Variant,
 }
@@ -97,13 +100,13 @@ enum NoAttrsEnum {
 fn test_source_location_no_attrs() {
     let e: crate::Error = NoAttrsStruct.into();
     assert_eq!(
-        e.source_location(),
-        Some("buck2_error/src/derive_tests.rs::NoAttrsStruct")
+        e.source_location().to_string(),
+        "buck2_error/src/derive_tests.rs::NoAttrsStruct"
     );
     let e: crate::Error = NoAttrsEnum::Variant.into();
     assert_eq!(
-        e.source_location(),
-        Some("buck2_error/src/derive_tests.rs::NoAttrsEnum::Variant")
+        e.source_location().to_string(),
+        "buck2_error/src/derive_tests.rs::NoAttrsEnum::Variant"
     );
 }
 
@@ -119,8 +122,8 @@ fn test_enum_with_type_option() {
     let e: crate::Error = EnumWithTypeOption::Variant.into();
     assert_eq!(e.get_tier(), Some(crate::Tier::Input));
     assert_eq!(
-        e.source_location(),
-        Some("buck2_error/src/derive_tests.rs::EnumWithTypeOption::Variant"),
+        e.source_location().to_string(),
+        "buck2_error/src/derive_tests.rs::EnumWithTypeOption::Variant",
     );
 }
 
@@ -144,16 +147,18 @@ fn test_source_metadata_are_included() {
 
     #[derive(buck2_error_derive::Error, Debug)]
     #[error("Unused")]
+    #[buck2(tag = WatchmanRequestError)]
     enum MaybeWatchmanError {
         Some(#[source] WatchmanError),
         None,
     }
 
     let e: crate::Error = MaybeWatchmanError::None.into();
-    assert!(e.tags().is_empty());
+    assert!(e.has_tag(crate::ErrorTag::WatchmanRequestError));
 
     let e: crate::Error = MaybeWatchmanError::Some(WatchmanError).into();
     assert!(e.has_tag(crate::ErrorTag::WatchmanTimeout));
+    assert!(e.has_tag(crate::ErrorTag::WatchmanRequestError));
 
     assert!(format!("{:?}", e).contains("Unused"));
     assert!(format!("{:?}", e).contains("WatchmanError"));
@@ -161,15 +166,15 @@ fn test_source_metadata_are_included() {
 
 #[test]
 fn test_error_tags() {
-    fn f(_: &TaggedError) -> Option<crate::ErrorTag> {
-        Some(crate::ErrorTag::StarlarkFail)
+    fn f() -> crate::ErrorTag {
+        crate::ErrorTag::StarlarkFail
     }
 
     #[derive(buck2_error_derive::Error, Debug)]
     #[error("Unused")]
     #[buck2(tag = WatchmanTimeout)]
     enum TaggedError {
-        #[buck2(tag = f(self))]
+        #[buck2(tag = f())]
         A,
         #[buck2(tag = WatchmanTimeout)]
         B,
@@ -188,6 +193,32 @@ fn test_error_tags() {
 }
 
 #[test]
+fn test_error_tags_vec_fn() {
+    fn calc_tags(extra_tag: bool) -> Vec<ErrorTag> {
+        if extra_tag {
+            vec![ErrorTag::StarlarkFail]
+        } else {
+            vec![]
+        }
+    }
+
+    #[derive(buck2_error_derive::Error, Debug)]
+    #[error("Unused")]
+    #[buck2(tag = WatchmanTimeout, tags = calc_tags(*extra_tag))]
+    struct TaggedError {
+        extra_tag: bool,
+    }
+
+    let a: crate::Error = TaggedError { extra_tag: true }.into();
+    assert_eq!(
+        &a.tags(),
+        &[ErrorTag::StarlarkFail, ErrorTag::WatchmanTimeout]
+    );
+    let b: crate::Error = TaggedError { extra_tag: false }.into();
+    assert_eq!(&b.tags(), &[ErrorTag::WatchmanTimeout]);
+}
+
+#[test]
 fn test_correct_transparent() {
     #[derive(buck2_error_derive::Error, Debug)]
     #[error("Unused")]
@@ -196,6 +227,7 @@ fn test_correct_transparent() {
 
     #[derive(buck2_error_derive::Error, Debug)]
     #[error(transparent)]
+    #[buck2(tag = Input)]
     struct T(E);
 
     let t: crate::Error = T(E).into();
@@ -203,39 +235,26 @@ fn test_correct_transparent() {
 }
 
 #[test]
-fn test_recovery_through_transparent() {
+fn test_error_message_with_provided_field() {
     #[derive(buck2_error_derive::Error, Debug)]
-    #[error("base_display")]
-    struct BaseError;
+    #[error("Some message {0} + {1}")]
+    #[buck2(tag = Environment)]
+    struct SomeError(String, String);
 
-    #[derive(buck2_error_derive::Error, Debug)]
-    #[error(transparent)]
-    enum PartiallyStructured {
-        #[error(transparent)]
-        Other(anyhow::Error),
-    }
-
-    let base: crate::Error = crate::Error::from(BaseError).tag([crate::ErrorTag::StarlarkFail]);
-    let wrapped_direct: crate::Error = PartiallyStructured::Other(base.clone().into()).into();
-    let wrapped_recovery: crate::Error =
-        anyhow::Error::from(PartiallyStructured::Other(base.into())).into();
-
-    assert!(format!("{:?}", wrapped_direct).contains("base_display"));
-    assert!(format!("{:?}", wrapped_recovery).contains("base_display"));
-
-    // FIXME(JakobDegen): Bug: Should be `&[crate::ErrorTag::StarlarkFail]`
-    assert_eq!(&wrapped_direct.tags()[..], &[]);
-    assert_eq!(&wrapped_recovery.tags()[..], &[]);
+    let t: crate::Error = SomeError("test123".to_owned(), "test222".to_owned()).into();
+    assert!(format!("{:?}", t).contains("Some message test123"));
 }
 
 #[test]
 fn test_recovery_through_transparent_buck2_error() {
     #[derive(buck2_error_derive::Error, Debug)]
     #[error("base_display")]
+    #[buck2(tag = Environment)]
     struct BaseError;
 
     #[derive(buck2_error_derive::Error, Debug)]
     #[error(transparent)]
+    #[buck2(tag = TestOnly)]
     enum PartiallyStructured {
         #[error(transparent)]
         Other(buck2_error::Error),
@@ -243,13 +262,14 @@ fn test_recovery_through_transparent_buck2_error() {
 
     let base: crate::Error = crate::Error::from(BaseError).tag([crate::ErrorTag::StarlarkFail]);
     let wrapped_direct: crate::Error = PartiallyStructured::Other(base.clone()).into();
-    let wrapped_recovery: crate::Error =
-        anyhow::Error::from(PartiallyStructured::Other(base)).into();
 
     assert!(format!("{:?}", wrapped_direct).contains("base_display"));
-    assert!(format!("{:?}", wrapped_recovery).contains("base_display"));
-
-    // FIXME(JakobDegen): Bug: Should be `&[crate::ErrorTag::StarlarkFail]`
-    assert_eq!(&wrapped_direct.tags()[..], &[]);
-    assert_eq!(&wrapped_recovery.tags()[..], &[]);
+    assert_eq!(
+        &wrapped_direct.tags()[..],
+        &[
+            crate::ErrorTag::Environment,
+            crate::ErrorTag::StarlarkFail,
+            crate::ErrorTag::TestOnly
+        ]
+    );
 }

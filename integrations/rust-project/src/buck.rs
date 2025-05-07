@@ -21,13 +21,15 @@ use anyhow::Context;
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 use serde::Deserialize;
+use tracing::Level;
 use tracing::enabled;
 use tracing::info;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
-use tracing::Level;
 
+use crate::Crate;
+use crate::Dep;
 use crate::cli::Input;
 use crate::json_project::Build;
 use crate::json_project::Edition;
@@ -42,15 +44,16 @@ use crate::target::Kind;
 use crate::target::MacroOutput;
 use crate::target::Target;
 use crate::target::TargetInfo;
-use crate::Crate;
-use crate::Dep;
+
+const CLIENT_METADATA_RUST_PROJECT: &str = "--client-metadata=id=rust-project";
 
 pub(crate) fn to_json_project(
     sysroot: Sysroot,
     expanded_and_resolved: ExpandedAndResolved,
     aliases: FxHashMap<Target, AliasedTargetInfo>,
-    relative_paths: bool,
     check_cycles: bool,
+    include_all_buildfiles: bool,
+    extra_cfgs: &[String],
 ) -> Result<JsonProject, anyhow::Error> {
     let mode = select_mode(None);
     let buck = Buck::new(mode);
@@ -108,7 +111,7 @@ pub(crate) fn to_json_project(
         // the mapping here is inverted, which means we need to search through the keys for the Target.
         // thankfully, most projects don't have to many proc macros, which means the size of this list
         // remains in the two digit space.
-        let mut proc_macro_dylib_path = proc_macros
+        let proc_macro_dylib_path = proc_macros
             .values()
             .find(|macro_output| macro_output.actual == *target)
             .map(|macro_output| macro_output.dylib.clone());
@@ -117,27 +120,11 @@ pub(crate) fn to_json_project(
         }
 
         // corresponds to the BUCK/TARGETS file of a target.
-        let mut build_file = info.project_relative_buildfile.clone();
+        let build_file = project_root.join(info.project_relative_buildfile.clone());
 
         // We don't need to push the source folder as rust-analyzer by default will use the root-module parent().
         // info.root_module() will output either the fbcode source file or the symlinked one based on if it's a mapped source or not
-        let mut root_module = info.root_module();
-
-        if relative_paths {
-            proc_macro_dylib_path = proc_macro_dylib_path.map(|p| relative_to(&p, &project_root));
-            root_module = root_module.map(|x| relative_to(&x, &project_root));
-        } else {
-            let path = project_root.join(build_file);
-            build_file = path;
-        }
-
-        let root_module = match root_module {
-            Err(e) => {
-                warn!(?target, "root module does not exist: {}", e);
-                continue;
-            }
-            Ok(x) => x,
-        };
+        let root_module = info.root_module(&project_root);
 
         let mut env = FxHashMap::default();
 
@@ -167,7 +154,7 @@ pub(crate) fn to_json_project(
             include_dirs.insert(parent.to_owned());
         }
 
-        let build = if info.in_workspace {
+        let build = if include_all_buildfiles || info.in_workspace {
             let build = Build {
                 label: target.clone(),
                 build_file: build_file.to_owned(),
@@ -188,7 +175,11 @@ pub(crate) fn to_json_project(
                 include_dirs,
                 exclude_dirs: FxHashSet::default(),
             }),
-            cfg: info.cfg(),
+            cfg: info
+                .cfg()
+                .into_iter()
+                .chain(extra_cfgs.iter().cloned())
+                .collect(),
             env,
             build,
             is_proc_macro: info.proc_macro.unwrap_or(false),
@@ -203,14 +194,14 @@ pub(crate) fn to_json_project(
     }
 
     let jp = JsonProject {
-        sysroot,
+        sysroot: Box::new(sysroot),
         crates,
         runnables: vec![
             Runnable {
                 program: "buck".to_owned(),
                 args: vec![
                     "build".to_owned(),
-                    "-c=client.id=rust-project".to_owned(),
+                    CLIENT_METADATA_RUST_PROJECT.to_owned(),
                     "{label}".to_owned(),
                 ],
                 cwd: project_root.to_owned(),
@@ -220,7 +211,7 @@ pub(crate) fn to_json_project(
                 program: "buck".to_owned(),
                 args: vec![
                     "test".to_owned(),
-                    "-c=client.id=rust-project".to_owned(),
+                    CLIENT_METADATA_RUST_PROJECT.to_owned(),
                     "{label}".to_owned(),
                     "--".to_owned(),
                     "{test_id}".to_owned(),
@@ -310,15 +301,6 @@ fn format_route(route: &[usize], crates: &[Crate]) -> String {
     }
 
     formatted_crates.join(" -> ")
-}
-
-/// If `path` starts with `base`, drop the prefix.
-pub(crate) fn relative_to(path: &Path, base: &Path) -> PathBuf {
-    match path.strip_prefix(base) {
-        Ok(rel_path) => rel_path,
-        Err(_) => path,
-    }
-    .to_owned()
 }
 
 /// If any target in `targets` is an alias, resolve it to the actual target.
@@ -529,10 +511,7 @@ impl Buck {
             sysroot_src_path: PathBuf,
         }
         let cfg: BuckConfig = deserialize_output(child.wait_with_output(), &command)?;
-        // the `library` path component needs to be appended to the `sysroot_src_path`
-        // so that rust-analyzer will be able to find standard library sources.
-        let cfg = cfg.sysroot_src_path.join("library");
-        Ok(cfg)
+        Ok(cfg.sysroot_src_path)
     }
 
     /// Determines the owning target(s) of the saved file and builds them.
@@ -649,6 +628,7 @@ impl Buck {
         ]);
 
         info!(
+            kind = "progress",
             ?input,
             "querying buck to determine owning buildfile and its targets"
         );

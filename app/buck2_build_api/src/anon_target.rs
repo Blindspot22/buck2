@@ -15,14 +15,15 @@ use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_node::rule_type::StarlarkRuleType;
 use dupe::Dupe;
 use starlark::collections::SmallMap;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use starlark::values::structs::StructRef;
 use starlark::values::Value;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::structs::StructRef;
 
 use crate::analysis::AnalysisResult;
 use crate::artifact_groups::promise::PromiseArtifactAttr;
@@ -30,6 +31,8 @@ use crate::artifact_groups::promise::PromiseArtifactId;
 use crate::validation::transitive_validations::TransitiveValidations;
 
 pub trait AnonTargetDyn: Send + Sync + Display {
+    fn eval_kind(self: Arc<Self>) -> StarlarkEvalKind;
+
     fn rule_type(&self) -> &Arc<StarlarkRuleType>;
 
     fn base_deferred_key(self: Arc<Self>) -> BaseDeferredKey;

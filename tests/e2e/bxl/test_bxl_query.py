@@ -67,7 +67,7 @@ async def test_cquery_inputs(buck: Buck) -> None:
     )
 
     assert "TARGETS.fixture" in result.stdout
-    assert "file_set" in result.stdout
+    assert "bxl.FileSet" in result.stdout
     assert "1" in result.stdout
 
 
@@ -135,7 +135,7 @@ async def test_cquery_deps(buck: Buck) -> None:
     )
 
 
-@buck_test(inplace=False, data_dir="bxl/simple")
+@buck_test(inplace=False, data_dir="bxl/simple", allow_soft_errors=True)
 async def test_cquery_buildfile(buck: Buck) -> None:
     await buck.bxl("//bxl/cquery.bxl:buildfile_test")
 
@@ -328,7 +328,7 @@ async def test_uquery_targets_in_buildfile(buck: Buck) -> None:
     )
 
 
-@buck_test(inplace=False, data_dir="bxl/simple")
+@buck_test(inplace=False, data_dir="bxl/simple", allow_soft_errors=True)
 async def test_uquery_buildfile(buck: Buck) -> None:
     await buck.bxl("//bxl/uquery.bxl:buildfile_test")
 

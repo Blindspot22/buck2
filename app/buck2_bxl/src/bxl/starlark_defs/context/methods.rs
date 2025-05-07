@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_cli_proto::build_request::Materializations;
+use buck2_cli_proto::build_request::Uploads;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::data::HasIoProvider;
 use buck2_common::events::HasEvents;
@@ -23,8 +24,8 @@ use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::soft_error;
 use buck2_core::target::label::label::TargetLabel;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use buck2_interpreter::starlark_promise::StarlarkPromise;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use buck2_interpreter::types::configured_providers_label::StarlarkProvidersLabel;
@@ -41,31 +42,31 @@ use starlark::collections::SmallMap;
 use starlark::environment::MethodsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
+use starlark::values::Value;
+use starlark::values::ValueOfUnchecked;
+use starlark::values::ValueTyped;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
 use starlark::values::structs::StructRef;
-use starlark::values::Value;
-use starlark::values::ValueOfUnchecked;
-use starlark::values::ValueTyped;
 
 use crate::bxl::starlark_defs::analysis_result::StarlarkAnalysisResult;
 use crate::bxl::starlark_defs::aquery::StarlarkAQueryCtx;
 use crate::bxl::starlark_defs::audit::StarlarkAuditCtx;
 use crate::bxl::starlark_defs::build_result::StarlarkBxlBuildResult;
-use crate::bxl::starlark_defs::context::actions::resolve_bxl_execution_platform;
-use crate::bxl::starlark_defs::context::actions::validate_action_instantiation;
-use crate::bxl::starlark_defs::context::actions::BxlActions;
-use crate::bxl::starlark_defs::context::analysis;
-use crate::bxl::starlark_defs::context::build;
-use crate::bxl::starlark_defs::context::fs::BxlFilesystem;
-use crate::bxl::starlark_defs::context::output::OutputStream;
 use crate::bxl::starlark_defs::context::BxlContext;
 use crate::bxl::starlark_defs::context::BxlContextError;
 use crate::bxl::starlark_defs::context::BxlContextNoDice;
 use crate::bxl::starlark_defs::context::BxlContextType;
 use crate::bxl::starlark_defs::context::NotATargetLabelString;
 use crate::bxl::starlark_defs::context::UnconfiguredTargetInAnalysis;
+use crate::bxl::starlark_defs::context::actions::BxlActions;
+use crate::bxl::starlark_defs::context::actions::resolve_bxl_execution_platform;
+use crate::bxl::starlark_defs::context::actions::validate_action_instantiation;
+use crate::bxl::starlark_defs::context::analysis;
+use crate::bxl::starlark_defs::context::build;
+use crate::bxl::starlark_defs::context::fs::BxlFilesystem;
+use crate::bxl::starlark_defs::context::output::OutputStream;
 use crate::bxl::starlark_defs::cquery::StarlarkCQueryCtx;
 use crate::bxl::starlark_defs::event::StarlarkUserEventParser;
 use crate::bxl::starlark_defs::lazy_ctx::StarlarkLazyCtx;
@@ -74,10 +75,10 @@ use crate::bxl::starlark_defs::nodes::unconfigured::StarlarkTargetNode;
 use crate::bxl::starlark_defs::providers_expr::AnyProvidersExprArg;
 use crate::bxl::starlark_defs::providers_expr::ProvidersExpr;
 use crate::bxl::starlark_defs::providers_expr::ProvidersExprArg;
-use crate::bxl::starlark_defs::target_list_expr::filter_incompatible;
 use crate::bxl::starlark_defs::target_list_expr::ConfiguredTargetListExprArg;
 use crate::bxl::starlark_defs::target_list_expr::TargetListExpr;
 use crate::bxl::starlark_defs::target_list_expr::TargetListExprArg;
+use crate::bxl::starlark_defs::target_list_expr::filter_incompatible;
 use crate::bxl::starlark_defs::target_universe::StarlarkTargetUniverse;
 use crate::bxl::starlark_defs::targetset::StarlarkTargetSet;
 use crate::bxl::starlark_defs::uquery::StarlarkUQueryCtx;
@@ -96,7 +97,7 @@ pub(crate) fn bxl_context_methods(builder: &mut MethodsBuilder) {
     ///
     /// This function is not available on the `bxl_ctx` when called from `dynamic_output`.
     #[starlark(attribute)]
-    fn output<'v>(this: &'v BxlContext) -> starlark::Result<ValueTyped<'v, OutputStream>> {
+    fn output<'v>(this: &'v BxlContext<'v>) -> starlark::Result<ValueTyped<'v, OutputStream>> {
         let output_stream = this
             .data
             .context_type
@@ -281,14 +282,19 @@ pub(crate) fn bxl_context_methods(builder: &mut MethodsBuilder) {
     /// Also takes in an optional `target_platform` param to configure the nodes with, and a `keep_going`
     /// flag to skip any loading or configuration errors. Note that `keep_going` currently can only be used
     /// if the input labels is a single target pattern as a string literal.
+    ///
+    /// The default modifiers used to configure the target nodes are empty. If you want to use the
+    /// modifiers from the cli, you can pass `ctx.modifiers` to the argument `modifiers` of this function.
     fn target_universe<'v>(
         this: ValueTyped<'v, BxlContext<'v>>,
         labels: ConfiguredTargetListExprArg<'v>,
         #[starlark(default = ValueAsStarlarkTargetLabel::NONE)]
         target_platform: ValueAsStarlarkTargetLabel<'v>,
         #[starlark(require = named, default = false)] keep_going: bool,
+        #[starlark(require = named, default = UnpackList::default())] modifiers: UnpackList<String>,
     ) -> starlark::Result<StarlarkTargetUniverse<'v>> {
-        let global_cfg_options = this.resolve_global_cfg_options(target_platform, vec![].into())?;
+        let modifiers = modifiers.items;
+        let global_cfg_options = this.resolve_global_cfg_options(target_platform, modifiers)?;
 
         Ok(this.via_dice(|ctx, this_no_dice: &BxlContextNoDice<'_>| {
             ctx.via(|ctx| {
@@ -641,8 +647,13 @@ pub(crate) fn bxl_context_methods(builder: &mut MethodsBuilder) {
             labels,
             target_platform,
             Materializations::from_str_name(&materializations.to_uppercase()).ok_or_else(|| {
-                buck2_error!([], "Unknown materialization setting `{}`", materializations)
+                buck2_error!(
+                    buck2_error::ErrorTag::Input,
+                    "Unknown materialization setting `{}`",
+                    materializations
+                )
             })?,
+            Uploads::Never,
             eval,
         )?)
     }
@@ -657,7 +668,7 @@ pub(crate) fn bxl_context_methods(builder: &mut MethodsBuilder) {
     /// This attribute is not available on the bxl context within the a dynamic lambda.
     #[starlark(attribute)]
     fn cli_args<'v>(
-        this: &BxlContext<'v>,
+        this: &'v BxlContext<'v>,
     ) -> starlark::Result<ValueOfUnchecked<'v, StructRef<'v>>> {
         let cli_args = this
             .data
@@ -746,10 +757,11 @@ pub(crate) fn bxl_context_methods(builder: &mut MethodsBuilder) {
         promise: ValueTyped<'v, StarlarkPromise<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<NoneOr<Value<'v>>> {
-        this.via_dice(|dice, this| {
+        let eval_kind = this.current_bxl().as_starlark_eval_kind();
+        this.via_dice(|dice, _this| {
             dice.via(|dice| {
                 action_factory
-                    .run_promises(dice, eval, format!("bxl$promises:{}", this.current_bxl()))
+                    .run_promises(dice, eval, &eval_kind)
                     .boxed_local()
             })
         })?;

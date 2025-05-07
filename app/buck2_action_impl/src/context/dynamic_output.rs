@@ -23,15 +23,16 @@ use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_core::deferred::dynamic::DynamicLambdaResultsKey;
 use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
 use dupe::Dupe;
 use indexmap::IndexSet;
 use starlark::environment::MethodsBuilder;
 use starlark::starlark_module;
+use starlark::values::FrozenValue;
+use starlark::values::ValueTyped;
 use starlark::values::list_or_tuple::UnpackListOrTuple;
 use starlark::values::none::NoneType;
 use starlark::values::typing::StarlarkCallable;
-use starlark::values::FrozenValue;
-use starlark::values::ValueTyped;
 use starlark_map::small_map::SmallMap;
 
 use crate::dynamic::dynamic_actions::StarlarkDynamicActions;
@@ -42,6 +43,7 @@ use crate::dynamic::params::DynamicLambdaStaticFields;
 use crate::dynamic::storage::DynamicLambdaParamsStorageImpl;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum DynamicOutputError {
     #[error("Output list may not be empty")]
     EmptyOutput,
@@ -70,9 +72,6 @@ impl DynamicActionsOutputArtifactBinder {
         //
         // This means that we are creating ActionKeys for the lambda and it needs to offset
         // its key's index to account for this (see ActionRegistry where this is done).
-        //
-        // TODO(cjhopman): We should probably combine ActionRegistry and DynamicRegistry (and
-        // probably ArtifactGroupRegistry too).
         let bound = output
             .bind(ActionKey::new(
                 self.key.dupe(),
@@ -213,7 +212,7 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
         let dynamic_actions = dynamic_actions
             .data
             .try_borrow_mut()
-            .map_err(buck2_error::Error::from)?
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?
             .take()
             .buck_error_context(
                 "dynamic_action data can be used only in one `dynamic_output_new` call",

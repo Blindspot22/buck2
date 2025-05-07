@@ -37,21 +37,21 @@ use buck2_query::query::syntax::simple::eval::error::QueryError;
 use buck2_query::query::syntax::simple::eval::file_set::FileNode;
 use buck2_query::query::syntax::simple::eval::file_set::FileSet;
 use buck2_query::query::syntax::simple::eval::set::TargetSet;
-use buck2_query::query::syntax::simple::functions::docs::QueryEnvironmentDescription;
 use buck2_query::query::syntax::simple::functions::DefaultQueryFunctionsModule;
 use buck2_query::query::syntax::simple::functions::HasModuleDescription;
-use buck2_query::query::traversal::async_depth_first_postorder_traversal;
-use buck2_query::query::traversal::async_depth_limited_traversal;
+use buck2_query::query::syntax::simple::functions::docs::QueryEnvironmentDescription;
 use buck2_query::query::traversal::AsyncNodeLookup;
 use buck2_query::query::traversal::ChildVisitor;
+use buck2_query::query::traversal::async_depth_first_postorder_traversal;
+use buck2_query::query::traversal::async_depth_limited_traversal;
 use buck2_util::future::try_join_all;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::LinearRecomputeDiceComputations;
 use dupe::Dupe;
-use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use gazebo::prelude::*;
 use indexmap::IndexSet;
 use itertools::Itertools;
@@ -61,12 +61,14 @@ use tracing::warn;
 type ArcCellPath = Arc<CellPath>;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Tier0)]
 enum QueryLiteralResolutionError {
     #[error("literal `{0}` missing in pre-resolved literals")]
     LiteralMissing(String),
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Tier0)]
 enum RBuildFilesError {
     #[error("no parent found for the file `{0}`")]
     ParentDoesNotExist(ArcCellPath),
@@ -99,7 +101,7 @@ pub(crate) trait UqueryDelegate: Send + Sync {
 
     fn linear_dice_computations(&self) -> &LinearRecomputeDiceComputations<'_>;
 
-    fn ctx<'a>(&'a self) -> DiceComputations<'a>;
+    fn ctx(&self) -> DiceComputations<'_>;
 }
 
 #[async_trait]
@@ -205,7 +207,7 @@ impl<'c> UqueryEnvironment<'c> {
 }
 
 #[async_trait]
-impl<'c> QueryEnvironment for UqueryEnvironment<'c> {
+impl QueryEnvironment for UqueryEnvironment<'_> {
     type Target = TargetNode;
 
     async fn get_node(&self, node_ref: &TargetLabel) -> buck2_error::Result<Self::Target> {
@@ -566,7 +568,7 @@ async fn split_universe_files<'c>(
         let buildfile_names_for_file =
             buildfile_names_by_cell.get(&file.cell()).ok_or_else(|| {
                 buck2_error::buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::Tier0,
                     "{}",
                     RBuildFilesError::CellMissingBuildFileNames(file.cell()).to_string()
                 )

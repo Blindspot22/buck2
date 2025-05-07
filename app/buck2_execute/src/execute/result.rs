@@ -37,6 +37,12 @@ pub enum CommandExecutionErrorType {
     Other,
 }
 
+#[derive(Debug)]
+pub enum CommandCancellationReason {
+    NotSpecified,
+    ReQueueTimeout,
+}
+
 /// "Status" of an action execution indicating how it finished. E.g. "built_remotely", "local_fallback", "action_cache".
 #[derive(Debug)]
 pub enum CommandExecutionStatus {
@@ -60,7 +66,9 @@ pub enum CommandExecutionStatus {
         duration: Duration,
     },
     // TODO: We should rename this.
-    Cancelled,
+    Cancelled {
+        reason: Option<CommandCancellationReason>,
+    },
 }
 
 impl CommandExecutionStatus {
@@ -71,7 +79,7 @@ impl CommandExecutionStatus {
             CommandExecutionStatus::WorkerFailure { execution_kind } => Some(execution_kind),
             CommandExecutionStatus::Error { execution_kind, .. } => execution_kind.as_ref(),
             CommandExecutionStatus::TimedOut { execution_kind, .. } => Some(execution_kind),
-            CommandExecutionStatus::Cancelled => None,
+            CommandExecutionStatus::Cancelled { reason: _ } => None,
         }
     }
 }
@@ -107,7 +115,13 @@ impl Display for CommandExecutionStatus {
             CommandExecutionStatus::TimedOut { duration, .. } => {
                 write!(f, "timed out after {:.3}s", duration.as_secs_f64())
             }
-            CommandExecutionStatus::Cancelled => write!(f, "Cancelled"),
+            CommandExecutionStatus::Cancelled { reason } => {
+                if let Some(reason) = reason {
+                    write!(f, "Cancelled due to {:?}", reason)
+                } else {
+                    write!(f, "Cancelled")
+                }
+            }
         }
     }
 }
@@ -245,6 +259,9 @@ impl CommandExecutionResult {
             CommandExecutionStatus::Success {
                 execution_kind: CommandExecutionKind::Local { .. },
             } => true,
+            CommandExecutionStatus::Success {
+                execution_kind: CommandExecutionKind::LocalWorker { .. },
+            } => true,
             _ => false,
         }
     }
@@ -261,10 +278,12 @@ impl CommandExecutionResult {
     pub fn resolve_outputs<'a>(
         &'a self,
         fs: &'a ArtifactFs,
-    ) -> impl Iterator<Item = (ResolvedCommandExecutionOutput, &'a ArtifactValue)> + 'a {
+    ) -> impl Iterator<
+        Item = buck2_error::Result<(ResolvedCommandExecutionOutput, &'a ArtifactValue)>,
+    > + 'a {
         self.outputs
             .iter()
-            .map(|(output, value)| (output.as_ref().resolve(fs), value))
+            .map(|(output, value)| Ok((output.as_ref().resolve(fs)?, value)))
     }
 }
 
@@ -298,7 +317,9 @@ impl CommandExecutionReport {
             CommandExecutionStatus::Success { .. } => {
                 buck2_data::command_execution::Success {}.into()
             }
-            CommandExecutionStatus::Cancelled => buck2_data::command_execution::Cancelled {}.into(),
+            CommandExecutionStatus::Cancelled { .. } => {
+                buck2_data::command_execution::Cancelled {}.into()
+            }
             CommandExecutionStatus::Failure { .. } => {
                 buck2_data::command_execution::Failure {}.into()
             }

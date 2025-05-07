@@ -9,27 +9,28 @@
 
 use std::sync::Arc;
 
+use buck2_cli_proto::ClientContext;
 use buck2_cli_proto::new_generic::CompleteRequest;
 use buck2_cli_proto::new_generic::NewGenericRequest;
 use buck2_cli_proto::new_generic::NewGenericResponse;
-use buck2_cli_proto::ClientContext;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
 use buck2_client_ctx::command_outcome::CommandOutcome;
-use buck2_client_ctx::common::target_cfg::TargetCfgOptions;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::target_cfg::TargetCfgOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::daemon::client::FlushingBuckdClient;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::streaming::StreamingCommand;
 use buck2_common::invocation_roots::InvocationRoots;
 use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
 use buck2_core::fs::working_dir::AbsWorkingDir;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 
 use super::path_sanitizer::PathSanitizer;
 use super::results::CompletionResults;
@@ -68,7 +69,7 @@ impl CompleteTargetCommand {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 impl StreamingCommand for CompleteTargetCommand {
     const COMMAND_NAME: &'static str = "complete";
 
@@ -77,6 +78,7 @@ impl StreamingCommand for CompleteTargetCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let buckd_client = buckd.with_flushing();
         let context = ctx.client_context(matches, &self)?;
@@ -84,6 +86,7 @@ impl StreamingCommand for CompleteTargetCommand {
             buckd_client,
             context,
             target_cfg: self.target_cfg,
+            events_ctx,
         };
 
         let completer = TargetCompleter::new(&self.cwd, &ctx.paths()?.roots, &mut target_resolver)
@@ -165,20 +168,21 @@ impl<'a> TargetCompleter<'a> {
     }
 }
 
-struct DaemonTargetResolver<'a, 'b> {
-    buckd_client: FlushingBuckdClient<'a, 'b>,
+struct DaemonTargetResolver<'a> {
+    buckd_client: FlushingBuckdClient<'a>,
     context: ClientContext,
     target_cfg: TargetCfgOptions,
+    events_ctx: &'a mut EventsCtx,
 }
 
-impl<'a, 'b> TargetResolver for DaemonTargetResolver<'a, 'b> {
+impl TargetResolver for DaemonTargetResolver<'_> {
     fn resolve(&mut self, partial_target: String) -> BoxFuture<CommandOutcome<Vec<String>>> {
         let request = NewGenericRequest::Complete(CompleteRequest {
             target_cfg: self.target_cfg.target_cfg(),
             partial_target,
         });
         self.buckd_client
-            .new_generic(self.context.clone(), request, None)
+            .new_generic(self.context.clone(), request, self.events_ctx, None)
             .then(|res| async move {
                 match res {
                     Ok(CommandOutcome::Success(NewGenericResponse::Complete(res))) => {

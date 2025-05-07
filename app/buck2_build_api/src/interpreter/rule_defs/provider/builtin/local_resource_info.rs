@@ -11,18 +11,12 @@ use std::time::Duration;
 
 use allocative::Allocative;
 use buck2_build_api_derive::internal_provider;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
 use either::Either;
 use indexmap::IndexMap;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
-use starlark::values::dict::DictRef;
-use starlark::values::dict::DictType;
-use starlark::values::dict::UnpackDictEntries;
-use starlark::values::float::UnpackFloat;
-use starlark::values::none::NoneOr;
 use starlark::values::Coerce;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
@@ -34,12 +28,18 @@ use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueOfUncheckedGeneric;
 use starlark::values::ValueTypedComplex;
+use starlark::values::dict::DictRef;
+use starlark::values::dict::DictType;
+use starlark::values::dict::UnpackDictEntries;
+use starlark::values::float::UnpackFloat;
+use starlark::values::none::NoneOr;
 
-use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
+use crate as buck2_build_api;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::FrozenStarlarkCmdArgs;
 use crate::interpreter::rule_defs::cmd_args::StarlarkCmdArgs;
 use crate::interpreter::rule_defs::cmd_args::StarlarkCommandLineValueUnpack;
+use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use crate::starlark::values::UnpackValue;
 use crate::starlark::values::ValueLike;
 
@@ -85,11 +85,10 @@ where
     let env_vars = info
         .resource_env_vars
         .cast::<UnpackDictEntries<&str, &str>>()
-        .unpack()
-        .map_err(from_starlark)?;
+        .unpack()?;
     if env_vars.entries.is_empty() {
         return Err(buck2_error::buck2_error!(
-            [],
+            buck2_error::ErrorTag::Input,
             "Value for `resource_env_vars` field is an empty dictionary: `{}`",
             info.resource_env_vars
         ));
@@ -103,7 +102,7 @@ where
     };
     if setup_is_empty {
         return Err(buck2_error::buck2_error!(
-            [],
+            buck2_error::ErrorTag::Input,
             "Value for `setup` field is an empty command line: `{}`",
             info.setup
         ));

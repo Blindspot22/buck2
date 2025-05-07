@@ -18,14 +18,15 @@ use allocative::Allocative;
 use buck2_util::arc_str::StringInside;
 use derive_more::Display;
 use gazebo::transmute;
-use ref_cast::ref_cast_custom;
 use ref_cast::RefCastCustom;
+use ref_cast::ref_cast_custom;
 use relative_path::RelativePath;
 use relative_path::RelativePathBuf;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use smallvec::SmallVec;
+use strong_hash::StrongHash;
 
 use crate::fs::fs_util;
 use crate::fs::paths::file_name::FileName;
@@ -46,7 +47,8 @@ use crate::fs::paths::path_util::path_remove_prefix;
     PartialOrd,
     Ord,
     Hash,
-    Allocative
+    Allocative,
+    StrongHash
 )]
 #[repr(transparent)]
 pub struct ForwardRelativePath(
@@ -57,7 +59,18 @@ pub struct ForwardRelativePath(
 /// The owned version of 'ForwardRelativePath', like how 'PathBuf' relates to
 /// 'Path'
 #[derive(
-    Default, Clone, Display, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash, Allocative
+    Default,
+    Clone,
+    Display,
+    Debug,
+    Serialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Allocative,
+    strong_hash::StrongHash
 )]
 #[repr(transparent)]
 pub struct ForwardRelativePathBuf(String);
@@ -141,7 +154,7 @@ impl<'a> DoubleEndedIterator for ForwardRelativePathIter<'a> {
     }
 }
 
-impl<'a> Clone for ForwardRelativePathIter<'a> {
+impl Clone for ForwardRelativePathIter<'_> {
     fn clone(&self) -> Self {
         ForwardRelativePathIter(ForwardRelativePath::unchecked_new(self.0.as_str()))
     }
@@ -865,8 +878,8 @@ impl ForwardRelativePathBuf {
     /// components directly, similar to `join_normalized`.
     ///
     /// ```
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     /// use buck2_core::fs::paths::RelativePath;
+    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     ///
     /// let mut path = ForwardRelativePathBuf::unchecked_new("foo".to_owned());
     /// path.push_normalized(RelativePath::new("bar"))?;
@@ -1019,6 +1032,7 @@ impl<P: AsRef<ForwardRelativePath>> Extend<P> for ForwardRelativePathBuf {
 
 /// Errors from ForwardRelativePath creation
 #[derive(buck2_error::Error, Debug)]
+#[buck2(input)]
 enum ForwardRelativePathError {
     #[error("expected a relative path but got an absolute path instead: `{0}`")]
     PathNotRelative(String),
@@ -1115,8 +1129,8 @@ impl<'a> TryFrom<&'a RelativePath> for &'a ForwardRelativePath {
     /// ```
     /// use std::convert::TryFrom;
     ///
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
     /// use buck2_core::fs::paths::RelativePath;
+    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
     ///
     /// assert!(<&ForwardRelativePath>::try_from(RelativePath::new("foo/bar")).is_ok());
     /// assert!(<&ForwardRelativePath>::try_from(RelativePath::new("")).is_ok());
@@ -1174,8 +1188,8 @@ impl TryFrom<PathBuf> for ForwardRelativePathBuf {
     /// use std::convert::TryFrom;
     /// use std::path::PathBuf;
     ///
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     /// use buck2_core::fs::paths::RelativePathBuf;
+    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     ///
     /// assert!(ForwardRelativePathBuf::try_from(PathBuf::from("foo/bar")).is_ok());
     /// assert!(ForwardRelativePathBuf::try_from(PathBuf::from("")).is_ok());
@@ -1203,8 +1217,8 @@ impl TryFrom<RelativePathBuf> for ForwardRelativePathBuf {
     /// ```
     /// use std::convert::TryFrom;
     ///
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     /// use buck2_core::fs::paths::RelativePathBuf;
+    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     ///
     /// assert!(ForwardRelativePathBuf::try_from(RelativePathBuf::from("foo/bar")).is_ok());
     /// assert!(ForwardRelativePathBuf::try_from(RelativePathBuf::from("")).is_ok());

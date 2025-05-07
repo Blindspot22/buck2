@@ -8,7 +8,7 @@
  */
 
 use anyhow::Context;
-use buck2_error::starlark_error::from_starlark;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_util::golden_test_helper::golden_test_template;
 use buck2_util::golden_test_helper::trim_rust_backtrace;
 use starlark::assert::Assert;
@@ -26,7 +26,8 @@ fn starlark_conversion_helper() -> starlark::Error {
     }
 
     fn fail3() -> buck2_error::Result<()> {
-        fail2().map_err(|e| buck2_error::Error::from(e).context("rust failure"))
+        fail2()
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Input).context("rust failure"))
     }
 
     #[starlark_module]
@@ -64,8 +65,8 @@ should_fail()"#,
 #[test]
 fn test_format_starlark_stacktrace_with_later_context() {
     let e = starlark_conversion_helper();
-    let test_context =
-        from_starlark(e).context("Adding a context after should still keep backtrace on top");
+    let test_context = buck2_error::Error::from(e)
+        .context("Adding a context after should still keep backtrace on top");
     golden_test_template(
         "src/golden/test_starlark_callstack_context.golden",
         trim_rust_backtrace(&format!("{:?}", test_context)),
@@ -77,7 +78,7 @@ fn test_starlark_multiple_stacktrace() {
     #[starlark_module]
     fn outer_module(builder: &mut GlobalsBuilder) {
         fn outer_rust_failure() -> starlark::Result<NoneType> {
-            let e: buck2_error::Error = from_starlark(starlark_conversion_helper());
+            let e: buck2_error::Error = starlark_conversion_helper().into();
             Err(e.into())
         }
     }
@@ -102,7 +103,7 @@ outer_fail()"#,
 
     golden_test_template(
         "src/golden/test_starlark_callstack_backtrace.golden",
-        trim_rust_backtrace(&format!("{:?}", from_starlark(e))),
+        trim_rust_backtrace(&format!("{:?}", buck2_error::Error::from(e))),
     );
 }
 
@@ -111,7 +112,7 @@ fn test_starlark_multiple_stacktrace_with_context_inbetween() {
     #[starlark_module]
     fn outer_module(builder: &mut GlobalsBuilder) {
         fn outer_rust_failure() -> starlark::Result<NoneType> {
-            let e: buck2_error::Error = from_starlark(starlark_conversion_helper());
+            let e: buck2_error::Error = starlark_conversion_helper().into();
             let e = e.context("Adding a context in between backtraces");
             let e = e.context("Error to be displayed in stacktrace");
             Err(e.into())
@@ -138,6 +139,6 @@ outer_fail()"#,
 
     golden_test_template(
         "src/golden/test_starlark_callstack_backtrace_with_context_inbetween.golden",
-        trim_rust_backtrace(&format!("{:?}", from_starlark(e))),
+        trim_rust_backtrace(&format!("{:?}", buck2_error::Error::from(e))),
     );
 }

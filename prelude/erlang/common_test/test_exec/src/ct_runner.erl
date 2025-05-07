@@ -11,6 +11,7 @@
 %% communicates the result to the test runner.
 
 -module(ct_runner).
+-eqwalizer(ignore).
 
 -behavior(gen_server).
 
@@ -146,7 +147,8 @@ run_test(
         suite = Suite,
         erl_cmd = ErlCmd,
         extra_flags = ExtraFlags,
-        common_app_env = CommonAppEnv
+        common_app_env = CommonAppEnv0,
+        raw_target = RawTarget
     } = _TestEnv,
     PortEpmd
 ) ->
@@ -154,8 +156,9 @@ run_test(
     % where the suite is as part of the dependencies.
     SuiteFolder = filename:dirname(filename:absname(SuitePath)),
     CodePath = [SuiteFolder | Dependencies],
+    CommonAppEnv1 = CommonAppEnv0#{"raw_target" => lists:flatten(io_lib:format("~0p", [RawTarget]))},
 
-    Args = build_run_args(OutputDir, Providers, Suite, TestSpecFile, CommonAppEnv),
+    Args = build_run_args(OutputDir, Providers, Suite, TestSpecFile, CommonAppEnv1),
 
     {ok, ProjectRoot} = file:get_cwd(),
 
@@ -179,7 +182,7 @@ run_test(
     ConfigFiles :: [file:filename_all()]
 ) -> [string()].
 build_common_args(CodePath, ConfigFiles) ->
-    lists:concat([
+    lists:append([
         ["-noinput"],
         ["-pa"],
         CodePath,
@@ -208,7 +211,7 @@ build_run_args(OutputDir, Providers, Suite, TestSpecFile, CommonAppEnv) ->
 
 -spec common_app_env_args(Env :: #{string() => string()}) -> [string()].
 common_app_env_args(Env) ->
-    lists:append([["-common", Key, Value] || {Key, Value} <- maps:to_list(Env)]).
+    lists:append([["-common", Key, Value] || Key := Value <- Env]).
 
 -spec start_test_node(
     Erl :: [binary()],

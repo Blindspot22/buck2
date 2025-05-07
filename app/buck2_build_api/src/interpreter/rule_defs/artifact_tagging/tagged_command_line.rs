@@ -11,8 +11,7 @@ use allocative::Allocative;
 use derive_more::Display;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
-use starlark::values::starlark_value;
-use starlark::values::type_repr::StarlarkTypeRepr;
+use starlark::environment::GlobalsBuilder;
 use starlark::values::Demand;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
@@ -22,17 +21,20 @@ use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
-use super::TaggedValueGen;
-use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
-use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
+use super::StarlarkTaggedValueGen;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
+use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
+use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 
-/// TaggedCommandLine wraps a CommandLineArgLike to apply a given ArtifactTag to all its inputs and
+/// StarlarkTaggedCommandLine wraps a CommandLineArgLike to apply a given ArtifactTag to all its inputs and
 /// outputs.
 #[derive(
     Debug,
@@ -46,21 +48,21 @@ use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
 )]
 #[derive(NoSerialize)] // TODO make artifacts serializable
 #[repr(C)]
-#[display("TaggedCommandLine({})", inner)]
-pub struct TaggedCommandLineGen<V: ValueLifetimeless> {
-    inner: TaggedValueGen<V>,
+#[display("StarlarkTaggedCommandLine({})", inner)]
+pub struct StarlarkTaggedCommandLineGen<V: ValueLifetimeless> {
+    inner: StarlarkTaggedValueGen<V>,
 }
 
-impl<V: ValueLifetimeless> TaggedCommandLineGen<V> {
-    pub fn new(inner: TaggedValueGen<V>) -> Self {
+impl<V: ValueLifetimeless> StarlarkTaggedCommandLineGen<V> {
+    pub fn new(inner: StarlarkTaggedValueGen<V>) -> Self {
         Self { inner }
     }
 }
 
-starlark_complex_value!(pub TaggedCommandLine);
+starlark_complex_value!(pub StarlarkTaggedCommandLine);
 
-#[starlark_value(type = "tagged_command_line")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for TaggedCommandLineGen<V>
+#[starlark_value(type = "TaggedCommandLine")]
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkTaggedCommandLineGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
@@ -69,9 +71,9 @@ where
     }
 }
 
-impl<'v, V: ValueLike<'v>> CommandLineArgLike for TaggedCommandLineGen<V> {
+impl<'v, V: ValueLike<'v>> CommandLineArgLike for StarlarkTaggedCommandLineGen<V> {
     fn register_me(&self) {
-        command_line_arg_like_impl!(TaggedCommandLine::starlark_type_repr());
+        command_line_arg_like_impl!(StarlarkTaggedCommandLine::starlark_type_repr());
     }
 
     fn add_to_command_line(
@@ -97,7 +99,7 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike for TaggedCommandLineGen<V> {
 
     fn contains_arg_attr(&self) -> bool {
         ValueAsCommandLineLike::unpack(self.inner.value().to_value())
-            .map_or(false, |inner| inner.0.contains_arg_attr())
+            .is_some_and(|inner| inner.0.contains_arg_attr())
     }
 
     fn visit_write_to_file_macros(
@@ -108,4 +110,10 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike for TaggedCommandLineGen<V> {
             .0
             .visit_write_to_file_macros(visitor)
     }
+}
+
+#[starlark_module]
+pub(crate) fn register_tagged_command_line(globals: &mut GlobalsBuilder) {
+    const TaggedCommandLine: StarlarkValueAsType<StarlarkTaggedCommandLine> =
+        StarlarkValueAsType::new();
 }

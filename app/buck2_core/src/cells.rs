@@ -78,6 +78,7 @@
 pub mod alias;
 pub mod build_file_cell;
 pub mod cell_path;
+pub mod cell_path_with_allowed_relative_dir;
 pub mod cell_root_path;
 pub mod external;
 pub mod instance;
@@ -87,8 +88,8 @@ pub mod paths;
 pub(crate) mod sequence_trie_allocative;
 pub mod unchecked_cell_rel_path;
 
-use std::collections::hash_map;
 use std::collections::HashMap;
+use std::collections::hash_map;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -350,11 +351,11 @@ impl CellResolver {
     /// ```
     /// use std::convert::TryFrom;
     ///
+    /// use buck2_core::cells::CellResolver;
     /// use buck2_core::cells::cell_path::CellPath;
     /// use buck2_core::cells::cell_root_path::CellRootPathBuf;
     /// use buck2_core::cells::name::CellName;
     /// use buck2_core::cells::paths::CellRelativePathBuf;
-    /// use buck2_core::cells::CellResolver;
     /// use buck2_core::fs::project_rel_path::ProjectRelativePath;
     /// use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
     ///

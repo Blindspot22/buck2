@@ -11,9 +11,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use allocative::Allocative;
+use buck2_build_api::actions::RegisteredAction;
 use buck2_build_api::actions::query::ActionQueryNode;
 use buck2_build_api::actions::query::OwnedActionAttr;
-use buck2_build_api::actions::RegisteredAction;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_error::buck2_error;
 use buck2_interpreter::types::target_label::StarlarkConfiguredTargetLabel;
@@ -27,9 +27,6 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::none::NoneOr;
-use starlark::values::starlark_value;
-use starlark::values::structs::AllocStruct;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
@@ -38,6 +35,9 @@ use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
 use starlark::values::ValueTyped;
+use starlark::values::none::NoneOr;
+use starlark::values::starlark_value;
+use starlark::values::structs::AllocStruct;
 
 use crate::bxl::starlark_defs::analysis_result::StarlarkAnalysisResult;
 
@@ -82,7 +82,11 @@ fn action_methods(builder: &mut MethodsBuilder) {
             BaseDeferredKey::TargetLabel(label) => {
                 Ok(StarlarkConfiguredTargetLabel::new(label.dupe()))
             }
-            _ => Err(buck2_error!([], "BXL and anon targets not supported.").into()),
+            _ => Err(buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "BXL and anon targets not supported."
+            )
+            .into()),
         }
     }
 }
@@ -170,7 +174,7 @@ pub(crate) struct StarlarkActionAttr(pub(crate) OwnedActionAttr);
 starlark_simple_value!(StarlarkActionAttr);
 
 /// Action attr from an action query node.
-#[starlark_value(type = "action_attr")]
+#[starlark_value(type = "bxl.ActionAttr")]
 impl<'v> StarlarkValue<'v> for StarlarkActionAttr {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();

@@ -31,7 +31,16 @@ use crate::provider::label::ConfiguredProvidersLabel;
 use crate::provider::label::NonDefaultProvidersName;
 use crate::provider::label::ProvidersName;
 
-#[derive(Clone, Debug, Display, Allocative, Hash, Eq, PartialEq)]
+#[derive(
+    Clone,
+    Debug,
+    Display,
+    Allocative,
+    Hash,
+    Eq,
+    PartialEq,
+    strong_hash::StrongHash
+)]
 #[display("({})/{}", owner, path.as_str())]
 struct BuildArtifactPathData {
     /// The owner responsible for creating this path.
@@ -47,7 +56,17 @@ struct BuildArtifactPathData {
 /// This structure contains a target label for generating the base of the path (base
 /// path), and a `ForwardRelativePath` that represents the specific output
 /// location relative to the 'base path'.
-#[derive(Clone, Dupe, Debug, Display, Hash, PartialEq, Eq, Allocative)]
+#[derive(
+    Clone,
+    Dupe,
+    Debug,
+    Display,
+    Hash,
+    PartialEq,
+    Eq,
+    Allocative,
+    strong_hash::StrongHash
+)]
 pub struct BuildArtifactPath(Arc<BuildArtifactPathData>);
 
 impl BuildArtifactPath {
@@ -190,7 +209,10 @@ impl BuckOutPathResolver {
 
     /// Resolves a 'BuckOutPath' into a 'ProjectRelativePath' based on the base
     /// directory, target and cell.
-    pub fn resolve_gen(&self, path: &BuildArtifactPath) -> ProjectRelativePathBuf {
+    pub fn resolve_gen(
+        &self,
+        path: &BuildArtifactPath,
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         self.prefixed_path_for_owner(
             ForwardRelativePath::unchecked_new("gen"),
             path.owner().owner(),
@@ -202,7 +224,10 @@ impl BuckOutPathResolver {
         )
     }
 
-    pub fn resolve_offline_cache(&self, path: &BuildArtifactPath) -> ProjectRelativePathBuf {
+    pub fn resolve_offline_cache(
+        &self,
+        path: &BuildArtifactPath,
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         self.prefixed_path_for_owner(
             ForwardRelativePath::unchecked_new("offline-cache"),
             path.owner().owner(),
@@ -238,7 +263,10 @@ impl BuckOutPathResolver {
         ]))
     }
 
-    pub fn resolve_scratch(&self, path: &BuckOutScratchPath) -> ProjectRelativePathBuf {
+    pub fn resolve_scratch(
+        &self,
+        path: &BuckOutScratchPath,
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         self.prefixed_path_for_owner(
             ForwardRelativePath::unchecked_new("tmp"),
             &path.owner,
@@ -263,7 +291,7 @@ impl BuckOutPathResolver {
     pub fn resolve_test_discovery(
         &self,
         label: &ConfiguredProvidersLabel,
-    ) -> ProjectRelativePathBuf {
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         let path = match label.name() {
             ProvidersName::Default => "default".into(),
             ProvidersName::NonDefault(nd) => match nd.as_ref() {
@@ -293,7 +321,7 @@ impl BuckOutPathResolver {
         action_key: Option<&str>,
         path: &ForwardRelativePath,
         fully_hash_path: bool,
-    ) -> ProjectRelativePathBuf {
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         owner.make_hashed_path(&self.buck_out_v2, prefix, action_key, path, fully_hash_path)
     }
 
@@ -322,10 +350,10 @@ mod tests {
     use regex::Regex;
 
     use crate::category::CategoryRef;
+    use crate::cells::CellResolver;
     use crate::cells::cell_root_path::CellRootPathBuf;
     use crate::cells::name::CellName;
     use crate::cells::paths::CellRelativePath;
-    use crate::cells::CellResolver;
     use crate::configuration::data::ConfigurationData;
     use crate::deferred::base_deferred_key::BaseDeferredKey;
     use crate::deferred::dynamic::DynamicLambdaIndex;
@@ -339,8 +367,8 @@ mod tests {
     use crate::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     use crate::fs::project::ProjectRoot;
     use crate::fs::project_rel_path::ProjectRelativePathBuf;
-    use crate::package::source_path::SourcePath;
     use crate::package::PackageLabel;
+    use crate::package::source_path::SourcePath;
     use crate::provider::label::ConfiguredProvidersLabel;
     use crate::provider::label::ProviderName;
     use crate::provider::label::ProvidersName;
@@ -407,7 +435,7 @@ mod tests {
         let resolved_gen_path = path_resolver.resolve_gen(&BuildArtifactPath::new(
             owner.dupe(),
             ForwardRelativePathBuf::unchecked_new("faz.file".into()),
-        ));
+        ))?;
 
         let expected_gen_path = Regex::new(
             "base/buck-out/v2/gen/foo/[0-9a-f]{16}/baz-package/__target-name__/faz.file",
@@ -427,7 +455,7 @@ mod tests {
                 ForwardRelativePathBuf::new("1_2".to_owned()).unwrap(),
             )
             .unwrap(),
-        );
+        )?;
 
         let expected_scratch_path =
             Regex::new("base/buck-out/v2/tmp/foo/[0-9a-f]{16}/category/blah.file")?;
@@ -456,7 +484,7 @@ mod tests {
         let resolved_gen_path = path_resolver.resolve_gen(&BuildArtifactPath::new(
             owner.dupe(),
             ForwardRelativePathBuf::unchecked_new("quux".to_owned()),
-        ));
+        ))?;
 
         let expected_gen_path: Regex =
             Regex::new("buck-out/gen/foo/[0-9a-f]{16}/baz-package/__target-name__/quux")?;
@@ -474,7 +502,7 @@ mod tests {
             ))),
             ForwardRelativePathBuf::unchecked_new("quux".to_owned()),
         );
-        let resolved_gen_path = path_resolver.resolve_gen(&path);
+        let resolved_gen_path = path_resolver.resolve_gen(&path)?;
 
         let expected_gen_path = Regex::new(
             "buck-out/gen/foo/[0-9a-f]{16}/baz-package/__target-name__/__action___17__/quux",
@@ -499,7 +527,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap(),
-        );
+        )?;
 
         let expected_scratch_path =
             Regex::new("buck-out/tmp/foo/[0-9a-f]{16}/category/_buck_[0-9a-f]{16}")?;
@@ -584,6 +612,7 @@ mod tests {
                     )
                     .unwrap(),
                 )
+                .unwrap()
                 .as_str()
                 .to_owned()
         };
@@ -618,7 +647,7 @@ mod tests {
         let cfg_target = target.configure(ConfigurationData::testing_new());
         let providers = ProvidersName::Default.push(ProviderName::new_unchecked("bar/baz".into()));
         let providers_label = ConfiguredProvidersLabel::new(cfg_target, providers);
-        let result = path_resolver.resolve_test_discovery(&providers_label);
+        let result = path_resolver.resolve_test_discovery(&providers_label)?;
         let expected_result = Regex::new("buck-out/test_discovery/foo/[0-9a-f]{16}/bar\\+baz")?;
         assert!(expected_result.is_match(result.as_str()));
         Ok(())

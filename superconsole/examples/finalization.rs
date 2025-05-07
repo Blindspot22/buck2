@@ -12,11 +12,11 @@
 use std::time::Duration;
 
 use derive_more::Display;
-use superconsole::components::Component;
-use superconsole::components::DrawMode;
 use superconsole::Dimensions;
 use superconsole::Lines;
 use superconsole::SuperConsole;
+use superconsole::components::Component;
+use superconsole::components::DrawMode;
 use tokio::time;
 
 /// A component representing a store greeter.
@@ -32,7 +32,7 @@ struct StoreName(String);
 #[derive(Display)]
 struct CustomerName(String);
 
-impl<'a> Component for Greeter<'a> {
+impl Component for Greeter<'_> {
     fn draw_unchecked(&self, _dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
         Ok(match mode {
             DrawMode::Normal => {

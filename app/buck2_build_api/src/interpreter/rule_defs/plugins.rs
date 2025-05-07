@@ -14,10 +14,9 @@ use buck2_core::plugins::PluginKind;
 use buck2_interpreter::plugins::PLUGIN_KIND_FROM_VALUE;
 use derive_more::Display;
 use dupe::Dupe;
-use starlark::coerce::coerce;
 use starlark::coerce::CoerceKey;
+use starlark::coerce::coerce;
 use starlark::starlark_complex_value;
-use starlark::values::starlark_value;
 use starlark::values::Coerce;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
@@ -29,6 +28,7 @@ use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
+use starlark::values::starlark_value;
 use starlark_map::small_map::SmallMap;
 
 /// Wrapper around `PluginKind` to impl `Trace` and `Freeze`
@@ -71,6 +71,7 @@ pub struct AnalysisPluginsGen<V: ValueLifetimeless> {
 starlark_complex_value!(pub AnalysisPlugins);
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum AnalysisPluginsError {
     #[error("The rule did not declare that it uses plugins of kind {0}")]
     PluginKindNotUsed(PluginKind),
@@ -85,9 +86,9 @@ where
         let kind = (PLUGIN_KIND_FROM_VALUE.get()?)(index)?;
         match self.plugins.get(&kind) {
             Some(v) => Ok(v.to_value()),
-            None => Err(starlark::Error::new_other(
+            None => Err(starlark::Error::new_other(buck2_error::Error::from(
                 AnalysisPluginsError::PluginKindNotUsed(kind),
-            )),
+            ))),
         }
     }
 

@@ -17,15 +17,15 @@ use buck2_cmd_starlark_client::typecheck::StarlarkTypecheckCommand;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::data::HasIoProvider;
 use buck2_common::io::IoProvider;
-use buck2_core::cells::name::CellName;
 use buck2_core::cells::CellResolver;
-use buck2_error::buck2_error;
+use buck2_core::cells::name::CellName;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use buck2_interpreter::file_type::StarlarkFileType;
 use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
 use buck2_interpreter::paths::path::OwnedStarlarkPath;
 use buck2_interpreter_for_build::interpreter::dice_calculation_delegate::HasCalculationDelegate;
-use buck2_interpreter_for_build::interpreter::interpreter_for_cell::ParseData;
+use buck2_interpreter_for_build::interpreter::interpreter_for_dir::ParseData;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::ctx::ServerCommandDiceContext;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
@@ -35,9 +35,9 @@ use starlark::environment::Globals;
 use starlark::typing::AstModuleTypecheck;
 use starlark::typing::Interface;
 
+use crate::StarlarkServerSubcommand;
 use crate::util::environment::Environment;
 use crate::util::paths::starlark_files;
-use crate::StarlarkServerSubcommand;
 
 struct Cache<'a> {
     // Things we have access to get information
@@ -52,7 +52,7 @@ struct Cache<'a> {
     cache: HashMap<OwnedStarlarkModulePath, Interface>,
 }
 
-impl<'a> Cache<'a> {
+impl Cache<'_> {
     async fn typecheck(&mut self, path: OwnedStarlarkPath) -> buck2_error::Result<()> {
         self.run(path).await?;
         Ok(())
@@ -102,7 +102,7 @@ impl<'a> Cache<'a> {
 
         let mut dice = self.dice.clone();
         let interp = dice
-            .get_interpreter_calculator(path_ref.cell(), path_ref.build_file_cell())
+            .get_interpreter_calculator(OwnedStarlarkPath::new(path_ref))
             .await?;
 
         let ParseData(ast, _) = interp.prepare_eval_with_content(path_ref, src)??;
@@ -134,7 +134,10 @@ impl<'a> Cache<'a> {
             for x in errors {
                 writeln!(self.stdout, "{x}")?;
             }
-            Err(buck2_error!([], "Detected {errors_count} errors"))
+            Err(buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "Detected {errors_count} errors"
+            ))
         }
     }
 }

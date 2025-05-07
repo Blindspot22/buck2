@@ -9,6 +9,7 @@
 
 -module(list_test).
 -compile(warn_missing_spec).
+-eqwalizer(ignore).
 
 -include_lib("common/include/tpx_records.hrl").
 
@@ -33,7 +34,7 @@
 
 -type group_name() :: atom().
 -type test_name() :: atom().
--type suite() :: atom().
+-type suite() :: module().
 
 %% coming from the output of the group/0 method.
 %% See https://www.erlang.org/doc/man/ct_suite.html#Module:groups-0 for the upstream type.
@@ -76,7 +77,8 @@ throw_if_duplicate(TestNames) ->
     throw_if_duplicate(sets:new([{version, 2}]), TestNames).
 
 -spec throw_if_duplicate(sets:set(binary()), list(binary())) -> ok.
-throw_if_duplicate(#{}, []) -> ok;
+throw_if_duplicate(_, []) ->
+    ok;
 throw_if_duplicate(TestNameSet, [TestName | Tail]) ->
     case sets:is_element(TestName, TestNameSet) of
         true ->
@@ -132,7 +134,7 @@ suite_groups(Suite, Hooks) ->
         Hooks
     ).
 
--spec suite_all(suite(), [module()], groups_output) -> all_output().
+-spec suite_all(suite(), [module()], groups_output()) -> all_output().
 suite_all(Suite, Hooks, GroupsDef) ->
     TestsDef = Suite:all(),
     lists:foldl(
@@ -258,6 +260,7 @@ get_contacts(Suite) ->
         _:_:_ -> [?FALLBACK_ONCALL]
     end.
 
+-spec extract_attribute(atom(), erl_syntax:forms()) -> [binary()].
 extract_attribute(_, []) ->
     [];
 extract_attribute(Attribute, [?MATCH_STRING(Data) | Forms]) ->

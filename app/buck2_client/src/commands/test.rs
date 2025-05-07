@@ -12,28 +12,32 @@ use buck2_cli_proto::CounterWithExamples;
 use buck2_cli_proto::TestRequest;
 use buck2_cli_proto::TestSessionOptions;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::build::CommonBuildOptions;
-use buck2_client_ctx::common::target_cfg::TargetCfgOptions;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonCommandOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::build::CommonBuildOptions;
+use buck2_client_ctx::common::target_cfg::TargetCfgOptions;
+use buck2_client_ctx::common::timeout::CommonTimeoutOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::daemon::client::NoPartialResultHandler;
+use buck2_client_ctx::events_ctx::EventsCtx;
+use buck2_client_ctx::exit_result::ExitCode;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::final_console::FinalConsole;
 use buck2_client_ctx::output_destination_arg::OutputDestinationArg;
 use buck2_client_ctx::path_arg::PathArg;
 use buck2_client_ctx::stdio::eprint_line;
 use buck2_client_ctx::streaming::StreamingCommand;
-use buck2_client_ctx::subscribers::superconsole::test::span_from_build_failure_count;
 use buck2_client_ctx::subscribers::superconsole::test::TestCounterColumn;
+use buck2_client_ctx::subscribers::superconsole::test::span_from_build_failure_count;
 use buck2_core::fs::fs_util;
 use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
+use buck2_error::buck2_error;
 use superconsole::Line;
 use superconsole::Span;
 
@@ -110,26 +114,7 @@ If include patterns are present, regardless of whether exclude patterns are pres
     #[clap(long, group = "re_options", alias = "unstable-force-tests-on-re")]
     unstable_allow_all_tests_on_re: bool,
 
-    // NOTE: the field below is given a different name from the test runner's `timeout` to avoid
-    // confusion between the two parameters.
-    /// How long to execute tests for. If the timeout is exceeded, Buck2 will exit
-    /// as quickly as possible and not run further tests. In-flight tests will be
-    /// cancelled. The test orchestrator will be allowed to shut down gracefully.
-    ///
-    /// The exit code is controlled by the test orchestrator (which normally should report zero for
-    /// this).
-    ///
-    /// The format is a concatenation of time spans (separated by spaces). Each time span is an
-    /// integer number and a suffix.
-    ///
-    /// Relevant supported suffixes: seconds, second, sec, s, minutes, minute, min, m, hours, hour,
-    /// hr, h
-    ///
-    /// For example: `5m 10s`, `500s`.
-    #[clap(long = "overall-timeout")]
-    timeout: Option<humantime::Duration>,
-
-    #[clap(name = "TARGET_PATTERNS", help = "Patterns to test")]
+    #[clap(name = "TARGET_PATTERNS", help = "Patterns to test", value_hint = clap::ValueHint::Other)]
     patterns: Vec<String>,
 
     /// Writes the test executor stdout to the provided path
@@ -183,10 +168,13 @@ If include patterns are present, regardless of whether exclude patterns are pres
     target_cfg: TargetCfgOptions,
 
     #[clap(flatten)]
+    timeout_options: CommonTimeoutOptions,
+
+    #[clap(flatten)]
     common_opts: CommonCommandOptions,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StreamingCommand for TestCommand {
     const COMMAND_NAME: &'static str = "test";
 
@@ -195,6 +183,7 @@ impl StreamingCommand for TestCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let context = ctx.client_context(matches, &self)?;
         let response = buckd
@@ -218,16 +207,10 @@ impl StreamingCommand for TestCommand {
                         force_use_project_relative_paths: self.unstable_allow_all_tests_on_re,
                         force_run_from_project_root: self.unstable_allow_all_tests_on_re,
                     }),
-                    timeout: self
-                        .timeout
-                        .map(|t| {
-                            let t: std::time::Duration = t.into();
-                            t.try_into()
-                        })
-                        .transpose()
-                        .buck_error_context("Invalid `timeout`")?,
+                    timeout: self.timeout_options.overall_timeout()?,
                     ignore_tests_attribute: self.ignore_tests_attribute,
                 },
+                events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
                 &mut NoPartialResultHandler,
             )
@@ -262,18 +245,8 @@ impl StreamingCommand for TestCommand {
         let console = self.common_opts.console_opts.final_console();
         print_build_result(&console, &response.errors)?;
 
-        // Filtering out individual types might not be best here. While we just have 1 non-build
-        // error that seems OK, but if we add more we should reconsider (we could add a type on all
-        // the build errors, but that seems potentially confusing if we only do that in the test
-        // command).
-        let build_errors = response
-            .errors
-            .into_iter()
-            .filter(|e| !e.tags().any(|t| t == ErrorTag::TestDeadlineExpired))
-            .collect::<Vec<_>>();
-
-        if !build_errors.is_empty() {
-            console.print_error(&format!("{} BUILDS FAILED", build_errors.len()))?;
+        if statuses.build_errors != 0 {
+            console.print_error(&format!("{} BUILDS FAILED", statuses.build_errors))?;
         }
 
         let mut line = Line::default();
@@ -292,7 +265,7 @@ impl StreamingCommand for TestCommand {
             line.push(column.to_span_from_test_statuses(statuses)?);
             line.push(Span::new_unstyled_lossy(". "));
         }
-        line.push(span_from_build_failure_count(build_errors.len())?);
+        line.push(span_from_build_failure_count(statuses.build_errors)?);
         eprint_line(&line)?;
 
         print_error_counter(&console, listing_failed, "LISTINGS FAILED", "⚠")?;
@@ -321,16 +294,26 @@ impl StreamingCommand for TestCommand {
             buck2_client_ctx::println!("{}", build_report)?;
         }
 
-        let exit_result = if !build_errors.is_empty() {
-            // If we had build errors, those take precedence and we return their exit code.
-            ExitResult::from_errors(&build_errors)
-        } else if let Some(exit_code) = response.exit_code {
-            // Otherwise, use the exit code from Tpx.
-            ExitResult::status_extended(exit_code)
+        let exit_result = if let Some(exit_code) = response.exit_code {
+            // If exit code is set in response, it should be used and not derived from command errors.
+            let exit_code = if let Ok(code) = exit_code.try_into() {
+                ExitCode::TestRunner(code)
+            } else {
+                // The exit code isn't an allowable value, so just switch to generic failure
+                ExitCode::UnknownFailure
+            };
+            ExitResult::status_with_emitted_errors(exit_code, response.errors)
+        } else if !response.errors.is_empty() {
+            // If we had build errors return their exit code.
+            ExitResult::from_command_result_errors(response.errors)
         } else {
             // But if we had no build errors, and Tpx did not provide an exit code, then that's
             // going to be an error.
-            ExitResult::bail("Test executor did not provide an exit code")
+            buck2_error!(
+                ErrorTag::TestExecutor,
+                "Test executor did not provide an exit code"
+            )
+            .into()
         };
 
         match self.test_executor_stdout {

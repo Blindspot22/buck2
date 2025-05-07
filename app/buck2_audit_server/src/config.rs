@@ -22,8 +22,8 @@ use buck2_common::legacy_configs::configs::LegacyBuckConfig;
 use buck2_common::legacy_configs::configs::LegacyBuckConfigLocation;
 use buck2_common::legacy_configs::configs::LegacyBuckConfigValue;
 use buck2_common::legacy_configs::dice::HasLegacyConfigs;
-use buck2_core::cells::name::CellName;
 use buck2_core::cells::CellAliasResolver;
+use buck2_core::cells::name::CellName;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::ctx::ServerCommandDiceContext;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
@@ -132,7 +132,7 @@ impl<'a> Match<'a> {
     ) -> Option<String> {
         if cell == self.cell.unwrap_or(default_cell)
             && section == self.section
-            && self.key.map_or(true, |k| k == key)
+            && self.key.is_none_or(|k| k == key)
         {
             Some(
                 self.spec
@@ -201,7 +201,7 @@ struct SimpleCellConfigRenderer<'a> {
     location_style: LocationStyle,
 }
 
-impl<'a> CellConfigRenderer for SimpleCellConfigRenderer<'a> {
+impl CellConfigRenderer for SimpleCellConfigRenderer<'_> {
     fn render_cell_header(&mut self, cell: CellName) -> buck2_error::Result<()> {
         if self.render_cell_headers {
             writeln!(&mut self.stdout, "# Cell: {cell}")?;
@@ -241,7 +241,7 @@ struct JsonCellConfigRenderer<'a> {
     json_output: HashMap<String, String>,
 }
 
-impl<'a> CellConfigRenderer for JsonCellConfigRenderer<'a> {
+impl CellConfigRenderer for JsonCellConfigRenderer<'_> {
     fn render_cell_header(&mut self, _cell: CellName) -> buck2_error::Result<()> {
         Ok(())
     }

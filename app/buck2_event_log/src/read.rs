@@ -26,10 +26,10 @@ use buck2_core::fs::paths::abs_path::AbsPathBuf;
 use buck2_error::BuckErrorContext;
 use buck2_events::BuckEvent;
 use buck2_wrapper_common::invocation_id::TraceId;
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use futures::stream::Stream;
 use futures::stream::TryStreamExt;
-use futures::StreamExt;
 use pin_project::pin_project;
 use prost::Message;
 use regex::Regex;
@@ -46,8 +46,8 @@ use crate::utils::Encoding;
 use crate::utils::EventLogErrors;
 use crate::utils::EventLogInferenceError;
 use crate::utils::Invocation;
-use crate::utils::LogMode;
 use crate::utils::KNOWN_ENCODINGS;
+use crate::utils::LogMode;
 
 type EventLogReader<'a> = Box<dyn AsyncRead + Send + Sync + Unpin + 'a>;
 
@@ -94,7 +94,7 @@ impl<'a, T> CountingReader<'a, T> {
     }
 }
 
-impl<'a, T> AsyncRead for CountingReader<'a, T>
+impl<T> AsyncRead for CountingReader<'_, T>
 where
     T: AsyncRead,
 {
@@ -166,7 +166,10 @@ impl EventLogPathBuf {
         // format is of the form "{ts}_{command}_{uuid}_events{ext}"
         match file_name.split('_').nth(1) {
             Some(command) => Ok(command),
-            None => Err(buck2_error::buck2_error!([], "No command in filename")),
+            None => Err(buck2_error::buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "No command in filename"
+            )),
         }
     }
 
@@ -250,7 +253,10 @@ impl EventLogPathBuf {
                 Some(command_progress::Progress::PartialResult(result)) => {
                     Ok(StreamValue::PartialResult(result))
                 }
-                None => Err(buck2_error::buck2_error!([], "Event type not recognized")),
+                None => Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::InvalidEvent,
+                    "Event type not recognized"
+                )),
             }
         });
 
@@ -341,7 +347,7 @@ impl EventLogPathBuf {
             .await?
             .ok_or_else(|| {
                 buck2_error::buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::EventLog,
                     "{}",
                     EventLogErrors::EndOfFile(self.path.to_str().unwrap().to_owned())
                 )

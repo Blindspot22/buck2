@@ -6,6 +6,7 @@
 # of this source tree.
 
 load("@prelude//:artifact_tset.bzl", "project_artifacts")
+load("@prelude//:paths.bzl", "paths")
 load(
     "@prelude//linking:shared_libraries.bzl",
     "SharedLibrary",
@@ -66,7 +67,8 @@ def get_srcs_from_manifest(
 def create_manifest_for_shared_libs(
         actions: AnalysisActions,
         name: str,
-        shared_libs: list[SharedLibrary]) -> ManifestInfo:
+        shared_libs: list[SharedLibrary],
+        lib_dir: str = "") -> ManifestInfo:
     """
     Generate a source manifest for the given list of sources.
     """
@@ -78,7 +80,7 @@ def create_manifest_for_shared_libs(
             gen_action = lambda actions, output, shared_libs: actions.write_json(
                 output,
                 [
-                    (soname, shlib.lib.output, name)
+                    (paths.join(lib_dir, soname), shlib.lib.output, name)
                     for soname, shlib in shared_libs.items()
                 ],
             ),
@@ -105,7 +107,7 @@ def create_manifest_for_source_dir(
     ctx.actions.run(cmd, category = "py_source_manifest", identifier = param)
 
     # TODO: enumerate directory?
-    return ManifestInfo(manifest = manifest, artifacts = [(extracted, param)])
+    return ManifestInfo(manifest = manifest.without_associated_artifacts(), artifacts = [(extracted, param)])
 
 def create_manifest_for_extensions(
         ctx: AnalysisContext,

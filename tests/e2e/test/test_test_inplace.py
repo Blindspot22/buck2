@@ -25,6 +25,7 @@ from buck2.tests.e2e_util.buck_workspace import (
     get_mode_from_platform,
     is_deployed_buck2,
 )
+from buck2.tests.e2e_util.helper.utils import read_invocation_record
 
 MAC_AND_WINDOWS = ["darwin", "windows"]
 
@@ -386,8 +387,8 @@ async def test_stress_runs(buck: Buck) -> None:
 if not is_deployed_buck2():
 
     @buck_test(inplace=False, data_dir="testsof")
+    @env("BUCK_LOG", "buck2_test::command=debug")
     async def test_target_compatibility(buck: Buck) -> None:
-        # This excludes some tests
         out = await buck.test(
             "//...",
             "--target-platforms",
@@ -453,6 +454,32 @@ async def test_env_var_filtering(buck: Buck) -> None:
         ),
         stderr_regex="1 TESTS FAILED",
     )
+
+
+@buck_test(inplace=True, skip_for_os=["windows"])
+async def test_prepare_for_local_execution_env_with_env_cli_parameter(
+    buck: Buck, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    await buck.test(
+        "fbcode//buck2/tests/targets/rules/python/test:test",
+        "--",
+        "--env",
+        "EXTRA_VAR=foo",
+        "--no-run-output-test-commands-for-fdb",
+        str(out),
+    )
+
+    with open(out) as f:
+        config = json.load(f)
+
+    # Expect python/test:test target to support debugging. Executable field is populated only when debugging is supported.
+    assert "debuggers" in config
+    assert len(config["debuggers"]) > 0
+    assert "executable" in config
+    env = config["executable"]["env"]
+    assert "PWD" in env
+    assert "EXTRA_VAR" in env
 
 
 # TODO(marwhal): Fix and enable on Windows
@@ -789,3 +816,28 @@ async def test_test_worker(buck: Buck) -> None:
     await buck.test(
         *worker_args, "fbcode//buck2/tests/targets/rules/worker_grpc:worker_test"
     )
+
+
+@buck_test(inplace=True)
+@env("TEST_MAKE_IT_FAIL", "1")
+async def test_failed_tests_has_error_category(buck: Buck, tmp_path: Path) -> None:
+    record_path = tmp_path / "record.json"
+    await expect_failure(
+        buck.test(
+            "fbcode//buck2/tests/targets/rules/python/test:test",
+            get_mode_from_platform(),
+            "--unstable-write-invocation-record",
+            str(record_path),
+            "--",
+            "--env",
+            "TEST_MAKE_IT_FAIL=1",
+        ),
+        stderr_regex="1 TESTS FAILED",
+    )
+
+    record = read_invocation_record(record_path)
+    errors = record["errors"]
+
+    assert len(errors) == 1
+    assert errors[0]["category"] == "USER"
+    assert "TestExecutor" in errors[0]["category_key"]

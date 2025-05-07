@@ -10,14 +10,14 @@
 use std::future;
 use std::mem;
 
-use buck2_error::internal_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
+use futures::StreamExt;
 use futures::future::Either;
 use futures::stream::FuturesOrdered;
-use futures::StreamExt;
+use starlark_map::Hashed;
 use starlark_map::unordered_map;
 use starlark_map::unordered_map::UnorderedMap;
-use starlark_map::Hashed;
 
 use crate::query::graph::node::LabeledNode;
 use crate::query::graph::successors::AsyncChildVisitor;
@@ -256,7 +256,10 @@ mod tests {
     impl AsyncNodeLookup<TestNode> for TestGraph {
         async fn get(&self, label: &TestNodeKey) -> buck2_error::Result<TestNode> {
             if self.errors.contains(&label.0) {
-                return Err(buck2_error::buck2_error!([], "my error"));
+                return Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::Input,
+                    "my error"
+                ));
             }
             Ok(TestNode(*label))
         }
@@ -351,6 +354,7 @@ mod tests {
                 "CONTEXT: traversing TestNodeKey(1)",
                 "CONTEXT: traversing TestNodeKey(2)",
                 "CONTEXT: traversing TestNodeKey(3)",
+                "CONTEXT: [Input]",
                 "ROOT:",
                 "\"my error\"",
                 ""

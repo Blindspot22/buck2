@@ -12,17 +12,20 @@ use buck2_cli_proto::new_generic::DocsOutputFormat;
 use buck2_cli_proto::new_generic::DocsRequest;
 use buck2_cli_proto::new_generic::DocsStarlarkRequest;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonCommandOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::path_arg::PathArg;
 use buck2_client_ctx::streaming::StreamingCommand;
 use buck2_error::BuckErrorContext;
+use buck2_error::ErrorTag;
+use buck2_error::buck2_error;
 use dupe::Dupe;
 
 #[derive(Debug, Clone, Dupe, clap::ValueEnum)]
@@ -65,7 +68,7 @@ pub(crate) struct DocsStarlarkCommand {
     common_opts: CommonCommandOptions,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StreamingCommand for DocsStarlarkCommand {
     const COMMAND_NAME: &'static str = "docs starlark";
     async fn exec_impl(
@@ -73,6 +76,7 @@ impl StreamingCommand for DocsStarlarkCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let client_context = ctx.client_context(matches, &self)?;
 
@@ -98,12 +102,17 @@ impl StreamingCommand for DocsStarlarkCommand {
                         format,
                     },
                 )),
+                events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
             )
             .await??;
 
         let buck2_cli_proto::new_generic::NewGenericResponse::Docs(response) = response else {
-            return ExitResult::bail("Unexpected response type from generic command");
+            return buck2_error!(
+                ErrorTag::InvalidEvent,
+                "Unexpected response type from generic command"
+            )
+            .into();
         };
 
         if let Some(json_output) = response.json_output {

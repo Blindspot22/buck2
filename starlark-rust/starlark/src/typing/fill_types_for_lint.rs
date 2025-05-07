@@ -43,6 +43,9 @@ use crate::codemap::Span;
 use crate::codemap::Spanned;
 use crate::environment::slots::ModuleSlotId;
 use crate::eval::compiler::constants::Constants;
+use crate::eval::compiler::scope::ModuleScopeData;
+use crate::eval::compiler::scope::ResolvedIdent;
+use crate::eval::compiler::scope::Slot;
 use crate::eval::compiler::scope::payload::CstAssignIdent;
 use crate::eval::compiler::scope::payload::CstAssignIdentExt;
 use crate::eval::compiler::scope::payload::CstExpr;
@@ -50,22 +53,19 @@ use crate::eval::compiler::scope::payload::CstIdent;
 use crate::eval::compiler::scope::payload::CstPayload;
 use crate::eval::compiler::scope::payload::CstStmt;
 use crate::eval::compiler::scope::payload::CstTypeExpr;
-use crate::eval::compiler::scope::ModuleScopeData;
-use crate::eval::compiler::scope::ResolvedIdent;
-use crate::eval::compiler::scope::Slot;
-use crate::typing::callable_param::ParamIsRequired;
-use crate::typing::error::InternalError;
-use crate::typing::error::TypingError;
 use crate::typing::Approximation;
 use crate::typing::ParamSpec;
 use crate::typing::Ty;
 use crate::typing::TypingOracleCtx;
+use crate::typing::callable_param::ParamIsRequired;
+use crate::typing::error::InternalError;
+use crate::typing::error::TypingError;
 use crate::util::arc_str::ArcStr;
+use crate::values::Heap;
+use crate::values::Value;
 use crate::values::tuple::AllocTuple;
 use crate::values::types::ellipsis::Ellipsis;
 use crate::values::typing::type_compiled::compiled::TypeCompiled;
-use crate::values::Heap;
-use crate::values::Value;
 
 /// Value computed during partial evaluation of globals.
 #[derive(Clone)]
@@ -591,33 +591,36 @@ impl<'a, 'v> GlobalTypesBuilder<'a, 'v> {
             }
             TypeExprUnpackP::Path(path) => self.path_ty(path),
             TypeExprUnpackP::Index(a, i) => {
-                if let Some(a) = self.expr_ident(a)?.value {
-                    if !a.ptr_eq(Constants::get().fn_list.0.to_value()) {
-                        self.approximations.push(Approximation::new("Not list", x));
-                        return Ok(Ty::any());
-                    }
-                    let i = self.from_type_expr_impl(i)?;
-                    let i = TypeCompiled::from_ty(&i, self.heap);
-                    match a.get_ref().at(i.to_inner(), self.heap) {
-                        Ok(t) => match TypeCompiled::new(t, self.heap) {
-                            Ok(ty) => Ok(ty.as_ty().clone()),
-                            Err(_) => {
-                                // TODO(nga): proper error, not approximation.
+                match self.expr_ident(a)?.value {
+                    Some(a) => {
+                        if !a.ptr_eq(Constants::get().fn_list.0.to_value()) {
+                            self.approximations.push(Approximation::new("Not list", x));
+                            return Ok(Ty::any());
+                        }
+                        let i = self.from_type_expr_impl(i)?;
+                        let i = TypeCompiled::from_ty(&i, self.heap);
+                        match a.get_ref().at(i.to_inner(), self.heap) {
+                            Ok(t) => match TypeCompiled::new(t, self.heap) {
+                                Ok(ty) => Ok(ty.as_ty().clone()),
+                                Err(_) => {
+                                    // TODO(nga): proper error, not approximation.
+                                    self.approximations
+                                        .push(Approximation::new("TypeCompiled::new failed", x));
+                                    Ok(Ty::any())
+                                }
+                            },
+                            Err(e) => {
                                 self.approximations
-                                    .push(Approximation::new("TypeCompiled::new failed", x));
+                                    .push(Approximation::new("Getitem failed", e));
                                 Ok(Ty::any())
                             }
-                        },
-                        Err(e) => {
-                            self.approximations
-                                .push(Approximation::new("Getitem failed", e));
-                            Ok(Ty::any())
                         }
                     }
-                } else {
-                    self.approximations
-                        .push(Approximation::new("Not global", x));
-                    Ok(Ty::any())
+                    _ => {
+                        self.approximations
+                            .push(Approximation::new("Not global", x));
+                        Ok(Ty::any())
+                    }
                 }
             }
             TypeExprUnpackP::Index2(a, i0, i1) => {

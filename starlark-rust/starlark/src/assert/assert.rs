@@ -40,14 +40,14 @@ use crate::eval::ReturnFileLoader;
 use crate::stdlib::PrintHandler;
 use crate::syntax::AstModule;
 use crate::syntax::Dialect;
-use crate::values::none::NoneType;
-use crate::values::structs::AllocStruct;
-use crate::values::tuple::UnpackTuple;
-use crate::values::typing::type_compiled::compiled::TypeCompiled;
 use crate::values::AllocValue;
 use crate::values::Heap;
 use crate::values::OwnedFrozenValue;
 use crate::values::Value;
+use crate::values::none::NoneType;
+use crate::values::structs::AllocStruct;
+use crate::values::tuple::UnpackTuple;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
 
 fn mk_environment() -> GlobalsBuilder {
     GlobalsBuilder::extended().with(test_functions)
@@ -289,8 +289,10 @@ impl<'a> Assert<'a> {
         }
         let loader = ReturnFileLoader { modules: &modules };
         let ast = AstModule::parse(path, program.to_owned(), &self.dialect)?;
-        let gc_always = |_span: FileSpanRef, eval: &mut Evaluator| {
-            eval.trigger_gc();
+        let gc_always = |_span: FileSpanRef, continued: bool, eval: &mut Evaluator| {
+            if !continued {
+                eval.trigger_gc();
+            }
         };
         let mut eval = Evaluator::new(module);
         eval.enable_static_typechecking(self.static_typechecking);

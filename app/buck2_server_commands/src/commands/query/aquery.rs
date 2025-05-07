@@ -12,6 +12,7 @@ use std::io::Write;
 use async_trait::async_trait;
 use buck2_build_api::actions::query::ActionQueryNode;
 use buck2_build_api::query::oneshot::QUERY_FRONTEND;
+use buck2_cli_proto::HasClientContext;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_error::BuckErrorContext;
 use buck2_query::query::environment::AttrFmtOptions;
@@ -19,8 +20,8 @@ use buck2_query::query::syntax::simple::eval::values::QueryEvaluationResult;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::global_cfg_options::global_cfg_options_from_client_context;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
-use buck2_server_ctx::template::run_server_command;
 use buck2_server_ctx::template::ServerCommandTemplate;
+use buck2_server_ctx::template::run_server_command;
 use dice::DiceTransaction;
 
 use crate::commands::query::printer::QueryResultPrinter;
@@ -105,6 +106,7 @@ async fn aquery(
         &cell_resolver,
         &request.output_attributes,
         request.unstable_output_format,
+        request.client_context()?.trace_id.clone(),
     )?;
 
     let buck2_cli_proto::AqueryRequest {

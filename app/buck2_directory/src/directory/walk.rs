@@ -68,10 +68,13 @@ impl<'a, T: WalkType<'a>> DirectoryIteratorPathStack for Walk<'a, T> {
 }
 
 impl<'a, T: WalkType<'a>> DirectoryIterator for Walk<'a, T> {
-    type PathStack<'b> = DirectoryIteratorPathAccessor<'b, Self> where Self: 'b;
+    type PathStack<'b>
+        = DirectoryIteratorPathAccessor<'b, Self>
+    where
+        Self: 'b;
     type Item = DirectoryEntry<T::Directory, &'a T::Leaf>;
 
-    fn next<'b>(&'b mut self) -> Option<(DirectoryIteratorPathAccessor<'b, Self>, Self::Item)> {
+    fn next(&mut self) -> Option<(DirectoryIteratorPathAccessor<'_, Self>, Self::Item)> {
         loop {
             let frame = self.stack.last_mut()?;
 
@@ -138,7 +141,8 @@ where
     I: DirectoryIterator<Item = DirectoryEntry<D, &'a L>>,
     D: 'a,
 {
-    type PathStack<'b> = DirectoryEntryWalkPathAccessor<<I as DirectoryIterator>::PathStack<'b>>
+    type PathStack<'b>
+        = DirectoryEntryWalkPathAccessor<<I as DirectoryIterator>::PathStack<'b>>
     where
         Self: 'b;
 

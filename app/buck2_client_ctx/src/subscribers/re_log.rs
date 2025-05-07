@@ -12,34 +12,27 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_event_log::FutureChildOutput;
 use buck2_event_log::should_block_on_log_upload;
 use buck2_event_log::should_upload_log;
 use buck2_event_log::wait_for_child_and_log;
-use buck2_event_log::FutureChildOutput;
-use buck2_event_observer::unpack_event::unpack_event;
 use buck2_event_observer::unpack_event::UnpackedBuckEvent;
+use buck2_event_observer::unpack_event::unpack_event;
 use buck2_events::BuckEvent;
-use buck2_util::cleanup_ctx::AsyncCleanupContext;
 use futures::Future;
-use futures::FutureExt;
 
 use crate::subscribers::subscriber::EventSubscriber;
 
-pub(crate) struct ReLog<'a> {
+pub(crate) struct ReLog {
     re_session_id: Option<String>,
     isolation_dir: FileNameBuf,
-    async_cleanup_context: AsyncCleanupContext<'a>,
 }
 
-impl<'a> ReLog<'a> {
-    pub(crate) fn new(
-        isolation_dir: FileNameBuf,
-        async_cleanup_context: AsyncCleanupContext<'a>,
-    ) -> Self {
+impl ReLog {
+    pub(crate) fn new(isolation_dir: FileNameBuf) -> Self {
         Self {
             re_session_id: None,
             isolation_dir,
-            async_cleanup_context,
         }
     }
 
@@ -60,7 +53,11 @@ impl<'a> ReLog<'a> {
 }
 
 #[async_trait]
-impl<'a> EventSubscriber for ReLog<'a> {
+impl EventSubscriber for ReLog {
+    fn name(&self) -> &'static str {
+        "RE log"
+    }
+
     async fn exit(&mut self) -> buck2_error::Result<()> {
         self.log_upload().await
     }
@@ -80,20 +77,9 @@ impl<'a> EventSubscriber for ReLog<'a> {
         }
         Ok(())
     }
-}
 
-impl<'a> Drop for ReLog<'a> {
-    fn drop(&mut self) {
-        let upload = self.log_upload();
-        self.async_cleanup_context.register(
-            "RE log upload",
-            async move {
-                if let Err(e) = upload.await {
-                    tracing::warn!("Failed to cleanup ReLog: {:#}", e);
-                }
-            }
-            .boxed(),
-        );
+    async fn finalize(&mut self) -> buck2_error::Result<()> {
+        self.log_upload().await
     }
 }
 

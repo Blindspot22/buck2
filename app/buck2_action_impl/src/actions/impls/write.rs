@@ -15,33 +15,31 @@ use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_api::actions::Action;
+use buck2_build_api::actions::ActionExecutionCtx;
+use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionKind;
 use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
-use buck2_build_api::actions::Action;
-use buck2_build_api::actions::ActionExecutable;
-use buck2_build_api::actions::ActionExecutionCtx;
-use buck2_build_api::actions::IncrementalActionExecutable;
-use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::artifact_groups::ArtifactGroup;
-use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::AbsCommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
+use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_core::category::CategoryRef;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::WriteRequest;
 use dupe::Dupe;
-use indexmap::indexmap;
 use indexmap::IndexMap;
 use indexmap::IndexSet;
+use indexmap::indexmap;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::UnpackValue;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Tier0)]
 enum WriteActionValidationError {
     #[error("WriteAction received inputs")]
     TooManyInputs,
@@ -101,10 +99,7 @@ impl WriteAction {
             return Err(WriteActionValidationError::TooManyInputs.into());
         }
 
-        if ValueAsCommandLineLike::unpack_value(contents.value())
-            .map_err(from_starlark)?
-            .is_none()
-        {
+        if ValueAsCommandLineLike::unpack_value(contents.value())?.is_none() {
             return Err(WriteActionValidationError::ContentsNotCommandLineValue(
                 contents.value().to_repr(),
             )
@@ -163,10 +158,6 @@ impl Action for WriteAction {
         &self.output
     }
 
-    fn as_executable(&self) -> ActionExecutable<'_> {
-        ActionExecutable::Incremental(self)
-    }
-
     fn category(&self) -> CategoryRef {
         CategoryRef::unchecked_new("write")
     }
@@ -185,10 +176,7 @@ impl Action for WriteAction {
             "absolute".to_owned() => self.inner.absolute.to_string(),
         }
     }
-}
 
-#[async_trait]
-impl IncrementalActionExecutable for WriteAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
@@ -203,7 +191,7 @@ impl IncrementalActionExecutable for WriteAction {
                 execution_start = Some(Instant::now());
                 let content = self.get_contents(&ctx.executor_fs())?.into_bytes();
                 Ok(vec![WriteRequest {
-                    path: fs.resolve_build(self.output.get_path()),
+                    path: fs.resolve_build(self.output.get_path())?,
                     content,
                     is_executable: self.inner.is_executable,
                 }])

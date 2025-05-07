@@ -15,9 +15,6 @@ use buck2_core::execution_types::execution_platforms::ExecutionPlatformFallback;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
-use starlark::values::list::ListRef;
-use starlark::values::list::ListType;
-use starlark::values::none::NoneOr;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::FrozenRef;
@@ -29,11 +26,16 @@ use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueOfUncheckedGeneric;
 use starlark::values::ValueTypedComplex;
+use starlark::values::list::ListRef;
+use starlark::values::list::ListType;
+use starlark::values::none::NoneOr;
 
+use crate as buck2_build_api;
 use crate::interpreter::rule_defs::provider::builtin::execution_platform_info::ExecutionPlatformInfo;
 use crate::interpreter::rule_defs::provider::builtin::execution_platform_info::FrozenExecutionPlatformInfo;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum ExecutionPlatformRegistrationTypeError {
     #[error("expected a list of ExecutionPlatformInfo, got `{0}` (type `{1}`)")]
     ExpectedListOfPlatforms(String, String),

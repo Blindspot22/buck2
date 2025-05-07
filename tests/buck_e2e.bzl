@@ -7,6 +7,7 @@
 
 load("@fbcode//buck2/app:modifier.bzl", "buck2_modifiers")
 load("@fbcode_macros//build_defs:native_rules.bzl", "buck_filegroup")
+load("@fbcode_macros//build_defs:python.bzl", "python")
 load("@fbcode_macros//build_defs:python_pytest.bzl", "python_pytest")
 load("@fbsource//tools/target_determinator/macros:ci.bzl", "ci")
 load("@fbsource//tools/target_determinator/macros:ci_hint.bzl", "ci_hint")
@@ -20,7 +21,7 @@ def buck_e2e_test(
         data = None,
         data_dir = None,
         srcs = None,
-        tags = None,
+        labels = None,
         deps = None,
         env = None,
         resources = None,
@@ -39,17 +40,14 @@ def buck_e2e_test(
     Custom macro for buck2/buckaemon end-to-end tests using pytest.
     """
     srcs = srcs or []
-    tags = tags or []
+    labels = labels or []
     deps = deps or []
     cfg_modifiers = cfg_modifiers or []
 
     for s in skip_for_os:
         if s not in ["darwin", "windows"]:
             fail("Skipped os must be one of darwin or windows, not {}".format(s))
-    tags = list(tags) + [
-        # Running multiple bucks are expensive. This limits tpx to parallelism of 4.
-        "heavyweight",
-    ]
+    labels = list(labels)
     env = env or {}
     env["RUST_BACKTRACE"] = "1"
     env["TEST_EXECUTABLE"] = executable
@@ -73,11 +71,22 @@ def buck_e2e_test(
     else:
         env["BUCK2_E2E_TEST_FLAVOR"] = "any"
         serialize_test_cases = serialize_test_cases if serialize_test_cases != None else True
+    heavyweight_label = "heavyweight8_experimental"
+    heavyweight_threads = "8"
+
+    # Running multiple bucks are expensive. This label specifies that each test gets 4 or 8 CPU slots
+    # when TPX schedules them. See different possible values for heavyweight label here:
+    # https://www.internalfb.com/wiki/TAE/tpx/Tpx_user_guide/#tests-that-oom-or-time-o.
+    labels.append(heavyweight_label)
+
+    # Use little threads. We don't do much work in tests but we do run lots of Bucks.
+    env["BUCK2_RUNTIME_THREADS"] = heavyweight_threads
+    env["BUCK2_MAX_BLOCKING_THREADS"] = heavyweight_threads
 
     if serialize_test_cases:
         # This lets us pass stress runs by making all test cases inside of a test file serial
         # Test cases in different files can still run in parallel.
-        tags.append("serialize_test_cases")
+        labels.append("serialize_test_cases")
 
     if data and data_dir:
         fail("`data` and `data_dir` cannot be used together")
@@ -116,7 +125,6 @@ def buck_e2e_test(
     if not "conftest.py" in resources.values():
         resources["fbcode//buck2/tests/e2e_util:conftest.py"] = "conftest.py"
 
-    labels = []
     if "darwin" in skip_for_os:
         labels += ci.remove_labels(ci.mac(ci.aarch64(ci.opt())))
     if "windows" in skip_for_os:
@@ -129,7 +137,7 @@ def buck_e2e_test(
         name = name,
         base_module = base_module,
         srcs = srcs,
-        tags = tags,
+        labels = labels,
         deps = deps,
         env = env,
         emails = contacts,
@@ -140,7 +148,6 @@ def buck_e2e_test(
         pytest_marks = pytest_marks,
         pytest_expr = pytest_expr,
         pytest_confcutdir = pytest_confcutdir,
-        labels = labels,
         metadata = metadata,
         compatible_with = compatible_with,
     )
@@ -190,7 +197,7 @@ def buck2_e2e_test(
         data = None,
         data_dir = None,
         srcs = (),
-        tags = (),
+        labels = (),
         resources = None,
         pytest_config = None,
         pytest_marks = None,
@@ -229,6 +236,7 @@ def buck2_e2e_test(
         "contacts": contacts,
         "data": data,
         "data_dir": data_dir,
+        "labels": labels,
         "pytest_confcutdir": pytest_confcutdir,
         "pytest_config": pytest_config,
         "pytest_expr": pytest_expr,
@@ -237,7 +245,6 @@ def buck2_e2e_test(
         "resources": resources,
         "serialize_test_cases": serialize_test_cases,
         "srcs": srcs,
-        "tags": tags,
         "use_buck_api": use_buck_api,
     }
 
@@ -290,6 +297,7 @@ def buck2_e2e_test(
             executable = "buck2",
             skip_for_os = skip_for_os,
             deps = deps,
+            cfg_modifiers = python.get_opt_setup_modifiers(),
             **kwargs
         )
 
@@ -302,6 +310,7 @@ def buck2_e2e_test(
             executable = "buck2",
             skip_for_os = skip_for_os,
             deps = deps,
+            cfg_modifiers = python.get_opt_setup_modifiers(),
             **kwargs
         )
 

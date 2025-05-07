@@ -9,10 +9,11 @@
 
 use std::fmt;
 
-use buck2_error::ErrorTag;
 use buck2_error::__for_macro::AsDynError;
-use buck2_event_observer::display::display_action_error;
+use buck2_error::ErrorTag;
+use buck2_error::source_location::SourceLocation;
 use buck2_event_observer::display::TargetDisplayOptions;
+use buck2_event_observer::display::display_action_error;
 
 use crate::actions::execute::error::ExecuteError;
 
@@ -35,14 +36,30 @@ impl std::error::Error for ActionError {
         });
 
         let mut tags = vec![ErrorTag::AnyActionExecution];
-
+        let mut string_tags = vec![];
+        let mut source_location = SourceLocation::new(std::file!()).with_type_name("ActionError");
         match &self.execute_error {
             ExecuteError::CommandExecutionError { error } => {
                 if let Some(err) = error {
                     tags.extend(err.tags());
+                    string_tags.extend(err.string_tags());
+                    source_location = err.source_location().clone();
                 }
 
                 if is_command_failure {
+                    if let Some(diagnostic) = &self.error_diagnostics {
+                        if let Some(buck2_data::action_error_diagnostics::Data::SubErrors(
+                            sub_errors,
+                        )) = diagnostic.data.as_ref()
+                        {
+                            // Only adding the first error category as multiple would likely cause too many variants and
+                            // cause the data to be less useful. We can revisit this once we have more categories if needed.
+                            if !sub_errors.sub_errors.is_empty() {
+                                string_tags.push(sub_errors.sub_errors[0].category.clone());
+                            }
+                        }
+                    }
+
                     tags.push(ErrorTag::ActionCommandFailure)
                 }
             }
@@ -54,14 +71,16 @@ impl std::error::Error for ActionError {
             ExecuteError::WrongOutputType { .. } => tags.push(ErrorTag::ActionWrongOutputType),
             ExecuteError::Error { error } => {
                 tags.extend(error.tags());
+                string_tags.extend(error.string_tags());
+                source_location = error.source_location().clone();
             }
         };
 
         buck2_error::provide_metadata(
             request,
             tags,
-            std::file!(),
-            Some("ActionError"),
+            string_tags,
+            source_location,
             Some(self.as_proto_event()),
         );
     }
@@ -159,14 +178,15 @@ fn error_items<T: fmt::Display>(xs: &[T]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use buck2_error::buck2_error;
     use buck2_error::ErrorTag;
+    use buck2_error::buck2_error;
+    use buck2_error::conversion::from_any_with_tag;
 
     use super::*;
 
     #[test]
     fn test_error_conversion() {
-        let error = buck2_error!([ErrorTag::Http], "error");
+        let error = buck2_error!(ErrorTag::Http, "error");
 
         let execute_error = ExecuteError::Error {
             error: error.into(),
@@ -198,7 +218,7 @@ mod tests {
             None,
         );
 
-        let buck2_error: buck2_error::Error = action_error.into();
+        let buck2_error = from_any_with_tag(action_error, ErrorTag::AnyActionExecution);
 
         assert_eq!(
             buck2_error.tags(),

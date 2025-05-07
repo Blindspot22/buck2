@@ -10,17 +10,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use buck2_build_api::bxl::calculation::BXL_CALCULATION_IMPL;
 use buck2_build_api::bxl::calculation::BxlCalculationDyn;
 use buck2_build_api::bxl::calculation::BxlComputeResult;
-use buck2_build_api::bxl::calculation::BXL_CALCULATION_IMPL;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKeyBxl;
 use buck2_futures::cancellation::CancellationContext;
-use buck2_interpreter::starlark_profiler::mode::StarlarkProfileMode;
 use dice::DiceComputations;
 use dice::Key;
 use dupe::Dupe;
 use futures::future::FutureExt;
 
+use crate::bxl;
 use crate::bxl::eval::eval;
 use crate::bxl::key::BxlKey;
 
@@ -34,7 +34,7 @@ impl BxlCalculationDyn for BxlCalculationImpl {
         ctx: &mut DiceComputations<'_>,
         bxl: BaseDeferredKeyBxl,
     ) -> buck2_error::Result<BxlComputeResult> {
-        eval_bxl(ctx, BxlKey::from_base_deferred_key_dyn_impl_err(bxl)?).await
+        Ok(eval_bxl(ctx, BxlKey::from_base_deferred_key_dyn_impl_err(bxl)?).await?)
     }
 }
 
@@ -45,15 +45,16 @@ pub(crate) fn init_bxl_calculation_impl() {
 pub(crate) async fn eval_bxl(
     ctx: &mut DiceComputations<'_>,
     bxl: BxlKey,
-) -> buck2_error::Result<BxlComputeResult> {
-    ctx.compute(&internal::BxlComputeKey(bxl))
-        .await?
-        .map_err(buck2_error::Error::from)
+) -> bxl::eval::Result<BxlComputeResult> {
+    match ctx.compute(&internal::BxlComputeKey(bxl)).await {
+        Ok(res) => res,
+        Err(e) => Err(buck2_error::Error::from(e).into()),
+    }
 }
 
 #[async_trait]
 impl Key for internal::BxlComputeKey {
-    type Value = buck2_error::Result<BxlComputeResult>;
+    type Value = bxl::eval::Result<BxlComputeResult>;
 
     async fn compute(
         &self,
@@ -61,13 +62,12 @@ impl Key for internal::BxlComputeKey {
         cancellation: &CancellationContext,
     ) -> Self::Value {
         let key = self.0.dupe();
-
+        // TODO(cjhopman): send analysis started/finished events for bxl to support detailed aggregated metrics
         cancellation
             .with_structured_cancellation(|observer| {
                 async move {
-                    eval(ctx, key, StarlarkProfileMode::None, observer)
+                    eval(ctx, key, observer)
                         .await
-                        .map_err(buck2_error::Error::from)
                         .map(|(result, _)| BxlComputeResult(Arc::new(result)))
                 }
                 .boxed()

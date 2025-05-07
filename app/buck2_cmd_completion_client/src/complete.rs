@@ -20,10 +20,11 @@ use buck2_client_ctx::command_outcome::CommandOutcome;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::exit_result::ExitCode;
 use buck2_client_ctx::exit_result::ExitResult;
-use buck2_client_ctx::streaming::BuckSubcommand;
 use buck2_core::buck2_env;
 use buck2_core::fs::fs_util;
 use buck2_core::fs::paths::abs_path::AbsPath;
+use buck2_error::ErrorTag;
+use buck2_error::buck2_error;
 use package::PackageCompleter;
 use target::CompleteTargetCommand;
 
@@ -122,11 +123,13 @@ impl CompleteCommand {
                     given_partial_target.to_owned(),
                     print_completions,
                 );
-                completer.exec_async(matches, ctx).await
+                ctx.exec_async(completer, matches).await
             }
-            _ => ExitResult::bail(
+            _ => buck2_error!(
+                ErrorTag::Input,
                 "Malformed target string (expected [[cell]//][path/to/package][:target_name])",
-            ),
+            )
+            .into(),
         };
         exit_result
     }

@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use buck2_query::query::traversal::NodeLookup;
 use buck2_query::query::traversal::async_depth_first_postorder_traversal;
 use buck2_query::query::traversal::async_depth_limited_traversal;
-use buck2_query::query::traversal::NodeLookup;
 use derive_more::Display;
 use derive_more::From;
 use indexmap::IndexSet;
@@ -119,6 +119,10 @@ impl QueryTarget for TestTarget {
     }
 
     fn map_attr<R, F: FnMut(Option<&Self::Attr<'_>>) -> R>(&self, _key: &str, _func: F) -> R {
+        unimplemented!()
+    }
+
+    fn map_any_attr<R, F: FnMut(Option<&Self::Attr<'_>>) -> R>(&self, _key: &str, _func: F) -> R {
         unimplemented!()
     }
 }

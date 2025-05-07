@@ -14,18 +14,17 @@ use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
 
-use anyhow::Context;
 use rustc_hash::FxHashMap;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
 use serde::de::Error as _;
 use serde::de::MapAccess;
 use serde::de::SeqAccess;
 use serde::de::Visitor;
-use serde::Deserialize;
-use serde::Deserializer;
-use serde::Serialize;
 
 use crate::json_project::Edition;
-use crate::path::canonicalize;
+use crate::path::canonicalize_to_vcs_path;
 
 #[derive(Serialize, Debug, Default, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub(crate) struct Target(String);
@@ -158,9 +157,9 @@ impl TargetInfo {
         name.to_owned()
     }
 
-    pub(crate) fn root_module(&self) -> anyhow::Result<PathBuf> {
+    pub(crate) fn root_module(&self, project_root: &Path) -> PathBuf {
         let p = self.source_folder.join(&self.crate_root);
-        canonicalize(&p).with_context(|| format!("path={}", p.display()))
+        canonicalize_to_vcs_path(&p, project_root)
     }
 
     pub(crate) fn overridden_dep_names(&self) -> FxHashMap<Target, String> {
@@ -182,20 +181,9 @@ impl TargetInfo {
             .iter()
             .filter_map(|flag| flag.strip_prefix("--cfg=").map(str::to_string));
 
-        let mut cfg = feature_cfgs
+        feature_cfgs
             .chain(rustc_flags_cfgs)
-            .collect::<Vec<String>>();
-
-        // Include "test" cfg so rust-analyzer picks up #[cfg(test)] code.
-        cfg.push("test".to_owned());
-
-        #[cfg(fbcode_build)]
-        {
-            // FIXME(JakobDegen): This should be set via a configuration mechanism of some kind.
-            cfg.push("fbcode_build".to_owned());
-        }
-
-        cfg
+            .collect::<Vec<String>>()
     }
 }
 
@@ -276,20 +264,8 @@ fn test_cfg() {
         rustc_flags: vec!["--cfg=foo_cfg".to_owned(), "--other".to_owned()],
     };
 
-    let expected = if cfg!(fbcode_build) {
-        vec![
-            "feature=\"foo_feature\"".to_owned(),
-            "foo_cfg".to_owned(),
-            "test".to_owned(),
-            "fbcode_build".to_owned(),
-        ]
-    } else {
-        vec![
-            "feature=\"foo_feature\"".to_owned(),
-            "foo_cfg".to_owned(),
-            "test".to_owned(),
-        ]
-    };
-
-    assert_eq!(info.cfg(), expected);
+    assert_eq!(
+        info.cfg(),
+        vec!["feature=\"foo_feature\"".to_owned(), "foo_cfg".to_owned()]
+    );
 }

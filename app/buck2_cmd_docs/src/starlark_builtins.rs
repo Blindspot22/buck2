@@ -10,13 +10,14 @@
 use buck2_cli_proto::new_generic::DocsRequest;
 use buck2_cli_proto::new_generic::DocsStarlarkBuiltinsRequest;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonCommandOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::path_arg::PathArg;
 use buck2_client_ctx::streaming::StreamingCommand;
@@ -35,7 +36,7 @@ pub(crate) struct StarlarkBuiltinsCommand {
     common_opts: CommonCommandOptions,
 }
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 impl StreamingCommand for StarlarkBuiltinsCommand {
     const COMMAND_NAME: &'static str = "docs starlark-builtins";
     async fn exec_impl(
@@ -43,6 +44,7 @@ impl StreamingCommand for StarlarkBuiltinsCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let client_context = ctx.client_context(matches, &self)?;
 
@@ -55,6 +57,7 @@ impl StreamingCommand for StarlarkBuiltinsCommand {
                 buck2_cli_proto::new_generic::NewGenericRequest::Docs(
                     DocsRequest::StarlarkBuiltins(DocsStarlarkBuiltinsRequest { path: p }),
                 ),
+                events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
             )
             .await??;

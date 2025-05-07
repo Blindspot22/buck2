@@ -26,7 +26,8 @@ use static_assertions::assert_eq_size;
     Clone,
     Dupe,
     derive_more::Display,
-    Allocative
+    Allocative,
+    strong_hash::StrongHash
 )]
 #[display("(target: `{parent}`, id: `{id}`)")]
 pub struct ActionKey {
@@ -46,9 +47,10 @@ assert_eq_size!(ActionKey, [usize; 4]);
     Dupe,
     Copy,
     derive_more::Display,
-    Allocative
+    Allocative,
+    strong_hash::StrongHash
 )]
-pub struct ActionIndex(u32);
+pub struct ActionIndex(pub u32);
 impl ActionIndex {
     pub fn new(v: u32) -> ActionIndex {
         Self(v)
@@ -56,10 +58,6 @@ impl ActionIndex {
 }
 
 impl ActionKey {
-    pub fn unchecked_new(parent: DeferredHolderKey, id: ActionIndex) -> ActionKey {
-        ActionKey { parent, id }
-    }
-
     pub fn new(parent: DeferredHolderKey, id: ActionIndex) -> ActionKey {
         ActionKey { parent, id }
     }

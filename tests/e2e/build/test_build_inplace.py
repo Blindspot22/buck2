@@ -24,7 +24,12 @@ from buck2.tests.e2e_util.api.buck_result import BuckException, BuildResult
 from buck2.tests.e2e_util.api.process import Process
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test, env, get_mode_from_platform
-from buck2.tests.e2e_util.helper.utils import json_get, random_string, read_what_ran
+from buck2.tests.e2e_util.helper.utils import (
+    json_get,
+    random_string,
+    read_invocation_record,
+    read_what_ran,
+)
 
 
 # rust rule implementations hardcode invocation of `/bin/jq` which is not available on Mac RE workers (or mac laptops)
@@ -51,7 +56,7 @@ async def test_build_output(buck: Buck) -> None:
         "targets",
         "interpreter",
         "buildfiles",
-        "TARGETS.v2",
+        "TARGETS",
     )
 
     result = await buck.build_without_report(
@@ -439,15 +444,13 @@ async def test_build_test_dependencies(buck: Buck) -> None:
     target = "fbcode//buck2/tests/targets/rules/sh_test:test_with_env"
     build = await buck.build(
         target,
-        "-c",
-        "build_report.unstable_include_other_outputs=true",
         "--build-test-info",
         "--build-report",
         "-",
     )
     report = build.get_build_report().build_report
 
-    path = ["results", target, "other_outputs", "DEFAULT"]
+    path = ["results", target, "other_outputs"]
     for p in path:
         report = report[p]
 
@@ -456,7 +459,7 @@ async def test_build_test_dependencies(buck: Buck) -> None:
         if "__file__" in artifact:
             has_file = True
 
-    assert has_file
+    assert not has_file
 
 
 # TODO(marwhal): Fix and enable on Windows
@@ -521,6 +524,8 @@ if fbcode_linux_only():  # noqa: C901
     async def test_instruction_count_disabled(buck: Buck) -> None:
         package = "fbcode//buck2/tests/targets/rules/instruction_counts"
         name = "three_billion_instructions"
+        # disable resource control as it uses miniperf to read cgroup's memory peak
+        env = {"BUCK2_TEST_RESOURCE_CONTROL_CONFIG": '{"status":"Off"}'}
 
         await buck.build(
             f"{package}:{name}",
@@ -530,6 +535,7 @@ if fbcode_linux_only():  # noqa: C901
             "--local-only",
             "-c",
             f"test.cache_buster={random_string()}",
+            env=env,
         )
 
         log = (await buck.log("show")).stdout.strip().splitlines()
@@ -680,7 +686,7 @@ async def test_exit_when_different_state(buck: Buck) -> None:
         return (result.process.returncode, result.stderr)
 
     done, pending = await asyncio.wait(
-        [process(a), process(b)],
+        [asyncio.create_task(process(a)), asyncio.create_task(process(b))],
         timeout=10,
         return_when=asyncio.FIRST_COMPLETED,
     )
@@ -723,7 +729,7 @@ async def test_exit_when_preemptible_always(buck: Buck, same_state: bool) -> Non
         return (result.process.returncode, result.stderr)
 
     done, pending = await asyncio.wait(
-        [process(a), process(b)],
+        [asyncio.create_task(process(a)), asyncio.create_task(process(b))],
         timeout=10,
         return_when=asyncio.FIRST_COMPLETED,
     )
@@ -736,6 +742,20 @@ async def test_exit_when_preemptible_always(buck: Buck, same_state: bool) -> Non
         exit_code, stderr = task.result()
         assert "daemon preempted" in stderr
         assert exit_code == 5
+
+
+@buck_test(inplace=True)
+async def test_preemptible_logged(buck: Buck, tmp_path: Path) -> None:
+    record_path = tmp_path / "record.json"
+    await buck.targets(
+        "@fbcode//mode/dev",
+        "--preemptible=always",
+        ":",
+        "--unstable-write-invocation-record",
+        str(record_path),
+    )
+    record = read_invocation_record(record_path)
+    assert record["preemptible"] == "ALWAYS"
 
 
 @buck_test(inplace=True)
@@ -768,7 +788,7 @@ async def test_exit_when_preemptible_on_different_state(
         return (result.process.returncode, result.stderr)
 
     done, pending = await asyncio.wait(
-        [process(a), process(b)],
+        [asyncio.create_task(process(a)), asyncio.create_task(process(b))],
         timeout=10,
         return_when=asyncio.FIRST_COMPLETED,
     )

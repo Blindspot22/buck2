@@ -18,15 +18,16 @@ use buck2_build_api::bxl::types::BxlFunctionLabel;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKeyBxl;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKeyDyn;
-use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
-use buck2_data::action_key_owner::BaseDeferredKeyProto;
 use buck2_data::ToProtoMessage;
+use buck2_data::action_key_owner::BaseDeferredKeyProto;
 use buck2_error::BuckErrorContext;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
+use buck2_util::strong_hasher::Blake3StrongHasher;
 use cmp_any::PartialEqAny;
 use dupe::Dupe;
 use starlark_map::ordered_map::OrderedMap;
@@ -44,7 +45,8 @@ use crate::bxl::starlark_defs::context::actions::BxlExecutionResolution;
     PartialEq,
     Ord,
     PartialOrd,
-    Allocative
+    Allocative,
+    strong_hash::StrongHash
 )]
 pub(crate) struct BxlKey(Arc<BxlKeyData>);
 
@@ -105,6 +107,10 @@ impl BxlKey {
     pub(crate) fn force_print_stacktrace(&self) -> bool {
         self.0.force_print_stacktrace
     }
+
+    pub(crate) fn as_starlark_eval_kind(&self) -> StarlarkEvalKind {
+        StarlarkEvalKind::Bxl(self.0.dupe())
+    }
 }
 
 #[derive(
@@ -116,7 +122,8 @@ impl BxlKey {
     PartialEq,
     Ord,
     PartialOrd,
-    Allocative
+    Allocative,
+    strong_hash::StrongHash
 )]
 #[display("{}", spec)]
 struct BxlKeyData {
@@ -142,7 +149,16 @@ impl BxlKeyData {
 // BxlDynamicKeyData, and _is_ used to make the hashed path. Thus, exec_deps and toolchains are indirectly used to
 // construct the hashed path. However, we still need to include them in the BxlDynamicKeyData so that we can pass
 // them from the root BXL to the dynamic BXL context, and then access them on the dynamic BXL context's actions factory.
-#[derive(Clone, derive_more::Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(
+    Clone,
+    derive_more::Display,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    Allocative,
+    strong_hash::StrongHash
+)]
 #[display("{}", key)]
 pub(crate) struct BxlDynamicKeyData {
     key: Arc<BxlKeyData>,
@@ -175,6 +191,12 @@ impl BaseDeferredKeyDyn for BxlDynamicKeyData {
     fn hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         Hash::hash(self, &mut hasher);
+        hasher.finish()
+    }
+
+    fn strong_hash(&self) -> u64 {
+        let mut hasher = Blake3StrongHasher::default();
+        strong_hash::StrongHash::strong_hash(self, &mut hasher);
         hasher.finish()
     }
 
@@ -247,10 +269,6 @@ impl BaseDeferredKeyDyn for BxlDynamicKeyData {
 
     fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
-    }
-
-    fn execution_platform_resolution(&self) -> &ExecutionPlatformResolution {
-        &self.execution_resolution.resolved_execution
     }
 
     fn global_cfg_options(&self) -> Option<GlobalCfgOptions> {

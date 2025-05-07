@@ -14,8 +14,8 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_build_api::bxl::types::BxlFunctionLabel;
 use buck2_core::bxl::BxlFilePath;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use buck2_interpreter::build_context::starlark_path_from_build_context;
 use cli_args::CliArgs;
 use derive_more::Display;
@@ -26,9 +26,6 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::dict::UnpackDictEntries;
-use starlark::values::starlark_value;
-use starlark::values::typing::StarlarkCallable;
 use starlark::values::AllocValue;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
@@ -40,6 +37,9 @@ use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
+use starlark::values::dict::UnpackDictEntries;
+use starlark::values::starlark_value;
+use starlark::values::typing::StarlarkCallable;
 use starlark_map::ordered_map::OrderedMap;
 
 use crate::bxl::eval::CliResolutionCtx;
@@ -82,7 +82,12 @@ fn bxl_impl<'v>(
 
     let bxl_path = (*starlark_path_from_build_context(eval)?
         .unpack_bxl_file()
-        .ok_or_else(|| buck2_error!([], "`bxl` can only be declared in bxl files"))?)
+        .ok_or_else(|| {
+            buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "`bxl` can only be declared in bxl files"
+            )
+        })?)
     .clone();
 
     let mut unresolved_cli_args = SmallMap::new();
@@ -112,6 +117,7 @@ fn bxl_impl<'v>(
 
 /// Errors around rule declaration, instantiation, validation, etc
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum BxlError {
     #[error("Bxl defined in `{0}` must be assigned to a variable, e.g. `my_bxl = bxl_main(...)`")]
     BxlNotAssigned(String),

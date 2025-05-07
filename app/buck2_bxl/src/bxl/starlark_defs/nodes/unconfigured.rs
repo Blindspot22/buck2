@@ -10,6 +10,8 @@
 use std::convert::Infallible;
 
 use allocative::Allocative;
+use buck2_build_api::bxl::unconfigured_attribute::StarlarkCoercedAttr;
+use buck2_interpreter::types::cell_path::StarlarkCellPath;
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
 use buck2_node::attrs::inspect_options::AttrInspectOptions;
 use buck2_node::nodes::unconfigured::TargetNode;
@@ -22,10 +24,6 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::list::AllocList;
-use starlark::values::none::NoneOr;
-use starlark::values::starlark_value;
-use starlark::values::structs::AllocStruct;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
@@ -33,12 +31,13 @@ use starlark::values::StringValue;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
+use starlark::values::list::AllocList;
+use starlark::values::none::NoneOr;
+use starlark::values::starlark_value;
+use starlark::values::structs::AllocStruct;
 
 use super::node_attrs::NodeAttributeGetter;
 use crate::bxl::starlark_defs::file_set::StarlarkFileNode;
-use crate::bxl::starlark_defs::nodes::unconfigured::attribute::StarlarkCoercedAttr;
-
-pub(crate) mod attribute;
 
 #[derive(Debug, Display, ProvidesStaticType, Allocative, Clone, Dupe)]
 #[derive(NoSerialize)] // TODO probably should be serializable the same as how queries serialize
@@ -250,5 +249,20 @@ fn target_node_value_methods(builder: &mut MethodsBuilder) {
                 .map(|label| StarlarkTargetLabel::new(label.dupe()))
                 .into_iter(),
         ))
+    }
+
+    /// Gets all files which are an immediate input to the rule function and thus are needed to go through analysis.
+    /// The result is a list of `CellPath`.
+    ///
+    /// Sample usage:
+    /// ```python
+    /// def _impl_get_deps(ctx):
+    ///     target_node = ctx.uquery().eval("//foo:bar")[0]
+    ///     ctx.output.print(target_node.inputs())
+    /// ```
+    fn inputs<'v>(
+        this: &'v StarlarkTargetNode,
+    ) -> starlark::Result<AllocList<impl IntoIterator<Item = StarlarkCellPath> + 'v>> {
+        Ok(AllocList(this.0.inputs().map(StarlarkCellPath)))
     }
 }

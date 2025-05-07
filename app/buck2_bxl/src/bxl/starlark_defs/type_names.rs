@@ -7,6 +7,10 @@
  * of this source tree.
  */
 
+#![allow(non_upper_case_globals)]
+
+use buck2_build_api::bxl::select::StarlarkSelectConcat;
+use buck2_build_api::bxl::select::StarlarkSelectDict;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::unconfigured::TargetNode;
 use starlark::environment::GlobalsBuilder;
@@ -20,15 +24,20 @@ use crate::bxl::starlark_defs::artifacts::EnsuredArtifact;
 use crate::bxl::starlark_defs::audit::StarlarkAuditCtx;
 use crate::bxl::starlark_defs::build_result::StarlarkBxlBuildResult;
 use crate::bxl::starlark_defs::cli_args::CliArgs;
+use crate::bxl::starlark_defs::context::BxlContext;
 use crate::bxl::starlark_defs::context::actions::BxlActions;
+use crate::bxl::starlark_defs::context::build::StarlarkFailedArtifactIterable;
+use crate::bxl::starlark_defs::context::build::StarlarkProvidersArtifactIterable;
 use crate::bxl::starlark_defs::context::fs::BxlFilesystem;
 use crate::bxl::starlark_defs::context::output::OutputStream;
-use crate::bxl::starlark_defs::context::BxlContext;
 use crate::bxl::starlark_defs::cquery::StarlarkCQueryCtx;
 use crate::bxl::starlark_defs::file_set::StarlarkFileNode;
-use crate::bxl::starlark_defs::lazy_ctx::lazy_cquery_ctx::StarlarkLazyCqueryCtx;
-use crate::bxl::starlark_defs::lazy_ctx::operation::StarlarkLazy;
 use crate::bxl::starlark_defs::lazy_ctx::StarlarkLazyCtx;
+use crate::bxl::starlark_defs::lazy_ctx::lazy_cquery_ctx::StarlarkLazyCqueryCtx;
+use crate::bxl::starlark_defs::lazy_ctx::lazy_uquery_ctx::StarlarkLazyUqueryCtx;
+use crate::bxl::starlark_defs::lazy_ctx::operation::StarlarkLazy;
+use crate::bxl::starlark_defs::nodes::action::StarlarkActionAttr;
+use crate::bxl::starlark_defs::nodes::configured::StarlarkConfiguredAttr;
 use crate::bxl::starlark_defs::nodes::configured::StarlarkConfiguredTargetNode;
 use crate::bxl::starlark_defs::nodes::configured::StarlarkLazyAttrs;
 use crate::bxl::starlark_defs::nodes::configured::StarlarkLazyResolvedAttrs;
@@ -43,6 +52,7 @@ use crate::bxl::starlark_defs::uquery::StarlarkUQueryCtx;
 pub(crate) fn register_bxl_type_names_in_bxl_namespace(globals: &mut GlobalsBuilder) {
     const CliArgs: StarlarkValueAsType<CliArgs> = StarlarkValueAsType::new();
     const Context: StarlarkValueAsType<BxlContext> = StarlarkValueAsType::new();
+    const ActionAttr: StarlarkValueAsType<StarlarkActionAttr> = StarlarkValueAsType::new();
     const AuditContext: StarlarkValueAsType<StarlarkAuditCtx> = StarlarkValueAsType::new();
     const AqueryContext: StarlarkValueAsType<StarlarkAQueryCtx> = StarlarkValueAsType::new();
     const CqueryContext: StarlarkValueAsType<StarlarkCQueryCtx> = StarlarkValueAsType::new();
@@ -66,12 +76,21 @@ pub(crate) fn register_bxl_type_names_in_bxl_namespace(globals: &mut GlobalsBuil
         StarlarkValueAsType::new();
     const ConfiguredTargetSet: StarlarkValueAsType<StarlarkTargetSet<ConfiguredTargetNode>> =
         StarlarkValueAsType::new();
+    const ConfiguredAttr: StarlarkValueAsType<StarlarkConfiguredAttr> = StarlarkValueAsType::new();
     const TargetUniverse: StarlarkValueAsType<StarlarkTargetUniverse> = StarlarkValueAsType::new();
     const OutputStream: StarlarkValueAsType<OutputStream> = StarlarkValueAsType::new();
     const LazyContext: StarlarkValueAsType<StarlarkLazyCtx> = StarlarkValueAsType::new();
     const Lazy: StarlarkValueAsType<StarlarkLazy> = StarlarkValueAsType::new();
     const Error: StarlarkValueAsType<StarlarkError> = StarlarkValueAsType::new();
     const Result: StarlarkValueAsType<StarlarkResult> = StarlarkValueAsType::new();
+    const LazyUqueryContext: StarlarkValueAsType<StarlarkLazyUqueryCtx> =
+        StarlarkValueAsType::new();
     const LazyCqueryContext: StarlarkValueAsType<StarlarkLazyCqueryCtx> =
+        StarlarkValueAsType::new();
+    const SelectDict: StarlarkValueAsType<StarlarkSelectDict> = StarlarkValueAsType::new();
+    const SelectConcat: StarlarkValueAsType<StarlarkSelectConcat> = StarlarkValueAsType::new();
+    const FailedArtifactsIterable: StarlarkValueAsType<StarlarkFailedArtifactIterable> =
+        StarlarkValueAsType::new();
+    const BuiltArtifactsIterable: StarlarkValueAsType<StarlarkProvidersArtifactIterable> =
         StarlarkValueAsType::new();
 }

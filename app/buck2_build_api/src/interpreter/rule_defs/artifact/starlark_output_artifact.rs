@@ -17,9 +17,6 @@ use buck2_error::BuckErrorContext;
 use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::Coerce;
 use starlark::values::Demand;
 use starlark::values::Freeze;
@@ -32,15 +29,18 @@ use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOfUncheckedGeneric;
 use starlark::values::ValueTyped;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
 use crate::interpreter::rule_defs::artifact::starlark_declared_artifact::StarlarkDeclaredArtifact;
-use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
+use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 
 /// Thin wrapper around `OutputArtifact`.
 ///
@@ -136,7 +136,7 @@ impl<'v> CommandLineArgLike for StarlarkOutputArtifact<'v> {
     ) -> buck2_error::Result<()> {
         // TODO: proper error message
         Err(buck2_error::buck2_error!(
-            [],
+            buck2_error::ErrorTag::Tier0,
             "proper error here; we should not be adding mutable starlark objects to clis"
         ))
     }
@@ -161,7 +161,7 @@ impl<'v> CommandLineArgLike for StarlarkOutputArtifact<'v> {
     }
 }
 
-#[starlark_value(type = "output_artifact")]
+#[starlark_value(type = "OutputArtifact")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkOutputArtifactGen<V>
 where
     Self: ProvidesStaticType<'v> + Display + CommandLineArgLike,
@@ -181,10 +181,7 @@ impl CommandLineArgLike for FrozenStarlarkOutputArtifact {
         cli: &mut dyn CommandLineBuilder,
         ctx: &mut dyn CommandLineContext,
     ) -> buck2_error::Result<()> {
-        cli.push_arg(
-            ctx.resolve_artifact(&self.inner()?.artifact())?
-                .into_string(),
-        );
+        cli.push_location(ctx.resolve_artifact(&self.inner()?.artifact())?);
         Ok(())
     }
 

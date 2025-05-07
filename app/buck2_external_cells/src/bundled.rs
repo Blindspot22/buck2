@@ -38,30 +38,36 @@ use buck2_directory::directory::directory_hasher::NoDigestDigester;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
 use buck2_directory::directory::directory_ref::DirectoryRef;
 use buck2_directory::directory::entry::DirectoryEntry;
-use buck2_directory::directory::find::find;
 use buck2_directory::directory::find::DirectoryFindError;
+use buck2_directory::directory::find::find;
 use buck2_directory::directory::immutable_directory::ImmutableDirectory;
-use buck2_error::buck2_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
+use buck2_error::conversion::from_any_with_tag;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::digest_config::HasDigestConfig;
 use buck2_execute::materialize::materializer::HasMaterializer;
 use buck2_execute::materialize::materializer::WriteRequest;
-use buck2_external_cells_bundled::get_bundled_data;
 use buck2_external_cells_bundled::BundledCell;
 use buck2_external_cells_bundled::BundledFile;
+use buck2_external_cells_bundled::get_bundled_data;
 use cmp_any::PartialEqAny;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
 
 fn load_nano_prelude() -> buck2_error::Result<BundledCell> {
-    let path = env::var("NANO_PRELUDE").buck_error_context(
-        "NANO_PRELUDE env var must be set to the location of nano prelude\n\
+    let path = env::var("NANO_PRELUDE")
+        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Input))
+        .buck_error_context(
+            "NANO_PRELUDE env var must be set to the location of nano prelude\n\
         Consider `export NANO_PRELUDE=$HOME/fbsource/fbcode/buck2/tests/e2e_util/nano_prelude`",
-    )?;
+        )?;
     if path.is_empty() {
-        return Err(buck2_error!([], "NANO_PRELUDE env var must not be empty"));
+        return Err(buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "NANO_PRELUDE env var must not be empty"
+        ));
     }
     let path = AbsPathBuf::new(Path::new(&path))
         .buck_error_context("NANO_PRELUDE env var must point to absolute path")?;
@@ -112,6 +118,7 @@ fn nano_prelude() -> buck2_error::Result<BundledCell> {
 pub(crate) fn find_bundled_data(cell_name: CellName) -> buck2_error::Result<BundledCell> {
     #[derive(buck2_error::Error, Debug)]
     #[error("No bundled cell named `{0}`, options are `{}`", _1.join(", "))]
+    #[buck2(tag = Input)]
     struct CellNotBundled(String, Vec<&'static str>);
 
     let cell_name = cell_name.as_str();
@@ -149,6 +156,7 @@ pub(crate) struct BundledFileOpsDelegate {
 }
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Environment)]
 enum BundledPathSearchError {
     #[error("Expected a directory at `{0}` but found a file")]
     ExpectedDirectory(String),

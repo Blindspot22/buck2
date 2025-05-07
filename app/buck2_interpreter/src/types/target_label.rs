@@ -30,10 +30,6 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::list::UnpackList;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
-use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::Heap;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
@@ -41,6 +37,10 @@ use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueError;
 use starlark::values::ValueLike;
+use starlark::values::list::UnpackList;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::type_repr::StarlarkTypeRepr;
 
 use crate::types::cell_path::StarlarkCellPath;
 use crate::types::configuration::StarlarkConfiguration;
@@ -77,7 +77,7 @@ impl StarlarkTargetLabel {
     }
 }
 
-#[starlark_value(type = "target_label")]
+#[starlark_value(type = "TargetLabel")]
 impl<'v> StarlarkValue<'v> for StarlarkTargetLabel {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -117,7 +117,7 @@ fn label_methods(builder: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
-    fn name<'v>(this: &StarlarkTargetLabel) -> starlark::Result<&'v str> {
+    fn name<'v>(this: &'v StarlarkTargetLabel) -> starlark::Result<&'v str> {
         Ok(this.label.name().as_str())
     }
 
@@ -189,7 +189,7 @@ impl StarlarkConfiguredTargetLabel {
     }
 }
 
-#[starlark_value(type = "configured_target_label")]
+#[starlark_value(type = "ConfiguredTargetLabel")]
 impl<'v> StarlarkValue<'v> for StarlarkConfiguredTargetLabel {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -229,7 +229,7 @@ fn configured_label_methods(builder: &mut MethodsBuilder) {
     }
 
     #[starlark(attribute)]
-    fn name<'v>(this: &StarlarkConfiguredTargetLabel) -> starlark::Result<&'v str> {
+    fn name<'v>(this: &'v StarlarkConfiguredTargetLabel) -> starlark::Result<&'v str> {
         Ok(this.label.name().as_str())
     }
 

@@ -59,28 +59,40 @@ use crate::collections::Hashed;
 use crate::collections::StarlarkHashValue;
 use crate::collections::StarlarkHasher;
 use crate::docs::DocItem;
+use crate::eval::Arguments;
+use crate::eval::Evaluator;
+use crate::eval::ParametersSpec;
 use crate::eval::compiler::def::Def;
 use crate::eval::compiler::def::FrozenDef;
 use crate::eval::runtime::arguments::ArgumentsFull;
 use crate::eval::runtime::frame_span::FrameSpan;
-use crate::eval::Arguments;
-use crate::eval::Evaluator;
-use crate::eval::ParametersSpec;
 use crate::sealed::Sealed;
 use crate::typing::ParamIsRequired;
 use crate::typing::ParamSpec;
 use crate::typing::Ty;
 use crate::typing::TyCallable;
 use crate::util::ArcStr;
+use crate::values::FreezeResult;
+use crate::values::Freezer;
+use crate::values::FrozenRef;
+use crate::values::FrozenStringValue;
+use crate::values::FrozenValueTyped;
+use crate::values::Heap;
+use crate::values::StarlarkValue;
+use crate::values::StringValue;
+use crate::values::Trace;
+use crate::values::UnpackValue;
+use crate::values::ValueError;
+use crate::values::ValueIdentity;
 use crate::values::bool::value::VALUE_FALSE_TRUE;
 use crate::values::demand::request_value_impl;
-use crate::values::dict::value::VALUE_EMPTY_FROZEN_DICT;
 use crate::values::dict::FrozenDictRef;
+use crate::values::dict::value::VALUE_EMPTY_FROZEN_DICT;
 use crate::values::enumeration::EnumType;
 use crate::values::enumeration::FrozenEnumValue;
+use crate::values::function::FUNCTION_TYPE;
 use crate::values::function::FrozenBoundMethod;
 use crate::values::function::NativeFunction;
-use crate::values::function::FUNCTION_TYPE;
 use crate::values::int::pointer_i32::PointerI32;
 use crate::values::iter::StarlarkIterator;
 use crate::values::layout::avalue::AValue;
@@ -116,18 +128,6 @@ use crate::values::types::list::value::FrozenListData;
 use crate::values::types::num::value::NumRef;
 use crate::values::types::tuple::value::FrozenTuple;
 use crate::values::types::tuple::value::Tuple;
-use crate::values::FreezeResult;
-use crate::values::Freezer;
-use crate::values::FrozenRef;
-use crate::values::FrozenStringValue;
-use crate::values::FrozenValueTyped;
-use crate::values::Heap;
-use crate::values::StarlarkValue;
-use crate::values::StringValue;
-use crate::values::Trace;
-use crate::values::UnpackValue;
-use crate::values::ValueError;
-use crate::values::ValueIdentity;
 
 // We already import another `ValueError`, hence the odd name.
 #[derive(Debug, thiserror::Error)]
@@ -282,12 +282,12 @@ impl<'v> Value<'v> {
 
     #[inline]
     pub(crate) unsafe fn new_ptr_usize_with_str_tag(x: usize) -> Self {
-        Self(Pointer::new_unfrozen_usize_with_str_tag(x))
+        unsafe { Self(Pointer::new_unfrozen_usize_with_str_tag(x)) }
     }
 
     #[inline]
     pub(crate) unsafe fn cast_lifetime<'w>(self) -> Value<'w> {
-        Value(self.0.cast_lifetime())
+        unsafe { Value(self.0.cast_lifetime()) }
     }
 
     /// Create a new `None` value.
@@ -347,8 +347,10 @@ impl<'v> Value<'v> {
 
     #[inline]
     unsafe fn unpack_frozen_unchecked(self) -> FrozenValue {
-        debug_assert!(!self.0.is_unfrozen());
-        FrozenValue(self.0.cast_lifetime().to_frozen_pointer_unchecked())
+        unsafe {
+            debug_assert!(!self.0.is_unfrozen());
+            FrozenValue(self.0.cast_lifetime().to_frozen_pointer_unchecked())
+        }
     }
 
     /// Is this value `None`.
@@ -466,6 +468,12 @@ impl<'v> Value<'v> {
         self.unpack_starlark_str().map(|s| s.as_str())
     }
 
+    /// Obtain the underlying `str` if it is a string, otherwise return an error for users.
+    #[inline]
+    pub fn unpack_str_err(self) -> crate::Result<&'v str> {
+        UnpackValue::unpack_value_err(self)
+    }
+
     /// Get a pointer to a [`AValue`].
     #[inline]
     pub(crate) fn get_ref(self) -> AValueDyn<'v> {
@@ -496,13 +504,15 @@ impl<'v> Value<'v> {
     #[inline]
     pub(crate) unsafe fn downcast_ref_unchecked<T: StarlarkValue<'v>>(self) -> &'v T {
         debug_assert!(self.get_ref().downcast_ref::<T>().is_some());
-        if PointerI32::type_is_pointer_i32::<T>() {
-            transmute!(&PointerI32, &T, self.0.unpack_pointer_i32_unchecked())
-        } else {
-            self.0
-                .unpack_ptr_no_int_unchecked()
-                .unpack_header_unchecked()
-                .payload()
+        unsafe {
+            if PointerI32::type_is_pointer_i32::<T>() {
+                transmute!(&PointerI32, &T, self.0.unpack_pointer_i32_unchecked())
+            } else {
+                self.0
+                    .unpack_ptr_no_int_unchecked()
+                    .unpack_header_unchecked()
+                    .payload()
+            }
         }
     }
 
@@ -604,12 +614,12 @@ impl<'v> Value<'v> {
 
     /// `x * other`.
     pub fn mul(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
-        if let Some(r) = self.get_ref().mul(other, heap) {
-            r
-        } else if let Some(r) = other.get_ref().rmul(self, heap) {
-            r
-        } else {
-            ValueError::unsupported_owned(self.get_type(), "*", Some(other.get_type()))
+        match self.get_ref().mul(other, heap) {
+            Some(r) => r,
+            _ => match other.get_ref().rmul(self, heap) {
+                Some(r) => r,
+                _ => ValueError::unsupported_owned(self.get_type(), "*", Some(other.get_type())),
+            },
         }
     }
 
@@ -818,12 +828,12 @@ impl<'v> Value<'v> {
             }
         }
 
-        if let Some(v) = self.get_ref().add(other, heap) {
-            v
-        } else if let Some(v) = other.get_ref().radd(self, heap) {
-            v
-        } else {
-            ValueError::unsupported_owned(self.get_type(), "+", Some(other.get_type()))
+        match self.get_ref().add(other, heap) {
+            Some(v) => v,
+            _ => match other.get_ref().radd(self, heap) {
+                Some(v) => v,
+                _ => ValueError::unsupported_owned(self.get_type(), "+", Some(other.get_type())),
+            },
         }
     }
 
@@ -1342,14 +1352,13 @@ pub trait ValueLike<'v>:
 
     /// Get a reference to underlying data or [`Err`]
     /// if contained object has different type than requested.
-    fn downcast_ref_err<T: StarlarkValue<'v>>(self) -> anyhow::Result<&'v T> {
+    fn downcast_ref_err<T: StarlarkValue<'v>>(self) -> crate::Result<&'v T> {
         match self.downcast_ref() {
             Some(v) => Ok(v),
-            None => Err(ValueValueError::WrongType(
+            None => Err(crate::Error::new_value(ValueValueError::WrongType(
                 T::TYPE,
                 self.to_value().to_string_for_type_error(),
-            )
-            .into()),
+            ))),
         }
     }
 }
@@ -1477,14 +1486,14 @@ mod tests {
     use crate::assert;
     use crate::environment::Globals;
     use crate::typing::Ty;
+    use crate::values::Heap;
+    use crate::values::Value;
+    use crate::values::ValueLike;
     use crate::values::int::pointer_i32::PointerI32;
     use crate::values::list::AllocList;
     use crate::values::none::NoneType;
     use crate::values::string::str_type::StarlarkStr;
     use crate::values::unpack::UnpackValue;
-    use crate::values::Heap;
-    use crate::values::Value;
-    use crate::values::ValueLike;
 
     #[test]
     fn test_downcast_ref() {

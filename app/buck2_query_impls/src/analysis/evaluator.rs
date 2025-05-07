@@ -47,11 +47,7 @@ pub(crate) async fn eval_query<
     }
 }
 
-async fn eval_single_query<
-    F: QueryFunctions<Env = Env>,
-    Env: QueryEnvironment,
-    Fut: Future<Output = buck2_error::Result<Env>>,
->(
+async fn eval_single_query<F, Env, Fut>(
     functions: &F,
     query: &str,
     environment: impl Fn(Vec<String>) -> Fut,
@@ -95,7 +91,11 @@ where
                             i,
                             arg_1,
                             Err::<_, buck2_error::Error>(
-                                buck2_error::buck2_error!([], "future was cancelled").into(),
+                                buck2_error::buck2_error!(
+                                    buck2_error::ErrorTag::Tier0,
+                                    "future was cancelled"
+                                )
+                                .into(),
                             ),
                         )
                     },

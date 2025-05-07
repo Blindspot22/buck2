@@ -12,16 +12,19 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_core::bzl::ImportPath;
+use buck2_core::cells::CellAliasResolver;
 use buck2_core::cells::build_file_cell::BuildFileCell;
 use buck2_core::cells::cell_path::CellPath;
+use buck2_core::cells::cell_path_with_allowed_relative_dir::CellPathWithAllowedRelativeDir;
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::cells::paths::CellRelativePathBuf;
-use buck2_core::cells::CellAliasResolver;
 use buck2_core::package::PackageLabel;
 
+use crate::parse_import::RelativeImports;
 use crate::parse_import::parse_import;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Input)]
 enum PackageImportsError {
     #[error("Expected value to contain `=>`. Got `{0}`.")]
     MissingArrow(String),
@@ -84,7 +87,14 @@ impl PackageImplicitImports {
                 let (import, symbol_specs) = import_spec
                     .split_once("::")
                     .ok_or_else(|| PackageImportsError::MissingColons(import_spec.to_owned()))?;
-                let import_path = parse_import(&cell_alias_resolver, &root_path, import)?;
+                let relative_import_option = RelativeImports::Allow {
+                    current_dir_with_allowed_relative: &CellPathWithAllowedRelativeDir::new(
+                        root_path.clone(),
+                        None,
+                    ),
+                };
+                let import_path =
+                    parse_import(&cell_alias_resolver, relative_import_option, import)?;
                 // Package implicit imports are only going to be used for a top-level module in
                 // the same cell, so we can set that early.
                 let import_path = ImportPath::new_with_build_file_cells(import_path, cell_name)?;

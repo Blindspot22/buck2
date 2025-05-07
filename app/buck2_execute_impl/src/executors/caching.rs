@@ -16,15 +16,14 @@ use buck2_action_metadata_proto::REMOTE_DEP_FILE_KEY;
 use buck2_common::file_ops::TrackedFileDigest;
 use buck2_core::buck2_env;
 use buck2_core::execution_types::executor_config::RePlatformFields;
-use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_error::BuckErrorContext;
 use buck2_events::dispatch::span_async;
 use buck2_execute::digest::CasDigestToReExt;
 use buck2_execute::digest_config::DigestConfig;
-use buck2_execute::directory::directory_to_re_tree;
 use buck2_execute::directory::ActionDirectoryMember;
+use buck2_execute::directory::directory_to_re_tree;
 use buck2_execute::execute::action_digest_and_blobs::ActionDigestAndBlobs;
 use buck2_execute::execute::blobs::ActionBlobs;
 use buck2_execute::execute::cache_uploader::CacheUploadInfo;
@@ -33,6 +32,7 @@ use buck2_execute::execute::cache_uploader::IntoRemoteDepFile;
 use buck2_execute::execute::cache_uploader::UploadCache;
 use buck2_execute::execute::result::CommandExecutionResult;
 use buck2_execute::materialize::materializer::Materializer;
+use buck2_execute::re::client::ActionCacheWriteType;
 use buck2_execute::re::error::RemoteExecutionError;
 use buck2_execute::re::manager::ManagedRemoteExecutionClient;
 use derive_more::Display;
@@ -69,7 +69,6 @@ pub struct CacheUploader {
     artifact_fs: ArtifactFs,
     materializer: Arc<dyn Materializer>,
     re_client: ManagedRemoteExecutionClient,
-    re_use_case: RemoteExecutorUseCase,
     platform: RePlatformFields,
     max_bytes: Option<u64>,
     cache_upload_permission_checker: Arc<ActionCacheUploadPermissionChecker>,
@@ -80,7 +79,6 @@ impl CacheUploader {
         artifact_fs: ArtifactFs,
         materializer: Arc<dyn Materializer>,
         re_client: ManagedRemoteExecutionClient,
-        re_use_case: RemoteExecutorUseCase,
         platform: RePlatformFields,
         max_bytes: Option<u64>,
         cache_upload_permission_checker: Arc<ActionCacheUploadPermissionChecker>,
@@ -89,7 +87,6 @@ impl CacheUploader {
             artifact_fs,
             materializer,
             re_client,
-            re_use_case,
             platform,
             max_bytes,
             cache_upload_permission_checker,
@@ -143,7 +140,6 @@ impl CacheUploader {
                             vec![],
                             vec![],
                             action_digest_and_blobs.blobs.to_inlined_blobs(),
-                            self.re_use_case,
                         )
                         .await?;
 
@@ -173,8 +169,8 @@ impl CacheUploader {
                         .write_action_result(
                             digest,
                             result,
-                            self.re_use_case,
                             &self.platform.to_re_platform(),
+                            ActionCacheWriteType::LocalCacheUpload,
                         )
                         .await?;
 
@@ -254,7 +250,6 @@ impl CacheUploader {
                             vec![],
                             vec![],
                             remote_dep_file_action.blobs.to_inlined_blobs(),
-                            self.re_use_case,
                         )
                         .await?;
 
@@ -263,8 +258,8 @@ impl CacheUploader {
                         .write_action_result(
                             digest,
                             action_result,
-                            self.re_use_case,
                             &self.platform.to_re_platform(),
+                            ActionCacheWriteType::RemoteDepFile,
                         )
                         .await?;
 
@@ -293,7 +288,7 @@ impl CacheUploader {
     async fn check_upload_permission(&self) -> buck2_error::Result<Result<(), CacheUploadOutcome>> {
         let outcome = if let Err(reason) = self
             .cache_upload_permission_checker
-            .has_permission_to_upload_to_cache(self.re_use_case, &self.platform)
+            .has_permission_to_upload_to_cache(&self.re_client, &self.platform)
             .await?
         {
             Err(CacheUploadOutcome::Rejected(
@@ -316,7 +311,8 @@ impl CacheUploader {
         let mut output_files: Vec<TFile> = Vec::new();
         let mut output_directories: Vec<TDirectory2> = Vec::new();
 
-        for (output, value) in result.resolve_outputs(&self.artifact_fs) {
+        for output_result in result.resolve_outputs(&self.artifact_fs) {
+            let (output, value) = output_result?;
             match value.entry().as_ref() {
                 DirectoryEntry::Leaf(ActionDirectoryMember::File(f)) => {
                     output_files.push(TFile {
@@ -351,7 +347,6 @@ impl CacheUploader {
                                 }],
                                 vec![],
                                 vec![],
-                                self.re_use_case,
                             )
                             .await
                     };
@@ -380,7 +375,6 @@ impl CacheUploader {
                                 &action_blobs,
                                 output.path(),
                                 &d.dupe().as_immutable(),
-                                self.re_use_case,
                                 identity,
                                 digest_config,
                             )
@@ -417,7 +411,7 @@ impl CacheUploader {
                 .report
                 .std_streams
                 .clone()
-                .into_re(&self.re_client, self.re_use_case)
+                .into_re(&self.re_client, digest_config)
                 .await
                 .buck_error_context("Error accessing std_streams")
         };
@@ -525,7 +519,10 @@ impl CacheUploadOutcome {
             }
         };
         if !self.uploaded() && error_on_cache_upload {
-            Err(buck2_error::buck2_error!([], "cache_upload_failed"))
+            Err(buck2_error::buck2_error!(
+                buck2_error::ErrorTag::CacheUploadFailed,
+                "cache_upload_failed"
+            ))
         } else {
             Ok(self)
         }
@@ -545,6 +542,7 @@ enum CacheUploadRejectionReason {
 
 #[derive(Debug, buck2_error::Error)]
 #[error("Missing action result for dep file key `{0}`")]
+#[buck2(tag = Tier0)]
 struct DepFileReActionResultMissingError(String);
 
 #[async_trait]
@@ -593,7 +591,6 @@ impl UploadCache for CacheUploader {
             (false, None)
         };
 
-        // note uploads aren't attempted for local worker actions because we don't upload outputs for them so there is no action result
         let should_upload_dep_file =
             res.was_locally_executed() || res.was_remotely_executed() || res.was_action_cache_hit();
 

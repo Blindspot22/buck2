@@ -20,13 +20,13 @@ use buck2_execute::execute::request::OutputType;
 use buck2_execute::materialize::http::Checksum;
 use chrono::TimeZone;
 use chrono::Utc;
-use indexmap::indexset;
 use indexmap::IndexSet;
+use indexmap::indexset;
 use starlark::environment::MethodsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::values::none::NoneOr;
 use starlark::values::ValueTyped;
+use starlark::values::none::NoneOr;
 
 use crate::actions::impls::cas_artifact::ArtifactKind;
 use crate::actions::impls::cas_artifact::DirectoryKind;
@@ -34,6 +34,7 @@ use crate::actions::impls::cas_artifact::UnregisteredCasArtifactAction;
 use crate::actions::impls::download_file::UnregisteredDownloadFileAction;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(tag = Tier0)]
 enum CasArtifactError {
     #[error("Not a valid RE digest: `{0}`")]
     InvalidDigest(String),
@@ -55,6 +56,7 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] vpnless_url: NoneOr<&str>,
         #[starlark(require = named, default = NoneOr::None)] sha1: NoneOr<&str>,
         #[starlark(require = named, default = NoneOr::None)] sha256: NoneOr<&str>,
+        #[starlark(require = named, default = NoneOr::None)] size_bytes: NoneOr<u64>,
         #[starlark(require = named, default = false)] is_executable: bool,
         #[starlark(require = named, default = false)] is_deferrable: bool,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -70,6 +72,7 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
             indexset![output_artifact],
             UnregisteredDownloadFileAction::new(
                 checksum,
+                size_bytes.into_option(),
                 Arc::from(url),
                 vpnless_url.into_option().map(Arc::from),
                 is_executable,

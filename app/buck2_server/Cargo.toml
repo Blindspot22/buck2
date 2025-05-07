@@ -13,7 +13,6 @@ async-trait = { workspace = true }
 bincode = { workspace = true }
 buck2_re_configuration = { workspace = true }
 chrono = { workspace = true }
-const_format = { workspace = true }
 constant_time_eq = { workspace = true }
 crossbeam-channel = { workspace = true }
 flate2 = { workspace = true }
@@ -74,6 +73,7 @@ buck2_test = { workspace = true }
 buck2_util = { workspace = true }
 buck2_validation = { workspace = true }
 buck2_wrapper_common = { workspace = true }
+dashmap = { workspace = true }
 host_sharing = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]

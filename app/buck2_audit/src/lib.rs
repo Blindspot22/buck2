@@ -13,14 +13,15 @@
 use async_trait::async_trait;
 use buck2_cli_proto::GenericRequest;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
-use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonCommandOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::daemon::client::StdoutPartialResultHandler;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::streaming::StreamingCommand;
 use classpath::AuditClasspathCommand;
@@ -36,6 +37,7 @@ use crate::includes::AuditIncludesCommand;
 use crate::output::command::AuditOutputCommand;
 use crate::output::parse::AuditParseCommand;
 use crate::package_values::PackageValuesCommand;
+use crate::perf::AuditPerfCommand;
 use crate::prelude::AuditPreludeCommand;
 use crate::providers::AuditProvidersCommand;
 use crate::starlark::StarlarkCommand;
@@ -53,6 +55,7 @@ pub mod execution_platform_resolution;
 pub mod includes;
 pub mod output;
 pub mod package_values;
+pub mod perf;
 pub mod prelude;
 pub mod providers;
 pub mod starlark;
@@ -80,6 +83,8 @@ pub enum AuditCommand {
     Output(AuditOutputCommand),
     Parse(AuditParseCommand),
     PackageValues(PackageValuesCommand),
+    #[clap(subcommand, hide = true)]
+    Perf(AuditPerfCommand),
 }
 
 /// `buck2 audit` subcommands have a somewhat unique approach to make it really easy to
@@ -90,7 +95,7 @@ pub enum AuditCommand {
 ///
 /// Audit subcommands implement this trait so that we can handle the entire client side
 /// logic here and to support that serialization to the daemon.
-#[async_trait]
+#[async_trait(?Send)]
 pub trait AuditSubcommand: Send + Sync + 'static {
     fn common_opts(&self) -> &CommonCommandOptions;
 }
@@ -115,11 +120,12 @@ impl AuditCommand {
             AuditCommand::Output(cmd) => cmd,
             AuditCommand::Parse(cmd) => cmd,
             AuditCommand::PackageValues(cmd) => cmd,
+            AuditCommand::Perf(cmd) => cmd,
         }
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StreamingCommand for AuditCommand {
     const COMMAND_NAME: &'static str = "audit";
 
@@ -129,6 +135,7 @@ impl StreamingCommand for AuditCommand {
         buckd: &mut BuckdClientConnector,
         matches: BuckArgMatches<'_>,
         ctx: &mut ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let serialized = serde_json::to_string(&self)?;
 
@@ -143,6 +150,7 @@ impl StreamingCommand for AuditCommand {
                     context: Some(context),
                     serialized_opts: serialized,
                 },
+                events_ctx,
                 ctx.console_interaction_stream(self.console_opts()),
                 &mut StdoutPartialResultHandler,
             )

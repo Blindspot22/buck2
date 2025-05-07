@@ -20,9 +20,9 @@ use allocative::Allocative;
 use derive_more::Display;
 use ref_cast::RefCast;
 use relative_path::RelativePath;
-use serde::de::Error;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::Error;
 
 use crate::fs::paths::abs_path::AbsPath;
 use crate::fs::paths::abs_path::AbsPathBuf;
@@ -151,7 +151,7 @@ impl AbsNormPath {
         self.join_cow(path).into_owned()
     }
 
-    pub fn join_cow<'a, P: AsRef<ForwardRelativePath>>(&'a self, path: P) -> Cow<'a, AbsNormPath> {
+    pub fn join_cow<P: AsRef<ForwardRelativePath>>(&self, path: P) -> Cow<'_, AbsNormPath> {
         let path = path.as_ref();
         if path.is_empty() {
             Cow::Borrowed(self)
@@ -270,19 +270,20 @@ impl AbsNormPath {
 
     #[cfg(not(windows))]
     fn strip_prefix_impl(&self, base: &AbsNormPath) -> buck2_error::Result<&Path> {
-        self.0
-            .strip_prefix(&base.0)
-            .map_err(buck2_error::Error::from)
+        self.0.strip_prefix(&base.0)
     }
 
     #[cfg(windows)]
     fn strip_prefix_impl(&self, base: &AbsNormPath) -> buck2_error::Result<&Path> {
         if self.windows_prefix()? == base.windows_prefix()? {
-            self.strip_windows_prefix()?
-                .strip_prefix(base.strip_windows_prefix()?)
-                .map_err(buck2_error::Error::from)
+            Ok(self
+                .strip_windows_prefix()?
+                .strip_prefix(base.strip_windows_prefix()?)?)
         } else {
-            Err(buck2_error::buck2_error!([], "Path is not a prefix"))
+            Err(buck2_error::buck2_error!(
+                buck2_error::ErrorTag::InvalidAbsPath,
+                "Path is not a prefix"
+            ))
         }
     }
 
@@ -426,7 +427,7 @@ impl AbsNormPath {
         }
         let path_buf = stack.iter().collect::<PathBuf>();
 
-        Ok(AbsNormPathBuf::try_from(path_buf)?)
+        AbsNormPathBuf::try_from(path_buf)
     }
 
     /// Convert to an owned [`AbsNormPathBuf`].
@@ -467,12 +468,9 @@ impl AbsNormPath {
         use std::os::windows::ffi::OsStringExt;
         use std::path::Prefix;
 
-        match self
-            .0
-            .components()
-            .next()
-            .ok_or_else(|| buck2_error::buck2_error!([], "AbsPath is empty."))?
-        {
+        match self.0.components().next().ok_or_else(|| {
+            buck2_error::buck2_error!(buck2_error::ErrorTag::InvalidAbsPath, "AbsPath is empty.")
+        })? {
             std::path::Component::Prefix(prefix_component) => match prefix_component.kind() {
                 Prefix::Disk(disk) | Prefix::VerbatimDisk(disk) => {
                     Ok(OsString::from_wide(&[disk.into()]))
@@ -485,13 +483,13 @@ impl AbsNormPath {
                 }
                 Prefix::DeviceNS(device) => Ok(device.to_owned()),
                 prefix => Err(buck2_error::buck2_error!(
-                    [],
+                    buck2_error::ErrorTag::InvalidAbsPath,
                     "Unknown prefix kind: {:?}.",
                     prefix
                 )),
             },
             _ => Err(buck2_error::buck2_error!(
-                [],
+                buck2_error::ErrorTag::InvalidAbsPath,
                 "AbsPath doesn't have prefix."
             )),
         }
@@ -542,9 +540,9 @@ impl AbsNormPath {
     /// ```
     pub fn strip_windows_prefix(&self) -> buck2_error::Result<&Path> {
         let mut iter = self.0.iter();
-        let prefix = iter
-            .next()
-            .ok_or_else(|| buck2_error::buck2_error!([], "AbsPath is empty."))?;
+        let prefix = iter.next().ok_or_else(|| {
+            buck2_error::buck2_error!(buck2_error::ErrorTag::InvalidAbsPath, "AbsPath is empty.")
+        })?;
         let mut prefix = prefix.to_owned();
         // Strip leading path separator as well.
         if let Some(component) = iter.next() {
@@ -587,7 +585,7 @@ impl AbsNormPathBuf {
     }
 
     pub fn from(s: String) -> buck2_error::Result<Self> {
-        Ok(AbsNormPathBuf::try_from(s)?)
+        AbsNormPathBuf::try_from(s)
     }
 
     /// Creates a new 'AbsPathBuf' with a given capacity used to create the internal
@@ -653,8 +651,8 @@ impl AbsNormPathBuf {
     /// Note that this does not visit the filesystem to resolve `..`s. Instead, it cancels out the
     /// components directly, similar to `join_normalized`.
     /// ```
-    /// use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
     /// use buck2_core::fs::paths::RelativePath;
+    /// use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
     ///
     /// let prefix = if cfg!(windows) { "C:" } else { "" };
     ///
@@ -728,7 +726,7 @@ impl AbsNormPathBuf {
 }
 
 impl TryFrom<String> for AbsNormPathBuf {
-    type Error = anyhow::Error;
+    type Error = buck2_error::Error;
 
     /// no allocation conversion
     ///
@@ -751,22 +749,22 @@ impl TryFrom<String> for AbsNormPathBuf {
     ///     assert!(AbsNormPathBuf::try_from("c:/normalize/../bar".to_owned()).is_err());
     /// }
     /// ```
-    fn try_from(s: String) -> anyhow::Result<AbsNormPathBuf> {
+    fn try_from(s: String) -> buck2_error::Result<AbsNormPathBuf> {
         AbsNormPathBuf::try_from(OsString::from(s))
     }
 }
 
 impl TryFrom<OsString> for AbsNormPathBuf {
-    type Error = anyhow::Error;
+    type Error = buck2_error::Error;
 
     // no allocation
-    fn try_from(s: OsString) -> anyhow::Result<AbsNormPathBuf> {
+    fn try_from(s: OsString) -> buck2_error::Result<AbsNormPathBuf> {
         AbsNormPathBuf::try_from(PathBuf::from(s))
     }
 }
 
 impl TryFrom<PathBuf> for AbsNormPathBuf {
-    type Error = anyhow::Error;
+    type Error = buck2_error::Error;
 
     /// no allocation conversion
     ///
@@ -790,7 +788,7 @@ impl TryFrom<PathBuf> for AbsNormPathBuf {
     ///     assert!(AbsNormPathBuf::try_from(PathBuf::from("c:/normalize/../bar")).is_err());
     /// }
     /// ```
-    fn try_from(p: PathBuf) -> anyhow::Result<AbsNormPathBuf> {
+    fn try_from(p: PathBuf) -> buck2_error::Result<AbsNormPathBuf> {
         let p = AbsPathBuf::try_from(p)?;
         verify_abs_path(&p)?;
         Ok(AbsNormPathBuf(p))
@@ -798,9 +796,9 @@ impl TryFrom<PathBuf> for AbsNormPathBuf {
 }
 
 impl FromStr for AbsNormPathBuf {
-    type Err = anyhow::Error;
+    type Err = buck2_error::Error;
 
-    fn from_str(s: &str) -> anyhow::Result<Self> {
+    fn from_str(s: &str) -> buck2_error::Result<Self> {
         AbsNormPathBuf::try_from(s.to_owned())
     }
 }
@@ -909,6 +907,7 @@ fn verify_abs_path(path: &AbsPath) -> buck2_error::Result<()> {
 
 /// Errors from 'AbsPath' creation
 #[derive(buck2_error::Error, Debug)]
+#[buck2(input)]
 enum AbsNormPathError {
     #[error("expected a normalized path, but found a non-normalized path instead: `{0}`")]
     PathNotNormalized(AbsPathBuf),
@@ -916,6 +915,7 @@ enum AbsNormPathError {
 
 /// Errors from normalizing paths
 #[derive(buck2_error::Error, Debug)]
+#[buck2(input)]
 enum PathNormalizationError {
     #[error(
         "no such path: normalizing `{}` requires the parent directory of the root of `{}`",
@@ -931,9 +931,9 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
-    use crate::fs::paths::abs_norm_path::verify_abs_path_windows_part;
     use crate::fs::paths::abs_norm_path::AbsNormPath;
     use crate::fs::paths::abs_norm_path::AbsNormPathBuf;
+    use crate::fs::paths::abs_norm_path::verify_abs_path_windows_part;
     use crate::fs::paths::forward_rel_path::ForwardRelativePath;
 
     #[cfg(not(windows))]

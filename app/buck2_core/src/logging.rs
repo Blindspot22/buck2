@@ -10,12 +10,13 @@
 use std::sync::Arc;
 
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any_with_tag;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::Filtered;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::reload;
 use tracing_subscriber::reload::Handle;
-use tracing_subscriber::EnvFilter;
 
 use crate::buck2_env;
 
@@ -45,8 +46,11 @@ where
     R: Send + Sync + 'static,
 {
     fn update_log_filter(&self, raw: &str) -> buck2_error::Result<()> {
-        let filter = EnvFilter::try_new(raw).buck_error_context("Invalid log filter")?;
+        let filter = EnvFilter::try_new(raw)
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::LogFilter))
+            .buck_error_context("Invalid log filter")?;
         self.modify(|layer| *layer.filter_mut() = filter)
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::LogFilter))
             .buck_error_context("Error updating log filter")?;
         tracing::debug!("Log filter was updated to: `{}`", raw);
         Ok(())
@@ -65,6 +69,7 @@ where
 
     let filter = match buck2_env!(ENV_VAR)? {
         Some(v) => EnvFilter::try_new(v)
+            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::LogFilter))
             .with_buck_error_context(|| format!("Failed to parse ${} as a filter", ENV_VAR))?,
         // daemon_listener is all emitted before the client starts tailing, which is why we log
         // those by default.

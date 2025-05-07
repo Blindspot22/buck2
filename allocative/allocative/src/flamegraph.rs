@@ -7,20 +7,20 @@
  * of this source tree.
  */
 
-use std::collections::hash_map;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map;
 use std::fmt::Write as _;
 use std::mem;
 use std::ops::Index;
 use std::ops::IndexMut;
 
+use crate::Allocative;
 use crate::global_root::roots;
 use crate::key::Key;
 use crate::visitor::NodeKind;
 use crate::visitor::Visitor;
 use crate::visitor::VisitorImpl;
-use crate::Allocative;
 
 /// Node in flamegraph tree.
 ///
@@ -137,7 +137,7 @@ struct TreeRef<'a> {
     tree_id: TreeId,
 }
 
-impl<'a> TreeRef<'a> {
+impl TreeRef<'_> {
     fn write_flame_graph(&self, stack: &[&str], warnings: &mut String) -> FlameGraph {
         let mut flame_graph = FlameGraph::default();
         let tree = &self.trees[self.tree_id];
@@ -240,7 +240,7 @@ struct TreeStackRef<'t, 's> {
     stack: &'s mut TreeStack,
 }
 
-impl<'t, 's> TreeStackRef<'t, 's> {
+impl<'t> TreeStackRef<'t, '_> {
     fn current_data(&'t mut self) -> &'t mut TreeData {
         &mut self.trees[self.stack.tree]
     }
@@ -496,11 +496,11 @@ impl VisitorImpl for FlameGraphBuilder {
 
 #[cfg(test)]
 mod tests {
+    use crate::FlameGraph;
     use crate::flamegraph::FlameGraphBuilder;
     use crate::flamegraph::Tree;
     use crate::flamegraph::Trees;
     use crate::key::Key;
-    use crate::FlameGraph;
 
     #[test]
     fn test_empty() {

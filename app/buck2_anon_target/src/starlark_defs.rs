@@ -14,13 +14,13 @@ use std::fmt::Display;
 use allocative::Allocative;
 use buck2_build_api::artifact_groups::promise::PromiseArtifact;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_promise_artifact::StarlarkPromiseArtifact;
-use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_build_api::interpreter::rule_defs::context::ANALYSIS_ACTIONS_METHODS_ANON_TARGET;
+use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_interpreter::downstream_crate_starlark_defs::REGISTER_BUCK2_ANON_TARGETS_GLOBALS;
 use buck2_interpreter::starlark_promise::StarlarkPromise;
 use buck2_interpreter_for_build::rule::FrozenArtifactPromiseMappings;
-use buck2_interpreter_for_build::rule::FrozenRuleCallable;
+use buck2_interpreter_for_build::rule::FrozenStarlarkRuleCallable;
 use gazebo::prelude::VecExt;
 use starlark::any::ProvidesStaticType;
 use starlark::codemap::FileSpan;
@@ -30,12 +30,6 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::values::dict::Dict;
-use starlark::values::dict::UnpackDictEntries;
-use starlark::values::list::AllocList;
-use starlark::values::list_or_tuple::UnpackListOrTuple;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::AllocValue;
 use starlark::values::FrozenStringValue;
 use starlark::values::Heap;
@@ -44,12 +38,19 @@ use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueTyped;
+use starlark::values::dict::Dict;
+use starlark::values::dict::UnpackDictEntries;
+use starlark::values::list::AllocList;
+use starlark::values::list_or_tuple::UnpackListOrTuple;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark_map::small_map::SmallMap;
 
 use crate::anon_targets::AnonTargetKey;
 use crate::anon_targets::AnonTargetsRegistry;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 pub enum AnonTargetsError {
     #[error("artifact with name `{0}` was not found")]
     ArtifactNotFound(String),
@@ -91,7 +92,7 @@ impl<'v> StarlarkAnonTarget<'v> {
     }
 }
 
-impl<'v> Display for StarlarkAnonTarget<'v> {
+impl Display for StarlarkAnonTarget<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<anon target")?;
         if let Some(location) = &self.declaration_location {
@@ -102,7 +103,7 @@ impl<'v> Display for StarlarkAnonTarget<'v> {
     }
 }
 
-#[starlark_value(type = "anon_target", StarlarkTypeRepr, UnpackValue)]
+#[starlark_value(type = "AnonTarget", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkAnonTarget<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -184,7 +185,7 @@ struct StarlarkAnonTargets<'v> {
     declaration_location: Option<FileSpan>,
 }
 
-impl<'v> Display for StarlarkAnonTargets<'v> {
+impl Display for StarlarkAnonTargets<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<anon targets")?;
         if let Some(location) = &self.declaration_location {
@@ -195,7 +196,7 @@ impl<'v> Display for StarlarkAnonTargets<'v> {
     }
 }
 
-#[starlark_value(type = "anon_targets", StarlarkTypeRepr, UnpackValue)]
+#[starlark_value(type = "AnonTargets", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkAnonTargets<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -252,7 +253,7 @@ fn analysis_actions_methods_anon_target(builder: &mut MethodsBuilder) {
     fn anon_target<'v>(
         this: &AnalysisActions<'v>,
         // TODO(nga): this should be either positional or named, not both.
-        rule: ValueTyped<'v, FrozenRuleCallable>,
+        rule: ValueTyped<'v, FrozenStarlarkRuleCallable>,
         attrs: UnpackDictEntries<&'v str, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<StarlarkAnonTarget<'v>> {
@@ -277,7 +278,7 @@ fn analysis_actions_methods_anon_target(builder: &mut MethodsBuilder) {
         this: &AnalysisActions<'v>,
         // TODO(nga): this should be either positional or named, not both.
         rules: UnpackListOrTuple<(
-            ValueTyped<'v, FrozenRuleCallable>,
+            ValueTyped<'v, FrozenStarlarkRuleCallable>,
             UnpackDictEntries<&'v str, Value<'v>>,
         )>,
         eval: &mut Evaluator<'v, '_, '_>,

@@ -20,7 +20,6 @@ from aiohttp import web
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test
-
 from buck2.tests.e2e_util.helper.utils import filter_events
 
 
@@ -68,7 +67,13 @@ async def test_copies_files(buck: Buck) -> None:
     )
 
 
-@buck_test(data_dir="actions")
+@buck_test(
+    data_dir="actions",
+    # Because we use eden symlink redirection on MacOS
+    # this test resolves both links and points to nonexistent files,
+    # hence disabling eden
+    setup_eden=False,
+)
 async def test_symlink_dir(buck: Buck) -> None:
     result = await buck.build("//symlinked_dir:")
     build_report = result.get_build_report()
@@ -300,7 +305,10 @@ async def test_cas_artifact(buck: Buck) -> None:
         buckconfig.write("[buck2]\n")
         buckconfig.write("digest_algorithms = BLAKE3-KEYED,SHA1\n")
 
-    result = await buck.build("//cas_artifact:")
+    # Setting a use case override to test that it is not used.
+    result = await buck.build(
+        "//cas_artifact:", "-c", "buck2_re_client.override_use_case=missing_usecase"
+    )
 
     empty = result.get_build_report().output_for_target("//cas_artifact:empty")
     assert empty.read_text() == ""
@@ -320,9 +328,13 @@ async def test_invalid_command(buck: Buck) -> None:
         buck.build("//run_bad:run_invalid_command_local"),
         stderr_regex="non-zero exit code.*no exit code",
     )
+    if platform.system() == "Linux":
+        expected_error = "non-zero exit code"
+    else:
+        expected_error = "cannot find binary path"
     await expect_failure(
         buck.build("//run_bad:run_invalid_command_remote"),
-        stderr_regex="non-zero exit code",
+        stderr_regex=expected_error,
     )
 
 
@@ -455,3 +467,40 @@ async def test_action_invalidation_tracking(buck: Buck) -> None:
 
     assert invalidation_info
     assert invalidation_info[0]["changed_file"] == {}
+
+
+@buck_test(data_dir="actions")
+async def test_target_rule_type_name(buck: Buck) -> None:
+    await buck.build("//run:runs_simple_script", "//copy:file_uses_declared_output")
+
+    target_rule_type_name = await filter_events(
+        buck,
+        "Event",
+        "data",
+        "SpanEnd",
+        "data",
+        "ActionExecution",
+        "target_rule_type_name",
+    )
+
+    assert len(target_rule_type_name) == 2
+    assert "copy_file" in target_rule_type_name
+    assert "run_command" in target_rule_type_name
+
+    await expect_failure(
+        buck.build("//run_bad:run_odd_exit_code"),
+        stderr_regex="non-zero exit code 45",
+    )
+
+    target_rule_type_name = await filter_events(
+        buck,
+        "Event",
+        "data",
+        "SpanEnd",
+        "data",
+        "ActionExecution",
+        "target_rule_type_name",
+    )
+
+    assert len(target_rule_type_name) == 1
+    assert "run_odd_exit_code" in target_rule_type_name

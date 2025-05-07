@@ -22,6 +22,7 @@ use ref_cast::RefCast;
 use crate::fs::cwd;
 
 #[derive(buck2_error::Error, Debug)]
+#[buck2(input)]
 enum AbsPathError {
     #[error("expected an absolute path but got a relative path instead: `{}`", _0.display())]
     PathNotAbsolute(PathBuf),
@@ -139,7 +140,7 @@ impl PartialEq<AbsPathBuf> for &'_ AbsPath {
 }
 
 impl AbsPath {
-    pub fn new<'a, P: AsRef<Path> + ?Sized>(path: &'a P) -> buck2_error::Result<&'a AbsPath> {
+    pub fn new<P: AsRef<Path> + ?Sized>(path: &P) -> buck2_error::Result<&AbsPath> {
         // Wrapper function to make sure the lifetimes are right
         fn inner(path: &Path) -> buck2_error::Result<&AbsPath> {
             if path.is_absolute() {
@@ -245,7 +246,7 @@ impl AbsPathBuf {
 }
 
 impl TryFrom<PathBuf> for AbsPathBuf {
-    type Error = anyhow::Error;
+    type Error = buck2_error::Error;
 
     fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
         AbsPath::new(&path)?;
@@ -254,7 +255,7 @@ impl TryFrom<PathBuf> for AbsPathBuf {
 }
 
 impl TryFrom<String> for AbsPathBuf {
-    type Error = anyhow::Error;
+    type Error = buck2_error::Error;
 
     fn try_from(path: String) -> Result<Self, Self::Error> {
         AbsPathBuf::try_from(PathBuf::from(path))
@@ -262,9 +263,9 @@ impl TryFrom<String> for AbsPathBuf {
 }
 
 impl FromStr for AbsPathBuf {
-    type Err = anyhow::Error;
+    type Err = buck2_error::Error;
 
-    fn from_str(s: &str) -> anyhow::Result<AbsPathBuf> {
+    fn from_str(s: &str) -> buck2_error::Result<AbsPathBuf> {
         AbsPathBuf::try_from(s.to_owned())
     }
 }

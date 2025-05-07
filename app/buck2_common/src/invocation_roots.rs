@@ -47,7 +47,7 @@ impl InvocationRoots {
     pub fn paranoid_info_path(&self) -> buck2_error::Result<AbsPathBuf> {
         // Used in tests
         if let Some(p) = buck2_env!("BUCK2_PARANOID_PATH")? {
-            return Ok(AbsPathBuf::try_from(p.to_owned())?);
+            return AbsPathBuf::try_from(p.to_owned());
         }
 
         Ok(self

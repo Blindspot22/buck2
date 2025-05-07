@@ -10,8 +10,8 @@
 use allocative::Allocative;
 use dupe::Dupe;
 
-use crate::cells::cell_path::CellPathRef;
 use crate::cells::CellResolver;
+use crate::cells::cell_path::CellPathRef;
 use crate::fs::buck_out_path::BuckOutPathResolver;
 use crate::fs::buck_out_path::BuildArtifactPath;
 use crate::fs::project::ProjectRoot;
@@ -45,7 +45,10 @@ impl ArtifactFs {
         self.buck_out_path_resolver.unhashed_gen(path)
     }
 
-    pub fn resolve_build(&self, path: &BuildArtifactPath) -> ProjectRelativePathBuf {
+    pub fn resolve_build(
+        &self,
+        path: &BuildArtifactPath,
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         self.buck_out_path_resolver.resolve_gen(path)
     }
 
@@ -79,7 +82,7 @@ impl ArtifactFs {
     pub fn resolve_offline_output_cache_path(
         &self,
         path: &BuildArtifactPath,
-    ) -> ProjectRelativePathBuf {
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         self.buck_out_path_resolver.resolve_offline_cache(path)
     }
 

@@ -5,7 +5,7 @@
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 # of this source tree.
 
-load("@prelude//:alias.bzl", "alias_impl", "configured_alias_impl", "toolchain_alias_impl", "versioned_alias_impl")
+load("@prelude//:alias.bzl", "alias_impl", "configured_alias_impl", "versioned_alias_impl")
 load("@prelude//:command_alias.bzl", "command_alias_impl")
 load("@prelude//:export_file.bzl", "export_file_impl")
 load("@prelude//:filegroup.bzl", "filegroup_impl")
@@ -24,6 +24,7 @@ load("@prelude//apple/user:target_sdk_version_transition.bzl", "apple_test_targe
 load("@prelude//configurations:rules.bzl", _config_extra_attributes = "extra_attributes", _config_implemented_rules = "implemented_rules")
 load("@prelude//csharp:csharp.bzl", "csharp_library_impl", "prebuilt_dotnet_library_impl")
 load("@prelude//cxx:bitcode.bzl", "llvm_link_bitcode_impl")
+load("@prelude//cxx:cuda.bzl", "CudaCompileStyle")
 load("@prelude//cxx:cxx.bzl", "cxx_binary_impl", "cxx_library_impl", "cxx_precompiled_header_impl", "cxx_test_impl", "prebuilt_cxx_library_impl")
 load("@prelude//cxx:cxx_toolchain.bzl", "cxx_toolchain_extra_attributes", "cxx_toolchain_impl")
 load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxPlatformInfo", "CxxToolchainInfo")
@@ -91,6 +92,7 @@ load("@prelude//python:python.bzl", "PythonLibraryInfo")
 load("@prelude//python:python_binary.bzl", "python_binary_impl")
 load("@prelude//python:python_library.bzl", "python_library_impl")
 load("@prelude//python:python_needed_coverage_test.bzl", "python_needed_coverage_test_impl")
+load("@prelude//python:python_runtime_bundle.bzl", "PythonRuntimeBundleInfo", "python_runtime_bundle_impl")
 load("@prelude//python:python_test.bzl", "python_test_impl")
 load("@prelude//python_bootstrap:python_bootstrap.bzl", "PythonBootstrapSources", "python_bootstrap_binary_impl", "python_bootstrap_library_impl")
 load("@prelude//transitions:constraint_overrides.bzl", "constraint_overrides")
@@ -153,7 +155,7 @@ extra_implemented_rules = struct(
     sh_binary = sh_binary_impl,
     sh_test = sh_test_impl,
     test_suite = test_suite_impl,
-    toolchain_alias = toolchain_alias_impl,
+    toolchain_alias = alias_impl,
     versioned_alias = versioned_alias_impl,
     worker_tool = worker_tool,
 
@@ -211,6 +213,7 @@ extra_implemented_rules = struct(
     prebuilt_python_library = prebuilt_python_library_impl,
     python_binary = python_binary_impl,
     python_library = python_library_impl,
+    python_runtime_bundle = python_runtime_bundle_impl,
     python_test = python_test_impl,
     python_needed_coverage_test = python_needed_coverage_test_impl,
 
@@ -251,6 +254,7 @@ def _cxx_python_extension_attrs():
         # when coverage for that target is enabled by `exported_needs_coverage_instrumentation`
         # or by any of the target's dependencies.
         "coverage_instrumentation_compiler_flags": attrs.list(attrs.string(), default = []),
+        "cuda_compile_style": attrs.enum(CudaCompileStyle.values(), default = "mono"),
         "exported_needs_coverage_instrumentation": attrs.bool(default = False),
         "link_ordering": attrs.option(attrs.enum(LinkOrdering.values()), default = None),
         "link_whole": attrs.default_only(attrs.bool(default = True)),
@@ -329,16 +333,20 @@ def _python_executable_attrs():
             `string`s, or a further `string`-keyed dictionary.""",
         ),
         "native_link_strategy": attrs.option(attrs.enum(NativeLinkStrategy), default = None),
+        "opt_by_default_enabled": attrs.bool(default = False),
         "package_split_dwarf_dwp": attrs.bool(default = False),
         "par_style": attrs.option(attrs.string(), default = None),
         "resources": attrs.named_set(attrs.one_of(attrs.dep(), attrs.source(allow_directory = True)), sorted = True, default = []),
         "run_with_inplace": attrs.bool(default = False),
+        "runtime_bundle": attrs.option(attrs.dep(providers = [PythonRuntimeBundleInfo]), default = None),
+        "runtime_bundle_full": attrs.bool(default = False),
         "runtime_env": attrs.option(attrs.dict(key = attrs.string(), value = attrs.string()), default = None),
         "standalone_build_args": attrs.list(attrs.arg(), default = []),
         "static_extension_finder": attrs.source(default = "prelude//python/tools:static_extension_finder.py"),
         "static_extension_utils": attrs.source(default = "prelude//python/tools:static_extension_utils.cpp"),
         "strip_libpar": attrs.enum(StripLibparStrategy, default = "none"),
         "strip_stapsdt": attrs.bool(default = False),
+        "use_rust_make_par": attrs.bool(default = False),  # TODO(lorenarthur) Delete this when we change the default build style
         "_build_info": BUILD_INFO_ATTR,
         "_create_manifest_for_source_dir": _create_manifest_for_source_dir(),
         "_cxx_hacks": attrs.default_only(attrs.dep(default = "prelude//cxx/tools:cxx_hacks")),
@@ -349,6 +357,16 @@ def _python_executable_attrs():
     })
 
     return updated_attrs
+
+def _python_runtime_bundle_attrs():
+    return {
+        "include": attrs.string(doc = "Header files required for linking python extensions"),
+        "install_root": attrs.dep(doc = "The filegroup containing the runtime artifacts, all the paths are relative to this location"),
+        "libpython": attrs.string(doc = "libpyhon.so required at runtime for the python executable and native extensions."),
+        "py_bin": attrs.string(doc = "The runtime executable"),
+        "py_version": attrs.string(doc = "The version of python this represents"),
+        "stdlib": attrs.string(doc = "The python standard library"),
+    }
 
 def _python_test_attrs():
     test_attrs = _python_executable_attrs()
@@ -372,6 +390,7 @@ def _cxx_binary_and_test_attrs():
         # selected for coverage either in the target or in one
         # of the target's dependencies.
         "coverage_instrumentation_compiler_flags": attrs.list(attrs.string(), default = []),
+        "cuda_compile_style": attrs.enum(CudaCompileStyle.values(), default = "mono"),
         "distributed_thinlto_partial_split_dwarf": attrs.bool(default = False),
         "enable_distributed_thinlto": attrs.bool(default = False),
         "exported_needs_coverage_instrumentation": attrs.bool(default = False),
@@ -383,7 +402,6 @@ def _cxx_binary_and_test_attrs():
         "precompiled_header": attrs.option(attrs.dep(providers = [CPrecompiledHeaderInfo]), default = None),
         "resources": attrs.named_set(attrs.one_of(attrs.dep(), attrs.source(allow_directory = True)), sorted = True, default = []),
         "separate_debug_info": attrs.bool(default = False),
-        "standalone_extensions": attrs.option(attrs.bool(), default = None),
         "_build_info": BUILD_INFO_ATTR,
         "_cxx_hacks": attrs.dep(default = "prelude//cxx/tools:cxx_hacks"),
         "_cxx_toolchain": toolchains_common.cxx(),
@@ -431,6 +449,7 @@ inlined_extra_attributes = {
         # when coverage for that target is enabled by `exported_needs_coverage_instrumentation`
         # or by any of the target's dependencies.
         "coverage_instrumentation_compiler_flags": attrs.list(attrs.string(), default = []),
+        "cuda_compile_style": attrs.enum(CudaCompileStyle.values(), default = "mono"),
         "deps_query": attrs.option(attrs.query(), default = None),
         "exported_needs_coverage_instrumentation": attrs.bool(default = False),
         "extra_xcode_sources": attrs.list(attrs.source(allow_directory = True), default = []),
@@ -451,6 +470,7 @@ inlined_extra_attributes = {
         ),
         "resources": attrs.named_set(attrs.one_of(attrs.dep(), attrs.source(allow_directory = True)), sorted = True, default = []),
         "separate_debug_info": attrs.bool(default = False),
+        "stub": attrs.bool(default = False),
         "supports_header_symlink_subtarget": attrs.bool(default = False),
         "supports_python_dlopen": attrs.option(attrs.bool(), default = None),
         "supports_shlib_interfaces": attrs.bool(default = True),
@@ -464,7 +484,7 @@ inlined_extra_attributes = {
     "cxx_toolchain": cxx_toolchain_extra_attributes(is_toolchain_rule = False),
 
     # Generic rule to build from a command
-    "genrule": genrule_attributes(),
+    "genrule": genrule_attributes() | constraint_overrides.attributes,
 
     # Go
     "go_binary": {
@@ -587,6 +607,7 @@ inlined_extra_attributes = {
         "public_include_directories": attrs.set(attrs.string(), sorted = True, default = []),
         "public_system_include_directories": attrs.set(attrs.string(), sorted = True, default = []),
         "raw_headers": attrs.set(attrs.source(), sorted = True, default = []),
+        "stub": attrs.bool(default = False),
         "supports_lto": attrs.bool(default = False),
         "supports_python_dlopen": attrs.bool(default = True),
         "versioned_header_dirs": attrs.option(attrs.versioned(attrs.list(attrs.source(allow_directory = True))), default = None),
@@ -608,6 +629,7 @@ inlined_extra_attributes = {
     "python_binary": _python_binary_attrs(),
     #python bootstrap
     "python_bootstrap_binary": {
+        "copy_deps": attrs.bool(default = True),
         "deps": attrs.list(attrs.dep(providers = [PythonBootstrapSources]), default = []),
         "main": attrs.source(),
         "_exec_os_type": buck.exec_os_type_arg(),
@@ -641,6 +663,7 @@ inlined_extra_attributes = {
         test = attrs.dep(providers = [ExternalRunnerTestInfo]),
         **(re_test_common.test_args() | buck.inject_test_env_arg())
     ),
+    "python_runtime_bundle": _python_runtime_bundle_attrs(),
     "python_test": _python_test_attrs(),
     "remote_file": {
         "sha1": attrs.option(attrs.string(), default = None),
@@ -681,18 +704,20 @@ transitions = {
     "apple_test": apple_test_target_sdk_version_transition,
     "cxx_binary": constraint_overrides.transition,
     "cxx_test": constraint_overrides.transition,
+    "genrule": constraint_overrides.transition,
     "go_binary": go_binary_transition,
     "go_exported_library": go_exported_library_transition,
     "go_library": go_library_transition,
     "go_stdlib": go_stdlib_transition,
     "go_test": go_test_transition,
-    "python_binary": constraint_overrides.transition,
-    "python_test": constraint_overrides.transition,
+    "python_binary": constraint_overrides.python_transition,
+    "python_test": constraint_overrides.python_transition,
     "sh_test": constraint_overrides.transition,
 }
 
 toolchain_rule_names = [
     "apple_toolchain",
+    "swift_macro_toolchain",
     "swift_toolchain",
     "toolchain_alias",
 ]

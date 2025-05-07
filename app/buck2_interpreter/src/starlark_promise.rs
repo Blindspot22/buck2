@@ -14,7 +14,6 @@ use std::convert::Infallible;
 use std::mem;
 
 use allocative::Allocative;
-use buck2_error::starlark_error::from_starlark;
 use derivative::Derivative;
 use derive_more::Display;
 use starlark::any::ProvidesStaticType;
@@ -25,12 +24,6 @@ use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
-use starlark::values::list::AllocList;
-use starlark::values::list_or_tuple::UnpackListOrTuple;
-use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
-use starlark::values::type_repr::StarlarkTypeRepr;
-use starlark::values::typing::StarlarkCallable;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -40,6 +33,12 @@ use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
 use starlark::values::ValueTyped;
+use starlark::values::list::AllocList;
+use starlark::values::list_or_tuple::UnpackListOrTuple;
+use starlark::values::starlark_value;
+use starlark::values::starlark_value_as_type::StarlarkValueAsType;
+use starlark::values::type_repr::StarlarkTypeRepr;
+use starlark::values::typing::StarlarkCallable;
 
 /// A type that corresponds to a Rust promise.
 #[derive(
@@ -113,6 +112,7 @@ impl<'v> PromiseJoin<'v> {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum PromiseError {
     #[error("Can't .resolve on a promise produced with .map")]
     CantResolveMap,
@@ -121,9 +121,6 @@ enum PromiseError {
 }
 
 impl<'v> StarlarkPromise<'v> {
-    /// The result of calling `type()` on promise.
-    pub const TYPE: &'static str = "promise";
-
     /// Create a new unresolved promise.
     /// Must have [`StarlarkPromise::resolve`] called on it later.
     pub fn new_unresolved() -> Self {
@@ -170,8 +167,7 @@ impl<'v> StarlarkPromise<'v> {
         x: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> buck2_error::Result<Value<'v>> {
-        eval.eval_function(f.0, &[x], &[])
-            .map_err(|e| from_starlark(e).into())
+        Ok(eval.eval_function(f.0, &[x], &[])?)
     }
 
     pub fn map(
@@ -306,7 +302,7 @@ impl<'v> UnpackValue<'v> for &'v StarlarkPromise<'v> {
     }
 }
 
-#[starlark_value(type = StarlarkPromise::TYPE)]
+#[starlark_value(type = "Promise")]
 impl<'v> StarlarkValue<'v> for StarlarkPromise<'v> {
     fn get_methods() -> Option<&'static Methods> {
         static RES: MethodsStatic = MethodsStatic::new();
@@ -370,7 +366,7 @@ mod tests {
     #[display("{:?}", self)]
     struct Promises<'v>(RefCell<Vec<(String, ValueTyped<'v, StarlarkPromise<'v>>)>>);
 
-    #[starlark_value(type = "promises")]
+    #[starlark_value(type = "Promises")]
     impl<'v> StarlarkValue<'v> for Promises<'v> {}
 
     #[starlark_module]
@@ -396,7 +392,10 @@ mod tests {
                 if x.unpack_str() == Some("ok") {
                     Ok(())
                 } else {
-                    Err(buck2_error!([], "VALIDATE_FAILED"))
+                    Err(buck2_error!(
+                        buck2_error::ErrorTag::Tier0,
+                        "VALIDATE_FAILED"
+                    ))
                 }
             })?;
             Ok(NoneType)
@@ -421,10 +420,9 @@ mod tests {
             "test.bzl",
             content.to_owned(),
             &StarlarkFileType::Bzl.dialect(false),
-        )
-        .map_err(from_starlark)?;
+        )?;
         let mut eval = Evaluator::new(modu);
-        let res = eval.eval_module(ast, &globals).map_err(from_starlark)?;
+        let res = eval.eval_module(ast, &globals)?;
         let promises = get_promises(modu);
         for (key, promise) in promises.0.borrow().iter() {
             promise.resolve(modu.heap().alloc(key), &mut eval)?;

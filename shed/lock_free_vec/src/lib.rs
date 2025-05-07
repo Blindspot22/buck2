@@ -384,7 +384,7 @@ impl<'a, T, const SHARDS: usize> Iterator for Iter<'a, T, SHARDS> {
     }
 }
 
-impl<'a, T, const SHARDS: usize> ExactSizeIterator for Iter<'a, T, SHARDS> {}
+impl<T, const SHARDS: usize> ExactSizeIterator for Iter<'_, T, SHARDS> {}
 
 impl<'a, T, const SHARDS: usize> IntoIterator for &'a LockFreeVec<T, SHARDS> {
     type Item = &'a T;
@@ -403,8 +403,8 @@ mod tests {
 
     use allocative::FlameGraphBuilder;
 
-    use crate::buckets_for_max_capacity;
     use crate::LockFreeVec;
+    use crate::buckets_for_max_capacity;
 
     #[test]
     fn test_max_capacity() {

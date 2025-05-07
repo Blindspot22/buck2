@@ -22,6 +22,7 @@ use crate::attrs::attr_type::any::AnyAttrType;
 use crate::attrs::attr_type::arg::ArgAttrType;
 use crate::attrs::attr_type::bool::BoolAttrType;
 use crate::attrs::attr_type::configuration_dep::ConfigurationDepAttrType;
+use crate::attrs::attr_type::configuration_dep::ConfigurationDepKind;
 use crate::attrs::attr_type::configured_dep::ExplicitConfiguredDepAttrType;
 use crate::attrs::attr_type::dep::DepAttrTransition;
 use crate::attrs::attr_type::dep::DepAttrType;
@@ -39,6 +40,7 @@ use crate::attrs::attr_type::source::SourceAttrType;
 use crate::attrs::attr_type::split_transition_dep::SplitTransitionDepAttrType;
 use crate::attrs::attr_type::string::StringAttrType;
 use crate::attrs::attr_type::target_modifiers::TargetModifiersAttrType;
+use crate::attrs::attr_type::transition_dep::TransitionDepAttrType;
 use crate::attrs::attr_type::tuple::TupleAttrType;
 use crate::attrs::attr_type::visibility::VisibilityAttrType;
 use crate::attrs::attr_type::within_view::WithinViewAttrType;
@@ -68,6 +70,7 @@ pub mod source;
 pub mod split_transition_dep;
 pub mod string;
 pub mod target_modifiers;
+pub mod transition_dep;
 pub mod tuple;
 pub mod visibility;
 pub mod within_view;
@@ -105,6 +108,7 @@ pub enum AttrTypeInner {
     Query(QueryAttrType),
     Source(SourceAttrType),
     SplitTransitionDep(SplitTransitionDepAttrType),
+    TransitionDep(TransitionDepAttrType),
     String(StringAttrType),
     Enum(EnumAttrType),
     Label(LabelAttrType),
@@ -147,6 +151,7 @@ impl AttrType {
             AttrTypeInner::Enum(x) => x.fmt_with_arg(f, &arg()),
             AttrTypeInner::Source(_) => attr("source"),
             AttrTypeInner::SplitTransitionDep(_) => attr("split_transition_dep"),
+            AttrTypeInner::TransitionDep(_) => attr("transition_dep"),
             AttrTypeInner::String(_) => attr("string"),
             AttrTypeInner::Label(_) => attr("label"),
             AttrTypeInner::Visibility(_) => attr("visibility"),
@@ -206,9 +211,9 @@ impl AttrType {
         }))
     }
 
-    pub fn configuration_dep() -> Self {
+    pub fn configuration_dep(t: ConfigurationDepKind) -> Self {
         Self(Arc::new(AttrTypeInner2 {
-            inner: AttrTypeInner::ConfigurationDep(ConfigurationDepAttrType),
+            inner: AttrTypeInner::ConfigurationDep(ConfigurationDepAttrType(t)),
             may_have_queries: false,
         }))
     }
@@ -263,11 +268,14 @@ impl AttrType {
     ///
     /// If `required_providers` is non-empty, the dependency must return those providers
     /// from its implementation function. Otherwise an error will result at resolution time.
-    pub fn transition_dep(required_providers: ProviderIdSet, cfg: Arc<TransitionId>) -> Self {
+    pub fn transition_dep(
+        required_providers: ProviderIdSet,
+        cfg: Option<Arc<TransitionId>>,
+    ) -> Self {
         Self(Arc::new(AttrTypeInner2 {
-            inner: AttrTypeInner::Dep(DepAttrType::new(
+            inner: AttrTypeInner::TransitionDep(TransitionDepAttrType::new(
                 required_providers,
-                DepAttrTransition::Transition(cfg),
+                cfg,
             )),
             may_have_queries: false,
         }))
@@ -423,6 +431,7 @@ impl AttrType {
             | AttrTypeInner::Dep(_)
             | AttrTypeInner::Tuple(_)
             | AttrTypeInner::SplitTransitionDep(_)
+            | AttrTypeInner::TransitionDep(_)
             | AttrTypeInner::Label(_)
             | AttrTypeInner::Enum(_)
             | AttrTypeInner::Visibility(_)

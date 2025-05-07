@@ -9,9 +9,9 @@
 
 //! Implementation of the cli and query_* attr query language.
 
+use buck2_query_parser::Expr;
 use buck2_query_parser::parse_expr;
 use buck2_query_parser::spanned::Spanned;
-use buck2_query_parser::Expr;
 use futures::FutureExt;
 use gazebo::prelude::*;
 use gazebo::variants::VariantName;
@@ -117,7 +117,7 @@ impl<'e, Env: QueryEnvironment> QueryEvaluator<'e, Env> {
         async move { expr.span(self.eval_internal(&expr.value).await) }.boxed()
     }
 
-    pub async fn eval_query<'a>(
+    pub async fn eval_query(
         &self,
         query: &str,
     ) -> buck2_error::Result<QueryEvaluationValue<Env::Target>> {

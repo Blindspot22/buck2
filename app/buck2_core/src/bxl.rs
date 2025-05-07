@@ -8,6 +8,7 @@
  */
 
 use allocative::Allocative;
+use strong_hash::StrongHash;
 
 use crate::cells::build_file_cell::BuildFileCell;
 use crate::cells::cell_path::CellPath;
@@ -24,7 +25,8 @@ use crate::cells::paths::CellRelativePathBuf;
     derive_more::Display,
     Ord,
     PartialOrd,
-    Allocative
+    Allocative,
+    StrongHash
 )]
 #[display("{}", path)]
 pub struct BxlFilePath {
@@ -34,6 +36,7 @@ pub struct BxlFilePath {
 
 #[derive(Debug, buck2_error::Error)]
 #[error("Expected a cell path to a `.bxl` file, but got `{0}`")]
+#[buck2(tag = Input)]
 struct BxlPathError(CellPath);
 
 impl BxlFilePath {

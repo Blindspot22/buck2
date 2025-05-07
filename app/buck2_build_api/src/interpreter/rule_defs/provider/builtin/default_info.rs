@@ -15,7 +15,6 @@ use allocative::Allocative;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_build_api_derive::internal_provider;
-use buck2_error::starlark_error::from_starlark;
 use buck2_error::BuckErrorContext;
 use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
@@ -23,15 +22,6 @@ use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
-use starlark::values::dict::AllocDict;
-use starlark::values::dict::DictType;
-use starlark::values::dict::FrozenDictRef;
-use starlark::values::dict::UnpackDictEntries;
-use starlark::values::list::AllocList;
-use starlark::values::list::ListRef;
-use starlark::values::list::ListType;
-use starlark::values::list::UnpackList;
-use starlark::values::none::NoneOr;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::FreezeResult;
@@ -51,15 +41,25 @@ use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::dict::AllocDict;
+use starlark::values::dict::DictType;
+use starlark::values::dict::FrozenDictRef;
+use starlark::values::dict::UnpackDictEntries;
+use starlark::values::list::AllocList;
+use starlark::values::list::ListRef;
+use starlark::values::list::ListType;
+use starlark::values::list::UnpackList;
+use starlark::values::none::NoneOr;
 
+use crate as buck2_build_api;
 use crate::artifact_groups::ArtifactGroup;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
 use crate::interpreter::rule_defs::artifact_tagging::ArtifactTag;
-use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
-use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollection;
+use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use crate::interpreter::rule_defs::provider::ProviderCollection;
+use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollection;
 
 /// A provider that all rules' implementations must return
 ///
@@ -241,8 +241,7 @@ impl FrozenDefaultInfo {
                     starlark_artifact.dupe()
                 } else {
                     // This code path is for StarlarkPromiseArtifact. We have to create a `StarlarkArtifact` object here.
-                    let artifact_like = ValueAsArtifactLike::unpack_value(frozen_value.to_value())
-                        .map_err(from_starlark)?
+                    let artifact_like = ValueAsArtifactLike::unpack_value(frozen_value.to_value())?
                         .buck_error_context("Should be list of artifacts")?;
                     artifact_like.0.get_bound_starlark_artifact()?
                 },
@@ -378,6 +377,7 @@ impl PartialEq for FrozenDefaultInfo {
 }
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum DefaultOutputError {
     #[error("Cannot specify both `default_output` and `default_outputs`.")]
     ConflictingArguments,

@@ -18,9 +18,10 @@ use buck2_build_api::interpreter::rule_defs::provider::dependency::Dependency;
 use buck2_build_api::interpreter::rule_defs::resolved_macro::ResolvedStringWithMacros;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::soft_error;
-use buck2_error::starlark_error::from_starlark;
 use buck2_interpreter::types::configured_providers_label::StarlarkProvidersLabel;
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
+use buck2_node::attrs::attr_type::AttrType;
+use buck2_node::attrs::attr_type::AttrTypeInner;
 use buck2_node::attrs::attr_type::bool::BoolLiteral;
 use buck2_node::attrs::attr_type::dep::DepAttr;
 use buck2_node::attrs::attr_type::dep::DepAttrTransition;
@@ -32,18 +33,16 @@ use buck2_node::attrs::attr_type::one_of::OneOfAttrType;
 use buck2_node::attrs::attr_type::string::StringLiteral;
 use buck2_node::attrs::attr_type::tuple::TupleAttrType;
 use buck2_node::attrs::attr_type::tuple::TupleLiteral;
-use buck2_node::attrs::attr_type::AttrType;
-use buck2_node::attrs::attr_type::AttrTypeInner;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use gazebo::prelude::SliceExt;
+use starlark::values::UnpackValue;
+use starlark::values::Value;
 use starlark::values::dict::Dict;
 use starlark::values::dict::DictRef;
 use starlark::values::list::ListRef;
 use starlark::values::string::STRING_TYPE;
 use starlark::values::tuple::TupleRef;
-use starlark::values::UnpackValue;
-use starlark::values::Value;
 
 use crate::anon_target_attr::AnonTargetAttr;
 use crate::anon_targets::AnonAttrCtx;
@@ -60,7 +59,7 @@ impl AnonTargetAttrTypeCoerce for AttrType {
                 Some(s) => Ok(AnonTargetAttr::Bool(BoolLiteral(s))),
                 None => Err(AnonTargetCoercionError::type_error("bool", value).into()),
             },
-            AttrTypeInner::Int(_) => match i64::unpack_value(value).map_err(from_starlark)? {
+            AttrTypeInner::Int(_) => match i64::unpack_value(value)? {
                 Some(x) => Ok(AnonTargetAttr::Int(x)),
                 None => Err(AnonTargetCoercionError::type_error("int", value).into()),
             },
@@ -132,9 +131,7 @@ impl AnonTargetAttrTypeCoerce for AttrType {
                         id: promise_artifact.artifact.id.as_ref().clone(),
                         short_path: promise_artifact.short_path.clone(),
                     }))
-                } else if let Some(artifact_like) =
-                    ValueAsArtifactLike::unpack_value(value).map_err(from_starlark)?
-                {
+                } else if let Some(artifact_like) = ValueAsArtifactLike::unpack_value(value)? {
                     let artifact = artifact_like.0.get_bound_artifact()?;
                     Ok(AnonTargetAttr::Artifact(artifact))
                 } else {
@@ -146,13 +143,21 @@ impl AnonTargetAttrTypeCoerce for AttrType {
                     Err(AnonTargetCoercionError::type_error("artifact", value).into())
                 }
             }
-            AttrTypeInner::Arg(_) => match ResolvedStringWithMacros::from_value(value) {
-                Some(resolved_macro) => match resolved_macro.configured_macros() {
-                    Some(configured_macros) => Ok(AnonTargetAttr::Arg(configured_macros.clone())),
-                    None => Err(AnonTargetCoercionError::ArgNotAnonTargetCompatible.into()),
-                },
-                None => Err(AnonTargetCoercionError::type_error("resolved_macro", value).into()),
-            },
+            AttrTypeInner::Arg(_) => {
+                if let Some(resolved_macro) = ResolvedStringWithMacros::from_value(value) {
+                    match resolved_macro.configured_macros() {
+                        Some(configured_macros) => {
+                            Ok(AnonTargetAttr::Arg(configured_macros.clone()))
+                        }
+                        None => Err(AnonTargetCoercionError::ArgNotAnonTargetCompatible.into()),
+                    }
+                } else if let Some(s) = value.unpack_str() {
+                    // It's fine to use a string for attrs.arg()
+                    Ok(AnonTargetAttr::String(StringLiteral(ctx.intern_str(s))))
+                } else {
+                    Err(AnonTargetCoercionError::type_error("resolved_macro", value).into())
+                }
+            }
             AttrTypeInner::Label(_) => {
                 if let Some(label) = StarlarkProvidersLabel::from_value(value) {
                     Ok(AnonTargetAttr::Label(label.label().dupe()))
@@ -176,28 +181,38 @@ impl AnonTargetAttrTypeCoerce for AttrType {
 #[derive(Debug, buck2_error::Error)]
 pub(crate) enum AnonTargetCoercionError {
     #[error("Expected value of type `{0}`, got value with type `{1}` (value was `{2}`)")]
+    #[buck2(tag = Input)]
     TypeError(String, String, String),
     #[error("Used one_of with an empty list.")]
+    #[buck2(tag = Input)]
     OneOfEmpty,
     #[error("one_of fails, the errors against each alternative in turn were:\n{}", .0.map(|x| format!("{:#}", x)).join("\n"))]
+    #[buck2(tag = Input)]
     OneOfMany(Vec<buck2_error::Error>),
     #[error("enum called with `{0}`, only allowed: {}", .1.map(|x| format!("`{}`", x)).join(", "))]
+    #[buck2(tag = Input)]
     InvalidEnumVariant(String, Vec<String>),
     #[error("Cannot coerce value of type `{0}` to any: `{1}`")]
+    #[buck2(tag = Input)]
     CannotCoerceToAny(&'static str, String),
     #[error("Attr value of type `{0}` not supported")]
+    #[buck2(tag = Input)]
     AttrTypeNotSupported(String),
     #[error("Arg attribute must have `anon_target_compatible` set to `True`")]
+    #[buck2(tag = Input)]
     ArgNotAnonTargetCompatible,
     #[error("Internal error: exec dep is missing the execution platform resolution")]
+    #[buck2(tag = Tier0)]
     ExecDepMissingExecPlatformResolution,
     #[error(
         "Exec deps and the current anon target must have the same execution platform resolution. Exec dep's execution platform: ({0}), anon target's execution platform: ({1})"
     )]
+    #[buck2(tag = Input)]
     ExecDepPlatformMismatch(String, String),
     #[error(
         "`transition_dep`, and `toolchain_dep` are not supported. By design, anon targets do not support configurations/transitions."
     )]
+    #[buck2(tag = Input)]
     OnlyIdentityDepSupported,
 }
 
@@ -226,7 +241,7 @@ fn to_anon_target_any(value: Value, ctx: &AnonAttrCtx) -> buck2_error::Result<An
         Ok(AnonTargetAttr::None)
     } else if let Some(x) = value.unpack_bool() {
         Ok(AnonTargetAttr::Bool(BoolLiteral(x)))
-    } else if let Some(x) = i64::unpack_value(value).map_err(from_starlark)? {
+    } else if let Some(x) = i64::unpack_value(value)? {
         Ok(AnonTargetAttr::Int(x))
     } else if let Some(x) = DictRef::from_value(value) {
         Ok(AnonTargetAttr::Dict(

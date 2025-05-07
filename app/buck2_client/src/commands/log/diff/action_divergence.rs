@@ -7,15 +7,17 @@
  * of this source tree.
  */
 
+use buck2_client_ctx::client_ctx::BuckSubcommand;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
 use buck2_client_ctx::common::BuckArgMatches;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_data::ActionKey;
 use buck2_data::ActionName;
 use buck2_event_log::stream_value::StreamValue;
 use buck2_event_observer::action_util::get_action_digest;
-use buck2_event_observer::display::display_action_identity;
 use buck2_event_observer::display::TargetDisplayOptions;
+use buck2_event_observer::display::display_action_identity;
 use futures::Stream;
 use futures::TryStreamExt;
 use linked_hash_map::LinkedHashMap;
@@ -37,8 +39,8 @@ struct ActionExecutionData {
     output_tiny_digests: String,
 }
 
-fn get_action_execution_data<'a>(
-    event: &'a buck2_data::BuckEvent,
+fn get_action_execution_data(
+    event: &buck2_data::BuckEvent,
 ) -> Option<(ActionKey, ActionExecutionData)> {
     event.data.as_ref().and_then(|data| match data {
         buck2_data::buck_event::Data::SpanEnd(end) => {
@@ -73,16 +75,10 @@ async fn get_digest_map(
     let mut out = LinkedHashMap::new();
 
     while let Some(event) = events.try_next().await? {
-        match event {
-            StreamValue::Event(event) => match get_action_execution_data(&event) {
-                Some((key, action_execution_data)) => {
-                    out.insert(key, action_execution_data);
-                }
-                None => {
-                    continue;
-                }
-            },
-            _ => {}
+        if let StreamValue::Event(event) = event {
+            if let Some((key, action_execution_data)) = get_action_execution_data(&event) {
+                out.insert(key, action_execution_data);
+            }
         }
     }
     Ok(out)
@@ -126,43 +122,47 @@ fn print_divergence_msg(
     Ok(())
 }
 
-impl ActionDivergenceCommand {
-    pub fn exec(self, _matches: BuckArgMatches<'_>, ctx: ClientCommandContext<'_>) -> ExitResult {
-        ctx.instant_command_no_log("log-diff-action-divergence", |ctx| async move {
-            let (log_path1, log_path2) = self.diff_event_log.get(&ctx).await?;
+impl BuckSubcommand for ActionDivergenceCommand {
+    const COMMAND_NAME: &'static str = "log-diff-action-divergence";
 
-            let (invocation1, events1) = log_path1.unpack_stream().await?;
-            let (invocation2, events2) = log_path2.unpack_stream().await?;
+    async fn exec_impl(
+        self,
+        _matches: BuckArgMatches<'_>,
+        ctx: ClientCommandContext<'_>,
+        _events_ctx: &mut EventsCtx,
+    ) -> ExitResult {
+        let (log_path1, log_path2) = self.diff_event_log.get(&ctx).await?;
 
-            buck2_client_ctx::println!(
-                "Analyzing divergent actions between: \n{} and \n{}",
-                invocation1.display_command_line(),
-                invocation2.display_command_line()
-            )?;
+        let (invocation1, events1) = log_path1.unpack_stream().await?;
+        let (invocation2, events2) = log_path2.unpack_stream().await?;
 
-            let digest_map1 = get_digest_map(events1).await?;
-            let digest_map2 = get_digest_map(events2).await?;
+        buck2_client_ctx::println!(
+            "Analyzing divergent actions between: \n{} and \n{}",
+            invocation1.display_command_line(),
+            invocation2.display_command_line()
+        )?;
 
-            let mut divergence_found = false;
+        let digest_map1 = get_digest_map(events1).await?;
+        let digest_map2 = get_digest_map(events2).await?;
 
-            for (action2, ad2) in digest_map2 {
-                if let Some(ad1) = digest_map1.get(&action2).cloned() {
-                    if ad1.output_tiny_digests == ad2.output_tiny_digests {
-                        continue;
-                    }
-                    divergence_found = true;
-                    print_divergence_msg(&action2, Some(&ad1), &ad2)?;
-                } else {
-                    divergence_found = true;
-                    print_divergence_msg(&action2, None, &ad2)?;
+        let mut divergence_found = false;
+
+        for (action2, ad2) in digest_map2 {
+            if let Some(ad1) = digest_map1.get(&action2).cloned() {
+                if ad1.output_tiny_digests == ad2.output_tiny_digests {
+                    continue;
                 }
-                break;
+                divergence_found = true;
+                print_divergence_msg(&action2, Some(&ad1), &ad2)?;
+            } else {
+                divergence_found = true;
+                print_divergence_msg(&action2, None, &ad2)?;
             }
-            if !divergence_found {
-                buck2_client_ctx::println!("No divergent actions found.")?;
-            }
-            buck2_error::Ok(())
-        })
-        .into()
+            break;
+        }
+        if !divergence_found {
+            buck2_client_ctx::println!("No divergent actions found.")?;
+        }
+        ExitResult::success()
     }
 }

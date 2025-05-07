@@ -18,8 +18,6 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
-use starlark::values::list::UnpackList;
-use starlark::values::starlark_value;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
@@ -27,10 +25,13 @@ use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueTyped;
+use starlark::values::list::UnpackList;
+use starlark::values::starlark_value;
 
 use crate::bxl::starlark_defs::artifacts::ArtifactArg;
 use crate::bxl::starlark_defs::artifacts::LazyBuildArtifact;
 use crate::bxl::starlark_defs::context::BxlContext;
+use crate::bxl::starlark_defs::lazy_ctx::lazy_uquery_ctx::StarlarkLazyUqueryCtx;
 use crate::bxl::starlark_defs::providers_expr::ConfiguredProvidersLabelArg;
 use crate::bxl::starlark_defs::target_list_expr::ConfiguredTargetNodeArg;
 use crate::bxl::starlark_defs::target_list_expr::OwnedConfiguredTargetNodeArg;
@@ -39,9 +40,11 @@ use crate::bxl::starlark_defs::target_list_expr::TargetNodeOrTargetLabelOrStr;
 use crate::bxl::value_as_starlark_target_label::ValueAsStarlarkTargetLabel;
 
 pub(crate) mod lazy_cquery_ctx;
+pub(crate) mod lazy_uquery_ctx;
 pub(crate) mod operation;
 
 #[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
 enum BxlBuildArtifactError {
     #[error(
         "`ctx.lazy.build_artifact()` does not accept declared artifact {0}. Use `ctx.output.ensure()` instead."
@@ -216,6 +219,13 @@ fn lazy_ctx_methods(builder: &mut MethodsBuilder) {
         Ok(StarlarkLazy::new_unconfigured_target_node(expr))
     }
 
+    /// Gets the lazy uquery context.
+    fn uquery<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyCtx,
+    ) -> starlark::Result<StarlarkLazyUqueryCtx> {
+        Ok(StarlarkLazyUqueryCtx::new())
+    }
+
     /// Gets the lazy cquery context.
     fn cquery<'v>(
         this: &'v StarlarkLazyCtx,
@@ -240,8 +250,8 @@ fn lazy_ctx_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<StarlarkLazy> {
         match artifact {
             ArtifactArg::DeclaredArtifact(_) => {
-                return Err(BxlBuildArtifactError::NotSupportDeclaredArtifact(
-                    artifact.to_string(),
+                return Err(buck2_error::Error::from(
+                    BxlBuildArtifactError::NotSupportDeclaredArtifact(artifact.to_string()),
                 )
                 .into());
             }

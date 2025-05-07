@@ -11,104 +11,11 @@ load(
     "Toolchain",  # @unused Used as type
 )
 
-def to_term_args(data: typing.Any) -> cmd_args:
-    """ convert nested lists/tuple/map data structure to Erlang Term cmd_args
-    """
-
-    return cmd_args(
-        cmd_args([
-            convert(data),
-            ".",
-        ], delimiter = ""),
-        "",
-    )
-
-# paths
-def app_file(ctx: AnalysisContext) -> str:
-    return paths.join(beam_dir(ctx), ctx.attrs.name + ".app")
-
-def beam_dir(ctx: AnalysisContext) -> str:
-    return paths.join(ctx.attrs.name, "ebin")
-
-def beam_path(ctx: AnalysisContext, src: Artifact) -> str:
-    return paths.join(beam_dir(ctx), paths.replace_extension(src.basename, ".beam"))
-
-def linktree() -> str:
-    return "linktree"
-
-build_paths = struct(
-    app_file = app_file,
-    beam_dir = beam_dir,
-    beam_path = beam_path,
-    linktree = linktree,
-)
-
-def convert(data: typing.Any, ignore_artifacts: bool = False) -> cmd_args:
-    """ converts a lists/tuple/map data structure to a sub-term that can be embedded in another to_term_args or convert
-    """
-    if type(data) == "list":
-        return convert_list(data)
-    elif type(data) == "tuple":
-        return convert_list(list(data), ob = "{", cb = "}")
-    elif type(data) == "dict":
-        return convert_dict(data)
-    elif type(data) == "string":
-        return convert_string(data)
-    elif type(data) == "cmd_args":
-        return data
-    elif type(data) == "bool":
-        return convert_bool(data)
-
-    return cmd_args(
-        cmd_args(["\"", data, "\""], delimiter = ""),
-        ignore_artifacts = ignore_artifacts,
-    )
-
-# internal
-def convert_list(ls: list, ob: str = "[", cb: str = "]") -> cmd_args:
-    args = []
-    args.append(ob)
-    if len(ls) >= 1:
-        args.append(cmd_args([
-            convert(ls[0]),
-        ], delimiter = ""))
-        for item in ls[1:]:
-            args.append(cmd_args([
-                ",",
-                convert(item),
-            ], delimiter = ""))
-    args.append(cb)
-    return cmd_args(args)
-
-def convert_dict(dt: dict) -> cmd_args:
-    args = []
-    args.append("#{")
-    items = list(dt.items())
-    if len(items) >= 1:
-        k, v = items[0]
-        args.append(cmd_args([
-            convert(k),
-            "=>",
-            convert(v),
-        ], delimiter = ""))
-        for k, v in items[1:]:
-            args.append(cmd_args([
-                ",",
-                convert(k),
-                "=>",
-                convert(v),
-            ], delimiter = ""))
-    args.append("}")
-    return cmd_args(args)
-
-def convert_string(st: str) -> cmd_args:
-    return cmd_args(cmd_args(["\"", st.replace("\"", "\\\""), "\""], delimiter = ""))
-
-def convert_bool(bl: bool) -> cmd_args:
-    if bl:
-        return cmd_args(["true"])
+def app_name(ctx: AnalysisContext) -> str:
+    if ctx.attrs.app_name == None:
+        return ctx.attrs.name
     else:
-        return cmd_args(["false"])
+        return ctx.attrs.app_name
 
 # `build_environments` is a `dict[str, BuildEnvironment]`.
 def multidict_projection(build_environments: dict[str, typing.Any], field_name: str) -> dict:
@@ -145,7 +52,7 @@ def _file_mapping_impl(ctx: AnalysisContext) -> list[Provider]:
         for file in files:
             target_path = paths.normalize(target_path)
             out_path = paths.normalize(paths.join(target_path, file.basename))
-            out = ctx.actions.copy_file(
+            out = ctx.actions.symlink_file(
                 out_path,
                 file,
             )

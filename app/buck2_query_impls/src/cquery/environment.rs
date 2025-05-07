@@ -19,27 +19,27 @@ use buck2_node::configured_universe::CqueryUniverse;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::configured_node_ref::ConfiguredTargetNodeRefNode;
 use buck2_node::nodes::configured_node_ref::ConfiguredTargetNodeRefNodeDeps;
-use buck2_query::query::environment::deps;
 use buck2_query::query::environment::QueryEnvironment;
 use buck2_query::query::environment::QueryEnvironmentAsNodeLookup;
 use buck2_query::query::environment::TraversalFilter;
+use buck2_query::query::environment::deps;
 use buck2_query::query::graph::dfs::dfs_postorder;
 use buck2_query::query::graph::successors::AsyncChildVisitor;
 use buck2_query::query::syntax::simple::eval::error::QueryError;
 use buck2_query::query::syntax::simple::eval::file_set::FileSet;
 use buck2_query::query::syntax::simple::eval::set::TargetSet;
-use buck2_query::query::syntax::simple::functions::docs::QueryEnvironmentDescription;
 use buck2_query::query::syntax::simple::functions::DefaultQueryFunctionsModule;
 use buck2_query::query::syntax::simple::functions::HasModuleDescription;
+use buck2_query::query::syntax::simple::functions::docs::QueryEnvironmentDescription;
 use buck2_query::query::traversal::async_depth_first_postorder_traversal;
 use buck2_query::query::traversal::async_depth_limited_traversal;
 use dice::DiceComputations;
 use tracing::warn;
 
-use crate::uquery::environment::allbuildfiles;
-use crate::uquery::environment::rbuildfiles;
 use crate::uquery::environment::QueryLiterals;
 use crate::uquery::environment::UqueryDelegate;
+use crate::uquery::environment::allbuildfiles;
+use crate::uquery::environment::rbuildfiles;
 
 /// CqueryDelegate resolves information needed by the QueryEnvironment.
 #[async_trait]
@@ -56,7 +56,7 @@ pub(crate) trait CqueryDelegate: Send + Sync {
         target: &TargetLabel,
     ) -> buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>>;
 
-    fn ctx<'a>(&'a self) -> DiceComputations<'a>;
+    fn ctx(&self) -> DiceComputations<'_>;
 }
 
 pub(crate) struct CqueryEnvironment<'c> {
@@ -117,7 +117,7 @@ impl<'c> CqueryEnvironment<'c> {
 }
 
 #[async_trait]
-impl<'c> QueryEnvironment for CqueryEnvironment<'c> {
+impl QueryEnvironment for CqueryEnvironment<'_> {
     type Target = ConfiguredTargetNode;
 
     async fn get_node(

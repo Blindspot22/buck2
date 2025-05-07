@@ -19,10 +19,10 @@ pub use bounding::Bounded;
 pub use padding::Padded;
 pub use splitting::Split;
 
-pub use crate::components::draw_horizontal::DrawHorizontal;
-pub use crate::components::draw_vertical::DrawVertical;
 use crate::Dimensions;
 use crate::Lines;
+pub use crate::components::draw_horizontal::DrawHorizontal;
+pub use crate::components::draw_vertical::DrawVertical;
 
 pub mod alignment;
 mod blank;
@@ -77,19 +77,19 @@ impl<C: Component> Component for Box<C> {
     }
 }
 
-impl<'a> Component for &'a dyn Component {
+impl Component for &dyn Component {
     fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
         (**self).draw_unchecked(dimensions, mode)
     }
 }
 
-impl<'a> Component for &'a (dyn Component + Send) {
+impl Component for &(dyn Component + Send) {
     fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
         (**self).draw_unchecked(dimensions, mode)
     }
 }
 
-impl<'a, C: Component> Component for &'a C {
+impl<C: Component> Component for &C {
     fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
         (**self).draw_unchecked(dimensions, mode)
     }

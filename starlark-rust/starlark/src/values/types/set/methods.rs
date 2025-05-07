@@ -21,21 +21,21 @@ use std::mem;
 
 use either::Either;
 use starlark_derive::starlark_module;
-use starlark_map::small_set::SmallSet;
 use starlark_map::Hashed;
+use starlark_map::small_set::SmallSet;
 use starlark_syntax::value_error;
 
 use crate as starlark;
 use crate::environment::MethodsBuilder;
+use crate::values::Heap;
+use crate::values::UnpackValue;
+use crate::values::Value;
+use crate::values::ValueOfUnchecked;
 use crate::values::none::NoneType;
 use crate::values::set::refs::SetMut;
 use crate::values::set::refs::SetRef;
 use crate::values::set::value::SetData;
 use crate::values::typing::StarlarkIter;
-use crate::values::Heap;
-use crate::values::UnpackValue;
-use crate::values::Value;
-use crate::values::ValueOfUnchecked;
 
 enum SetFromValue<'v> {
     Set(SmallSet<Value<'v>>),
@@ -47,14 +47,15 @@ impl<'v> SetFromValue<'v> {
         value: ValueOfUnchecked<'v, StarlarkIter<Value<'v>>>,
         heap: &'v Heap,
     ) -> crate::Result<Self> {
-        if let Some(v) = SetRef::unpack_value_opt(value.get()) {
-            Ok(SetFromValue::Ref(v))
-        } else {
-            let mut set = SmallSet::default();
-            for elem in value.get().iterate(heap)? {
-                set.insert_hashed(elem.get_hashed()?);
+        match SetRef::unpack_value_opt(value.get()) {
+            Some(v) => Ok(SetFromValue::Ref(v)),
+            _ => {
+                let mut set = SmallSet::default();
+                for elem in value.get().iterate(heap)? {
+                    set.insert_hashed(elem.get_hashed()?);
+                }
+                Ok(SetFromValue::Set(set))
             }
-            Ok(SetFromValue::Set(set))
         }
     }
 
@@ -381,14 +382,15 @@ pub(crate) fn set_methods(builder: &mut MethodsBuilder) {
         heap: &'v Heap,
     ) -> starlark::Result<bool> {
         let other_var;
-        let other = if let Some(other) = SetRef::unpack_value_opt(other.get()) {
-            if this.aref.content.len() < other.aref.content.len() {
-                return Ok(false);
+        let other = match SetRef::unpack_value_opt(other.get()) {
+            Some(other) => {
+                if this.aref.content.len() < other.aref.content.len() {
+                    return Ok(false);
+                }
+                other_var = other;
+                Either::Left(other_var.aref.content.iter_hashed().map(|v| Ok(v.copied())))
             }
-            other_var = other;
-            Either::Left(other_var.aref.content.iter_hashed().map(|v| Ok(v.copied())))
-        } else {
-            Either::Right(other.get().iterate(heap)?.map(|v| v.get_hashed()))
+            _ => Either::Right(other.get().iterate(heap)?.map(|v| v.get_hashed())),
         };
 
         for elem in other {
