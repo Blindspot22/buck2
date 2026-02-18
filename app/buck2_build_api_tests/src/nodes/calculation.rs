@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -15,13 +16,13 @@ use buck2_core::build_file_path::BuildFilePath;
 use buck2_core::bzl::ImportPath;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
-use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::package::PackageLabel;
 use buck2_core::plugins::PluginKindSet;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_core::target::name::TargetName;
+use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_interpreter_for_build::interpreter::calculation::InterpreterResultsKey;
 use buck2_interpreter_for_build::super_package::package_value::SuperPackageValuesImpl;
 use buck2_node::attrs::attr::Attribute;
@@ -56,7 +57,7 @@ use starlark::collections::SmallMap;
 use starlark_map::smallmap;
 
 #[tokio::test]
-async fn test_get_node() -> anyhow::Result<()> {
+async fn test_get_node() -> buck2_error::Result<()> {
     let cfg = ConfigurationData::testing_new();
     let pkg = PackageLabel::testing_parse("cell//foo/bar");
 
@@ -135,7 +136,8 @@ async fn test_get_node() -> anyhow::Result<()> {
     let computations = DiceBuilder::new()
         .mock_and_return(InterpreterResultsKey(pkg), Ok(Arc::new(eval_result)))
         .mock_and_return(ExecutionPlatformsKey, Ok(None))
-        .build(data)?;
+        .build(data)
+        .unwrap();
     let mut computations = computations.commit().await;
 
     let node = computations.get_target_node(&label1).await?;

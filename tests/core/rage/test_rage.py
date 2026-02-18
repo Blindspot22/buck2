@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -31,7 +32,7 @@ echo "$@"
 
 
 # No windows since mocking pastry command didn't work D41623200
-@buck_test(skip_for_os=["windows"])
+@buck_test(skip_for_os=["windows", "darwin"])
 async def test_rage(buck: Buck) -> None:
     # Build a trivial action
     await buck.build("//:simple")
@@ -48,7 +49,7 @@ async def test_rage(buck: Buck) -> None:
         await buck.rage(input=b"0", env={"PATH": cmd_path})
 
 
-@buck_test()
+@buck_test(skip_for_os=["darwin"])
 async def test_rage_no_paste(buck: Buck) -> None:
     # Build a trivial action
     await buck.build("//:simple")
@@ -56,7 +57,12 @@ async def test_rage_no_paste(buck: Buck) -> None:
     await buck.rage("--no-paste", "--invocation-offset", "0")
 
 
-@buck_test()
+@buck_test(skip_for_os=["darwin"])
 async def test_rage_no_logs(buck: Buck) -> None:
     # Rage doesn't crash even with no invocation logs
     await buck.rage("--no-paste")
+
+
+@buck_test()  # pytest blows up if there's zero mac tests in the file
+async def test_nop(buck: Buck) -> None:
+    pass

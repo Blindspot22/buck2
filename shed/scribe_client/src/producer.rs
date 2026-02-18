@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! A producer of Scribe messages, which connects to a remote Scribe daemon and sends messages to it.
@@ -638,14 +639,14 @@ impl From<WriteError> for anyhow::Error {
             val.retry_count
         );
         let error = match val.first_message_error {
-            Some(e) => error.context(format!("message error: {:?}", e)),
+            Some(e) => error.context(format!("message error: {e:?}")),
             None => error,
         };
         match val.first_request_error {
             Some(e) => {
                 let error = error.context(format!("request error: {:?}", e.error));
                 match e.refresh_error {
-                    Some(re) => error.context(format!("connection refresh error: {:?}", re)),
+                    Some(re) => error.context(format!("connection refresh error: {re:?}")),
                     None => error,
                 }
             }
@@ -814,7 +815,7 @@ mod tests {
         producer.offer(message);
         producer.run_once().await.expect("write failure");
         let counters = producer.export_counters();
-        println!("counters: {:?}", counters);
+        println!("counters: {counters:?}");
         assert_eq!(counters.successes, 1);
         assert_eq!(counters.failures(), 0);
     }
@@ -906,7 +907,7 @@ mod tests {
         }
         producer.run_once().await.expect("write failure");
         let counters = producer.export_counters();
-        println!("counters: {:?}", counters);
+        println!("counters: {counters:?}");
         assert_eq!(counters.successes, 3);
         assert_eq!(counters.failures(), 2);
     }

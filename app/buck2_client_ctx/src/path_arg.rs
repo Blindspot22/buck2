@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Display;
@@ -12,8 +13,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::working_dir::AbsWorkingDir;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::working_dir::AbsWorkingDir;
 use serde::Deserialize;
 use serde::Serialize;
 

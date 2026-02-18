@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@fbcode_macros//build_defs:sanitizers.bzl", "sanitizers")
 load("@prelude//:asserts.bzl", "asserts")
@@ -19,6 +20,7 @@ def _run_cfg_constructor(test_refs: TestRefs, target_modifiers: list[str] | None
         rule_name = "_dummy",
         aliases = ALIASES,
         extra_data = struct(),
+        configuring_exec_dep = False,
     )
     refs = {ref: test_refs.get(ref) for ref in refs}
     return cfg_constructor_post_constraint_analysis(refs = refs, params = params)
@@ -30,7 +32,7 @@ def _impl(ctx: bxl.Context):
     platform = _run_cfg_constructor(test_refs, target_modifiers = None)
     asserts.true(test_refs.make_cfg([sanitizers.get_sanitizer_constraint(sanitizer)]), platform.configuration)
 
-    nosan = "ovr_config//build_mode/constraints:no-san"
+    nosan = "ovr_config//build_mode:sanitizer_type[no-san]"
     platform = _run_cfg_constructor(test_refs, target_modifiers = [nosan])
     asserts.true(test_refs.make_cfg([nosan]), platform.configuration)
 

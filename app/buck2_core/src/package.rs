@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
@@ -41,26 +42,29 @@
 pub mod package_relative_path;
 pub mod source_path;
 
+// Re-export for use in submodules
 use std::hash::Hash;
 use std::hash::Hasher;
 
 use allocative::Allocative;
+pub(crate) use buck2_fs::paths::fmt::quoted_display;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_util::hash::BuckHasher;
 use derive_more::Display;
 use dupe::Dupe;
 use equivalent::Equivalent;
+use pagable::Pagable;
 use serde::Serialize;
 use serde::Serializer;
 use static_interner::Intern;
-use static_interner::Interner;
+use static_interner::interner;
 use strong_hash::StrongHash;
 
 use crate::cells::cell_path::CellPath;
 use crate::cells::cell_path::CellPathRef;
 use crate::cells::name::CellName;
 use crate::cells::paths::CellRelativePath;
-use crate::fs::paths::fmt::quoted_display;
-use crate::fs::paths::forward_rel_path::ForwardRelativePath;
+use crate::pattern::pattern::Modifiers;
 
 /// A 'Package' as defined above.
 ///
@@ -80,7 +84,8 @@ use crate::fs::paths::forward_rel_path::ForwardRelativePath;
 /// a valid `PackageLabel` is the `CellPath` that points to a folder containing a `BUCK` file.
 /// e.g. `root//path/to/package` is a valid `PackageLabel` if `root//path/to/package/BUCK` exists.
 #[derive(
-    Copy, Clone, Dupe, Debug, Display, Eq, PartialEq, Hash, Ord, PartialOrd, Allocative, StrongHash
+    Copy, Clone, Dupe, Debug, Display, Eq, PartialEq, Hash, Ord, PartialOrd, Allocative,
+    StrongHash, Pagable
 )]
 pub struct PackageLabel(Intern<PackageLabelData>);
 
@@ -90,7 +95,15 @@ impl Serialize for PackageLabel {
     }
 }
 
-#[derive(Debug, Display, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash)]
+#[derive(Dupe, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
+pub struct PackageLabelWithModifiers {
+    pub package: PackageLabel,
+    pub modifiers: Modifiers,
+}
+
+#[derive(
+    Debug, Display, Eq, PartialEq, Ord, PartialOrd, Allocative, Pagable, StrongHash
+)]
 struct PackageLabelData(CellPath);
 
 #[derive(Hash, Eq, PartialEq)]
@@ -105,7 +118,7 @@ impl<'a> From<PackageLabelDataRef<'a>> for PackageLabelData {
 }
 
 impl PackageLabelData {
-    fn as_ref(&self) -> PackageLabelDataRef {
+    fn as_ref(&self) -> PackageLabelDataRef<'_> {
         PackageLabelDataRef {
             path: self.0.as_ref(),
         }
@@ -125,17 +138,17 @@ impl Equivalent<PackageLabelData> for PackageLabelDataRef<'_> {
     }
 }
 
-static INTERNER: Interner<PackageLabelData, BuckHasher> = Interner::new();
+interner!(INTERNER, BuckHasher, PackageLabelData);
 
 impl PackageLabel {
     #[inline]
-    pub fn new(cell: CellName, path: &CellRelativePath) -> Self {
+    pub fn new(cell: CellName, path: &CellRelativePath) -> buck2_error::Result<Self> {
         PackageLabel::from_cell_path(CellPathRef::new(cell, path))
     }
 
     #[inline]
-    pub fn from_cell_path(path: CellPathRef) -> Self {
-        PackageLabel(INTERNER.intern(PackageLabelDataRef { path }))
+    pub fn from_cell_path(path: CellPathRef) -> buck2_error::Result<Self> {
+        Ok(PackageLabel(INTERNER.intern(PackageLabelDataRef { path })))
     }
 
     #[inline]
@@ -154,20 +167,23 @@ impl PackageLabel {
     }
 
     #[inline]
-    pub fn as_cell_path(&self) -> CellPathRef {
+    pub fn as_cell_path(&self) -> CellPathRef<'_> {
         self.0.0.as_ref()
     }
 
-    pub fn join(&self, path: &ForwardRelativePath) -> Self {
+    pub fn join(&self, path: &ForwardRelativePath) -> buck2_error::Result<Self> {
         if path.is_empty() {
-            self.dupe()
+            Ok(self.dupe())
         } else {
             PackageLabel::from_cell_path(self.as_cell_path().join(path).as_ref())
         }
     }
 
-    pub fn parent(&self) -> Option<PackageLabel> {
-        Some(PackageLabel::from_cell_path(self.as_cell_path().parent()?))
+    pub fn parent(&self) -> buck2_error::Result<Option<PackageLabel>> {
+        match self.as_cell_path().parent() {
+            Some(parent) => PackageLabel::from_cell_path(parent).map(Some),
+            None => Ok(None),
+        }
     }
 
     // Following functions should only be used in tests, so they have "testing" in their names.
@@ -178,6 +194,7 @@ impl PackageLabel {
             CellName::testing_new("root"),
             CellRelativePath::new(ForwardRelativePath::new("package/subdir").unwrap()),
         )
+        .unwrap()
     }
 
     pub fn testing_new(cell: &str, path: &str) -> PackageLabel {
@@ -185,6 +202,7 @@ impl PackageLabel {
             CellName::testing_new(cell),
             CellRelativePath::new(ForwardRelativePath::new(path).unwrap()),
         )
+        .unwrap()
     }
 
     pub fn testing_parse(label: &str) -> PackageLabel {
@@ -200,8 +218,8 @@ mod tests {
     #[test]
     fn test_serialize() {
         assert_eq!(
-            r#""foo//bar/baz""#,
-            serde_json::to_string(&PackageLabel::testing_parse("foo//bar/baz")).unwrap()
+            "foo//bar/baz",
+            PackageLabel::testing_parse("foo//bar/baz").to_string()
         );
     }
 }

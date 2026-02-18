@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
@@ -24,7 +25,7 @@
 //!     use dice::{Key, InjectedKey, DiceComputations, DiceDataBuilder, DiceData, DiceTransactionUpdater};
 //!     use std::sync::Arc;
 //!     use allocative::Allocative;
-//!     use buck2_futures::cancellation::CancellationContext;
+//!     use dice_futures::cancellation::CancellationContext;
 //!
 //!     /// A configuration computation that consists of values that are pre-computed outside of DICE
 //!     pub struct InjectConfigs<'compute, 'd>(&'compute mut DiceComputations<'d>);
@@ -161,107 +162,6 @@
 //!     assert_eq!("aaaaaaaaaa", &*MyComputation(&mut ctx).compute_a(4, "a".into()).await);
 //! });
 //! ```
-
-use std::fmt::Debug;
-use std::io::Write;
-use std::sync::Arc;
-
-use allocative::Allocative;
-use futures::future::Future;
-use serde::Serializer;
-
-use crate::DiceDataBuilderImpl;
-use crate::DiceImplementation;
-use crate::WhichDice;
-use crate::api::cycles::DetectCycles;
-use crate::api::transaction::DiceTransactionUpdater;
-use crate::api::user_data::UserComputationData;
-use crate::metrics::Metrics;
-
-/// An incremental computation engine that executes arbitrary computations that
-/// maps `Key`s to values.
-#[derive(Allocative, Debug)]
-pub struct Dice {
-    pub(crate) implementation: DiceImplementation,
-}
-
-impl Dice {
-    pub fn builder() -> DiceDataBuilder {
-        DiceDataBuilder(DiceDataBuilderImpl::new_modern())
-    }
-
-    pub fn modern() -> DiceDataBuilder {
-        DiceDataBuilder(DiceDataBuilderImpl::new_modern())
-    }
-
-    pub(crate) fn new(implementation: DiceImplementation) -> Arc<Self> {
-        Arc::new(Self { implementation })
-    }
-
-    pub fn updater(self: &Arc<Dice>) -> DiceTransactionUpdater {
-        self.implementation.updater()
-    }
-
-    pub fn updater_with_data(
-        self: &Arc<Dice>,
-        extra: UserComputationData,
-    ) -> DiceTransactionUpdater {
-        self.implementation.updater_with_data(extra)
-    }
-
-    pub fn serialize_tsv(
-        &self,
-        nodes: impl Write,
-        edges: impl Write,
-        nodes_currently_running: impl Write,
-    ) -> anyhow::Result<()> {
-        self.implementation
-            .serialize_tsv(nodes, edges, nodes_currently_running)
-    }
-
-    pub fn serialize_serde<S>(&self, serializer: S) -> Result<(), S::Error>
-    where
-        S: Serializer,
-    {
-        self.implementation.serialize_serde(serializer)
-    }
-
-    pub fn detect_cycles(&self) -> &DetectCycles {
-        self.implementation.detect_cycles()
-    }
-
-    pub fn which_dice(&self) -> WhichDice {
-        match self.implementation {
-            DiceImplementation::Modern(_) => WhichDice::Modern,
-        }
-    }
-
-    pub fn metrics(&self) -> Metrics {
-        self.implementation.metrics()
-    }
-
-    /// Wait until all active versions have exited.
-    pub fn wait_for_idle(&self) -> impl Future<Output = ()> + 'static {
-        self.implementation.wait_for_idle()
-    }
-
-    /// true when there are no active tasks nor transactions alive
-    pub async fn is_idle(&self) -> bool {
-        self.implementation.is_idle().await
-    }
-}
-
-pub struct DiceDataBuilder(DiceDataBuilderImpl);
-
-impl DiceDataBuilder {
-    pub fn set<K: Send + Sync + 'static>(&mut self, val: K) {
-        self.0.set(val);
-    }
-
-    pub fn build(self, detect_cycles: DetectCycles) -> Arc<Dice> {
-        self.0.build(detect_cycles)
-    }
-}
 
 pub mod testing {
     use crate::Dice;

@@ -1,16 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifact_tset.bzl",
     "ArtifactInfo",
     "ArtifactInfoTag",
 )
-load("@prelude//apple:apple_common.bzl", "apple_common")
 load("@prelude//apple:apple_toolchain_types.bzl", "AppleToolchainInfo", "AppleToolsInfo")
 load(
     "@prelude//linking:execution_preference.bzl",
@@ -19,7 +19,6 @@ load(
     "LinkExecutionPreferenceInfo",  # @unused Used as a type
     "get_action_execution_attributes",
 )
-load("@prelude//user:rule_spec.bzl", "RuleRegistrationSpec")
 load(
     "@prelude//utils:build_target_pattern.bzl",
     "BuildTargetPattern",  # @unused Used as a type
@@ -53,7 +52,7 @@ AppleSelectiveDebuggingFilteredDebugInfo = record(
 )
 
 # The type of selective debugging json input to utilze.
-_SelectiveDebuggingJsonTypes = [
+SelectiveDebuggingJsonTypes = [
     # Use a targets json file containing all targets to include.
     "targets",
     # Use a spec json file specifying the targets to include
@@ -61,7 +60,7 @@ _SelectiveDebuggingJsonTypes = [
     "spec",
 ]
 
-_SelectiveDebuggingJsonType = enum(*_SelectiveDebuggingJsonTypes)
+_SelectiveDebuggingJsonType = enum(*SelectiveDebuggingJsonTypes)
 
 _LOCAL_LINK_THRESHOLD = 0.2
 
@@ -94,7 +93,7 @@ def _generate_metadata_json_object(is_any_selected_target_linked: bool) -> dict[
         "contains_focused_targets": is_any_selected_target_linked,
     }
 
-def _apple_selective_debugging_impl(ctx: AnalysisContext) -> list[Provider]:
+def apple_selective_debugging_impl(ctx: AnalysisContext) -> list[Provider]:
     json_type = _SelectiveDebuggingJsonType(ctx.attrs.json_type)
 
     # process inputs and provide them up the graph with typing
@@ -215,10 +214,7 @@ def _apple_selective_debugging_impl(ctx: AnalysisContext) -> list[Provider]:
         selected_targets_contain_swift = False
         for infos in debug_info:
             for info in infos:
-                is_swiftmodule = ArtifactInfoTag("swiftmodule") in info.tags
-                is_swift_pcm = ArtifactInfoTag("swift_pcm") in info.tags
-                is_swift_related = is_swiftmodule or is_swift_pcm
-
+                is_swift_debug_info = ArtifactInfoTag("swift_debug_info") in info.tags
                 is_label_included = _is_label_included(info.label, selection_criteria)
 
                 is_any_selected_target_linked_when_using_spec = is_using_spec and is_any_selected_target_linked
@@ -245,11 +241,11 @@ def _apple_selective_debugging_impl(ctx: AnalysisContext) -> list[Provider]:
                     # `selected_target_infos` should only include targets explicitly selected by the user,
                     # not anything included in addition to support the debugger (e.g., `.swiftmodule` files)
                     selected_target_infos.append(info)
-                if is_label_included or (selected_targets_contain_swift and is_swift_related):
+                if is_label_included or (selected_targets_contain_swift and is_swift_debug_info):
                     # There might be a few ArtifactInfo corresponding to the same Label,
                     # so to avoid overwriting, we need to preserve all artifacts.
                     artifact_infos.append(info)
-                    selected_targets_contain_swift = selected_targets_contain_swift or ArtifactInfoTag("swiftmodule") in info.tags
+                    selected_targets_contain_swift = selected_targets_contain_swift or ArtifactInfoTag("swift_debug_info") in info.tags
 
         if json_type == _SelectiveDebuggingJsonType("spec"):
             metadata_output = inner_ctx.actions.write_json(
@@ -321,19 +317,6 @@ def _apple_selective_debugging_impl(ctx: AnalysisContext) -> list[Provider]:
         ),
         LinkExecutionPreferenceDeterminatorInfo(preference_for_links = preference_for_links),
     ]
-
-registration_spec = RuleRegistrationSpec(
-    name = "apple_selective_debugging",
-    impl = _apple_selective_debugging_impl,
-    attrs = {
-        "exclude_build_target_patterns": attrs.list(attrs.string(), default = []),
-        "exclude_regular_expressions": attrs.list(attrs.string(), default = []),
-        "include_build_target_patterns": attrs.list(attrs.string(), default = []),
-        "include_regular_expressions": attrs.list(attrs.string(), default = []),
-        "json_type": attrs.enum(_SelectiveDebuggingJsonTypes),
-        "targets_json_file": attrs.option(attrs.source(), default = None),
-    } | apple_common.apple_tools_arg(),
-)
 
 def _is_label_included(label: Label, selection_criteria: _SelectionCriteria) -> bool:
     # If no include criteria are provided, we then include everything, as long as it is not excluded.

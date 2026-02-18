@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Cross-platform process killing.
@@ -12,6 +13,7 @@
 use std::time::Duration;
 
 use sysinfo::Process;
+use sysinfo::ProcessesToUpdate;
 
 use crate::pid::Pid;
 #[cfg(unix)]
@@ -57,7 +59,7 @@ pub fn get_sysinfo_status(pid: Pid) -> Option<sysinfo::ProcessStatus> {
     let mut system = System::new();
     // There is some bug in `sysinfo` so we have to use `refresh_processes_specifics`
     // instead of `refresh_process_specifics`, otherwise we not always get process info.
-    system.refresh_processes_specifics(ProcessRefreshKind::new());
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
 
     let proc = system.process(pid)?;
     Some(proc.status())
@@ -108,7 +110,7 @@ mod tests {
                     break;
                 }
                 assert!(
-                    start.elapsed() < Duration::from_secs(20),
+                    Instant::now() - start < Duration::from_secs(20),
                     "Timed out waiting for process to die"
                 );
                 std::thread::sleep(Duration::from_millis(100));

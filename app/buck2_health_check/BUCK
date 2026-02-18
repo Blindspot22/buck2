@@ -1,4 +1,4 @@
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
 
 oncall("build_infra")
 
@@ -17,21 +17,27 @@ rust_library(
     mapped_srcs = {
         # @oss-disable[end= ]: "fbsource//xplat/graphql:intern-schema.graphql": "intern-schema.graphql",
     },
-    test_deps = ["fbsource//third-party/rust:tokio"],
+    test_deps = [
+        "fbsource//third-party/rust:tempfile",
+        "fbsource//third-party/rust:tokio",
+    ],
     deps = [
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:futures",
         # @oss-disable[end= ]: "fbsource//third-party/rust:graphql_client",
         "fbsource//third-party/rust:itertools",
+        "fbsource//third-party/rust:prost-types-0-13-4",
         "fbsource//third-party/rust:regex",
         "fbsource//third-party/rust:serde",
         "fbsource//third-party/rust:serde_json",
         "fbsource//third-party/rust:tokio",
-        "fbsource//third-party/rust:tonic",
+        "fbsource//third-party/rust:tonic-0-12-3",
+        "fbsource//third-party/rust:tracing",
         "//buck2/app/buck2_common:buck2_common",
         "//buck2/app/buck2_core:buck2_core",
         "//buck2/app/buck2_data:buck2_data",
         "//buck2/app/buck2_error:buck2_error",
+        "//buck2/app/buck2_fs:buck2_fs",
         "//buck2/app/buck2_grpc:buck2_grpc",
         "//buck2/app/buck2_health_check_proto:buck2_health_check_proto",
         "//buck2/app/buck2_util:buck2_util",

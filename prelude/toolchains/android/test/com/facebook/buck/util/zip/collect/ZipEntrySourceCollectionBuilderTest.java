@@ -1,17 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.util.zip.collect;
 
 import static org.junit.Assert.assertEquals;
 
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.testutil.integration.TestDataHelper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -40,7 +40,7 @@ public class ZipEntrySourceCollectionBuilderTest {
     ZipEntrySourceCollectionBuilder builder =
         new ZipEntrySourceCollectionBuilder(ImmutableSet.of(), OnDuplicateEntry.FAIL);
 
-    thrown.expect(HumanReadableException.class);
+    thrown.expect(RuntimeException.class);
     thrown.expectMessage("Duplicate entry \"entry1\" is coming from entry11 and entry12");
 
     builder.addFile("entry1", Paths.get("entry11"));

@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java.abi;
 
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.jvm.java.abi.source.api.SourceOnlyAbiRuleInfoFactory.SourceOnlyAbiRuleInfo;
 import com.facebook.buck.jvm.java.plugin.api.BuckJavacTaskListener;
 import com.facebook.buck.jvm.java.plugin.api.BuckJavacTaskProxy;
@@ -39,10 +39,10 @@ public final class SourceBasedAbiStubber {
       return BuckJavacTaskListener.wrapRealTaskListener(
           pluginLoader, constructor.newInstance(task, ruleInfo, errorsExist, messageKind));
     } catch (ReflectiveOperationException e) {
-      throw new HumanReadableException(
-          e,
+      throw new RuntimeException(
           "Could not load source-generated ABI validator. Your compiler might not support this. "
-              + "If it doesn't, you may need to disable source-based ABI generation.");
+              + "If it doesn't, you may need to disable source-based ABI generation.",
+          e);
     }
   }
 

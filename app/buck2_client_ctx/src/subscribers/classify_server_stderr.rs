@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ops::ControlFlow;
@@ -16,37 +17,41 @@ pub(crate) fn classify_server_stderr(
     error: buck2_error::Error,
     stderr: &str,
 ) -> buck2_error::Error {
-    let tag = if stderr.is_empty() {
-        ErrorTag::ServerStderrEmpty
+    let mut tag = if stderr.is_empty() {
+        None
     } else if stderr.contains("<jemalloc>: size mismatch detected") {
         // P1181704561
-        ErrorTag::ServerJemallocAssert
+        Some(ErrorTag::ServerJemallocAssert)
     } else if stderr.contains("panicked at") {
         // Sample output of `buck2 debug crash`: P1159041719
-        ErrorTag::ServerPanicked
+        Some(ErrorTag::ServerPanicked)
     } else if stderr.contains("has overflowed its stack") {
         // Stderr looks like this:
         // ```
         // thread 'buck2-dm' has overflowed its stack
         // ```
-        ErrorTag::ServerStackOverflow
+        Some(ErrorTag::ServerStackOverflow)
     } else if stderr.contains("Signal 11 (SIGSEGV)") {
         // P1180289404
-        ErrorTag::ServerSegv
+        Some(ErrorTag::ServerSegv)
     } else if stderr.contains("Signal 15 (SIGTERM)") {
-        ErrorTag::ServerSigterm
+        Some(ErrorTag::ServerSigterm)
     } else if stderr.contains("Signal 6 (SIGABRT)") {
-        ErrorTag::ServerSigabrt
+        Some(ErrorTag::ServerSigabrt)
     } else if stderr.contains("(SIGBUS)") {
         // Signal 7 or Signal 10 depending on OS
-        ErrorTag::ServerSigbus
+        Some(ErrorTag::ServerSigbus)
     } else {
-        ErrorTag::ServerStderrUnknown
+        None
     };
-    let mut tags = vec![tag];
+    if tag.is_none() && error.has_tag(ErrorTag::ClientGrpcStream) {
+        tag = Some(ErrorTag::DaemonDisconnect);
+    }
+
+    let mut tags = tag.into_iter().collect::<Vec<_>>();
 
     let error = if let Some(trace) = extract_trace(stderr) {
-        if tag != ErrorTag::ServerSigterm {
+        if tag != Some(ErrorTag::ServerSigterm) {
             if trace
                 .stack_trace_lines
                 .iter()
@@ -81,8 +86,7 @@ static RUST_CONTEXT: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"^\s*a
 fn extract_rust_frame(line: &str) -> ControlFlow<(), Option<String>> {
     if let Some(capture) = RUST_STACK_FRAME
         .captures(line)
-        .map(|captures| captures.get(1))
-        .flatten()
+        .and_then(|captures| captures.get(1))
     {
         ControlFlow::Continue(Some(capture.as_str().to_owned()))
     } else if RUST_CONTEXT.is_match(line) {
@@ -107,14 +111,12 @@ static FOLLY_LINUX_CONTEXT: Lazy<regex::Regex> =
 fn extract_folly_frame(line: &str) -> ControlFlow<(), Option<String>> {
     if let Some(capture) = FOLLY_MAC_STACK_FRAME
         .captures(line)
-        .map(|captures| captures.get(1))
-        .flatten()
+        .and_then(|captures| captures.get(1))
     {
         ControlFlow::Continue(Some(capture.as_str().to_owned()))
     } else if let Some(capture) = FOLLY_LINUX_STACK_FRAME
         .captures(line)
-        .map(|captures| captures.get(1))
-        .flatten()
+        .and_then(|captures| captures.get(1))
     {
         ControlFlow::Continue(Some(capture.as_str().to_owned()))
     } else if FOLLY_LINUX_CONTEXT.is_match(line) {
@@ -220,7 +222,7 @@ mod tests {
     #[test]
     fn test_generated_stack_trace() {
         let backtrace = std::backtrace::Backtrace::force_capture();
-        let stderr = format!("stack backtrace:\n{}", backtrace);
+        let stderr = format!("stack backtrace:\n{backtrace}");
         assert!(extract_trace(&stderr).is_some());
     }
 

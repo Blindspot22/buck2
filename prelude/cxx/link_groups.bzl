@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load(
@@ -16,6 +17,10 @@ load(
     "LinkGroupInfo",
     "LinkGroupsDebugLinkableEntry",
     "LinkGroupsDebugLinkableItem",
+)
+load(
+    "@prelude//cxx:transformation_spec.bzl",
+    "TransformationSpecContext",  # @unused Used as a type
 )
 load("@prelude//linking:execution_preference.bzl", "LinkExecutionPreference")
 load(
@@ -32,6 +37,7 @@ load(
     "LinkedObject",  # @unused Used as a type
     "SharedLibLinkable",
     "get_lib_output_style",
+    "get_link_info_for_transformation",
     "set_link_info_link_whole",
     "wrap_link_info",
     "wrap_with_no_as_needed_shared_libs_flags",
@@ -45,7 +51,6 @@ load(
     "ReducedLinkableGraph",
     "create_linkable_graph",
     "get_deps_for_link",
-    "get_link_info",
     "get_linkable_graph_node_map_func",
     "get_transitive_deps",
 )
@@ -72,7 +77,7 @@ load(
     ":cxx_library_utility.bzl",
     "cxx_is_gnu",
 )
-load(":cxx_toolchain_types.bzl", "PicBehavior")
+load(":cxx_toolchain_types.bzl", "LinkerType", "PicBehavior")
 load(
     ":groups.bzl",
     "compute_mappings",
@@ -81,11 +86,13 @@ load(
 load(
     ":groups_types.bzl",
     "MATCH_ALL_LABEL",
+    "MATCH_DIRECT_DEPS_LABEL",
     "NO_MATCH_LABEL",
     "should_discard_group",
 )
 load(
     ":link.bzl",
+    "CxxLinkerMapData",  # @unused Used as a type
     "cxx_link_shared_library",
 )
 load(
@@ -153,6 +160,7 @@ LinkGroupLibSpec = record(
 _LinkedLinkGroup = record(
     artifact = field(LinkedObject),
     library = field([LinkGroupLib, None], None),
+    linker_map_data = field([CxxLinkerMapData, None], None),
 )
 
 _LinkedLinkGroups = record(
@@ -446,6 +454,7 @@ BuildLinkGroupsContext = record(
     link_group_roots = field(dict[str, Label] | None, None),  # If none, derived from link_group_libs
     prefer_stripped = field(bool, False),
     prefer_optimized = field(bool, False),
+    transformation_spec_context = field(TransformationSpecContext | None, None),
 )
 
 def get_filtered_labels_to_links_map(
@@ -493,8 +502,24 @@ def get_filtered_labels_to_links_map(
     group_srcs = {}
 
     def add_link(target: Label, output_style: LibOutputStyle):
+        infos = build_context.linkable_graph.nodes[target].link_infos[output_style]
+
+        if build_context.transformation_spec_context:
+            link_info = get_link_info_for_transformation(
+                build_context.transformation_spec_context,
+                infos,
+                target,
+                build_context.prefer_stripped,
+            )
+        else:
+            link_info = get_link_info_from_link_infos(
+                infos,
+                build_context.prefer_stripped,
+                prefer_optimized and output_style != LibOutputStyle("shared_lib"),  # prefer_optimized is only relevant for static libs
+            )
+
         linkable_map[target] = LinkGroupLinkInfo(
-            link_info = get_link_info(build_context.linkable_graph.nodes[target], output_style, build_context.prefer_stripped, prefer_optimized),
+            link_info = link_info,
             output_style = output_style,
             link_name = target,
         )
@@ -540,7 +565,20 @@ def get_filtered_labels_to_links_map(
             link_name = target_group,
         )
 
-    filtered_groups = [None, NO_MATCH_LABEL, MATCH_ALL_LABEL]
+    filtered_groups = [None, NO_MATCH_LABEL, MATCH_ALL_LABEL, MATCH_DIRECT_DEPS_LABEL]
+
+    # Pre-compute which MATCH_DIRECT_DEPS targets should be included in this link group.
+    # A MATCH_DIRECT_DEPS target is included only if there's a target in the current
+    # link group which has a direct dependency on that MATCH_DIRECT_DEPS target.
+    match_direct_deps_for_current_group = set()
+    for target in linkables:
+        target_link_group = build_context.link_group_mappings.get(target)
+        if target_link_group == link_group or target_link_group == MATCH_ALL_LABEL:
+            node = build_context.linkable_graph.nodes[target]
+            for dep in node.deps + node.exported_deps:
+                dep_link_group = build_context.link_group_mappings.get(dep)
+                if dep_link_group == MATCH_DIRECT_DEPS_LABEL:
+                    match_direct_deps_for_current_group.add(dep)
 
     output_style = get_lib_output_style(build_context.link_strategy, Linkage("any"), build_context.pic_behavior) if build_context.link_strategy != LinkStrategy("shared") else LibOutputStyle("shared_lib")
 
@@ -553,8 +591,9 @@ def get_filtered_labels_to_links_map(
         # We should always add force-static libs to the link.
         is_force_static_lib = force_static_follows_dependents and node.preferred_linkage == Linkage("static") and not node.ignore_force_static_follows_dependents
 
-        # If this belongs to the match all link group or the group currently being evaluated
-        matches_current_link_group = target_link_group == link_group or target_link_group == MATCH_ALL_LABEL
+        # If this belongs to the match all link group, the group currently being
+        # evaluated, or is a MATCH_DIRECT_DEPS target that has a direct rdep in this group
+        matches_current_link_group = target_link_group == link_group or target_link_group == MATCH_ALL_LABEL or target in match_direct_deps_for_current_group
 
         if link_group_preferred_linkage == Linkage("shared"):
             # filter out any dependencies to be discarded
@@ -655,7 +694,7 @@ def get_public_link_group_nodes(
             if crosses_link_group_boundary(current_group, new_group):
                 external_link_group_nodes.add(dep)
 
-    SPECIAL_LINK_GROUPS = [MATCH_ALL_LABEL, NO_MATCH_LABEL]
+    SPECIAL_LINK_GROUPS = [MATCH_ALL_LABEL, MATCH_DIRECT_DEPS_LABEL, NO_MATCH_LABEL]
 
     # Additionally identify exported_deps of those marked nodes (except those included in all groups or included in the main executable).
 
@@ -699,10 +738,17 @@ def get_filtered_links(
     return infos
 
 def get_filtered_targets(labels_to_links_map: dict[Label, LinkGroupLinkInfo]):
-    return [label.raw_target() for label in labels_to_links_map.keys()]
+    # labels_to_links_map will include entries for shared link group libraries
+    # as well as libraries being statically linked into this link unit.
+    statically_linked_targets = []
+    for label, info in labels_to_links_map.items():
+        if info.output_style != LibOutputStyle("shared_lib"):
+            statically_linked_targets.append(label.raw_target())
+
+    return statically_linked_targets
 
 def get_link_group_map_json(ctx: AnalysisContext, targets: list[TargetLabel]) -> DefaultInfo:
-    json_map = ctx.actions.write_json(LINK_GROUP_MAP_DATABASE_FILENAME, sorted(targets))
+    json_map = ctx.actions.write_json(LINK_GROUP_MAP_DATABASE_FILENAME, sorted(targets), pretty = True)
     return DefaultInfo(default_output = json_map)
 
 def _find_all_relevant_roots(
@@ -741,6 +787,15 @@ def _find_all_relevant_roots(
                 relevant_roots[link_group].add(node_target)
         elif node_link_group in link_groups_for_full_traversal and node_link_group != NO_MATCH_LABEL:
             relevant_roots[node_link_group].add(node_target)
+
+        # For MATCH_DIRECT_DEPS support: if this node belongs to a real link group and has
+        # a direct dep on a MATCH_DIRECT_DEPS target, add that target to this link group
+        if node_link_group and node_link_group in relevant_roots:
+            for dep in node.deps + node.exported_deps:
+                dep_link_group = link_group_mappings.get(dep)
+                if dep_link_group == MATCH_DIRECT_DEPS_LABEL:
+                    relevant_roots[node_link_group].add(dep)
+
         return node.all_deps
 
     depth_first_traversal_by(
@@ -770,6 +825,13 @@ def find_relevant_roots(
             roots.append(node_target)
         elif node_link_group == link_group:
             roots.append(node_target)
+
+            # For MATCH_DIRECT_DEPS support: if this node has a direct dep on a MATCH_DIRECT_DEPS target,
+            # add that target to the roots for this link group
+            for dep in node.deps + node.exported_deps:
+                dep_link_group = link_group_mappings.get(dep)
+                if dep_link_group == MATCH_DIRECT_DEPS_LABEL:
+                    roots.append(dep)
         else:
             return node.all_deps
 
@@ -806,6 +868,7 @@ def _get_roots_from_mappings(
 _CreatedLinkGroup = record(
     linked_object = field(LinkedObject),
     labels_to_links = field(FinalLabelsToLinks),
+    linker_map_data = field([CxxLinkerMapData, None], None),
 )
 
 _CreateLinkGroupParams = record(
@@ -864,6 +927,17 @@ def _create_link_group(
         # don't create empty shared libraries
         return None
 
+    # Determine link execution preference for this link group
+    # Default to "any" if not specified on the link group
+    link_exec_pref = spec.group.attrs.link_execution_preference
+    if link_exec_pref:
+        # If link_exec_pref is an Artifact (source file), extract the basename
+        # This happens when strings are specified in BUCK file attribute dictionaries
+        link_exec_pref = getattr(link_exec_pref, "basename", link_exec_pref)
+        link_execution_preference = LinkExecutionPreference(link_exec_pref)
+    else:
+        link_execution_preference = LinkExecutionPreference("any")
+
     # link the rule
     link_result = cxx_link_shared_library(
         ctx = ctx,
@@ -875,7 +949,7 @@ def _create_link_group(
             identifier = spec.name,
             # TODO: anonymous targets cannot be used with dynamic output yet
             enable_distributed_thinlto = False if params.anonymous else spec.group.attrs.enable_distributed_thinlto,
-            link_execution_preference = LinkExecutionPreference("any"),
+            link_execution_preference = link_execution_preference,
             allow_cache_upload = params.allow_cache_upload,
             error_handler = params.error_handler,
         ),
@@ -884,6 +958,7 @@ def _create_link_group(
     return _CreatedLinkGroup(
         linked_object = link_result.linked_object,
         labels_to_links = filtered_labels_to_links,
+        linker_map_data = link_result.linker_map_data,
     )
 
 def _stub_library(
@@ -923,7 +998,8 @@ def _symbol_files_for_link_group(
         ctx: AnalysisContext,
         lib: LinkedObject,
         prefer_local: bool = False,
-        anonymous: bool = False) -> (Artifact, Artifact):
+        anonymous: bool = False,
+        hash_counter = 0) -> (Artifact, Artifact):
     """
     Find and return all undefined and global symbols form the given library.
     """
@@ -936,6 +1012,7 @@ def _symbol_files_for_link_group(
         category_prefix = "link_groups",
         prefer_local = prefer_local,
         anonymous = anonymous,
+        hash_counter = hash_counter,
     )
 
     # Extract global symbols.
@@ -952,6 +1029,7 @@ def _symbol_files_for_link_group(
 
 def _symbol_flags_for_link_groups(
         ctx: AnalysisContext,
+        linker_type: LinkerType,
         undefined_symfiles: list[Artifact] = [],
         global_symfiles: list[Artifact] = []) -> list[ArgLike]:
     """
@@ -981,10 +1059,12 @@ def _symbol_flags_for_link_groups(
         symbol_files = global_symfiles,
         category = "link_groups_dynamic_list",
     )
-    sym_linker_flags.extend([
-        "-Wl,--dynamic-list",
-        dynamic_list_vers,
-    ])
+
+    if linker_type == LinkerType("gnu"):
+        sym_linker_flags.extend([
+            "-Wl,--dynamic-list",
+            dynamic_list_vers,
+        ])
 
     return sym_linker_flags
 
@@ -1003,6 +1083,7 @@ def create_link_groups(
         link_group_mappings: [dict[Label, str], None] = None,
         anonymous: bool = False,
         allow_cache_upload = False,
+        transformation_spec_context: TransformationSpecContext | None = None,
         error_handler: [typing.Callable, None] = None) -> _LinkedLinkGroups:
     # We linking libraries here so we need pic
     if link_strategy == LinkStrategy("static"):
@@ -1069,6 +1150,7 @@ def create_link_groups(
         # (e.g. bottom-up with symbol errors)?
         link_group_roots = {},
         prefer_stripped = prefer_stripped_objects,
+        transformation_spec_context = transformation_spec_context,
     )
 
     create_link_group_params = _CreateLinkGroupParams(
@@ -1079,7 +1161,10 @@ def create_link_groups(
         build_groups_context = build_groups_context,
     )
 
-    for link_group_spec in specs:
+    toolchain_info = get_cxx_toolchain_info(ctx)
+    linker_info = toolchain_info.linker_info
+
+    for counter, link_group_spec in enumerate(specs):
         # NOTE(agallagher): It might make sense to move this down to be
         # done when we generated the links for the executable, so we can
         # handle the case when a link group can depend on the executable.
@@ -1090,7 +1175,7 @@ def create_link_groups(
             linker_flags = (
                 linker_flags +
                 link_group_spec.group.attrs.exported_linker_flags +
-                link_group_spec.group.attrs.linker_flags
+                ([cmd_args(link_group_spec.group.attrs.linker_script, format = "-Wl,--script={}")] if link_group_spec.group.attrs.linker_script else [])
             ),
             params = create_link_group_params,
         )
@@ -1133,8 +1218,6 @@ def create_link_groups(
         )
 
         if link_group_spec.group.attrs.no_as_needed:
-            toolchain_info = get_cxx_toolchain_info(ctx)
-            linker_info = toolchain_info.linker_info
             link_info = wrap_with_no_as_needed_shared_libs_flags(
                 linker_type = linker_info.type,
                 link_info = link_info,
@@ -1156,6 +1239,7 @@ def create_link_groups(
                     default = link_info,
                 ),
             ),
+            linker_map_data = created_link_group.linker_map_data,
         )
 
         # Merge and format all symbol files into flags that we can pass into
@@ -1164,6 +1248,7 @@ def create_link_groups(
             ctx = ctx,
             lib = link_group_lib,
             anonymous = anonymous,
+            hash_counter = counter,
         )
         undefined_symfiles.append(undefined_symfile)
         global_symfiles.append(global_symfile)
@@ -1176,6 +1261,7 @@ def create_link_groups(
         symbol_ldflags.extend(
             _symbol_flags_for_link_groups(
                 ctx = ctx,
+                linker_type = linker_info.type,
                 undefined_symfiles = undefined_symfiles,
                 global_symfiles = global_symfiles,
             ),

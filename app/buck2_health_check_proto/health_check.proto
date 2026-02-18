@@ -1,15 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 syntax = "proto3";
 
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 import "data.proto";
 
 package buck.health_check;
@@ -22,7 +24,7 @@ message Empty {};
 message HealthCheckContextEvent {
   oneof data {
     buck.data.ParsedTargetPatterns parsed_target_patterns = 1;
-    buck.data.CommandStart command_start = 2;
+    buck.data.CommandStartWithTraceId command_start = 2;
     string branched_from_revision = 3;
     bool has_excess_cache_misses = 4;
     buck.data.SystemInfo experiment_configurations = 5;
@@ -36,6 +38,7 @@ enum HealthCheckType {
   SLOW_DOWNLOAD_SPEED = 2;
   VPN_ENABLED = 3;
   STABLE_REVISION = 4;
+  SLOW_BUILD = 5;
 }
 
 // Severity of an issue reported by a health check.
@@ -54,10 +57,27 @@ message Remediation {
   }
 }
 
+/// Message format options for health issue messages.
+message Message {
+  oneof data {
+    // Simple text message.
+    string simple = 1;
+    // Rich format with header, body, and footer.
+    RichMessage rich = 2;
+  }
+}
+
+/// Rich message format with header, body, and optional footer.
+message RichMessage {
+  string header = 1;
+  string body = 2;
+  optional string footer = 3;
+}
+
 message HealthIssue {
   Severity severity = 1;
   // A human readable description of the issue.
-  string message = 2;
+  Message message = 2;
   // This is optional because some health checks may not have a remediation.
   optional Remediation remediation = 3;
 }
@@ -73,6 +93,13 @@ message Report {
   optional string tag = 2;
 }
 
+// A subset of the Snapshot data specifically for health check use.
+// This struct contains timing metrics extracted from buck2_data::Snapshot.
+message HealthCheckSnapshotData {
+  // Timestamp when the snapshot was created
+  google.protobuf.Timestamp timestamp = 1;
+}
+
 message HealthCheckResult {
   repeated Report reports = 1;
 }
@@ -80,7 +107,7 @@ message HealthCheckResult {
 service HealthCheck {
   rpc UpdateContext(HealthCheckContextEvent) returns (Empty);
   // Run health checks and return the result.
-  // Existing health checks do not need any additional data. If necessary, pass
-  // the buck.data.Snapshot or a custom message to this method.
-  rpc RunChecks(Empty) returns (HealthCheckResult);
+  // Pass the HealthCheckSnapshotData containing timing metrics from the
+  // snapshot.
+  rpc RunChecks(HealthCheckSnapshotData) returns (HealthCheckResult);
 }

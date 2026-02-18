@@ -74,7 +74,7 @@ pub(crate) struct StarlarkValueRawPtr {
 impl StarlarkValueRawPtr {
     #[inline]
     pub(crate) fn new_header(ptr: &AValueHeader) -> Self {
-        debug_assert!(ptr as *const AValueHeader as usize % AValueHeader::ALIGN == 0);
+        debug_assert!((ptr as *const AValueHeader as usize).is_multiple_of(AValueHeader::ALIGN));
 
         unsafe {
             let ptr = (ptr as *const AValueHeader).add(1) as *const ();
@@ -98,7 +98,7 @@ impl StarlarkValueRawPtr {
         // `self.ptr` is a pointer to the end of `AValueHeader`.
         // Align it up to `T` by adding padding between `AValueRepr` fields.
         let ptr = self.ptr as usize + AValueRepr::<T>::padding_after_header();
-        debug_assert!(ptr % mem::align_of::<T>() == 0);
+        debug_assert!(ptr.is_multiple_of(mem::align_of::<T>()));
         ptr as *mut T
     }
 
@@ -108,7 +108,11 @@ impl StarlarkValueRawPtr {
     }
 }
 
-pub(crate) struct AValueVTable {
+/// VTable for `AValue` operations.
+///
+/// This struct contains function pointers for all operations on a Starlark value,
+/// allowing dynamic dispatch.
+pub struct AValueVTable {
     // Common `AValue` fields.
     pub(crate) static_type_of_value: ConstTypeId,
     pub(crate) starlark_type_id: StarlarkTypeId,
@@ -133,6 +137,7 @@ pub(crate) struct AValueVTable {
     debug: unsafe fn(StarlarkValueRawPtr) -> *const dyn Debug,
     erased_serde_serialize: unsafe fn(StarlarkValueRawPtr) -> *const dyn erased_serde::Serialize,
     allocative: unsafe fn(StarlarkValueRawPtr) -> *const dyn Allocative,
+    total_memory_for_profile: unsafe fn(StarlarkValueRawPtr) -> usize,
 }
 
 struct GetTypeId<'v, T: StarlarkValue<'v>>(PhantomData<&'v T>);
@@ -180,11 +185,18 @@ impl AValueVTable {
                 let this = unsafe { &*this.value_ptr::<BlackHole>() };
                 this as *const dyn Allocative
             },
+            total_memory_for_profile: |this| unsafe {
+                (*this.value_ptr::<BlackHole>()).0.bytes() as usize
+            },
             starlark_value: StarlarkValueVTable::BLACK_HOLE,
         }
     }
 
-    pub(crate) const fn new<'v, T: AValue<'v>>() -> &'static AValueVTable {
+    /// Public for use by `register_avalue_simple_frozen!` macro in doctests.
+    /// Hidden from docs and uses private `AValue` bound to prevent direct external use.
+    #[doc(hidden)]
+    #[allow(private_bounds)]
+    pub const fn new<'v, T: AValue<'v>>() -> &'static AValueVTable {
         &AValueVTable {
             drop_in_place: |p| unsafe {
                 ptr::drop_in_place(p.value_ptr::<T::StarlarkValue>());
@@ -230,6 +242,10 @@ impl AValueVTable {
                 let allocative = this as *const dyn Allocative;
                 // Drop lifetime.
                 mem::transmute(allocative)
+            },
+            total_memory_for_profile: |this| unsafe {
+                let p = &*this.value_ptr::<T::StarlarkValue>();
+                T::total_memory_for_profile(p)
             },
             starlark_value: StarlarkValueVTableGet::<'v, T::StarlarkValue>::VTABLE,
         }
@@ -295,9 +311,8 @@ impl<'v> AValueDyn<'v> {
         unsafe { &*(self.vtable.allocative)(self.value) }
     }
 
-    pub(crate) fn total_memory(self) -> usize {
-        (self.memory_size().bytes() as usize)
-            + allocative::size_of_unique_allocated_data(self.as_allocative())
+    pub(crate) fn total_memory_for_profile(self) -> usize {
+        unsafe { (self.vtable.total_memory_for_profile)(self.value) }
     }
 
     #[inline]
@@ -324,7 +339,7 @@ impl<'v> AValueDyn<'v> {
     }
 
     #[inline]
-    pub(crate) fn at(self, index: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn at(self, index: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.at)(self.value, index, heap)
     }
 
@@ -332,7 +347,7 @@ impl<'v> AValueDyn<'v> {
         self,
         index0: Value<'v>,
         index1: Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.at2)(self.value, index0, index1, heap, Private)
     }
@@ -348,23 +363,23 @@ impl<'v> AValueDyn<'v> {
         start: Option<Value<'v>>,
         stop: Option<Value<'v>>,
         step: Option<Value<'v>>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.slice)(self.value, start, stop, step, heap)
     }
 
     #[inline]
-    pub(crate) fn get_attr(self, name: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    pub(crate) fn get_attr(self, name: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         (self.vtable.starlark_value.get_attr)(self.value, name, heap)
     }
 
     #[inline]
-    pub(crate) fn get_attr_hashed(self, name: Hashed<&str>, heap: &'v Heap) -> Option<Value<'v>> {
+    pub(crate) fn get_attr_hashed(self, name: Hashed<&str>, heap: Heap<'v>) -> Option<Value<'v>> {
         (self.vtable.starlark_value.get_attr_hashed)(self.value, name, heap)
     }
 
     #[inline]
-    pub(crate) fn has_attr(self, name: &str, heap: &'v Heap) -> bool {
+    pub(crate) fn has_attr(self, name: &str, heap: Heap<'v>) -> bool {
         (self.vtable.starlark_value.has_attr)(self.value, name, heap)
     }
 
@@ -374,22 +389,22 @@ impl<'v> AValueDyn<'v> {
     }
 
     #[inline]
-    pub(crate) fn bit_and(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn bit_and(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.bit_and)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn bit_or(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn bit_or(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.bit_or)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn bit_xor(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn bit_xor(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.bit_xor)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn bit_not(self, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn bit_not(self, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.bit_not)(self.value, heap)
     }
 
@@ -404,12 +419,12 @@ impl<'v> AValueDyn<'v> {
     }
 
     #[inline]
-    pub(crate) fn iterate(self, me: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn iterate(self, me: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.iterate)(self.value, me, heap)
     }
 
     #[inline]
-    pub(crate) fn iter_next(self, index: usize, heap: &'v Heap) -> Option<Value<'v>> {
+    pub(crate) fn iter_next(self, index: usize, heap: Heap<'v>) -> Option<Value<'v>> {
         (self.vtable.starlark_value.iter_next)(self.value, index, heap)
     }
 
@@ -429,62 +444,62 @@ impl<'v> AValueDyn<'v> {
     }
 
     #[inline]
-    pub(crate) fn plus(self, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn plus(self, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.plus)(self.value, heap)
     }
 
     #[inline]
-    pub(crate) fn minus(self, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn minus(self, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.minus)(self.value, heap)
     }
 
     #[inline]
-    pub(crate) fn add(self, other: Value<'v>, heap: &'v Heap) -> Option<crate::Result<Value<'v>>> {
+    pub(crate) fn add(self, other: Value<'v>, heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
         (self.vtable.starlark_value.add)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn radd(self, other: Value<'v>, heap: &'v Heap) -> Option<crate::Result<Value<'v>>> {
+    pub(crate) fn radd(self, other: Value<'v>, heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
         (self.vtable.starlark_value.radd)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn sub(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn sub(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.sub)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn mul(self, other: Value<'v>, heap: &'v Heap) -> Option<crate::Result<Value<'v>>> {
+    pub(crate) fn mul(self, other: Value<'v>, heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
         (self.vtable.starlark_value.mul)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn rmul(self, other: Value<'v>, heap: &'v Heap) -> Option<crate::Result<Value<'v>>> {
+    pub(crate) fn rmul(self, other: Value<'v>, heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
         (self.vtable.starlark_value.rmul)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn div(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn div(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.div)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn floor_div(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn floor_div(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.floor_div)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn percent(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn percent(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.percent)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn left_shift(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn left_shift(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.left_shift)(self.value, other, heap)
     }
 
     #[inline]
-    pub(crate) fn right_shift(self, other: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    pub(crate) fn right_shift(self, other: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         (self.vtable.starlark_value.right_shift)(self.value, other, heap)
     }
 

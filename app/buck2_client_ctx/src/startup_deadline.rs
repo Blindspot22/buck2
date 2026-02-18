@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cmp;
@@ -14,6 +15,7 @@ use std::time::Instant;
 
 use buck2_common::client_utils::retrying;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 
 /// Utility to time out properly with context during buck2 client startup.
 ///
@@ -30,12 +32,21 @@ pub struct StartupDeadline {
     deadline: Instant,
 }
 
+#[derive(buck2_error::Error, Debug)]
+#[buck2(tag = ClientStartupTimeout)]
+enum StartupDeadlineError {
+    #[error("timed out before {op}")]
+    TimeoutBefore { op: String },
+    #[error("{} timed out after {:.3}s", op, rem_duration.as_secs_f32())]
+    TimeoutDuring { op: String, rem_duration: Duration },
+}
+
 impl StartupDeadline {
     pub fn duration_from_now(duration: Duration) -> buck2_error::Result<StartupDeadline> {
         Ok(StartupDeadline {
             deadline: Instant::now()
                 .checked_add(duration)
-                .buck_error_context("overflow")?,
+                .ok_or_else(|| internal_error!("overflow"))?,
         })
     }
 
@@ -50,7 +61,7 @@ impl StartupDeadline {
         let new_deadline = self
             .deadline
             .checked_sub(Duration::from_millis(100))
-            .buck_error_context("deadline underflow")?;
+            .ok_or_else(|| internal_error!("deadline underflow"))?;
         Ok(StartupDeadline {
             deadline: new_deadline,
         })
@@ -60,7 +71,7 @@ impl StartupDeadline {
     pub(crate) fn rem_duration(&self, op: &str) -> buck2_error::Result<Duration> {
         self.deadline
             .checked_duration_since(Instant::now())
-            .with_buck_error_context(|| format!("timed out before {}", op))
+            .ok_or(StartupDeadlineError::TimeoutBefore { op: op.to_owned() }.into())
     }
 
     /// Decrease the deadline by 100ms and invoke the given function with the new deadline.
@@ -70,15 +81,21 @@ impl StartupDeadline {
         Fut: Future<Output = buck2_error::Result<R>>,
     {
         let rem_duration = self.rem_duration(op)?;
-        tokio::time::timeout_at(
+        let res = tokio::time::timeout_at(
             tokio::time::Instant::from_std(self.deadline),
             f(self.down_deadline()?),
         )
-        .await
-        .with_buck_error_context(|| {
-            format!("{} timed out after {:.3}s", op, rem_duration.as_secs_f32())
-        })?
-        .with_buck_error_context(|| op.to_owned())
+        .await;
+
+        match res {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(e.context(op.to_owned())),
+            Err(_elapsed) => Err(StartupDeadlineError::TimeoutDuring {
+                op: op.to_owned(),
+                rem_duration,
+            }
+            .into()),
+        }
     }
 
     pub(crate) async fn run<R, Fut>(&self, op: &str, f: Fut) -> buck2_error::Result<R>
@@ -92,7 +109,7 @@ impl StartupDeadline {
     pub(crate) fn min(&self, other: Duration) -> buck2_error::Result<StartupDeadline> {
         let other = Instant::now()
             .checked_add(other)
-            .buck_error_context("overflow")?;
+            .ok_or_else(|| internal_error!("overflow"))?;
         Ok(StartupDeadline {
             deadline: cmp::min(self.deadline, other),
         })
@@ -104,7 +121,7 @@ impl StartupDeadline {
         let duration = self.deadline.duration_since(now) / 2;
         let deadline = now
             .checked_add(duration)
-            .buck_error_context("duration overflow")?;
+            .ok_or_else(|| internal_error!("duration overflow"))?;
         Ok(StartupDeadline { deadline })
     }
 

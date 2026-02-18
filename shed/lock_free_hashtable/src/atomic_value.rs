@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Describes the types we can store in `LockFreeRawTable`.
@@ -98,7 +99,7 @@ impl<T> AtomicValue for Arc<T> {
 
     #[inline]
     unsafe fn from_raw(raw: Self::Raw) -> Self {
-        Arc::from_raw(raw)
+        unsafe { Arc::from_raw(raw) }
     }
 
     #[inline]
@@ -128,12 +129,12 @@ impl AtomicValue for NonZeroU64 {
 
     #[inline]
     unsafe fn from_raw(raw: u64) -> NonZeroU64 {
-        NonZeroU64::new_unchecked(raw)
+        unsafe { NonZeroU64::new_unchecked(raw) }
     }
 
     #[inline]
     unsafe fn deref<'a>(raw: u64) -> Self::Ref<'a> {
-        NonZeroU64::new_unchecked(raw)
+        unsafe { NonZeroU64::new_unchecked(raw) }
     }
 }
 
@@ -158,12 +159,12 @@ impl AtomicValue for NonZeroU32 {
 
     #[inline]
     unsafe fn from_raw(raw: u32) -> NonZeroU32 {
-        NonZeroU32::new_unchecked(raw)
+        unsafe { NonZeroU32::new_unchecked(raw) }
     }
 
     #[inline]
     unsafe fn deref<'a>(raw: u32) -> Self::Ref<'a> {
-        NonZeroU32::new_unchecked(raw)
+        unsafe { NonZeroU32::new_unchecked(raw) }
     }
 }
 
@@ -195,7 +196,7 @@ impl<T> AtomicValue for RawPtr<T> {
 
     #[inline]
     unsafe fn from_raw(raw: *mut T) -> RawPtr<T> {
-        RawPtr(NonNull::new_unchecked(raw))
+        unsafe { RawPtr(NonNull::new_unchecked(raw)) }
     }
 
     #[inline]
@@ -203,6 +204,6 @@ impl<T> AtomicValue for RawPtr<T> {
     where
         Self: 'a,
     {
-        NonNull::new_unchecked(raw)
+        unsafe { NonNull::new_unchecked(raw) }
     }
 }

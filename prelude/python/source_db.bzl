@@ -1,12 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//python:python.bzl", "PythonLibraryInfo")
-load("@prelude//utils:argfile.bzl", "at_argfile")
+load(":internal_tools.bzl", "PythonInternalToolsInfo")
 load(
     ":manifest.bzl",
     "ManifestInfo",  # @unused Used as a type
@@ -30,7 +31,8 @@ def create_dbg_source_db(
     artifacts = []
 
     python_toolchain = ctx.attrs._python_toolchain[PythonToolchainInfo]
-    cmd = cmd_args(python_toolchain.make_source_db)
+    python_internal_tools = ctx.attrs._python_internal_tools[PythonInternalToolsInfo]
+    cmd = cmd_args(python_internal_tools.make_source_db)
     cmd.add(cmd_args(output.as_output(), format = "--output={}"))
 
     # Pass manifests for rule's sources.
@@ -41,12 +43,9 @@ def create_dbg_source_db(
     # Pass manifests for transitive deps.
     dep_manifests = ctx.actions.tset(PythonLibraryManifestsTSet, children = [d.manifests for d in python_deps])
 
-    dependencies = cmd_args(dep_manifests.project_as_args("source_manifests"), format = "--dependency={}")
-    cmd.add(at_argfile(
-        actions = ctx.actions,
-        name = "dbg_source_db_dependencies",
-        args = dependencies,
-    ))
+    dependency_manifests = cmd_args(dep_manifests.project_as_args("source_manifests"))
+    deps_file = ctx.actions.write("deps_path.txt", dependency_manifests, has_content_based_path = True)
+    cmd.add(cmd_args(deps_file, format = "--dependency_manifests={}", hidden = dependency_manifests))
 
     artifacts.append(dep_manifests.project_as_args("source_artifacts"))
     ctx.actions.run(cmd, category = "py_dbg_source_db", error_handler = python_toolchain.python_error_handler)
@@ -57,14 +56,14 @@ def create_source_db_no_deps(
         ctx: AnalysisContext,
         srcs: [dict[str, Artifact], None]) -> DefaultInfo:
     content = {} if srcs == None else srcs
-    output = ctx.actions.write_json("db_no_deps.json", content)
+    output = ctx.actions.write_json("db_no_deps.json", content, has_content_based_path = True)
     return DefaultInfo(default_output = output, other_outputs = content.values())
 
 def create_source_db_no_deps_from_manifest(
         ctx: AnalysisContext,
         srcs: ManifestInfo) -> DefaultInfo:
-    output = ctx.actions.declare_output("db_no_deps.json")
-    cmd = cmd_args(ctx.attrs._python_toolchain[PythonToolchainInfo].make_source_db_no_deps)
+    output = ctx.actions.declare_output("db_no_deps.json", has_content_based_path = True)
+    cmd = cmd_args(ctx.attrs._python_internal_tools[PythonInternalToolsInfo].make_source_db_no_deps)
     cmd.add(cmd_args(output.as_output(), format = "--output={}"))
     cmd.add(srcs.manifest)
     ctx.actions.run(cmd, category = "py_source_db")

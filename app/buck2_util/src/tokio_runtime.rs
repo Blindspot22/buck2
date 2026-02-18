@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use tokio::runtime::Builder;
@@ -19,6 +20,7 @@ pub fn new_tokio_runtime(thread_name: &str) -> Builder {
     builder.thread_name(thread_name);
     builder.on_thread_start(on_thread_start);
     builder.on_thread_stop(on_thread_stop);
+    builder.worker_threads(crate::threads::available_parallelism());
     builder
 }
 

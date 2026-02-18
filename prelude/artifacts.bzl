@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//dist:dist_info.bzl", "DistInfo")
@@ -57,7 +58,7 @@ DefaultOutputExt = provider(
 )
 
 def single_artifact(dep: Artifact | Dependency) -> ArtifactOutputs:
-    if type(dep) == "artifact":
+    if isinstance(dep, Artifact):
         return ArtifactOutputs(
             default_output = dep,
             nondebug_runtime_files = [],
@@ -94,7 +95,7 @@ def unpack_artifacts(artifacts: list[Artifact | Dependency]) -> list[ArtifactOut
     out = []
 
     for artifact in artifacts:
-        if type(artifact) == "artifact":
+        if isinstance(artifact, Artifact):
             out.append(ArtifactOutputs(
                 default_output = artifact,
                 nondebug_runtime_files = [],
@@ -124,7 +125,7 @@ def unpack_artifact_map(artifacts: dict[str, Artifact | Dependency]) -> dict[str
     out = {}
 
     for name, artifact in artifacts.items():
-        if type(artifact) == "artifact":
+        if isinstance(artifact, Artifact):
             out[name] = ArtifactOutputs(
                 default_output = artifact,
                 nondebug_runtime_files = [],

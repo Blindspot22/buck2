@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Handles command concurrency.
@@ -20,10 +21,14 @@ use std::sync::Arc;
 use allocative::Allocative;
 use async_condvar_fair::Condvar;
 use async_trait::async_trait;
+use buck2_build_signals::env::EXCLUSIVE_COMMAND_WAIT;
+use buck2_build_signals::env::EarlyCommandTimingBuilder;
+use buck2_cli_proto::client_context::ExitWhen;
 use buck2_cli_proto::client_context::PreemptibleWhen;
 use buck2_common::legacy_configs::dice::HasInjectedLegacyConfigs;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::soft_error;
+use buck2_data::CommandPreempted;
 use buck2_data::DiceBlockConcurrentCommandEnd;
 use buck2_data::DiceBlockConcurrentCommandStart;
 use buck2_data::DiceEqualityCheck;
@@ -35,7 +40,6 @@ use buck2_data::NoActiveDiceState;
 use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
 use buck2_events::dispatch::EventDispatcher;
-use buck2_futures::cancellation::CancellationContext;
 use buck2_util::truncate::truncate;
 use buck2_wrapper_common::invocation_id::TraceId;
 use derive_more::Display;
@@ -44,6 +48,7 @@ use dice::DiceEquality;
 use dice::DiceTransaction;
 use dice::DiceTransactionUpdater;
 use dice::UserComputationData;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::future;
 use futures::future::BoxFuture;
@@ -75,13 +80,17 @@ enum ConcurrencyHandlerError {
     )]
     #[buck2(input)]
     NestedInvocationWithDifferentStates(String, String),
-    #[error("`--exit-when-different-state` was set")]
+    #[error("`--exit-when=differentstate` was set")]
     #[buck2(tag = DaemonIsBusy)]
     ExitWhenDifferentState,
 
     #[error("`--preemptible` was set, and buck daemon preempted this command as another came in.")]
     #[buck2(tag = DaemonPreempted)]
     ExitOnPreemption,
+
+    #[error("`--exit-when=notidle` was set, and buck daemon is not idle.")]
+    #[buck2(tag = DaemonIsBusy)]
+    ExitOnDaemonNotIdle,
 }
 
 #[derive(Clone, Dupe, Copy, Debug)]
@@ -187,9 +196,6 @@ enum DiceStatus {
 #[derive(Allocative)]
 struct ActiveDice {
     version: DiceEquality,
-
-    /// Whether this DICE version had concurrent commands that executed on it.
-    tainted: bool,
 }
 
 impl DiceStatus {
@@ -199,10 +205,7 @@ impl DiceStatus {
 
     fn active(version: DiceEquality) -> Self {
         Self::Available {
-            active: Some(ActiveDice {
-                version,
-                tainted: false,
-            }),
+            active: Some(ActiveDice { version }),
         }
     }
 }
@@ -260,6 +263,7 @@ pub trait DiceUpdater: Send + Sync {
     async fn update(
         &self,
         mut ctx: DiceTransactionUpdater,
+        early_timings: &mut EarlyCommandTimingBuilder,
     ) -> buck2_error::Result<(DiceTransactionUpdater, UserComputationData)>;
 }
 
@@ -319,6 +323,17 @@ impl ExclusiveCommandLock {
 }
 
 impl ConcurrencyHandler {
+    /// Helper method to format active commands into a string
+    fn format_active_commands(data: &ConcurrencyHandlerData) -> String {
+        let active_commands: Vec<String> = data
+            .active_commands
+            .values()
+            .map(|d| TraceId::to_string(&d.trace_id))
+            .collect();
+
+        active_commands.join(", ")
+    }
+
     pub fn new(dice: Arc<Dice>) -> Arc<Self> {
         Arc::new(ConcurrencyHandler {
             data: Mutex::new(ConcurrencyHandlerData {
@@ -344,14 +359,15 @@ impl ConcurrencyHandler {
         is_nested_invocation: bool,
         sanitized_argv: Vec<String>,
         exclusive_cmd: Option<String>,
-        exit_when_different_state: bool,
         cancellations: &CancellationContext,
         preemptible: PreemptibleWhen,
         previous_command_data: Arc<LockedPreviousCommandData>,
         project_root: &ProjectRoot,
+        exit_when: ExitWhen,
+        mut early_command_timing: EarlyCommandTimingBuilder,
     ) -> buck2_error::Result<R>
     where
-        F: FnOnce(DiceTransaction) -> Fut,
+        F: FnOnce(DiceTransaction, EarlyCommandTimingBuilder) -> Fut,
         Fut: Future<Output = R> + Send,
     {
         let _exclusive_command_guard = event_dispatcher
@@ -359,49 +375,60 @@ impl ConcurrencyHandler {
                 ExclusiveCommandWaitStart {
                     command_name: self.exclusive_command_lock.owning_command(),
                 },
-                async move {
-                    let guard = if let Some(cmd_name) = exclusive_cmd {
-                        let guard = self.exclusive_command_lock.exclusive_lock(cmd_name).await;
-                        self.dice.wait_for_idle().await;
-                        guard
-                    } else {
-                        self.exclusive_command_lock.shared_lock().await
-                    };
-                    (guard, ExclusiveCommandWaitEnd {})
+                {
+                    let early_command_timing = &mut early_command_timing;
+                    async move {
+                        let guard = if let Some(cmd_name) = exclusive_cmd {
+                            early_command_timing.start_span(EXCLUSIVE_COMMAND_WAIT.to_owned());
+                            let guard = self.exclusive_command_lock.exclusive_lock(cmd_name).await;
+                            self.dice.wait_for_idle().await;
+
+                            guard
+                        } else {
+                            self.exclusive_command_lock.shared_lock().await
+                        };
+                        (guard, ExclusiveCommandWaitEnd {})
+                    }
                 },
             )
             .await;
 
         let events = event_dispatcher.dupe();
         let (_guard, transaction, preempt_receiver) = event_dispatcher
-            .span_async(DiceSynchronizeSectionStart {}, async move {
-                (
-                    cancellations
-                        .critical_section(|| {
-                            self.wait_for_others(
-                                updates,
-                                events,
-                                is_nested_invocation,
-                                sanitized_argv,
-                                exit_when_different_state,
-                                preemptible,
-                                previous_command_data,
-                                project_root,
-                            )
-                        })
-                        .await,
-                    DiceSynchronizeSectionEnd {},
-                )
+            .span_async(DiceSynchronizeSectionStart {}, {
+                let early_command_timing = &mut early_command_timing;
+
+                async move {
+                    (
+                        cancellations
+                            .critical_section(|| {
+                                self.wait_for_others(
+                                    updates,
+                                    early_command_timing,
+                                    events,
+                                    is_nested_invocation,
+                                    sanitized_argv,
+                                    preemptible,
+                                    previous_command_data,
+                                    project_root,
+                                    exit_when,
+                                )
+                            })
+                            .await,
+                        DiceSynchronizeSectionEnd {},
+                    )
+                }
             })
             .await?;
 
-        let result = exec(transaction);
+        let result = exec(transaction, early_command_timing);
         pin_mut!(result);
         pin_mut!(preempt_receiver);
 
         match future::select(result, preempt_receiver).await {
             Either::Left((result, _)) => Ok(result),
             Either::Right((_preemption, _)) => {
+                event_dispatcher.instant_event(CommandPreempted {});
                 Err(ConcurrencyHandlerError::ExitOnPreemption.into())
             }
         }
@@ -414,17 +441,18 @@ impl ConcurrencyHandler {
     async fn wait_for_others(
         self: &Arc<Self>,
         updates: &dyn DiceUpdater,
+        early_timings: &mut EarlyCommandTimingBuilder,
         event_dispatcher: EventDispatcher,
         is_nested_invocation: bool,
         sanitized_argv: Vec<String>,
-        exit_when_different_state: bool,
         preemptible: PreemptibleWhen,
         previous_command_data: Arc<LockedPreviousCommandData>,
         project_root: &ProjectRoot,
+        exit_when: ExitWhen,
     ) -> buck2_error::Result<(
         OnExecExit,
         DiceTransaction,
-        impl Future<Output = Result<(), RecvError>>,
+        impl Future<Output = Result<(), RecvError>> + use<>,
     )> {
         // Have to put it on the function unfortunately, https://github.com/rust-lang/rust-clippy/issues/9047
         #![allow(clippy::await_holding_invalid_type)]
@@ -482,9 +510,10 @@ impl ConcurrencyHandler {
                     let transaction = async {
                         let updater = self.dice.updater();
 
-                        let (transaction, user_data) = updates.update(updater).await?;
+                        let (transaction, user_data) =
+                            updates.update(updater, early_timings).await?;
 
-                        event_dispatcher
+                        let transaction = event_dispatcher
                             .span_async(buck2_data::DiceStateUpdateStart {}, async {
                                 (
                                     async {
@@ -496,11 +525,26 @@ impl ConcurrencyHandler {
                                     buck2_data::DiceStateUpdateEnd {},
                                 )
                             })
-                            .await
+                            .await?;
+                        buck2_error::Ok(transaction)
                     }
                     .await?;
 
                     if let Some(active) = active {
+                        // If the --exit-when=notidle option is set for the current command and there is
+                        // another command running already, exit immediately with a "daemon is busy" error.
+                        if matches!(exit_when, ExitWhen::ExitNotIdle)
+                            && !data.active_commands.is_empty()
+                        {
+                            return Err(ConcurrencyHandlerError::ExitOnDaemonNotIdle)
+                                .with_buck_error_context(|| {
+                                    format!(
+                                        "Buck daemon is busy processing another command: {}",
+                                        Self::format_active_commands(&data)
+                                    )
+                                });
+                        }
+
                         let is_same_state = transaction.equivalent(&active.version);
 
                         // If we have a different state, attempt to transition to cleanup. This will
@@ -540,14 +584,19 @@ impl ConcurrencyHandler {
                                 break (transaction, false);
                             }
                             BypassSemaphore::Block => {
-                                if exit_when_different_state {
-                                    let active_commands: Vec<String> = data
-                                        .active_commands
-                                        .values()
-                                        .map(|d| TraceId::to_string(&d.trace_id))
-                                        .collect();
-                                    return Err(ConcurrencyHandlerError::ExitWhenDifferentState)
-                                        .with_buck_error_context(|| format!("Buck daemon is busy processing another command: {}", active_commands.join(", ")));
+                                let early_exit_error: Option<ConcurrencyHandlerError> =
+                                    if matches!(exit_when, ExitWhen::ExitDifferentState) {
+                                        Some(ConcurrencyHandlerError::ExitWhenDifferentState)
+                                    } else {
+                                        None
+                                    };
+                                if let Some(early_exit_error) = early_exit_error {
+                                    return Err(early_exit_error).with_buck_error_context(|| {
+                                        format!(
+                                            "Buck daemon is busy processing another command: {}",
+                                            Self::format_active_commands(&data)
+                                        )
+                                    });
                                 }
                                 // We should probably show more than the first here, but for now
                                 // this is what we have.
@@ -764,23 +813,28 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::task::Poll;
     use std::time::Duration;
+    use std::time::Instant;
 
     use allocative::Allocative;
     use assert_matches::assert_matches;
     use async_trait::async_trait;
+    use buck2_build_signals::env::EXCLUSIVE_COMMAND_WAIT;
+    use buck2_build_signals::env::FILE_WATCHER_WAIT;
     use buck2_common::legacy_configs::dice::SetLegacyConfigs;
     use buck2_core::fs::project::ProjectRootTemp;
     use buck2_core::is_open_source;
     use buck2_events::BuckEvent;
     use buck2_events::create_source_sink_pair;
+    use buck2_events::daemon_id::DaemonId;
+    use buck2_events::sink::null::NullEventSink;
     use buck2_events::source::ChannelEventSource;
     use buck2_events::span::SpanId;
-    use buck2_futures::cancellation::CancellationContext;
     use derivative::Derivative;
     use dice::DetectCycles;
     use dice::DiceComputations;
     use dice::InjectedKey;
     use dice::Key;
+    use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
     use futures::pin_mut;
     use futures::poll;
@@ -791,6 +845,11 @@ mod tests {
     use super::*;
     use crate::ctx::LockedPreviousCommandData;
 
+    /// Creates a new null Event Dispatcher with trace ID that accepts events but does not write them anywhere.
+    fn null_sink_with_trace(trace_id: TraceId) -> EventDispatcher {
+        EventDispatcher::new(trace_id, DaemonId::new(), NullEventSink::new())
+    }
+
     struct NoChanges;
 
     #[async_trait]
@@ -798,6 +857,7 @@ mod tests {
         async fn update(
             &self,
             ctx: DiceTransactionUpdater,
+            _early_timings: &mut EarlyCommandTimingBuilder,
         ) -> buck2_error::Result<(DiceTransactionUpdater, UserComputationData)> {
             Ok((ctx, Default::default()))
         }
@@ -810,6 +870,7 @@ mod tests {
         async fn update(
             &self,
             mut ctx: DiceTransactionUpdater,
+            _early_timings: &mut EarlyCommandTimingBuilder,
         ) -> buck2_error::Result<(DiceTransactionUpdater, UserComputationData)> {
             ctx.changed_to(vec![(K, ())])?;
             Ok((ctx, Default::default()))
@@ -854,9 +915,9 @@ mod tests {
         let project_root_temp: ProjectRootTemp = ProjectRootTemp::new().unwrap();
 
         let fut1 = concurrency.enter(
-            EventDispatcher::null_sink_with_trace(traces1),
+            null_sink_with_trace(traces1),
             &NoChanges,
-            |_| {
+            |_, _timing| {
                 let b = barrier.dupe();
                 async move {
                     b.wait().await;
@@ -865,16 +926,17 @@ mod tests {
             true,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
         let fut2 = concurrency.enter(
-            EventDispatcher::null_sink_with_trace(traces2),
+            null_sink_with_trace(traces2),
             &NoChanges,
-            |_| {
+            |_, _timing| {
                 let b = barrier.dupe();
                 async move {
                     b.wait().await;
@@ -883,16 +945,17 @@ mod tests {
             true,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
         let fut3 = concurrency.enter(
-            EventDispatcher::null_sink_with_trace(traces3),
+            null_sink_with_trace(traces3),
             &NoChanges,
-            |_| {
+            |_, _timing| {
                 let b = barrier.dupe();
                 async move {
                     b.wait().await;
@@ -901,11 +964,12 @@ mod tests {
             true,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
 
         let (r1, r2, r3) = futures::future::join3(fut1, fut2, fut3).await;
@@ -927,9 +991,9 @@ mod tests {
         let project_root_temp: ProjectRootTemp = ProjectRootTemp::new().unwrap();
 
         let fut1 = concurrency.enter(
-            EventDispatcher::null_sink_with_trace(traces1),
+            null_sink_with_trace(traces1),
             &NoChanges,
-            |_| {
+            |_, _timing| {
                 let b = barrier.dupe();
                 async move {
                     b.wait().await;
@@ -938,17 +1002,18 @@ mod tests {
             true,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
 
         let fut2 = concurrency.enter(
-            EventDispatcher::null_sink_with_trace(traces2),
+            null_sink_with_trace(traces2),
             &CtxDifferent,
-            |_| {
+            |_, _timing| {
                 let b = barrier.dupe();
                 async move {
                     b.wait().await;
@@ -957,11 +1022,12 @@ mod tests {
             true,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
 
         match futures::future::try_join(fut1, fut2).await {
@@ -987,9 +1053,9 @@ mod tests {
         let project_root_temp: ProjectRootTemp = ProjectRootTemp::new().unwrap();
 
         let fut1 = concurrency.enter(
-            EventDispatcher::null_sink_with_trace(traces1),
+            null_sink_with_trace(traces1),
             &NoChanges,
-            |_| {
+            |_, _timing| {
                 let b = barrier.dupe();
                 async move {
                     b.wait().await;
@@ -998,16 +1064,17 @@ mod tests {
             false,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
         let fut2 = concurrency.enter(
-            EventDispatcher::null_sink_with_trace(traces2),
+            null_sink_with_trace(traces2),
             &NoChanges,
-            |_| {
+            |_, _timing| {
                 let b = barrier.dupe();
                 async move {
                     b.wait().await;
@@ -1016,16 +1083,17 @@ mod tests {
             false,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
         let fut3 = concurrency.enter(
-            EventDispatcher::null_sink_with_trace(traces3),
+            null_sink_with_trace(traces3),
             &NoChanges,
-            |_| {
+            |_, _timing| {
                 let b = barrier.dupe();
                 async move {
                     b.wait().await;
@@ -1034,11 +1102,12 @@ mod tests {
             false,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
 
         let (r1, r2, r3) = futures::future::join3(fut1, fut2, fut3).await;
@@ -1076,20 +1145,21 @@ mod tests {
             async move {
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces1),
+                        null_sink_with_trace(traces1),
                         &NoChanges,
-                        |_| async move {
+                        |_, _timing| async move {
                             barrier.wait().await;
                             let _g = b.read().await;
                         },
                         false,
                         Vec::new(),
                         None,
-                        false,
                         CancellationContext::testing(),
                         PreemptibleWhen::Never,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1103,20 +1173,21 @@ mod tests {
             async move {
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces2),
+                        null_sink_with_trace(traces2),
                         &NoChanges,
-                        |_| async move {
+                        |_, _timing| async move {
                             barrier.wait().await;
                             let _g = b.read().await;
                         },
                         false,
                         Vec::new(),
                         None,
-                        false,
                         CancellationContext::testing(),
                         PreemptibleWhen::Never,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1133,19 +1204,20 @@ mod tests {
                 barrier.wait().await;
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces_different),
+                        null_sink_with_trace(traces_different),
                         &CtxDifferent,
-                        |_| async move {
+                        |_, _timing| async move {
                             arrived.store(true, Ordering::Relaxed);
                         },
                         false,
                         Vec::new(),
                         None,
-                        false,
                         CancellationContext::testing(),
                         PreemptibleWhen::Never,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1199,20 +1271,21 @@ mod tests {
             async move {
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces1),
+                        null_sink_with_trace(traces1),
                         &NoChanges,
-                        |_| async move {
+                        |_, _timing| async move {
                             barrier.wait().await;
                             let _g = b.read().await;
                         },
                         false,
                         Vec::new(),
                         None,
-                        true,
                         CancellationContext::testing(),
                         PreemptibleWhen::Never,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitDifferentState,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1226,20 +1299,21 @@ mod tests {
             async move {
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces2),
+                        null_sink_with_trace(traces2),
                         &NoChanges,
-                        |_| async move {
+                        |_, _timing| async move {
                             barrier.wait().await;
                             let _g = b.read().await;
                         },
                         false,
                         Vec::new(),
                         None,
-                        true,
                         CancellationContext::testing(),
                         PreemptibleWhen::Never,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitDifferentState,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1256,19 +1330,20 @@ mod tests {
                 barrier.wait().await;
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces_different),
+                        null_sink_with_trace(traces_different),
                         &CtxDifferent,
-                        |_| async move {
+                        |_, _timing| async move {
                             arrived.store(true, Ordering::Relaxed);
                         },
                         false,
                         Vec::new(),
                         None,
-                        true,
                         CancellationContext::testing(),
                         PreemptibleWhen::Never,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitDifferentState,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1288,7 +1363,7 @@ mod tests {
 
         let fut3_result = fut3.await?;
 
-        let fut3_error: buck2_error::Error = fut3_result.unwrap_err().into();
+        let fut3_error: buck2_error::Error = fut3_result.unwrap_err();
         assert!(
             fut3_error
                 .tags()
@@ -1327,20 +1402,21 @@ mod tests {
             async move {
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces1),
+                        null_sink_with_trace(traces1),
                         &NoChanges,
-                        |_| async move {
+                        |_, _timing| async move {
                             barrier.wait().await;
                             let _g = b.read().await;
                         },
                         false,
                         Vec::new(),
                         None,
-                        false,
                         CancellationContext::testing(),
                         PreemptibleWhen::Always,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1354,20 +1430,21 @@ mod tests {
             async move {
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces2),
+                        null_sink_with_trace(traces2),
                         &NoChanges,
-                        |_| async move {
+                        |_, _timing| async move {
                             barrier.wait().await;
                             let _g = b.read().await;
                         },
                         false,
                         Vec::new(),
                         None,
-                        false,
                         CancellationContext::testing(),
                         PreemptibleWhen::Never,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1384,19 +1461,20 @@ mod tests {
                 barrier.wait().await;
                 concurrency
                     .enter(
-                        EventDispatcher::null_sink_with_trace(traces_different),
+                        null_sink_with_trace(traces_different),
                         &CtxDifferent,
-                        |_| async move {
+                        |_, _timing| async move {
                             arrived.store(true, Ordering::Relaxed);
                         },
                         false,
                         Vec::new(),
                         None,
-                        false,
                         CancellationContext::testing(),
                         PreemptibleWhen::Never,
                         LockedPreviousCommandData::default().into(),
                         ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
                     )
                     .await
             }
@@ -1408,7 +1486,7 @@ mod tests {
 
         drop(blocked1);
         let fut1_result = fut1.await?;
-        let fut1_error: buck2_error::Error = fut1_result.unwrap_err().into();
+        let fut1_error: buck2_error::Error = fut1_result.unwrap_err();
         assert!(
             fut1_error
                 .tags()
@@ -1473,7 +1551,7 @@ mod tests {
             .enter(
                 EventDispatcher::null(),
                 &NoChanges,
-                |mut dice| async move {
+                |mut dice, _timing| async move {
                     let compute = dice.compute(key).fuse();
 
                     let started = async {
@@ -1497,11 +1575,12 @@ mod tests {
                 false,
                 Vec::new(),
                 None,
-                false,
                 CancellationContext::testing(),
                 PreemptibleWhen::Never,
                 LockedPreviousCommandData::default().into(),
                 ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
             )
             .await?;
 
@@ -1511,18 +1590,19 @@ mod tests {
             .enter(
                 EventDispatcher::null(),
                 &NoChanges,
-                |_dice| async move {
+                |_dice, _timing| async move {
                     // The key should still be evaluating by now.
                     assert!(key.is_executing.is_locked());
                 },
                 false,
                 Vec::new(),
                 None,
-                false,
                 CancellationContext::testing(),
                 PreemptibleWhen::Never,
                 LockedPreviousCommandData::default().into(),
                 ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
             )
             .await?;
 
@@ -1532,17 +1612,18 @@ mod tests {
             .enter(
                 EventDispatcher::null(),
                 &CtxDifferent,
-                |_dice| async move {
+                |_dice, _timing| async move {
                     assert!(!key.is_executing.is_locked());
                 },
                 false,
                 Vec::new(),
                 None,
-                false,
                 CancellationContext::testing(),
                 PreemptibleWhen::Never,
                 LockedPreviousCommandData::default().into(),
                 ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
             )
             .await?;
 
@@ -1556,7 +1637,8 @@ mod tests {
     where
         F: Fn(&BuckEvent) -> bool + Send,
     {
-        tokio::time::timeout(Duration::from_millis(2), async {
+        // 2 millis was too short on windows, fails concurrency::tests::exclusive_command_lock
+        tokio::time::timeout(Duration::from_millis(4), async {
             loop {
                 if let Some(event) = source.try_receive() {
                     if let Some(event) = event.unpack_buck() {
@@ -1622,7 +1704,7 @@ mod tests {
         let dice = make_default_dice().await;
         let concurrency = ConcurrencyHandler::new(dice.dupe());
         let (mut source, sink) = create_source_sink_pair();
-        let dispatcher = EventDispatcher::new(TraceId::new(), sink);
+        let dispatcher = EventDispatcher::new(TraceId::new(), DaemonId::new(), sink);
 
         let mutex = Arc::new(Mutex::new(()));
         let command = |exclusive_cmd: Option<&str>, barriers: Option<&Arc<(Barrier, Barrier)>>| {
@@ -1637,7 +1719,7 @@ mod tests {
                         .enter(
                             dispatcher,
                             &NoChanges,
-                            |_| async move {
+                            |_, _timing| async move {
                                 let _guard = mutex.try_lock().expect("Not exclusive!");
                                 if let Some(barriers) = barriers {
                                     barriers.0.wait().await;
@@ -1648,11 +1730,12 @@ mod tests {
                             false,
                             Vec::new(),
                             exclusive_cmd,
-                            false,
                             CancellationContext::testing(),
                             PreemptibleWhen::Never,
                             LockedPreviousCommandData::default().into(),
                             ProjectRootTemp::new().unwrap().path(),
+                            ExitWhen::ExitNever,
+                            EarlyCommandTimingBuilder::new(Instant::now()),
                         )
                         .await
                 }
@@ -1717,7 +1800,7 @@ mod tests {
                 .enter(
                     EventDispatcher::null(),
                     &CtxDifferent,
-                    |mut dice| async move {
+                    |mut dice, _timing| async move {
                         // NOTE: We need to actually compute something for DICE to be not-idle.
                         dice.compute(&K).await.unwrap();
                         tokio::task::yield_now().await;
@@ -1725,11 +1808,12 @@ mod tests {
                     false,
                     Vec::new(),
                     None,
-                    false,
                     CancellationContext::testing(),
                     PreemptibleWhen::Never,
                     LockedPreviousCommandData::default().into(),
                     ProjectRootTemp::new().unwrap().path(),
+                    ExitWhen::ExitNever,
+                    EarlyCommandTimingBuilder::new(Instant::now()),
                 )
                 .await
         });
@@ -1764,6 +1848,7 @@ mod tests {
             async fn update(
                 &self,
                 ctx: DiceTransactionUpdater,
+                _early_timings: &mut EarlyCommandTimingBuilder,
             ) -> buck2_error::Result<(DiceTransactionUpdater, UserComputationData)> {
                 self.on_enter.store(true, Ordering::Relaxed);
                 wait_on(&self.allow_exit).await;
@@ -1779,17 +1864,18 @@ mod tests {
         let fut1 = concurrency.enter(
             EventDispatcher::null(),
             &updater1,
-            |_dice| async move {
+            |_dice, _timing| async move {
                 tokio::task::yield_now().await;
             },
             false,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
         pin_mut!(fut1);
 
@@ -1802,17 +1888,18 @@ mod tests {
         let fut2 = concurrency.enter(
             EventDispatcher::null(),
             &updater2,
-            |_dice| async move {
+            |_dice, _timing| async move {
                 tokio::task::yield_now().await;
             },
             false,
             Vec::new(),
             None,
-            false,
             CancellationContext::testing(),
             PreemptibleWhen::Never,
             LockedPreviousCommandData::default().into(),
             project_root_temp.path(),
+            ExitWhen::ExitNever,
+            EarlyCommandTimingBuilder::new(Instant::now()),
         );
         pin_mut!(fut2);
 
@@ -1838,6 +1925,1033 @@ mod tests {
         let (a, b) = tokio::join!(fut1, fut2);
         a.unwrap();
         b.unwrap();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_exit_when_not_idle_with_same_state() -> buck2_error::Result<()> {
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+
+        let block1 = Arc::new(RwLock::new(()));
+        let blocked1 = block1.write().await;
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Start first command (same state, will run)
+        let fut1 = tokio::spawn({
+            let concurrency = concurrency.dupe();
+            let barrier = barrier.dupe();
+            let b = block1.dupe();
+
+            async move {
+                concurrency
+                    .enter(
+                        null_sink_with_trace(traces1),
+                        &NoChanges,
+                        |_, _timing| async move {
+                            barrier.wait().await;
+                            let _g = b.read().await;
+                        },
+                        false,
+                        Vec::new(),
+                        None,
+                        CancellationContext::testing(),
+                        PreemptibleWhen::Never,
+                        LockedPreviousCommandData::default().into(),
+                        ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
+                    )
+                    .await
+            }
+        });
+
+        barrier.wait().await;
+
+        // Start second command with --exit-when=notidle (same state, should fail)
+        let fut2 = tokio::spawn(buck2_util::async_move_clone!(concurrency, {
+            concurrency
+                .enter(
+                    null_sink_with_trace(traces2),
+                    &NoChanges,
+                    |_, _timing| async move {
+                        // Should never reach here
+                        panic!("Command should have failed before execution");
+                    },
+                    false,
+                    Vec::new(),
+                    None,
+                    CancellationContext::testing(),
+                    PreemptibleWhen::Never,
+                    LockedPreviousCommandData::default().into(),
+                    ProjectRootTemp::new().unwrap().path(),
+                    ExitWhen::ExitNotIdle,
+                    EarlyCommandTimingBuilder::new(Instant::now()),
+                )
+                .await
+        }));
+
+        // Second command should fail immediately
+        let fut2_result = fut2.await?;
+        let fut2_error: buck2_error::Error = fut2_result.unwrap_err();
+        assert!(
+            fut2_error
+                .tags()
+                .contains(&buck2_error::ErrorTag::DaemonIsBusy),
+            "Expected DaemonIsBusy error tag"
+        );
+
+        // Clean up first command
+        drop(blocked1);
+        fut1.await??;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_exit_when_not_idle_with_different_state() -> buck2_error::Result<()> {
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+
+        let block1 = Arc::new(RwLock::new(()));
+        let blocked1 = block1.write().await;
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Start first command (different state)
+        let fut1 = tokio::spawn({
+            let concurrency = concurrency.dupe();
+            let barrier = barrier.dupe();
+            let b = block1.dupe();
+
+            async move {
+                concurrency
+                    .enter(
+                        null_sink_with_trace(traces1),
+                        &NoChanges,
+                        |_, _timing| async move {
+                            barrier.wait().await;
+                            let _g = b.read().await;
+                        },
+                        false,
+                        Vec::new(),
+                        None,
+                        CancellationContext::testing(),
+                        PreemptibleWhen::Never,
+                        LockedPreviousCommandData::default().into(),
+                        ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
+                    )
+                    .await
+            }
+        });
+
+        barrier.wait().await;
+
+        // Start second command with --exit-when=notidle (different state, should fail)
+        let fut2 = tokio::spawn(buck2_util::async_move_clone!(concurrency, {
+            concurrency
+                .enter(
+                    null_sink_with_trace(traces2),
+                    &CtxDifferent, // Different state
+                    |_, _timing| async move {
+                        // Should never reach here
+                        panic!("Command should have failed before execution");
+                    },
+                    false,
+                    Vec::new(),
+                    None,
+                    CancellationContext::testing(),
+                    PreemptibleWhen::Never,
+                    LockedPreviousCommandData::default().into(),
+                    ProjectRootTemp::new().unwrap().path(),
+                    ExitWhen::ExitNotIdle,
+                    EarlyCommandTimingBuilder::new(Instant::now()),
+                )
+                .await
+        }));
+
+        // Second command should fail immediately
+        let fut2_result = fut2.await?;
+        let fut2_error: buck2_error::Error = fut2_result.unwrap_err();
+        assert!(
+            fut2_error
+                .tags()
+                .contains(&buck2_error::ErrorTag::DaemonIsBusy),
+            "Expected DaemonIsBusy error tag"
+        );
+
+        // Clean up first command
+        drop(blocked1);
+        fut1.await??;
+
+        Ok(())
+    }
+
+    // This test was moved to the top of the file
+
+    #[tokio::test]
+    async fn test_multiple_exit_when_not_idle_commands_with_same_state() -> buck2_error::Result<()>
+    {
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+        let traces3 = TraceId::new();
+
+        let block1 = Arc::new(RwLock::new(()));
+        let blocked1 = block1.write().await;
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Start first command with --exit-when=notidle
+        let fut1 = tokio::spawn({
+            let concurrency = concurrency.dupe();
+            let barrier = barrier.dupe();
+            let b = block1.dupe();
+
+            async move {
+                concurrency
+                    .enter(
+                        null_sink_with_trace(traces1),
+                        &NoChanges,
+                        |_, _timing| async move {
+                            barrier.wait().await;
+                            let _g = b.read().await;
+                        },
+                        false,
+                        Vec::new(),
+                        None,
+                        CancellationContext::testing(),
+                        PreemptibleWhen::Never,
+                        LockedPreviousCommandData::default().into(),
+                        ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNotIdle,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
+                    )
+                    .await
+            }
+        });
+
+        barrier.wait().await;
+
+        // Start second and third commands with --exit-when=notidle (should both fail)
+        let fut2 = tokio::spawn(buck2_util::async_move_clone!(concurrency, {
+            concurrency
+                .enter(
+                    null_sink_with_trace(traces2),
+                    &NoChanges,
+                    |_, _timing| async move {
+                        panic!("Should not execute");
+                    },
+                    false,
+                    Vec::new(),
+                    None,
+                    CancellationContext::testing(),
+                    PreemptibleWhen::Never,
+                    LockedPreviousCommandData::default().into(),
+                    ProjectRootTemp::new().unwrap().path(),
+                    ExitWhen::ExitNotIdle,
+                    EarlyCommandTimingBuilder::new(Instant::now()),
+                )
+                .await
+        }));
+
+        let fut3 = tokio::spawn(buck2_util::async_move_clone!(concurrency, {
+            concurrency
+                .enter(
+                    null_sink_with_trace(traces3),
+                    &NoChanges,
+                    |_, _timing| async move {
+                        panic!("Should not execute");
+                    },
+                    false,
+                    Vec::new(),
+                    None,
+                    CancellationContext::testing(),
+                    PreemptibleWhen::Never,
+                    LockedPreviousCommandData::default().into(),
+                    ProjectRootTemp::new().unwrap().path(),
+                    ExitWhen::ExitNotIdle,
+                    EarlyCommandTimingBuilder::new(Instant::now()),
+                )
+                .await
+        }));
+
+        // Both second and third commands should fail
+        let fut2_result = fut2.await?;
+        let fut2_error: buck2_error::Error = fut2_result.unwrap_err();
+        assert!(
+            fut2_error
+                .tags()
+                .contains(&buck2_error::ErrorTag::DaemonIsBusy)
+        );
+
+        let fut3_result = fut3.await?;
+        let fut3_error: buck2_error::Error = fut3_result.unwrap_err();
+        assert!(
+            fut3_error
+                .tags()
+                .contains(&buck2_error::ErrorTag::DaemonIsBusy)
+        );
+
+        // Clean up first command
+        drop(blocked1);
+        fut1.await??;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_exit_when_not_idle_with_preemptible_command() -> buck2_error::Result<()> {
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+
+        let block1 = Arc::new(RwLock::new(()));
+        let blocked1 = block1.write().await;
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Start first command with --preemptible=always (could be preempted)
+        let fut1 = tokio::spawn({
+            let concurrency = concurrency.dupe();
+            let barrier = barrier.dupe();
+            let b = block1.dupe();
+
+            async move {
+                concurrency
+                    .enter(
+                        null_sink_with_trace(traces1),
+                        &NoChanges,
+                        |_, _timing| async move {
+                            barrier.wait().await;
+                            let _g = b.read().await;
+                        },
+                        false,
+                        Vec::new(),
+                        None,
+                        CancellationContext::testing(),
+                        PreemptibleWhen::Always, // This command is preemptible
+                        LockedPreviousCommandData::default().into(),
+                        ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
+                    )
+                    .await
+            }
+        });
+
+        barrier.wait().await;
+
+        // Start second command with --exit-when=notidle (should fail)
+        // Even though the first command is preemptible, this should still fail
+        // because --exit-when=notidle means "only run if daemon is completely idle"
+        let fut2 = tokio::spawn(buck2_util::async_move_clone!(concurrency, {
+            concurrency
+                .enter(
+                    null_sink_with_trace(traces2),
+                    &NoChanges,
+                    |_, _timing| async move {
+                        // Should never reach here
+                        panic!("Command should have failed before execution");
+                    },
+                    false,
+                    Vec::new(),
+                    None,
+                    CancellationContext::testing(),
+                    PreemptibleWhen::Never,
+                    LockedPreviousCommandData::default().into(),
+                    ProjectRootTemp::new().unwrap().path(),
+                    ExitWhen::ExitNotIdle,
+                    EarlyCommandTimingBuilder::new(Instant::now()),
+                )
+                .await
+        }));
+
+        // Second command should fail immediately, even though first is preemptible
+        let fut2_result = fut2.await?;
+        let fut2_error: buck2_error::Error = fut2_result.unwrap_err();
+        assert!(
+            fut2_error
+                .tags()
+                .contains(&buck2_error::ErrorTag::DaemonIsBusy),
+            "Expected DaemonIsBusy error tag, even though previous command is preemptible"
+        );
+
+        // The first command should still be running (not preempted)
+        // because --exit-when=notidle doesn't preempt, it just fails
+        assert!(
+            block1.try_write().is_err(),
+            "First command should still be running"
+        );
+
+        // Clean up first command
+        drop(blocked1);
+        fut1.await??;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_exit_when_not_idle_gets_preempted() -> buck2_error::Result<()> {
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+
+        let block1 = Arc::new(RwLock::new(()));
+        let blocked1 = block1.write().await;
+
+        let barrier = Arc::new(Barrier::new(2));
+        let preempted = Arc::new(AtomicBool::new(false));
+
+        // Start first command with --exit-when=notidle
+        let fut1 = tokio::spawn({
+            let concurrency = concurrency.dupe();
+            let barrier = barrier.dupe();
+            let b = block1.dupe();
+            let preempted = preempted.dupe();
+
+            async move {
+                let result = concurrency
+                    .enter(
+                        null_sink_with_trace(traces1),
+                        &NoChanges,
+                        |_, _timing| async move {
+                            barrier.wait().await;
+                            // This should never complete because we'll be preempted
+                            let _g = b.read().await;
+                        },
+                        false,
+                        Vec::new(),
+                        None,
+                        CancellationContext::testing(),
+                        PreemptibleWhen::Always,
+                        LockedPreviousCommandData::default().into(),
+                        ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNotIdle,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
+                    )
+                    .await;
+
+                // Check if we got preempted
+                if let Err(ref e) = result {
+                    let error: buck2_error::Error = e.clone();
+                    if error
+                        .tags()
+                        .contains(&buck2_error::ErrorTag::DaemonPreempted)
+                    {
+                        preempted.store(true, Ordering::Relaxed);
+                    }
+                }
+                result
+            }
+        });
+
+        barrier.wait().await;
+
+        // Start second command (without any preemptible flag)
+        // This should preempt the first command
+        let fut2 = tokio::spawn(buck2_util::async_move_clone!(concurrency, {
+            concurrency
+                .enter(
+                    null_sink_with_trace(traces2),
+                    &NoChanges,
+                    |_, _timing| async move {
+                        // Just a quick task
+                        tokio::task::yield_now().await;
+                    },
+                    false,
+                    Vec::new(),
+                    None,
+                    CancellationContext::testing(),
+                    PreemptibleWhen::Never, // Not preemptible
+                    LockedPreviousCommandData::default().into(),
+                    ProjectRootTemp::new().unwrap().path(),
+                    ExitWhen::ExitNever,
+                    EarlyCommandTimingBuilder::new(Instant::now()),
+                )
+                .await
+        }));
+
+        // Second command should succeed
+        fut2.await??;
+
+        // First command should have been preempted
+        let fut1_result = fut1.await?;
+        assert!(fut1_result.is_err(), "First command should have failed");
+        assert!(
+            preempted.load(Ordering::Relaxed),
+            "First command should have been preempted"
+        );
+
+        // Clean up
+        drop(blocked1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multiple_exit_when_not_idle_commands_with_different_state()
+    -> buck2_error::Result<()> {
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+
+        let block1 = Arc::new(RwLock::new(()));
+        let blocked1 = block1.write().await;
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Start first command with --exit-when=notidle
+        let fut1 = tokio::spawn({
+            let concurrency = concurrency.dupe();
+            let barrier = barrier.dupe();
+            let b = block1.dupe();
+
+            async move {
+                concurrency
+                    .enter(
+                        null_sink_with_trace(traces1),
+                        &NoChanges,
+                        |_, _timing| async move {
+                            barrier.wait().await;
+                            let _g = b.read().await;
+                        },
+                        false,
+                        Vec::new(),
+                        None,
+                        CancellationContext::testing(),
+                        PreemptibleWhen::Never,
+                        LockedPreviousCommandData::default().into(),
+                        ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNotIdle,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
+                    )
+                    .await
+            }
+        });
+
+        barrier.wait().await;
+
+        // Start second and third commands with --exit-when=notidle (should both fail)
+        let fut2 = tokio::spawn(buck2_util::async_move_clone!(concurrency, {
+            concurrency
+                .enter(
+                    null_sink_with_trace(traces2),
+                    &CtxDifferent,
+                    |_, _timing| async move {
+                        // Just a quick task
+                        tokio::task::yield_now().await;
+                    },
+                    false,
+                    Vec::new(),
+                    None,
+                    CancellationContext::testing(),
+                    PreemptibleWhen::Never,
+                    LockedPreviousCommandData::default().into(),
+                    ProjectRootTemp::new().unwrap().path(),
+                    ExitWhen::ExitNotIdle,
+                    EarlyCommandTimingBuilder::new(Instant::now()),
+                )
+                .await
+        }));
+
+        // Both second and third commands should fail
+        let fut2_result = fut2.await?;
+        let fut2_error: buck2_error::Error = fut2_result.unwrap_err();
+        assert!(
+            fut2_error
+                .tags()
+                .contains(&buck2_error::ErrorTag::DaemonIsBusy)
+        );
+
+        // Clean up first command
+        drop(blocked1);
+        fut1.await??;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_exit_when_not_idle_allows_command_when_daemon_idle_with_same_state()
+    -> buck2_error::Result<()> {
+        // This test verifies that when the daemon is idle (no command is currently running),
+        // a command with --exit-when=notidle should succeed if it has the same state as the
+        // previous command that has finished.
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+
+        // First command runs to completion
+        concurrency
+            .enter(
+                null_sink_with_trace(traces1),
+                &NoChanges,
+                |_, _timing| async move {
+                    // Quick task that finishes
+                    tokio::task::yield_now().await;
+                },
+                false,
+                Vec::new(),
+                None,
+                CancellationContext::testing(),
+                PreemptibleWhen::Never,
+                LockedPreviousCommandData::default().into(),
+                ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
+            )
+            .await?;
+
+        // Wait for a moment to let async cleanup processes finish.
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Daemon should now be idle
+        // Second command with --exit-when=notidle and same state should succeed
+        let result = concurrency
+            .enter(
+                null_sink_with_trace(traces2),
+                &NoChanges, // Same state as first command
+                |_, _timing| async move {
+                    // Quick task
+                    tokio::task::yield_now().await;
+                    "success"
+                },
+                false,
+                Vec::new(),
+                None,
+                CancellationContext::testing(),
+                PreemptibleWhen::Never,
+                LockedPreviousCommandData::default().into(),
+                ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNotIdle,
+                EarlyCommandTimingBuilder::new(Instant::now()),
+            )
+            .await;
+
+        // Should succeed since daemon is idle
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "success");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_exit_when_not_idle_allows_command_when_daemon_idle_with_different_state()
+    -> buck2_error::Result<()> {
+        // This test verifies that when the daemon is idle (no command is currently running),
+        // a command with --exit-when=notidle should succeed even if it has a different state
+        // than previous commands.
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+
+        // First command runs to completion with NoChanges state
+        concurrency
+            .enter(
+                null_sink_with_trace(traces1),
+                &NoChanges,
+                |_, _timing| async move {
+                    // Quick task that finishes
+                    tokio::task::yield_now().await;
+                },
+                false,
+                Vec::new(),
+                None,
+                CancellationContext::testing(),
+                PreemptibleWhen::Never,
+                LockedPreviousCommandData::default().into(),
+                ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
+            )
+            .await?;
+
+        // Wait for a moment to let async cleanup processes finish.
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Daemon should now be idle
+        // Second command with --exit-when=notidle and different state should succeed
+        let result = concurrency
+            .enter(
+                null_sink_with_trace(traces2),
+                &CtxDifferent, // Different state than first command
+                |_, _timing| async move {
+                    // Quick task
+                    tokio::task::yield_now().await;
+                    "success"
+                },
+                false,
+                Vec::new(),
+                None,
+                CancellationContext::testing(),
+                PreemptibleWhen::Never,
+                LockedPreviousCommandData::default().into(),
+                ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNotIdle,
+                EarlyCommandTimingBuilder::new(Instant::now()),
+            )
+            .await;
+
+        // Should succeed since daemon is idle, regardless of state difference
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "success");
+
+        Ok(())
+    }
+
+    fn get_early_command_timing_duration(
+        timing: EarlyCommandTimingBuilder,
+        key: &str,
+    ) -> Option<Duration> {
+        let timing = timing.finish_early_command_timing();
+        let mut end = timing.early_command_end;
+        let mut duration = None;
+        for s in timing.early_spans.iter().rev() {
+            if s.1 == key {
+                let d = end - s.0;
+                if let Some(s) = &mut duration {
+                    *s += d;
+                } else {
+                    duration = Some(d)
+                }
+            }
+            end = s.0;
+        }
+        duration
+    }
+
+    fn get_exclusive_command_wait_duration(timing: EarlyCommandTimingBuilder) -> Option<Duration> {
+        get_early_command_timing_duration(timing, EXCLUSIVE_COMMAND_WAIT)
+    }
+
+    #[tokio::test]
+    async fn test_enter_duration_parameter_populated() -> buck2_error::Result<()> {
+        // Test that the duration parameter passed to the enter() callback is properly populated
+        // when waiting for an exclusive command lock.
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces1 = TraceId::new();
+        let traces2 = TraceId::new();
+
+        let block1 = Arc::new(RwLock::new(()));
+        let blocked1 = block1.write().await;
+
+        let barrier = Arc::new(Barrier::new(2));
+        let duration_captured: Arc<Mutex<Duration>> = Arc::new(Mutex::new(Duration::ZERO));
+
+        // Start first exclusive command
+        let fut1 = tokio::spawn({
+            let concurrency = concurrency.dupe();
+            let barrier = barrier.dupe();
+            let b = block1.dupe();
+
+            async move {
+                concurrency
+                    .enter(
+                        null_sink_with_trace(traces1),
+                        &NoChanges,
+                        |_, _timing| async move {
+                            barrier.wait().await;
+                            let _g = b.read().await;
+                        },
+                        false,
+                        Vec::new(),
+                        Some("exclusive_test".to_owned()),
+                        CancellationContext::testing(),
+                        PreemptibleWhen::Never,
+                        LockedPreviousCommandData::default().into(),
+                        ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
+                    )
+                    .await
+            }
+        });
+
+        barrier.wait().await;
+
+        // Start second exclusive command - it should wait and capture non-zero duration
+        let fut2 = tokio::spawn({
+            let concurrency = concurrency.dupe();
+            let duration_captured = duration_captured.dupe();
+
+            async move {
+                concurrency
+                    .enter(
+                        null_sink_with_trace(traces2),
+                        &NoChanges,
+                        |_, timing| {
+                            *duration_captured.lock() =
+                                get_exclusive_command_wait_duration(timing).unwrap();
+                            async move {
+                                tokio::task::yield_now().await;
+                            }
+                        },
+                        false,
+                        Vec::new(),
+                        Some("exclusive_test_2".to_owned()),
+                        CancellationContext::testing(),
+                        PreemptibleWhen::Never,
+                        LockedPreviousCommandData::default().into(),
+                        ProjectRootTemp::new().unwrap().path(),
+                        ExitWhen::ExitNever,
+                        EarlyCommandTimingBuilder::new(Instant::now()),
+                    )
+                    .await
+            }
+        });
+
+        // Give fut2 time to start waiting
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Unblock the first command
+        drop(blocked1);
+        fut1.await??;
+
+        // Complete the second command
+        fut2.await??;
+
+        // Verify that the duration was captured and is non-zero
+        let duration = *duration_captured.lock();
+        assert!(
+            !duration.is_zero(),
+            "Duration should be non-zero since we waited for exclusive lock. Got: {:?}",
+            duration
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_enter_duration_parameter_zero_for_non_exclusive() -> buck2_error::Result<()> {
+        // Test that the duration parameter is zero when no exclusive command lock is needed.
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        let traces = TraceId::new();
+        let duration_captured: Arc<Mutex<Duration>> = Arc::new(Mutex::new(Duration::ZERO));
+
+        // Run a non-exclusive command (None for exclusive_cmd parameter)
+        concurrency
+            .enter(
+                null_sink_with_trace(traces),
+                &NoChanges,
+                |_, timing| {
+                    *duration_captured.lock() =
+                        get_exclusive_command_wait_duration(timing).unwrap_or(Duration::ZERO);
+                    async move {
+                        tokio::task::yield_now().await;
+                    }
+                },
+                false,
+                Vec::new(),
+                None, // No exclusive command
+                CancellationContext::testing(),
+                PreemptibleWhen::Never,
+                LockedPreviousCommandData::default().into(),
+                ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
+            )
+            .await?;
+
+        // Verify that the duration was captured and is zero
+        let duration = *duration_captured.lock();
+        assert!(
+            duration.is_zero(),
+            "Duration should be zero for non-exclusive commands. Got: {:?}",
+            duration
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_sync_duration_captured() -> buck2_error::Result<()> {
+        // Test that file_watcher_sync_duration is properly captured when the updater
+        // returns a non-zero duration.
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        struct UpdaterWithDelay;
+        #[async_trait]
+        impl DiceUpdater for UpdaterWithDelay {
+            async fn update(
+                &self,
+                ctx: DiceTransactionUpdater,
+                early_timings: &mut EarlyCommandTimingBuilder,
+            ) -> buck2_error::Result<(DiceTransactionUpdater, UserComputationData)> {
+                // Simulate file watcher sync taking 50ms
+                early_timings.start_span(FILE_WATCHER_WAIT.to_owned());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                early_timings.end_known_span();
+                Ok((ctx, Default::default()))
+            }
+        }
+
+        let traces = TraceId::new();
+        let file_watcher_duration_captured: Arc<Mutex<Duration>> =
+            Arc::new(Mutex::new(Duration::ZERO));
+
+        concurrency
+            .enter(
+                null_sink_with_trace(traces),
+                &UpdaterWithDelay,
+                |_, timing| {
+                    let duration_captured = file_watcher_duration_captured.dupe();
+                    async move {
+                        // Capture the file watcher sync duration (sum of all syncs)
+                        let total_duration: std::time::Duration =
+                            get_early_command_timing_duration(timing, FILE_WATCHER_WAIT).unwrap();
+                        *duration_captured.lock() = total_duration;
+                        tokio::task::yield_now().await;
+                    }
+                },
+                false,
+                Vec::new(),
+                None,
+                CancellationContext::testing(),
+                PreemptibleWhen::Never,
+                LockedPreviousCommandData::default().into(),
+                ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
+            )
+            .await?;
+
+        // Verify that the file watcher sync duration was captured
+        let duration = *file_watcher_duration_captured.lock();
+        assert!(
+            !duration.is_zero(),
+            "File watcher sync duration should be non-zero. Got: {:?}",
+            duration
+        );
+        assert!(
+            duration >= Duration::from_millis(50),
+            "File watcher sync duration should be at least 50ms. Got: {:?}",
+            duration
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_sync_duration_accumulated_across_loop_iterations()
+    -> buck2_error::Result<()> {
+        // Test that file_watcher_sync_duration is accumulated across multiple loop iterations
+        // when the dice state transitions through cleanup.
+        let dice = make_default_dice().await;
+        let concurrency = ConcurrencyHandler::new(dice.dupe());
+
+        // First, establish an active DICE state by running a command
+        let traces_init = TraceId::new();
+        concurrency
+            .enter(
+                null_sink_with_trace(traces_init),
+                &NoChanges,
+                |_, _timing| async move {
+                    // Just establish the initial state
+                    tokio::task::yield_now().await;
+                },
+                false,
+                Vec::new(),
+                None,
+                CancellationContext::testing(),
+                PreemptibleWhen::Never,
+                LockedPreviousCommandData::default().into(),
+                ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
+            )
+            .await?;
+
+        // Now run the test that changes state, which should trigger a cleanup and re-update
+        struct UpdaterWithDelayAndStateChange {
+            call_count: AtomicBool,
+        }
+
+        #[async_trait]
+        impl DiceUpdater for UpdaterWithDelayAndStateChange {
+            async fn update(
+                &self,
+                mut ctx: DiceTransactionUpdater,
+                early_timings: &mut EarlyCommandTimingBuilder,
+            ) -> buck2_error::Result<(DiceTransactionUpdater, UserComputationData)> {
+                // First call changes state, second call doesn't
+                let is_first = !self.call_count.swap(true, Ordering::Relaxed);
+                if is_first {
+                    ctx.changed_to(vec![(K, ())])?;
+                }
+                // Each call simulates 30ms of file watcher sync
+                early_timings.start_span(FILE_WATCHER_WAIT.to_owned());
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                early_timings.end_known_span();
+                Ok((ctx, Default::default()))
+            }
+        }
+
+        let traces = TraceId::new();
+        let file_watcher_duration_captured: Arc<Mutex<Duration>> =
+            Arc::new(Mutex::new(Duration::ZERO));
+
+        let updater = UpdaterWithDelayAndStateChange {
+            call_count: AtomicBool::new(false),
+        };
+
+        concurrency
+            .enter(
+                null_sink_with_trace(traces),
+                &updater,
+                |_, timing| {
+                    *file_watcher_duration_captured.lock() =
+                        get_early_command_timing_duration(timing, FILE_WATCHER_WAIT).unwrap();
+                    async move {
+                        tokio::task::yield_now().await;
+                    }
+                },
+                false,
+                Vec::new(),
+                None,
+                CancellationContext::testing(),
+                PreemptibleWhen::Never,
+                LockedPreviousCommandData::default().into(),
+                ProjectRootTemp::new().unwrap().path(),
+                ExitWhen::ExitNever,
+                EarlyCommandTimingBuilder::new(Instant::now()),
+            )
+            .await?;
+
+        // Verify that the file watcher sync duration was accumulated
+        // It should be at least the sum of both iterations (60ms total)
+        let duration = *file_watcher_duration_captured.lock();
+        assert!(
+            duration >= Duration::from_millis(60),
+            "File watcher sync duration should be accumulated across loop iterations. Expected at least 60ms, got: {:?}",
+            duration
+        );
 
         Ok(())
     }

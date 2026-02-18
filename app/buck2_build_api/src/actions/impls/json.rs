@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io::Write;
@@ -12,6 +13,7 @@ use std::io::sink;
 use std::sync::Arc;
 
 use buck2_artifact::artifact::artifact_type::Artifact;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_error::BuckErrorContext;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::artifact::fs::ExecutorFs;
@@ -20,6 +22,7 @@ use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProv
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
 use dupe::Dupe;
 use either::Either;
+use fxhash::FxHashMap;
 use serde::Serialize;
 use serde::Serializer;
 use starlark::values::UnpackValue;
@@ -38,11 +41,12 @@ use starlark::values::type_repr::StarlarkTypeRepr;
 use crate::artifact_groups::ArtifactGroup;
 use crate::bxl::select::StarlarkSelectConcat;
 use crate::bxl::select::StarlarkSelectDict;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
 use crate::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
 use crate::interpreter::rule_defs::artifact_tagging::StarlarkTaggedValue;
 use crate::interpreter::rule_defs::cmd_args::AbsCommandLineContext;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
@@ -58,6 +62,7 @@ pub struct SerializeValue<'a, 'v> {
     pub value: JsonUnpack<'v>,
     pub fs: Option<&'a ExecutorFs<'a>>,
     pub absolute: bool,
+    pub artifact_path_mapping: &'a dyn ArtifactPathMapper,
 }
 
 struct Buck2ErrorResultOfSerializedValue<'a, 'v> {
@@ -71,7 +76,7 @@ impl<'a, 'v> Serialize for Buck2ErrorResultOfSerializedValue<'a, 'v> {
     {
         match &self.result {
             Ok(v) => v.serialize(serializer),
-            Err(e) => Err(serde::ser::Error::custom(format!("{:#}", e))),
+            Err(e) => Err(serde::ser::Error::custom(format!("{e:#}"))),
         }
     }
 }
@@ -85,6 +90,7 @@ impl<'a, 'v> SerializeValue<'a, 'v> {
                     value,
                     fs: self.fs,
                     absolute: self.absolute,
+                    artifact_path_mapping: self.artifact_path_mapping,
                 }),
         }
     }
@@ -93,7 +99,7 @@ impl<'a, 'v> SerializeValue<'a, 'v> {
 fn err<R, E: serde::ser::Error>(res: buck2_error::Result<R>) -> Result<R, E> {
     match res {
         Ok(v) => Ok(v),
-        Err(e) => Err(serde::ser::Error::custom(format!("{:#}", e))),
+        Err(e) => Err(serde::ser::Error::custom(format!("{e:#}"))),
     }
 }
 
@@ -119,17 +125,17 @@ where
 /// and end up getting wrapped in a list below.
 #[derive(UnpackValue, StarlarkTypeRepr)]
 pub enum JsonArtifact<'v> {
-    ValueAsArtifactLike(ValueAsArtifactLike<'v>),
+    ValueAsInputArtifactLike(ValueAsInputArtifactLike<'v>),
     StarlarkOutputArtifact(ValueTypedComplex<'v, StarlarkOutputArtifact<'v>>),
 }
 
 impl<'v> JsonArtifact<'v> {
     fn artifact(&self) -> buck2_error::Result<Artifact> {
         match self {
-            JsonArtifact::ValueAsArtifactLike(x) => Ok(x.0.get_bound_artifact()?.dupe()),
+            JsonArtifact::ValueAsInputArtifactLike(x) => Ok(x.0.get_bound_artifact()?.dupe()),
             JsonArtifact::StarlarkOutputArtifact(x) => match x.unpack() {
-                Either::Left(x) => Ok((*x.inner()?).get_bound_artifact()?.dupe()),
-                Either::Right(x) => Ok(x.inner()?.artifact()),
+                Either::Left(x) => Ok((*x.inner()).get_bound_artifact()?.dupe()),
+                Either::Right(x) => Ok(x.inner().artifact()),
             },
         }
     }
@@ -207,7 +213,17 @@ impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
                         serializer.serialize_str("")
                     }
                     Some(fs) => {
-                        let path = err(err(x.artifact())?.resolve_path(fs.fs()))?;
+                        let artifact = err(x.artifact())?;
+                        let path = match x {
+                            JsonArtifact::ValueAsInputArtifactLike(_) => {
+                                let content_hash = self.artifact_path_mapping.get(&artifact);
+                                err(artifact.resolve_path(fs.fs(), content_hash))?
+                            }
+                            JsonArtifact::StarlarkOutputArtifact(_) => {
+                                let content_hash = ContentBasedPathHash::for_output_artifact();
+                                err(artifact.resolve_path(fs.fs(), Some(&content_hash)))?
+                            }
+                        };
                         let path = with_command_line_context(fs, self.absolute, |ctx| {
                             err(ctx.resolve_project_path(path)).map(|loc| loc.into_string())
                         })?;
@@ -232,7 +248,11 @@ impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
                         let mut items = Vec::<String>::new();
 
                         with_command_line_context(fs, self.absolute, |ctx| {
-                            err(x.as_command_line_arg().add_to_command_line(&mut items, ctx))
+                            err(x.as_command_line_arg().add_to_command_line(
+                                &mut items,
+                                ctx,
+                                self.artifact_path_mapping,
+                            ))
                         })?;
 
                         // We change the type, based on the value - singleton = String, otherwise list.
@@ -267,7 +287,7 @@ fn is_singleton_cmdargs(x: CommandLineArg) -> bool {
 }
 
 pub fn validate_json(x: JsonUnpack) -> buck2_error::Result<()> {
-    write_json(x, None, &mut sink(), false, false)
+    write_json(x, None, &mut sink(), false, false, &FxHashMap::default())
 }
 
 pub fn write_json(
@@ -276,11 +296,13 @@ pub fn write_json(
     mut writer: &mut dyn Write,
     pretty: bool,
     absolute: bool,
+    artifact_path_mapping: &dyn ArtifactPathMapper,
 ) -> buck2_error::Result<()> {
     let value = SerializeValue {
         value,
         fs,
         absolute,
+        artifact_path_mapping,
     };
     (|| {
         if pretty {
@@ -296,9 +318,9 @@ pub fn write_json(
     .buck_error_context("Error converting to JSON for `write_json`")
 }
 
-pub fn visit_json_artifacts(
-    v: Value,
-    visitor: &mut dyn CommandLineArtifactVisitor,
+pub fn visit_json_artifacts<'v>(
+    v: Value<'v>,
+    visitor: &mut dyn CommandLineArtifactVisitor<'v>,
 ) -> buck2_error::Result<()> {
     match JsonUnpack::unpack_value_err(v)? {
         JsonUnpack::None(_)
@@ -339,8 +361,8 @@ pub fn visit_json_artifacts(
             }
         }
         JsonUnpack::TransitiveSetJsonProjection(x) => visitor.visit_input(
-            ArtifactGroup::TransitiveSetProjection(Arc::new(x.to_projection_key()?)),
-            None,
+            ArtifactGroup::TransitiveSetProjection(Arc::new(x.to_projection_key_wrapper()?)),
+            vec![],
         ),
         JsonUnpack::Artifact(_x) => {
             // The _x function requires that the artifact is already bound, but we may need to visit artifacts

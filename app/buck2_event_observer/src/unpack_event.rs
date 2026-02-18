@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_data::InstantEvent;
@@ -45,7 +46,7 @@ pub enum UnpackedBuckEvent<'a> {
     UnrecognizedInstant(&'a BuckEvent, &'a InstantEvent),
 }
 
-pub fn unpack_event(event: &BuckEvent) -> buck2_error::Result<UnpackedBuckEvent> {
+pub fn unpack_event(event: &BuckEvent) -> buck2_error::Result<UnpackedBuckEvent<'_>> {
     match &event.data() {
         buck_event::Data::SpanStart(v) => Ok({
             if let Some(data) = v.data.as_ref() {

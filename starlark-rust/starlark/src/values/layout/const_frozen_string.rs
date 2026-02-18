@@ -18,7 +18,7 @@
 /// Create a [`FrozenStringValue`](crate::values::FrozenStringValue).
 #[macro_export]
 macro_rules! const_frozen_string {
-    ($s:expr_2021) => {{
+    ($s:expr) => {{
         $crate::values::constant_string($s).unwrap_or_else(|| {
             // `$s.len() <= 1`, `StarlarkStrNRepr::new` should not be called
             // because it fails and it should be handled by `constant_string`.
@@ -55,12 +55,13 @@ mod tests {
                 .ptr_eq(const_frozen_string!("a").to_value())
         );
 
-        let heap = Heap::new();
-        assert!(
-            const_frozen_string!("a")
-                .to_value()
-                .ptr_eq(heap.alloc_str("a").to_value())
-        );
+        Heap::temp(|heap| {
+            assert!(
+                const_frozen_string!("a")
+                    .to_value()
+                    .ptr_eq(heap.alloc_str("a").to_value())
+            );
+        });
 
         let frozen_heap = FrozenHeap::new();
         assert!(

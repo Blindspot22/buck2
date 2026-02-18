@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//android:android_providers.bzl", "DexFilesInfo", "ExopackageDexInfo")
@@ -33,15 +34,20 @@ load("@prelude//utils:utils.bzl", "flatten")
 #
 # The primary DEX is always stored in the root directory of the APK as `classes.dex`.
 #
-# We have 4 different ways of storing our secondary DEX files, which are specified via the
+# We have 5 different ways of storing our secondary DEX files, which are specified via the
 # `dex_compression` attribute:
 # 1) `raw` compression. This means that we create `classes2.dex`, `classes3.dex`, ...,
 #    `classesN.dex` and store each of them in the root directory of the APK.
-# 2) `jar` compression. For each secondary DEX file, we put a `classes.dex` entry into a
+# 2) `raw_subdir` compression. We store each secondary DEX file uncompressed at
+#    `assets/secondary-program-dex-jars/secondary-I.dex`. This is like `raw` in
+#    the sense that secondary DEX files are included in the APK without
+#    additional compression. However, those raw DEXes are written to the
+#    secondary dex subdirectory instead of to the root directory of the APK.
+# 3) `jar` compression. For each secondary DEX file, we put a `classes.dex` entry into a
 #    JAR file, and store it as an asset at `assets/secondary-program-dex-jars/secondary-I.dex.jar`
-# 3) `xz` compression. This is the same as `jar` compression, except that we run `xz` on the
+# 4) `xz` compression. This is the same as `jar` compression, except that we run `xz` on the
 #    JAR file to produce `assets/secondary-program-dex-jars/secondary-I.dex.jar.xz`.
-# 4) `xzs` compression. We do the same as `jar` compression, then concatenate all the jars
+# 5) `xzs` compression. We do the same as `jar` compression, then concatenate all the jars
 #    together and do `xz` compression on the result to produce a single
 #    `assets/secondary-program-dex-jars/secondary.dex.jar.xzs`.
 #
@@ -73,8 +79,8 @@ def _get_dex_compression(ctx: AnalysisContext) -> str:
     default_dex_compression = "jar" if is_exopackage_enabled_for_secondary_dexes else "raw"
     dex_compression = getattr(ctx.attrs, "dex_compression", None) or default_dex_compression
     expect(
-        dex_compression in ["raw", "jar", "xz", "xzs"],
-        "Only 'raw', 'jar', 'xz' and 'xzs' dex compression are supported at this time!",
+        dex_compression in ["raw", "raw_subdir", "jar", "xz", "xzs"],
+        "Only 'raw', 'raw_subdir', 'jar', 'xz' and 'xzs' dex compression are supported at this time!",
     )
 
     return dex_compression
@@ -110,7 +116,13 @@ def get_single_primary_dex(
     if not is_optimized:
         d8_cmd.add("--no-optimize")
 
-    ctx.actions.run(d8_cmd, category = "get_single_primary_dex", identifier = "{}:{}".format(ctx.label.package, ctx.label.name))
+    ctx.actions.run(
+        d8_cmd,
+        category = "get_single_primary_dex",
+        identifier = "{}:{}".format(ctx.label.package, ctx.label.name),
+        allow_cache_upload = True,
+        error_handler = android_toolchain.android_error_handler,
+    )
 
     return DexFilesInfo(
         primary_dex = output_dex_file,
@@ -131,7 +143,8 @@ def get_multi_dex(
         proguard_mapping_output_file: Artifact | None = None,
         is_optimized: bool = False,
         apk_module_graph_file: Artifact | None = None,
-        enable_bootstrap_dexes = False) -> DexFilesInfo:
+        enable_bootstrap_dexes = False,
+        multidex_min_api: str | None = None) -> DexFilesInfo:
     expect(
         not _is_exopackage_enabled_for_secondary_dex(ctx),
         "secondary dex exopackage can only be enabled on pre-dexed builds!",
@@ -169,7 +182,7 @@ def get_multi_dex(
             multi_dex_cmd.add("--secondary-dex-output-dir", uncompressed_secondary_dex_output_dir.as_output())
             secondary_dex_compression_cmd.add("--raw-secondary-dexes-dir", uncompressed_secondary_dex_output_dir)
             if is_root_module(module):
-                primary_dex_patterns_file = ctx.actions.write("primary_dex_patterns", primary_dex_patterns)
+                primary_dex_patterns_file = ctx.actions.write("primary_dex_patterns", primary_dex_patterns, has_content_based_path = True)
 
                 if getattr(ctx.attrs, "minimize_primary_dex_size", False) or enable_bootstrap_dexes:
                     primary_dex_jars, jars_to_dex = _get_primary_dex_and_secondary_dex_jars(
@@ -216,6 +229,9 @@ def get_multi_dex(
             multi_dex_cmd.add("--files-to-dex-list", jar_to_dex_file)
 
             multi_dex_cmd.add("--android-jar", android_toolchain.android_jar)
+            if multidex_min_api:
+                multi_dex_cmd.add("--min-sdk-version", multidex_min_api)
+
             if not is_optimized:
                 multi_dex_cmd.add("--no-optimize")
 
@@ -223,12 +239,24 @@ def get_multi_dex(
                 multi_dex_cmd.add("--proguard-configuration-file", proguard_configuration_output_file)
                 multi_dex_cmd.add("--proguard-mapping-file", proguard_mapping_output_file)
 
-            ctx.actions.run(multi_dex_cmd, category = "multi_dex", identifier = "{}:{}_module_{}".format(ctx.label.package, ctx.label.name, module))
+            ctx.actions.run(
+                multi_dex_cmd,
+                category = "multi_dex",
+                identifier = "{}:{}_module_{}".format(ctx.label.package, ctx.label.name, module),
+                allow_cache_upload = True,
+                error_handler = android_toolchain.android_error_handler,
+            )
 
             secondary_dex_compression_cmd.add("--compression", _get_dex_compression(ctx))
             secondary_dex_compression_cmd.add("--xz-compression-level", str(getattr(ctx.attrs, "xz_compression_level", 4)))
 
-            ctx.actions.run(secondary_dex_compression_cmd, category = "secondary_dex_compression", identifier = "{}:{}_module_{}".format(ctx.label.package, ctx.label.name, module))
+            ctx.actions.run(
+                secondary_dex_compression_cmd,
+                category = "secondary_dex_compression",
+                identifier = "{}:{}_module_{}".format(ctx.label.package, ctx.label.name, module),
+                allow_cache_upload = True,
+                error_handler = android_toolchain.android_error_handler,
+            )
 
         ctx.actions.symlinked_dir(outputs[secondary_dex_dir], secondary_dex_dir_srcs)
 
@@ -258,8 +286,8 @@ def _get_primary_dex_and_secondary_dex_jars(
         jar_splitter_cmd = cmd_args(android_toolchain.jar_splitter_command[RunInfo])
         owner = java_library_jars_to_owners[jar]
         identifier = "{}/{}/{}".format(owner.package, owner.name, jar.short_path)
-        primary_dex_jar = ctx.actions.declare_output("root_module_primary_dex_jars/{}".format(identifier))
-        secondary_dex_jar = ctx.actions.declare_output("root_module_secondary_dex_jars/{}".format(identifier))
+        primary_dex_jar = ctx.actions.declare_output("root_module_primary_dex_jars/{}".format(identifier), has_content_based_path = True)
+        secondary_dex_jar = ctx.actions.declare_output("root_module_secondary_dex_jars/{}".format(identifier), has_content_based_path = True)
         jar_splitter_cmd.add([
             "--input-jar",
             jar,
@@ -274,7 +302,13 @@ def _get_primary_dex_and_secondary_dex_jars(
             jar_splitter_cmd.add("--proguard-configuration-file", proguard_configuration_output_file)
             jar_splitter_cmd.add("--proguard-mapping-file", proguard_mapping_output_file)
 
-        ctx.actions.run(jar_splitter_cmd, category = "jar_splitter", identifier = identifier)
+        ctx.actions.run(
+            jar_splitter_cmd,
+            category = "jar_splitter",
+            identifier = identifier,
+            allow_cache_upload = True,
+            error_handler = android_toolchain.android_error_handler,
+        )
 
         primary_dex_jars.append(primary_dex_jar)
         secondary_dex_jars.append(secondary_dex_jar)
@@ -292,7 +326,7 @@ def merge_to_single_dex(
     output_dex_file = ctx.actions.declare_output("classes.dex")
     pre_dexed_artifacts_to_dex_file = ctx.actions.declare_output("pre_dexed_artifacts_to_dex_file.txt")
     pre_dexed_artifacts = [pre_dexed_lib.dex for pre_dexed_lib in pre_dexed_libs if pre_dexed_lib.dex != None]
-    _merge_dexes(ctx, android_toolchain, output_dex_file, pre_dexed_artifacts, pre_dexed_artifacts_to_dex_file)
+    _merge_dexes(ctx.actions, android_toolchain, output_dex_file, pre_dexed_artifacts, pre_dexed_artifacts_to_dex_file)
 
     return DexFilesInfo(
         primary_dex = output_dex_file,
@@ -398,7 +432,13 @@ def _filter_pre_dexed_libs(
             args = filter_dex_cmd_args,
         ),
     ])
-    actions.run(filter_dex_cmd, category = "filter_dex", identifier = "batch_{}".format(batch_number))
+    actions.run(
+        filter_dex_cmd,
+        category = "filter_dex",
+        identifier = "batch_{}".format(batch_number),
+        allow_cache_upload = True,
+        error_handler = android_toolchain.android_error_handler,
+    )
 
     return DexInputsWithClassNamesAndWeightEstimatesFile(libs = pre_dexed_libs, weight_estimate_and_filtered_class_names_file = weight_estimate_and_filtered_class_names_file)
 
@@ -406,6 +446,23 @@ _SortedPreDexedInputs = record(
     module = str,
     primary_dex_inputs = list[list[DexInputWithSpecifiedClasses]],
     secondary_dex_inputs = list[list[DexInputWithSpecifiedClasses]],
+)
+
+def write_metadata_dot_txts_impl(
+        actions: AnalysisActions,
+        metadata_lines: list[str],
+        metadata_line_artifacts: list[ArtifactValue],
+        metadata_dot_txt_output: OutputArtifact):
+    actions.write(metadata_dot_txt_output, metadata_lines + [a.read_string().strip() for a in metadata_line_artifacts])
+    return []
+
+_write_metadata_dot_txts_dynamic_action = dynamic_actions(
+    impl = write_metadata_dot_txts_impl,
+    attrs = {
+        "metadata_dot_txt_output": dynattrs.output(),
+        "metadata_line_artifacts": dynattrs.list(dynattrs.artifact_value()),
+        "metadata_lines": dynattrs.list(dynattrs.value(str)),
+    },
 )
 
 def merge_to_split_dex(
@@ -490,7 +547,7 @@ def merge_to_split_dex(
                 )
 
                 _merge_dexes(
-                    ctx,
+                    ctx.actions,
                     android_toolchain,
                     outputs[primary_dex_output],
                     pre_dexed_artifacts,
@@ -515,7 +572,7 @@ def merge_to_split_dex(
                     bootstrap_dex_artifacts = [bootstrap_dex_input.lib.dex for bootstrap_dex_input in bootstrap_dex_input_list]
 
                     _merge_dexes(
-                        ctx,
+                        ctx.actions,
                         android_toolchain,
                         bootstrap_dex_output,
                         bootstrap_dex_artifacts,
@@ -533,13 +590,13 @@ def merge_to_split_dex(
             secondary_dex_inputs = sorted_pre_dexed_input.secondary_dex_inputs
             raw_secondary_dexes_for_compressing = {}
             for i in range(len(secondary_dex_inputs)):
-                if split_dex_merge_config.dex_compression == "jar" or split_dex_merge_config.dex_compression == "raw":
+                if split_dex_merge_config.dex_compression in ["jar", "raw", "raw_subdir"]:
                     if split_dex_merge_config.dex_compression == "jar":
                         secondary_dex_path = _get_secondary_dex_subdir_path(i, module)
                         secondary_dex_metadata_config = _get_secondary_dex_jar_metadata_config(ctx.actions, secondary_dex_path, module, module_to_canary_class_name_function, i)
                         secondary_dexes_for_symlinking[secondary_dex_metadata_config.secondary_dex_metadata_path] = secondary_dex_metadata_config.secondary_dex_metadata_file
                     else:
-                        secondary_dex_path = _get_raw_secondary_dex_path(i, module, base_apk_dex_files_count, is_exopackage_enabled_for_secondary_dex)
+                        secondary_dex_path = _get_raw_secondary_dex_path(i, module, base_apk_dex_files_count, is_exopackage_enabled_for_secondary_dex or split_dex_merge_config.dex_compression == "raw_subdir")
                         secondary_dex_metadata_config = _get_secondary_dex_raw_metadata_config(ctx.actions, module, module_to_canary_class_name_function, i)
 
                     secondary_dex_output = ctx.actions.declare_output(secondary_dex_path)
@@ -559,7 +616,7 @@ def merge_to_split_dex(
                 )
                 pre_dexed_artifacts = [secondary_dex_input.lib.dex for secondary_dex_input in secondary_dex_inputs[i] if secondary_dex_input.lib.dex]
                 _merge_dexes(
-                    ctx,
+                    ctx.actions,
                     android_toolchain,
                     secondary_dex_output,
                     pre_dexed_artifacts,
@@ -568,7 +625,7 @@ def merge_to_split_dex(
                     secondary_dex_metadata_config = secondary_dex_metadata_config,
                 )
 
-            if split_dex_merge_config.dex_compression == "jar" or split_dex_merge_config.dex_compression == "raw":
+            if split_dex_merge_config.dex_compression in ["jar", "raw", "raw_subdir"]:
                 metadata_dot_txt_path = "{}/metadata.txt".format(_get_secondary_dex_subdir(module))
                 metadata_dot_txt_file = ctx.actions.declare_output(metadata_dot_txt_path)
                 secondary_dexes_for_symlinking[metadata_dot_txt_path] = metadata_dot_txt_file
@@ -588,25 +645,31 @@ def merge_to_split_dex(
                 if not is_root_module(module):
                     multi_dex_cmd.add("--module-deps", ctx.actions.write("module_deps_for_{}".format(module), apk_module_graph_info.module_to_module_deps_function(module)))
 
-                ctx.actions.run(multi_dex_cmd, category = "multi_dex_from_raw_dexes", identifier = "{}:{}_module_{}".format(ctx.label.package, ctx.label.name, module))
+                ctx.actions.run(
+                    multi_dex_cmd,
+                    category = "multi_dex_from_raw_dexes",
+                    identifier = "{}:{}_module_{}".format(ctx.label.package, ctx.label.name, module),
+                    allow_cache_upload = True,
+                    error_handler = android_toolchain.android_error_handler,
+                )
 
                 secondary_dexes_for_symlinking[_get_secondary_dex_subdir(module)] = secondary_dex_subdir
 
-        if metadata_dot_txt_files_by_module:
-            def write_metadata_dot_txts(ctx: AnalysisContext, artifacts, outputs):
-                for voltron_module, metadata_dot_txt in metadata_dot_txt_files_by_module.items():
-                    metadata_line_artifacts = metadata_line_artifacts_by_module[voltron_module]
-                    expect(metadata_line_artifacts != None, "Should have metadata lines!")
+        for voltron_module, metadata_dot_txt in metadata_dot_txt_files_by_module.items():
+            metadata_line_artifacts = metadata_line_artifacts_by_module[voltron_module]
+            expect(metadata_line_artifacts != None, "Should have metadata lines!")
 
-                    metadata_lines = [".id {}".format(voltron_module)]
-                    metadata_lines.extend([".requires {}".format(module_dep) for module_dep in apk_module_graph_info.module_to_module_deps_function(voltron_module)])
-                    if split_dex_merge_config.dex_compression == "raw" and is_root_module(voltron_module) and not is_exopackage_enabled_for_secondary_dex:
-                        metadata_lines.append(".root_relative")
-                    for metadata_line_artifact in metadata_line_artifacts:
-                        metadata_lines.append(artifacts[metadata_line_artifact].read_string().strip())
-                    ctx.actions.write(outputs[metadata_dot_txt], metadata_lines)
-
-            ctx.actions.dynamic_output(dynamic = flatten(metadata_line_artifacts_by_module.values()), inputs = [], outputs = [o.as_output() for o in metadata_dot_txt_files_by_module.values()], f = write_metadata_dot_txts)
+            metadata_lines = [".id {}".format(voltron_module)]
+            metadata_lines.extend([".requires {}".format(module_dep) for module_dep in apk_module_graph_info.module_to_module_deps_function(voltron_module)])
+            if split_dex_merge_config.dex_compression == "raw" and is_root_module(voltron_module) and not is_exopackage_enabled_for_secondary_dex:
+                metadata_lines.append(".root_relative")
+            ctx.actions.dynamic_output_new(
+                _write_metadata_dot_txts_dynamic_action(
+                    metadata_dot_txt_output = metadata_dot_txt.as_output(),
+                    metadata_line_artifacts = metadata_line_artifacts,
+                    metadata_lines = metadata_lines,
+                ),
+            )
 
         ctx.actions.symlinked_dir(
             outputs[root_module_secondary_dexes_dir],
@@ -644,7 +707,7 @@ def merge_to_split_dex(
     )
 
 def _merge_dexes(
-        ctx: AnalysisContext,
+        actions: AnalysisActions,
         android_toolchain: AndroidToolchainInfo,
         output_dex_file: Artifact,
         pre_dexed_artifacts: list[Artifact],
@@ -655,7 +718,7 @@ def _merge_dexes(
     d8_cmd = cmd_args(android_toolchain.d8_command[RunInfo])
     d8_cmd.add(["--output-dex-file", output_dex_file.as_output()])
 
-    pre_dexed_artifacts_to_dex_file = argfile(actions = ctx.actions, name = pre_dexed_artifacts_file, args = pre_dexed_artifacts)
+    pre_dexed_artifacts_to_dex_file = argfile(actions = actions, name = pre_dexed_artifacts_file, args = pre_dexed_artifacts)
     d8_cmd.add(["--files-to-dex-list", pre_dexed_artifacts_to_dex_file])
 
     d8_cmd.add(["--android-jar", android_toolchain.android_jar])
@@ -674,10 +737,12 @@ def _merge_dexes(
         d8_cmd.add(["--secondary-dex-metadata-line", secondary_dex_metadata_config.secondary_dex_metadata_line.as_output()])
         d8_cmd.add(["--secondary-dex-canary-class-name", secondary_dex_metadata_config.secondary_dex_canary_class_name])
 
-    ctx.actions.run(
+    actions.run(
         d8_cmd,
         category = "merge_dexes",
-        identifier = "{}:{} {}".format(ctx.label.package, ctx.label.name, output_dex_file.short_path),
+        identifier = output_dex_file.short_path,
+        allow_cache_upload = True,
+        error_handler = android_toolchain.android_error_handler,
     )
 
 def _sort_pre_dexed_files(
@@ -854,9 +919,9 @@ def _get_raw_secondary_dex_name(index: int, module: str, base_apk_dex_count: int
     else:
         return "classes{}.dex".format(index + 1)
 
-def _get_raw_secondary_dex_path(index: int, module: str, base_apk_dex_count: int, is_exopackage_enabled_for_secondary_dex: bool):
+def _get_raw_secondary_dex_path(index: int, module: str, base_apk_dex_count: int, store_raw_secondary_dexes_in_secondary_dex_subdir: bool):
     if is_root_module(module):
-        if is_exopackage_enabled_for_secondary_dex:
+        if store_raw_secondary_dexes_in_secondary_dex_subdir:
             return _get_secondary_dex_subdir_path(index, module, "dex")
         return _get_raw_secondary_dex_name(index, module, base_apk_dex_count)
     else:

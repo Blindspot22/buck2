@@ -1,11 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
-load("get_attrs.bxl", "get_attrs")
+load("get_attrs.bxl", "get_attrs", "get_cxx_toolchain")
 load("get_vs_settings.bxl", "get_vs_settings")
 load("utils.bxl", "dedupe_by_value", "dirname", "get_project_file_path", "h")
 
@@ -120,15 +121,16 @@ def gen_filters(vs_settings: dict):
 
 def _main(bxl_ctx):
     target_label = bxl_ctx.cli_args.target
-    target_node = bxl_ctx.configured_targets(target_label)
+    target_node = bxl_ctx.configured_targets(target_label, modifiers = bxl_ctx.modifiers)
     actions = bxl_ctx.bxl_actions().actions
     attrs = get_attrs(target_node, bxl_ctx)
+    toolchain = get_cxx_toolchain(target_node, bxl_ctx)
     attrs_outfile = actions.write_json(get_project_file_path(target_node.label, ".json"), attrs)
     filters_artifact = actions.declare_output(get_project_file_path(target_node.label, ".vcxproj.filters"))
 
     def f(ctx, artifacts, outputs, attrs_outfile = attrs_outfile, filters_artifact = filters_artifact, target = target_node, cli_args = bxl_ctx.cli_args, buck_root = bxl_ctx.root()):
         attrs_input = artifacts[attrs_outfile].read_json()
-        vs_settings = get_vs_settings(target, attrs_input, {}, cli_args, buck_root, ctx)
+        vs_settings = get_vs_settings(target, toolchain, attrs_input, {}, cli_args, buck_root, ctx)
         content = gen_filters(vs_settings)
         ctx.bxl_actions().actions.write(outputs[filters_artifact].as_output(), content, allow_args = True)
 

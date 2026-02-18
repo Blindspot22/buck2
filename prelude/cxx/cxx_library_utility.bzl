@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifacts.bzl",
@@ -22,7 +23,7 @@ load(
 load("@prelude//linking:types.bzl", "Linkage")
 load(
     "@prelude//utils:utils.bzl",
-    "flatten",
+    "filter_and_map_idx",
     "from_named_set",
 )
 load(":cxx_context.bzl", "get_cxx_platform_info", "get_cxx_toolchain_info")
@@ -35,30 +36,37 @@ load(
     ":headers.bzl",
     "cxx_attr_header_namespace",
 )
-load(":platform.bzl", "cxx_by_platform")
 
 OBJECTS_SUBTARGET = "objects"
 
 # The dependencies
 def cxx_attr_deps(ctx: AnalysisContext) -> list[Dependency]:
-    return (
-        ctx.attrs.deps +
-        flatten(cxx_by_platform(ctx, getattr(ctx.attrs, "platform_deps", []))) +
-        (getattr(ctx.attrs, "deps_query", []) or [])
-    )
+    deps = list(ctx.attrs.deps)
+
+    deps_query_attr = getattr(ctx.attrs, "deps_query", None)
+    if deps_query_attr:
+        deps.extend(deps_query_attr)
+
+    return deps
 
 def cxx_attr_exported_deps(ctx: AnalysisContext) -> list[Dependency]:
-    return getattr(ctx.attrs, "exported_deps", []) + flatten(cxx_by_platform(ctx, ctx.attrs.exported_platform_deps))
+    exported_deps = []
+
+    exported_deps_attr = getattr(ctx.attrs, "exported_deps", None)
+    if exported_deps_attr:
+        exported_deps.extend(exported_deps_attr)
+
+    return exported_deps
 
 def cxx_attr_linker_flags_all(ctx: AnalysisContext) -> LinkerFlags:
-    flags = (
-        cxx_attr_linker_flags(ctx) +
-        (ctx.attrs.local_linker_script_flags if hasattr(ctx.attrs, "local_linker_script_flags") else [])
-    )
-    post_flags = (
-        (ctx.attrs.post_linker_flags if hasattr(ctx.attrs, "post_linker_flags") else []) +
-        (flatten(cxx_by_platform(ctx, ctx.attrs.post_platform_linker_flags)) if hasattr(ctx.attrs, "post_platform_linker_flags") else [])
-    )
+    flags = cxx_attr_linker_flags(ctx)
+
+    local_linker_script_flags_attr = getattr(ctx.attrs, "local_linker_script_flags", None)
+    if local_linker_script_flags_attr:
+        flags.extend(local_linker_script_flags_attr)
+
+    post_flags = getattr(ctx.attrs, "post_linker_flags", [])
+
     exported_flags = cxx_attr_exported_linker_flags(ctx)
     exported_post_flags = cxx_attr_exported_post_linker_flags(ctx)
     return LinkerFlags(
@@ -69,16 +77,12 @@ def cxx_attr_linker_flags_all(ctx: AnalysisContext) -> LinkerFlags:
     )
 
 def cxx_attr_exported_linker_flags(ctx: AnalysisContext) -> list[typing.Any]:
-    return (
-        ctx.attrs.exported_linker_flags +
-        (flatten(cxx_by_platform(ctx, ctx.attrs.exported_platform_linker_flags)) if hasattr(ctx.attrs, "exported_platform_linker_flags") else [])
-    )
+    exported_linker_flags = list(ctx.attrs.exported_linker_flags)
+    return exported_linker_flags
 
 def cxx_attr_exported_post_linker_flags(ctx: AnalysisContext) -> list[typing.Any]:
-    return (
-        ctx.attrs.exported_post_linker_flags +
-        (flatten(cxx_by_platform(ctx, ctx.attrs.exported_post_platform_linker_flags)) if hasattr(ctx.attrs, "exported_post_platform_linker_flags") else [])
-    )
+    exported_post_linker_flags = list(ctx.attrs.exported_post_linker_flags)
+    return exported_post_linker_flags
 
 def cxx_inherited_link_info(first_order_deps: list[Dependency]) -> list[MergedLinkInfo]:
     """
@@ -88,14 +92,12 @@ def cxx_inherited_link_info(first_order_deps: list[Dependency]) -> list[MergedLi
     # We filter out nones because some non-cxx rule without such providers could be a dependency, for example
     # cxx_binary "fbcode//one_world/cli/util/process_wrapper:process_wrapper" depends on
     # python_library "fbcode//third-party-buck/$platform/build/glibc:__project__"
-    return filter(None, [x.get(MergedLinkInfo) for x in first_order_deps])
+    return filter_and_map_idx(MergedLinkInfo, first_order_deps)
 
 # Linker flags
 def cxx_attr_linker_flags(ctx: AnalysisContext) -> list[typing.Any]:
-    return (
-        ctx.attrs.linker_flags +
-        (flatten(cxx_by_platform(ctx, ctx.attrs.platform_linker_flags)) if hasattr(ctx.attrs, "platform_linker_flags") else [])
-    )
+    linker_flags = list(ctx.attrs.linker_flags)
+    return linker_flags
 
 # Even though we're returning the shared library links, we must still
 # respect the `link_style` attribute of the target which controls how
@@ -142,11 +144,14 @@ def cxx_attr_resources(ctx: AnalysisContext) -> dict[str, ArtifactOutputs]:
     """
 
     resources = {}
-    namespace = cxx_attr_header_namespace(ctx)
 
-    # Use getattr, as apple rules don't have a `resources` parameter.
-    for name, resource in from_named_set(getattr(ctx.attrs, "resources", {})).items():
-        resources[paths.join(namespace, name)] = single_artifact(resource)
+    resources_attr = getattr(ctx.attrs, "resources", None)
+    if resources_attr:
+        namespace = cxx_attr_header_namespace(ctx)
+
+        # Use getattr, as apple rules don't have a `resources` parameter.
+        for name, resource in from_named_set(resources_attr).items():
+            resources[paths.join(namespace, name)] = single_artifact(resource)
 
     return resources
 
@@ -164,6 +169,9 @@ def cxx_use_shlib_intfs(ctx: AnalysisContext) -> bool:
 
     linker_info = get_cxx_toolchain_info(ctx).linker_info
     return linker_info.shlib_interfaces != ShlibInterfacesMode("disabled")
+
+def cxx_can_generate_shlib_interface_from_linkables(ctx: AnalysisContext) -> bool:
+    return get_cxx_toolchain_info(ctx).binary_utilities_info.custom_tools.get("llvm-tbd-gen", None) != None
 
 def cxx_use_shlib_intfs_mode(ctx: AnalysisContext, mode: ShlibInterfacesMode) -> bool:
     """
@@ -192,3 +200,9 @@ def cxx_attr_dep_metadata(ctx: AnalysisContext) -> list[DepMetadata]:
     if not getattr(ctx.attrs, "version", None):
         return []
     return [DepMetadata(version = ctx.attrs.version)]
+
+def cxx_attr_use_content_based_paths(ctx: AnalysisContext) -> bool:
+    """
+    Return whether this rule should use content-based paths.
+    """
+    return getattr(ctx.attrs, "use_content_based_paths", False)

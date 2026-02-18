@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
@@ -94,7 +95,8 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use allocative::Allocative;
-use buck2_error::BuckErrorContext;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::file_name::FileNameBuf;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
 use gazebo::prelude::*;
@@ -109,8 +111,6 @@ use crate::cells::cell_path::CellPathRef;
 use crate::cells::cell_root_path::CellRootPathBuf;
 use crate::cells::name::CellName;
 use crate::cells::nested::NestedCells;
-use crate::fs::paths::abs_path::AbsPath;
-use crate::fs::paths::file_name::FileNameBuf;
 use crate::fs::project::ProjectRoot;
 use crate::fs::project_rel_path::ProjectRelativePath;
 use crate::fs::project_rel_path::ProjectRelativePathBuf;
@@ -123,9 +123,7 @@ enum CellError {
     DuplicateNames(CellName, CellRootPathBuf, CellRootPathBuf),
     #[error("Two cells, `{0}` and `{1}`, share the same path `{2}`")]
     DuplicatePaths(CellName, CellName, CellRootPathBuf),
-    #[error("cannot find the cell at current path `{0}`. Known roots are `<{}>`", .1.join(", "))]
-    UnknownCellPath(ProjectRelativePathBuf, Vec<String>),
-    #[error("unknown cell alias: `{0}`. In cell `{1}`, known aliases are: `{}`", .2.iter().join(", "))]
+    #[error("unknown cell alias: `{0}`. In cell `{1}`, known aliases are: `{}`", .2.iter().sorted().join(", "))]
     UnknownCellAlias(CellAlias, CellName, Vec<NonEmptyCellAlias>),
     #[error("unknown cell name: `{0}`. known cell names are `{}`", .1.iter().join(", "))]
     UnknownCellName(CellName, Vec<CellName>),
@@ -299,35 +297,24 @@ impl CellResolver {
     /// Get a `CellName` from a path by finding the best matching cell path that
     /// is a prefix of the current path relative to the project root. e.g. `fbcode/foo/bar` matches
     /// cell path `fbcode`.
-    pub fn find<P: AsRef<ProjectRelativePath> + ?Sized>(
-        &self,
-        path: &P,
-    ) -> buck2_error::Result<CellName> {
-        self.0
+    pub fn find<P: AsRef<ProjectRelativePath> + ?Sized>(&self, path: &P) -> CellName {
+        *self
+            .0
             .path_mappings
             .get_ancestor(path.as_ref().iter())
-            .copied()
-            .ok_or_else(|| {
-                buck2_error::Error::from(CellError::UnknownCellPath(
-                    path.as_ref().to_buf(),
-                    self.0
-                        .path_mappings
-                        .keys()
-                        .map(|p| p.iter().join("/"))
-                        .collect(),
-                ))
-            })
+            // Note: Must have a root cell
+            .unwrap()
     }
 
-    pub fn get_cell_path<P: AsRef<ProjectRelativePath> + ?Sized>(
-        &self,
-        path: &P,
-    ) -> buck2_error::Result<CellPath> {
+    pub fn get_cell_path<P: AsRef<ProjectRelativePath> + ?Sized>(&self, path: &P) -> CellPath {
         let path = path.as_ref();
-        let cell = self.find(path)?;
-        let instance = self.get(cell)?;
-        let relative = path.strip_prefix(instance.path().as_project_relative_path())?;
-        Ok(CellPath::new(cell, relative.to_owned().into()))
+        let cell = self.find(path);
+        // Both of these unwraps are ok by construction of the `CellResolver`
+        let instance = self.get(cell).unwrap();
+        let relative = path
+            .strip_prefix(instance.path().as_project_relative_path())
+            .unwrap();
+        CellPath::new(cell, relative.to_owned().into())
     }
 
     pub fn get_cell_path_from_abs_path(
@@ -335,7 +322,7 @@ impl CellResolver {
         path: &AbsPath,
         fs: &ProjectRoot,
     ) -> buck2_error::Result<CellPath> {
-        self.get_cell_path(&fs.relativize_any(path)?)
+        Ok(self.get_cell_path(&fs.relativize_any(path)?))
     }
 
     pub fn cells(&self) -> impl Iterator<Item = (CellName, &CellInstance)> {
@@ -469,35 +456,15 @@ impl CellResolver {
 
         CellResolver::new(instances, root_aliases).unwrap()
     }
-
-    pub(crate) fn resolve_path_crossing_cell_boundaries<'a>(
-        &self,
-        mut path: CellPathRef<'a>,
-    ) -> buck2_error::Result<CellPathRef<'a>> {
-        let mut rem: u32 = 1000;
-        loop {
-            // Sanity check. Should never happen.
-            rem = rem
-                .checked_sub(1)
-                .buck_error_context("Overflow computing cell boundaries")?;
-
-            let nested_cells = self.get(path.cell())?.nested_cells();
-            match nested_cells.matches_checked(path.path()) {
-                None => return Ok(path),
-                Some((_, new_cell_path)) => {
-                    path = new_cell_path;
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+
     use super::*;
     use crate::cells::cell_root_path::CellRootPath;
-    use crate::fs::paths::forward_rel_path::ForwardRelativePath;
-    use crate::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 
     #[test]
     fn test_of_names_and_paths() -> buck2_error::Result<()> {
@@ -531,15 +498,15 @@ mod tests {
             (CellName::testing_new("cell3"), cell3_path.to_buf()),
         ]);
 
-        assert_eq!(cells.find(cell1_path)?, CellName::testing_new("cell1"));
-        assert_eq!(cells.find(cell2_path)?, CellName::testing_new("cell2"));
-        assert_eq!(cells.find(cell3_path)?, CellName::testing_new("cell3"));
+        assert_eq!(cells.find(cell1_path), CellName::testing_new("cell1"));
+        assert_eq!(cells.find(cell2_path), CellName::testing_new("cell2"));
+        assert_eq!(cells.find(cell3_path), CellName::testing_new("cell3"));
         assert_eq!(
             cells.find(
                 &cell2_path
                     .as_project_relative_path()
                     .join(ForwardRelativePath::new("fake/cell3")?)
-            )?,
+            ),
             CellName::testing_new("cell2")
         );
         assert_eq!(
@@ -547,12 +514,12 @@ mod tests {
                 &cell3_path
                     .as_project_relative_path()
                     .join(ForwardRelativePath::new("more/foo")?)
-            )?,
+            ),
             CellName::testing_new("cell3")
         );
 
         assert_eq!(
-            cells.get_cell_path(cell1_path)?,
+            cells.get_cell_path(cell1_path),
             CellPath::new(
                 CellName::testing_new("cell1"),
                 ForwardRelativePathBuf::unchecked_new("".to_owned()).into()
@@ -560,7 +527,7 @@ mod tests {
         );
 
         assert_eq!(
-            cells.get_cell_path(cell2_path)?,
+            cells.get_cell_path(cell2_path),
             CellPath::new(
                 CellName::testing_new("cell2"),
                 ForwardRelativePathBuf::unchecked_new("".to_owned()).into()
@@ -572,7 +539,7 @@ mod tests {
                 &cell2_path
                     .as_project_relative_path()
                     .join(ForwardRelativePath::new("fake/cell3")?)
-            )?,
+            ),
             CellPath::new(
                 CellName::testing_new("cell2"),
                 ForwardRelativePathBuf::unchecked_new("fake/cell3".to_owned()).into()
@@ -580,91 +547,5 @@ mod tests {
         );
 
         Ok(())
-    }
-
-    #[test]
-    fn test_resolve_path_crossing_cell_boundaries() {
-        let cell_resolver = CellResolver::testing_with_names_and_paths(&[
-            (
-                CellName::testing_new("fbsource"),
-                CellRootPathBuf::testing_new(""),
-            ),
-            (
-                CellName::testing_new("fbcode"),
-                CellRootPathBuf::testing_new("fbcode"),
-            ),
-            (
-                CellName::testing_new("fbcode_macros"),
-                CellRootPathBuf::testing_new("fbcode/something/macros"),
-            ),
-        ]);
-        // Test starting with `fbsource//`.
-        assert_eq!(
-            CellPathRef::testing_new("fbsource//"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new("fbsource//"))
-                .unwrap()
-        );
-        assert_eq!(
-            CellPathRef::testing_new("fbcode//"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new("fbsource//fbcode"))
-                .unwrap()
-        );
-        assert_eq!(
-            CellPathRef::testing_new("fbcode//something"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new(
-                    "fbsource//fbcode/something"
-                ))
-                .unwrap()
-        );
-        assert_eq!(
-            CellPathRef::testing_new("fbcode_macros//"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new(
-                    "fbsource//fbcode/something/macros"
-                ))
-                .unwrap()
-        );
-        assert_eq!(
-            CellPathRef::testing_new("fbcode_macros//xx"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new(
-                    "fbsource//fbcode/something/macros/xx"
-                ))
-                .unwrap()
-        );
-        // Now test starting with `fbcode//`.
-        assert_eq!(
-            CellPathRef::testing_new("fbcode//"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new("fbcode//"))
-                .unwrap()
-        );
-        assert_eq!(
-            CellPathRef::testing_new("fbcode//something"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new(
-                    "fbcode//something"
-                ))
-                .unwrap()
-        );
-        assert_eq!(
-            CellPathRef::testing_new("fbcode_macros//"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new(
-                    "fbcode//something/macros"
-                ))
-                .unwrap()
-        );
-        assert_eq!(
-            CellPathRef::testing_new("fbcode_macros//xx"),
-            cell_resolver
-                .resolve_path_crossing_cell_boundaries(CellPathRef::testing_new(
-                    "fbcode//something/macros/xx"
-                ))
-                .unwrap()
-        );
     }
 }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -18,12 +19,12 @@ use buck2_core::bzl::ImportPath;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::name::CellName;
 use buck2_core::configuration::compatibility::MaybeCompatible;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::package::PackageLabel;
 use buck2_core::pattern::pattern_type::TargetPatternExtra;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_error::BuckErrorContext;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_interpreter::load_module::InterpreterCalculation;
 use buck2_node::nodes::frontend::TargetGraphCalculation;
 use buck2_node::nodes::unconfigured::TargetNode;
@@ -141,7 +142,7 @@ impl<T: QueryTarget> PreresolvedQueryLiterals<T> {
             .await;
         let mut resolved_literals = HashMap::new();
         for (literal, result) in resolved_literal_results {
-            resolved_literals.insert(literal, result.map_err(buck2_error::Error::from));
+            resolved_literals.insert(literal, result);
         }
         Self { resolved_literals }
     }
@@ -171,7 +172,7 @@ impl<T: QueryTarget> QueryLiterals<T> for PreresolvedQueryLiterals<T> {
                 .ok_or_else(|| QueryLiteralResolutionError::LiteralMissing((*lit).to_owned()))?
             {
                 Ok(v) => v,
-                Err(e) => return Err(e.dupe().into()),
+                Err(e) => return Err(e.dupe()),
             };
             targets.extend(resolved);
         }
@@ -200,7 +201,7 @@ impl<'c> UqueryEnvironment<'c> {
             .ctx()
             .get_interpreter_results(target.pkg())
             .await
-            .with_buck_error_context(|| format!("Error looking up `{}`", target))?;
+            .with_buck_error_context(|| format!("Error looking up `{target}`"))?;
         let node = package.resolve_target(target.name())?;
         Ok(node.to_owned())
     }
@@ -606,13 +607,13 @@ async fn top_level_imports_by_build_file<'c>(
         .iter()
         .map(|file| async move {
             if let Some(parent) = file.parent() {
-                (
-                    file.dupe(),
-                    delegate
-                        .ctx()
-                        .get_interpreter_results(PackageLabel::from_cell_path(parent))
-                        .await,
-                )
+                match PackageLabel::from_cell_path(parent) {
+                    Ok(label) => (
+                        file.dupe(),
+                        delegate.ctx().get_interpreter_results(label).await,
+                    ),
+                    Err(e) => (file.dupe(), Err(e)),
+                }
             } else {
                 (
                     file.dupe(),

@@ -1,0 +1,26 @@
+load("@fbcode//buck2:proto_defs.bzl", "proto_srcs", "rust_protobuf_library_prost_0134")
+load("@fbcode_macros//build_defs:export_files.bzl", "export_file")
+
+oncall("build_infra")
+
+rust_protobuf_library_prost_0134(
+    name = "buck2_host_sharing_proto",
+    srcs = glob(["src/**/*.rs"]),
+    build_script = "build.rs",
+    proto_srcs = ":host_sharing.proto",
+    deps = [
+        "fbsource//third-party/rust:serde",
+        "//buck2/allocative/allocative:allocative",
+    ],
+)
+
+proto_srcs(
+    name = "host_sharing.proto",
+    srcs = ["host_sharing.proto"],
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "host_sharing_proto",
+    src = "host_sharing.proto",
+)

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Display;
@@ -18,6 +19,7 @@ use buck2_core::package::source_path::SourcePath;
 use buck2_error::starlark_error::from_starlark_with_options;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use buck2_interpreter::types::configured_providers_label::StarlarkProvidersLabel;
+use buck2_interpreter::types::select_fail::StarlarkSelectFail;
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
 use buck2_node::attrs::coerced_attr::CoercedAttr;
 use buck2_node::attrs::display::AttrDisplayWithContext;
@@ -105,7 +107,7 @@ fn coerced_attr_methods(builder: &mut MethodsBuilder) {
     // FIXME(JakobDegen): Strings as types are mostly dead, users should be getting the value and
     // using `isinstance` instead. Remove this.
     #[starlark(attribute)]
-    fn r#type<'v>(this: &StarlarkCoercedAttr, heap: &'v Heap) -> starlark::Result<&'v str> {
+    fn r#type<'v>(this: &StarlarkCoercedAttr, heap: Heap<'v>) -> starlark::Result<&'v str> {
         Ok(this.0.to_value(this.1.dupe(), heap)?.get_type())
     }
 
@@ -118,18 +120,18 @@ fn coerced_attr_methods(builder: &mut MethodsBuilder) {
     ///     node = ctx.uquery().owner("bin/TARGETS")[0]
     ///     ctx.output.print(node.attrs.name.value())
     /// ```
-    fn value<'v>(this: &StarlarkCoercedAttr, heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn value<'v>(this: &StarlarkCoercedAttr, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         Ok(this.0.to_value(this.1.dupe(), heap)?)
     }
 }
 
 pub trait CoercedAttrExt {
-    fn to_value<'v>(&self, pkg: PackageLabel, heap: &'v Heap) -> buck2_error::Result<Value<'v>>;
+    fn to_value<'v>(&self, pkg: PackageLabel, heap: Heap<'v>) -> buck2_error::Result<Value<'v>>;
 }
 
 impl CoercedAttrExt for CoercedAttr {
     /// Converts the coerced attr to a starlark value
-    fn to_value<'v>(&self, pkg: PackageLabel, heap: &'v Heap) -> buck2_error::Result<Value<'v>> {
+    fn to_value<'v>(&self, pkg: PackageLabel, heap: Heap<'v>) -> buck2_error::Result<Value<'v>> {
         Ok(match &self {
             CoercedAttr::Bool(v) => heap.alloc(v.0),
             CoercedAttr::Int(v) => heap.alloc(*v),
@@ -198,6 +200,10 @@ impl CoercedAttrExt for CoercedAttr {
             CoercedAttr::Selector(selector) => {
                 let select_dict = StarlarkSelectDict::new(*selector.clone(), pkg.dupe());
                 heap.alloc(select_dict)
+            }
+            CoercedAttr::SelectFail(message) => {
+                let select_fail = StarlarkSelectFail::new(heap.alloc_str(message));
+                heap.alloc(select_fail)
             }
             CoercedAttr::Concat(c) => heap.alloc(StarlarkSelectConcat::new(c.clone(), pkg.dupe())),
         })

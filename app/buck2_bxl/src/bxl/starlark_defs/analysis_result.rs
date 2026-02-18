@@ -1,16 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
 
 use allocative::Allocative;
 use buck2_build_api::analysis::AnalysisResult;
+use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollection;
 use buck2_build_api::interpreter::rule_defs::provider::dependency::Dependency;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use dupe::Dupe;
@@ -21,7 +23,7 @@ use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
-use starlark::values::FrozenValue;
+use starlark::values::FrozenValueTyped;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::ValueTyped;
@@ -72,7 +74,7 @@ impl<'v> StarlarkValue<'v> for StarlarkAnalysisResult {
 /// The result of running an analysis in bxl.
 #[starlark_module]
 fn starlark_analysis_result_methods(builder: &mut MethodsBuilder) {
-    /// Access the providers of the rule. Returns a `provider_collection` the same as accessing
+    /// Access the providers of the rule. Returns a `ProviderCollection` the same as accessing
     /// providers of dependencies within a rule implementation.
     ///
     /// Sample usage:
@@ -84,19 +86,21 @@ fn starlark_analysis_result_methods(builder: &mut MethodsBuilder) {
     ///     providers = ctx.analysis("//:bin").providers()
     ///     ctx.output.print(providers[FooInfo])
     /// ```
-    fn providers<'v>(this: &'v StarlarkAnalysisResult) -> starlark::Result<FrozenValue> {
+    fn providers<'v>(
+        this: &'v StarlarkAnalysisResult,
+    ) -> starlark::Result<FrozenValueTyped<'v, FrozenProviderCollection>> {
         unsafe {
-            // SAFETY:: this actually just returns a FrozenValue from in the StarlarkAnalysisResult
+            // SAFETY: this actually just returns a FrozenValue from in the StarlarkAnalysisResult
             // which is kept alive for 'v
             Ok(this
                 .analysis
                 .lookup_inner(&this.label)?
                 .value()
-                .to_frozen_value())
+                .value_typed())
         }
     }
 
-    /// Converts the analysis result into a `dependency`. Currently, you can only get a `dependency` without any
+    /// Converts the analysis result into a `Dependency`. Currently, you can only get a `Dependency` without any
     /// transitions. This means that you cannot create an exec dep or toolchain from an analysis result.
     ///
     /// We may support other dependency transition types in the future.

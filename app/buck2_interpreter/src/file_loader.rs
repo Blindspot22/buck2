@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::iter;
@@ -40,11 +41,11 @@ pub struct LoadedModules {
 
 impl LoadedModules {
     pub fn imports(&self) -> impl Iterator<Item = &ImportPath> {
-        self.map.values().map(|module| {
-            *module
-                .path()
-                .unpack_load_file()
-                .expect("imports should only be bzl files")
+        self.map.values().map(|module| match module.path() {
+            StarlarkModulePath::LoadFile(p)
+            | StarlarkModulePath::JsonFile(p)
+            | StarlarkModulePath::TomlFile(p) => p,
+            _ => panic!("imports should only be bzl, json, or toml files"),
         })
     }
 }
@@ -180,7 +181,7 @@ impl FileLoader for InterpreterFileLoader {
     fn load(&self, path: &str) -> starlark::Result<FrozenModule> {
         match self.info.resolve_load(path, None) {
             Ok(import) => Ok(self.find_module(import.borrow())?.dupe()),
-            Err(e) => Err(starlark::Error::new_native(to_diagnostic(&e, path))),
+            Err(e) => Err(to_diagnostic(&e, path).into()),
         }
     }
 }
@@ -220,9 +221,12 @@ mod tests {
     }
 
     fn env(name: StarlarkModulePath) -> FrozenModule {
-        let m = Module::new();
-        m.set("name", m.heap().alloc(name.to_string()));
-        m.freeze().unwrap()
+        // patternlint-disable-next-line buck2-no-starlark-module: Test
+        Module::with_temp_heap(|m| {
+            m.set("name", m.heap().alloc(name.to_string()));
+            m.freeze()
+        })
+        .unwrap()
     }
 
     fn loaded_modules() -> LoadedModules {
@@ -252,7 +256,7 @@ mod tests {
         let path = "some//random:file.bzl".to_owned();
         let loader = InterpreterFileLoader::new(loaded_modules(), resolver());
         match loader.load(&path) {
-            Ok(_) => panic!("Expected load failure for {}", path),
+            Ok(_) => panic!("Expected load failure for {path}"),
             Err(_) => {
                 // TODO: verify the error is correct
             }
@@ -270,7 +274,7 @@ mod tests {
         loaded_modules.map.remove(&id);
         let loader = InterpreterFileLoader::new(loaded_modules, resolver);
         match loader.load(&path) {
-            Ok(_) => panic!("Expected load failure for {}", path),
+            Ok(_) => panic!("Expected load failure for {path}"),
             Err(_) => {
                 // TODO: verify the error is correct
             }

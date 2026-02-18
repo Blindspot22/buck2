@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -14,16 +15,21 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
+use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_signals::env::WaitingData;
 use buck2_common::dice::data::HasIoProvider;
 use buck2_common::events::HasEvents;
 use buck2_common::http::HasHttpClient;
 use buck2_common::io::IoProvider;
 use buck2_common::liveliness_observer::NoopLivelinessObserver;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::buck_out_path::BuildArtifactPath;
+use buck2_data::SchedulingMode;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::artifact_value::ArtifactValue;
@@ -54,16 +60,21 @@ use buck2_execute::materialize::materializer::HasMaterializer;
 use buck2_execute::materialize::materializer::Materializer;
 use buck2_execute::output_size::OutputCountAndBytes;
 use buck2_execute::output_size::OutputSize;
+use buck2_execute::path::artifact_path::ArtifactPath;
 use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
+use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
 use buck2_file_watcher::mergebase::GetMergebase;
 use buck2_file_watcher::mergebase::Mergebase;
-use buck2_futures::cancellation::CancellationContext;
 use buck2_http::HttpClient;
 use derivative::Derivative;
 use derive_more::Display;
 use dice::DiceComputations;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use either::Either;
+use fxhash::FxHashMap;
 use indexmap::IndexMap;
+use indexmap::IndexSet;
 use indexmap::indexmap;
 use itertools::Itertools;
 use remote_execution::TActionResult2;
@@ -114,6 +125,7 @@ pub struct ActionExecutionMetadata {
     pub execution_kind: ActionExecutionKind,
     pub timing: ActionExecutionTimingData,
     pub input_files_bytes: Option<u64>,
+    pub waiting_data: WaitingData,
 }
 
 /// The *way* that a particular action was executed.
@@ -130,6 +142,8 @@ pub enum ActionExecutionKind {
         did_dep_file_cache_upload: bool,
         eligible_for_full_hybrid: bool,
         dep_file_key: Option<DepFileDigest>,
+        scheduling_mode: Option<SchedulingMode>,
+        incremental_kind: buck2_data::IncrementalKind,
     },
     /// This action is simple and executed inline within buck2 (e.g. write, symlink_dir)
     #[display("simple")]
@@ -155,7 +169,9 @@ pub struct CommandExecutionRef<'a> {
     pub allows_dep_file_cache_upload: bool,
     pub did_dep_file_cache_upload: bool,
     pub eligible_for_full_hybrid: bool,
+    pub scheduling_mode: Option<SchedulingMode>,
     pub dep_file_key: &'a Option<DepFileDigest>,
+    pub incremental_kind: buck2_data::IncrementalKind,
 }
 
 impl ActionExecutionKind {
@@ -183,6 +199,9 @@ impl ActionExecutionKind {
                 did_dep_file_cache_upload,
                 dep_file_key,
                 eligible_for_full_hybrid,
+                scheduling_mode,
+                incremental_kind,
+                ..
             } => Some(CommandExecutionRef {
                 kind,
                 prefers_local: *prefers_local,
@@ -193,6 +212,8 @@ impl ActionExecutionKind {
                 did_dep_file_cache_upload: *did_dep_file_cache_upload,
                 dep_file_key,
                 eligible_for_full_hybrid: *eligible_for_full_hybrid,
+                scheduling_mode: *scheduling_mode.dupe(),
+                incremental_kind: *incremental_kind,
             }),
             Self::Simple | Self::Deferred | Self::LocalDepFile | Self::LocalActionCache => None,
         }
@@ -210,6 +231,13 @@ impl ActionOutputs {
 
     pub fn get(&self, artifact: &BuildArtifactPath) -> Option<&ArtifactValue> {
         self.0.outputs.get(artifact)
+    }
+
+    pub fn get_from_artifact_path(&self, path: &ArtifactPath) -> Option<&ArtifactValue> {
+        match path.base_path.as_ref() {
+            Either::Left(base) => self.get(base),
+            Either::Right(_) => None,
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&BuildArtifactPath, &ArtifactValue)> {
@@ -244,12 +272,13 @@ impl HasActionExecutor for DiceComputations<'_> {
             action_cache_checker,
             remote_dep_file_cache_checker,
             cache_uploader,
+            output_trees_download_config,
         } = self.get_command_executor_from_dice(executor_config).await?;
         let blocking_executor = self.get_blocking_executor();
         let materializer = self.per_transaction_data().get_materializer();
         let events = self.per_transaction_data().get_dispatcher().dupe();
         let re_client = self.per_transaction_data().get_re_client();
-        let run_action_knobs = self.per_transaction_data().get_run_action_knobs();
+        let run_action_knobs = self.per_transaction_data().get_run_action_knobs().dupe();
         let io_provider = self.global_data().get_io_provider();
         let http_client = self.per_transaction_data().get_http_client();
         let mergebase = self.per_transaction_data().get_mergebase();
@@ -275,6 +304,7 @@ impl HasActionExecutor for DiceComputations<'_> {
             http_client,
             mergebase,
             invalidation_tracking_enabled,
+            output_trees_download_config,
         )))
     }
 }
@@ -291,6 +321,7 @@ pub struct BuckActionExecutor {
     http_client: HttpClient,
     mergebase: Mergebase,
     invalidation_tracking_enabled: bool,
+    output_trees_download_config: OutputTreesDownloadConfig,
 }
 
 impl BuckActionExecutor {
@@ -306,6 +337,7 @@ impl BuckActionExecutor {
         http_client: HttpClient,
         mergebase: Mergebase,
         invalidation_tracking_enabled: bool,
+        output_trees_download_config: OutputTreesDownloadConfig,
     ) -> Self {
         BuckActionExecutor {
             command_executor,
@@ -319,6 +351,7 @@ impl BuckActionExecutor {
             http_client,
             mergebase,
             invalidation_tracking_enabled,
+            output_trees_download_config,
         }
     }
 }
@@ -342,7 +375,7 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         self.executor.command_executor.fs()
     }
 
-    fn executor_fs(&self) -> ExecutorFs {
+    fn executor_fs(&self) -> ExecutorFs<'_> {
         self.executor.command_executor.executor_fs()
     }
 
@@ -354,16 +387,38 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         &self.executor.events
     }
 
-    fn command_execution_manager(&self) -> CommandExecutionManager {
+    fn command_execution_manager(&self, waiting_data: WaitingData) -> CommandExecutionManager {
         CommandExecutionManager::new(
             Box::new(MutexClaimManager::new()),
             self.executor.events.dupe(),
             NoopLivelinessObserver::create(),
+            waiting_data,
         )
     }
 
     fn artifact_values(&self, artifact: &ArtifactGroup) -> &ArtifactGroupValues {
         self.inputs.get(artifact).unwrap_or_else(|| panic!("Internal error: action {} tried to grab the artifact {} even though it was not an input.", self.action.owner(), artifact))
+    }
+
+    fn artifact_path_mapping(
+        &self,
+        filter: Option<IndexSet<ArtifactGroup>>,
+    ) -> FxHashMap<&Artifact, ContentBasedPathHash> {
+        self.inputs
+            .iter()
+            .filter(|(ag, _)| {
+                if !ag.path_resolution_may_require_artifact_value() {
+                    return false;
+                }
+
+                match filter {
+                    Some(ref filter) => filter.contains(*ag),
+                    None => true,
+                }
+            })
+            .flat_map(|(_, v)| v.iter())
+            .map(|(a, v)| (a, v.content_based_path_hash()))
+            .collect()
     }
 
     fn blocking_executor(&self) -> &dyn BlockingExecutor {
@@ -382,8 +437,8 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         self.executor.digest_config
     }
 
-    fn run_action_knobs(&self) -> RunActionKnobs {
-        self.executor.run_action_knobs
+    fn run_action_knobs(&self) -> &RunActionKnobs {
+        &self.executor.run_action_knobs
     }
 
     fn cancellation_context(&self) -> &CancellationContext {
@@ -397,10 +452,13 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
     fn prepare_action(
         &mut self,
         request: &CommandExecutionRequest,
+        re_outputs_required: bool,
     ) -> buck2_error::Result<PreparedAction> {
-        self.executor
-            .command_executor
-            .prepare_action(request, self.digest_config())
+        self.executor.command_executor.prepare_action(
+            request,
+            self.digest_config(),
+            re_outputs_required,
+        )
     }
 
     async fn action_cache(
@@ -454,6 +512,7 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         allows_cache_upload: bool,
         allows_dep_file_cache_upload: bool,
         input_files_bytes: Option<u64>,
+        incremental_kind: buck2_data::IncrementalKind,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
         let CommandExecutionResult {
             outputs,
@@ -463,21 +522,24 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
             did_dep_file_cache_upload,
             dep_file_key,
             eligible_for_full_hybrid,
+            scheduling_mode,
+            waiting_data,
             ..
         } = result;
+
+        // TODO(T156483516): We should also validate that the outputs match the expected outputs
+        let action_outputs = ActionOutputs::new(
+            outputs
+                .into_iter()
+                .filter_map(|(output, value)| Some((output.into_build_artifact()?.0, value)))
+                .collect(),
+        );
+
         // TODO (@torozco): The execution kind should be made to come via the command reports too.
         let res = match &report.status {
             CommandExecutionStatus::Success { execution_kind } => {
                 let result = (
-                    // TODO(T156483516): We should also validate that the outputs match the expected outputs
-                    ActionOutputs::new(
-                        outputs
-                            .into_iter()
-                            .filter_map(|(output, value)| {
-                                Some((output.into_build_artifact()?.0, value))
-                            })
-                            .collect(),
-                    ),
+                    action_outputs,
                     ActionExecutionMetadata {
                         execution_kind: ActionExecutionKind::Command {
                             kind: Box::new(execution_kind.clone()),
@@ -489,19 +551,26 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
                             did_dep_file_cache_upload,
                             dep_file_key,
                             eligible_for_full_hybrid,
+                            scheduling_mode,
+                            incremental_kind,
                         },
                         timing: report.timing.into(),
                         input_files_bytes,
+                        waiting_data,
                     },
                 );
                 Ok(result)
             }
             CommandExecutionStatus::Error { error, .. } => {
                 Err(ExecuteError::CommandExecutionError {
+                    action_outputs,
                     error: Some(error.clone()),
                 })
             }
-            _ => Err(ExecuteError::CommandExecutionError { error: None }),
+            _ => Err(ExecuteError::CommandExecutionError {
+                action_outputs,
+                error: None,
+            }),
         };
         self.command_reports.extend(rejected_execution);
         self.command_reports.push(report);
@@ -545,6 +614,8 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
                 &CacheUploadInfo {
                     target: &action as _,
                     digest_config: self.digest_config(),
+                    mergebase: self.mergebase().0.as_ref(),
+                    re_platform: self.re_platform(),
                 },
                 execution_result,
                 re_result,
@@ -559,7 +630,12 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         let output_paths = self
             .outputs
             .iter()
-            .map(|o| self.fs().resolve_build(o.get_path()))
+            .map(|o| {
+                if o.get_path().is_content_based_path() {
+                    internal_error!("Cleanup outputs is not supported for content-based paths!");
+                }
+                self.fs().resolve_build(o.get_path(), None)
+            })
             .collect::<buck2_error::Result<Vec<_>>>()?;
 
         // Invalidate all the output paths this action might provide. Note that this is a bit
@@ -594,11 +670,16 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
     fn http_client(&self) -> HttpClient {
         self.executor.http_client.dupe()
     }
+
+    fn output_trees_download_config(&self) -> &OutputTreesDownloadConfig {
+        &self.executor.output_trees_download_config
+    }
 }
 
 impl BuckActionExecutor {
     pub(crate) async fn execute(
         &self,
+        waiting_data: WaitingData,
         inputs: IndexMap<ArtifactGroup, ArtifactGroupValues>,
         action: &RegisteredAction,
         cancellations: &CancellationContext,
@@ -620,7 +701,7 @@ impl BuckActionExecutor {
                 cancellations,
             };
 
-            let (result, metadata) = action.execute(&mut ctx).await?;
+            let (result, metadata) = action.execute(&mut ctx, waiting_data).await?;
 
             // Check that all the outputs are the right output_type
             for x in outputs.iter() {
@@ -635,7 +716,10 @@ impl BuckActionExecutor {
                         };
                         if real != declared {
                             return Err(ExecuteError::WrongOutputType {
-                                path: self.command_executor.fs().resolve_build(x.get_path())?,
+                                path: self.command_executor.fs().resolve_build(
+                                    x.get_path(),
+                                    Some(&t.content_based_path_hash()),
+                                )?,
                                 declared,
                                 real,
                             });
@@ -671,7 +755,12 @@ impl BuckActionExecutor {
                 let declared = outputs
                     .iter()
                     .filter(|x| !result.0.outputs.contains_key(x.get_path()))
-                    .map(|x| self.command_executor.fs().resolve_build(x.get_path()))
+                    .map(|x| {
+                        self.command_executor.fs().resolve_build(
+                            x.get_path(),
+                            Some(&ContentBasedPathHash::for_output_artifact()),
+                        )
+                    })
                     .collect::<buck2_error::Result<_>>()?;
                 let real = result
                     .0
@@ -681,7 +770,11 @@ impl BuckActionExecutor {
                         // This is error message, linear search is fine.
                         !outputs.iter().map(|b| b.get_path()).contains(x)
                     })
-                    .map(|x| self.command_executor.fs().resolve_build(x))
+                    .map(|x| {
+                        self.command_executor
+                            .fs()
+                            .resolve_build(x, Some(&ContentBasedPathHash::for_output_artifact()))
+                    })
                     .collect::<buck2_error::Result<Vec<_>>>()?;
                 if real.is_empty() {
                     Err(ExecuteError::MissingOutputs { declared })
@@ -718,6 +811,7 @@ mod tests {
     use buck2_artifact::artifact::artifact_type::testing::BuildArtifactTestingExt;
     use buck2_artifact::artifact::build_artifact::BuildArtifact;
     use buck2_artifact::artifact::source_artifact::SourceArtifact;
+    use buck2_build_signals::env::WaitingData;
     use buck2_common::cas_digest::CasDigestConfig;
     use buck2_common::io::fs::FsIoProvider;
     use buck2_core::category::CategoryRef;
@@ -732,7 +826,6 @@ mod tests {
     use buck2_core::execution_types::executor_config::PathSeparatorKind;
     use buck2_core::fs::artifact_path_resolver::ArtifactFs;
     use buck2_core::fs::buck_out_path::BuckOutPathResolver;
-    use buck2_core::fs::fs_util;
     use buck2_core::fs::project::ProjectRootTemp;
     use buck2_core::fs::project_rel_path::ProjectRelativePath;
     use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
@@ -756,8 +849,10 @@ mod tests {
     use buck2_execute::execute::testing_dry_run::DryRunExecutor;
     use buck2_execute::materialize::nodisk::NoDiskMaterializer;
     use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
-    use buck2_futures::cancellation::CancellationContext;
+    use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
+    use buck2_fs::fs_util::uncategorized as fs_util;
     use buck2_http::HttpClientBuilder;
+    use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
     use indexmap::indexset;
     use sorted_vector_map::SortedVectorMap;
@@ -776,6 +871,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_execute_some_action() {
+        buck2_certs::certs::maybe_setup_cryptography();
         let cells = CellResolver::testing_with_name_and_path(
             CellName::testing_new("cell"),
             CellRootPathBuf::new(ProjectRelativePathBuf::unchecked_new("cell_path".into())),
@@ -826,6 +922,7 @@ mod tests {
                 .build(),
             Default::default(),
             true,
+            OutputTreesDownloadConfig::new(None, true),
         );
 
         #[derive(Debug, Allocative)]
@@ -853,7 +950,7 @@ mod tests {
                 &self.outputs.as_slice()[0]
             }
 
-            fn category(&self) -> CategoryRef {
+            fn category(&self) -> CategoryRef<'_> {
                 CategoryRef::new("testing").unwrap()
             }
 
@@ -864,6 +961,7 @@ mod tests {
             async fn execute(
                 &self,
                 ctx: &mut dyn ActionExecutionCtx,
+                waiting_data: WaitingData,
             ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
                 self.ran.store(true, Ordering::SeqCst);
 
@@ -887,23 +985,25 @@ mod tests {
                             .map(|b| CommandExecutionOutput::BuildArtifact {
                                 path: b.get_path().dupe(),
                                 output_type: OutputType::FileOrDirectory,
+                                supports_incremental_remote: false,
                             })
                             .collect(),
                         ctx.fs(),
                         ctx.digest_config(),
+                        None,
                     )?,
                     SortedVectorMap::new(),
                 );
 
                 // on fake executor, this does nothing
-                let prepared_action = ctx.prepare_action(&req)?;
-                let manager = ctx.command_execution_manager();
+                let prepared_action = ctx.prepare_action(&req, true)?;
+                let manager = ctx.command_execution_manager(waiting_data);
                 let res = ctx.exec_cmd(manager, &req, &prepared_action).await;
 
                 // Must write out the things we promised to do
                 for x in &self.outputs {
                     let dest = x.get_path();
-                    let dest_path = ctx.fs().resolve_build(dest)?;
+                    let dest_path = ctx.fs().resolve_build(dest, None)?;
                     ctx.fs().fs().write_file(&dest_path, "", false)?
                 }
 
@@ -913,6 +1013,7 @@ mod tests {
                     false,
                     false,
                     None,
+                    buck2_data::IncrementalKind::NonIncremental,
                 )?;
                 let outputs = self
                     .outputs
@@ -930,6 +1031,7 @@ mod tests {
                         execution_kind: ActionExecutionKind::Simple,
                         timing: ActionExecutionTimingData::default(),
                         input_files_bytes: None,
+                        waiting_data: WaitingData::new(),
                     },
                 ))
             }
@@ -960,7 +1062,12 @@ mod tests {
         );
         let res = with_dispatcher_async(
             EventDispatcher::null(),
-            executor.execute(Default::default(), &action, CancellationContext::testing()),
+            executor.execute(
+                WaitingData::new(),
+                Default::default(),
+                &action,
+                CancellationContext::testing(),
+            ),
         )
         .await
         .0

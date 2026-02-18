@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifacts.bzl",
@@ -12,6 +13,7 @@ load(
 )
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//:resources.bzl", "gather_resources")
+load("@prelude//cxx:cxx_context.bzl", "get_opt_cxx_toolchain_info")
 load(
     "@prelude//cxx:cxx_library_utility.bzl",
     "cxx_is_gnu",
@@ -29,20 +31,30 @@ load(
 load(
     "@prelude//linking:shared_libraries.bzl",
     "SharedLibrary",
+    "to_soname",
     "traverse_shared_library_info",
 )
 load("@prelude//linking:strip.bzl", "strip_debug_with_gnu_debuglink")
 load("@prelude//python:compute_providers.bzl", "ExecutableType", "compute_providers")
+load(
+    "@prelude//python/linking:link_helper.bzl",
+    "LinkProviders",
+    "cxx_implicit_attrs",
+    "process_native_linking_rule",
+    "python_implicit_attrs",
+)
 load("@prelude//python/linking:native.bzl", "process_native_linking")
-load("@prelude//python/linking:native_python_util.bzl", "compute_link_strategy")
+load("@prelude//python/linking:native_python_util.bzl", "compute_link_strategy", "merge_native_deps")
 load("@prelude//python/linking:omnibus.bzl", "process_omnibus_linking")
-load("@prelude//utils:utils.bzl", "flatten", "value_or")
+load("@prelude//utils:utils.bzl", "value_or")
 load(":compile.bzl", "compile_manifests")
 load(
     ":interface.bzl",
     "EntryPoint",
     "EntryPointKind",
 )
+load(":internal_tools.bzl", "PythonInternalToolsInfo")
+load(":lazy_imports.bzl", "run_lazy_imports_analyzer")
 load(":make_py_package.bzl", "PexModules", "PexProviders", "make_py_package")
 load(
     ":manifest.bzl",
@@ -61,7 +73,7 @@ load(
 )
 load(":python_runtime_bundle.bzl", "PythonRuntimeBundleInfo")
 load(":source_db.bzl", "create_dbg_source_db", "create_python_source_db_info", "create_source_db_no_deps")
-load(":toolchain.bzl", "NativeLinkStrategy", "PackageStyle", "PythonPlatformInfo", "PythonToolchainInfo", "get_package_style", "get_platform_attr")
+load(":toolchain.bzl", "NativeLinkStrategy", "PackageStyle", "PythonToolchainInfo", "get_package_style")
 load(":typing.bzl", "create_per_target_type_check")
 load(":versions.bzl", "LibraryName", "LibraryVersion", "gather_versioned_dependencies", "resolve_versions")
 
@@ -113,21 +125,13 @@ def python_executable(
         standalone_resources: dict[str, ArtifactOutputs] | None,
         compile: bool,
         allow_cache_upload: bool,
-        executable_type: ExecutableType) -> list[Provider]:
+        executable_type: ExecutableType) -> list[Provider] | Promise:
     # Returns a three tuple: the Python binary, all its potential runtime files,
     # and a provider for its source DB.
+    raw_deps = ctx.attrs.deps
 
     # TODO(nmj): See if people are actually setting cxx_platform here. Really
     #                 feels like it should be a property of the python platform
-    python_platform = ctx.attrs._python_toolchain[PythonPlatformInfo]
-    cxx_toolchain = ctx.attrs._cxx_toolchain
-
-    raw_deps = ctx.attrs.deps
-
-    raw_deps.extend(flatten(
-        get_platform_attr(python_platform, cxx_toolchain, ctx.attrs.platform_deps),
-    ))
-
     # `preload_deps` is used later to configure `LD_PRELOAD` environment variable,
     # here we make the actual libraries to appear in the distribution.
     # TODO: make fully consistent with its usage later
@@ -147,14 +151,17 @@ def python_executable(
     src_manifest = None
     bytecode_manifest = None
 
-    python_toolchain = ctx.attrs._python_toolchain[PythonToolchainInfo]
-    if python_toolchain.runtime_library and ArtifactGroupInfo in python_toolchain.runtime_library:
-        for artifact in python_toolchain.runtime_library[ArtifactGroupInfo].artifacts:
-            srcs[artifact.short_path] = artifact
+    python_internal_tools = ctx.attrs._python_internal_tools[PythonInternalToolsInfo]
+    for artifact in python_internal_tools.runtime_library[ArtifactGroupInfo].artifacts:
+        srcs[artifact.short_path] = artifact
 
     if srcs:
         src_manifest = create_manifest_for_source_map(ctx, "srcs", srcs)
-        bytecode_manifest = compile_manifests(ctx, [src_manifest])
+
+        # TODO(T245694881) let the toolchain decide whether pyc's should be precompiled
+        py_version = ctx.attrs._python_toolchain[PythonToolchainInfo].version
+        if py_version == None or "3.15" not in py_version:
+            bytecode_manifest = compile_manifests(ctx, [src_manifest])
 
     all_default_resources = {}
     all_standalone_resources = {}
@@ -180,6 +187,9 @@ def python_executable(
         bytecode = bytecode_manifest,
         deps = python_deps,
         shared_libraries = shared_deps,
+        native_deps = merge_native_deps(ctx, raw_deps),
+        is_native_dep = False,
+        par_style = ctx.attrs.par_style,
     )
 
     source_db_no_deps = create_source_db_no_deps(ctx, srcs)
@@ -261,14 +271,17 @@ def _compute_pex_providers(
         extensions: dict[str, (LinkedObject, Label)],
         link_args: list[LinkArgs],
         extra: dict[str, typing.Any],
-        extra_artifacts: dict[str, typing.Any],
-        executable_type: ExecutableType) -> list[Provider]:
-    dbg_source_db_output = ctx.actions.declare_output("dbg-db.json")
+        link_extra_artifacts: dict[str, typing.Any],
+        executable_type: ExecutableType) -> list[Provider] | Promise:
+    dbg_source_db_output = ctx.actions.declare_output("dbg-db.json", has_content_based_path = True)
     dbg_source_db = create_dbg_source_db(ctx, dbg_source_db_output, src_manifest, python_deps)
+
+    extra_artifacts = {key: value for key, value in link_extra_artifacts.items()}
 
     link_strategy = compute_link_strategy(ctx)
     build_args = ctx.attrs.build_args
     python_toolchain = ctx.attrs._python_toolchain[PythonToolchainInfo]
+    python_internal_tools = ctx.attrs._python_internal_tools[PythonInternalToolsInfo]
 
     if link_strategy == NativeLinkStrategy("native"):
         entry_point = "runtime/bin/{}".format(ctx.attrs.executable_name)
@@ -277,17 +290,25 @@ def _compute_pex_providers(
     if dbg_source_db_output:
         extra_artifacts["dbg-db.json"] = dbg_source_db_output
 
-    if python_toolchain.default_sitecustomize != None:
-        extra_artifacts["sitecustomize.py"] = python_toolchain.default_sitecustomize
+    # Run lazy import analysis using the existing dbg-db.json only if the attribute is enabled
+    if getattr(ctx.attrs, "lazy_imports_analyzer", None):
+        lazy_import_analysis_output = ctx.actions.declare_output("safer_lazy_imports/lazy-import-analysis.json")
+        run_lazy_imports_analyzer(ctx, dbg_source_db.other_outputs, lazy_import_analysis_output, dbg_source_db_output)
+        if lazy_import_analysis_output:
+            extra_artifacts["safer_lazy_imports/lazy-import-analysis.json"] = lazy_import_analysis_output
+
+    extra_artifacts["sitecustomize.py"] = python_internal_tools.default_sitecustomize
 
     # Add bundled runtime
     if ctx.attrs.runtime_bundle:
         bundle = ctx.attrs.runtime_bundle[PythonRuntimeBundleInfo]
         build_args.append(cmd_args("--passthrough=--python-home=runtime"))
-        build_args.append(cmd_args("--passthrough=--preload=runtime/lib/{}".format(bundle.libpython.basename)))
         extra_artifacts["runtime/bin/{}".format(bundle.py_bin.basename)] = bundle.py_bin
         extra_artifacts["runtime/lib/{}".format(bundle.stdlib.basename)] = bundle.stdlib
-        extra_artifacts["runtime/lib/{}".format(bundle.libpython.basename)] = bundle.libpython
+        if bundle.libpython:
+            if link_strategy != NativeLinkStrategy("native"):
+                build_args.append(cmd_args("--passthrough=--preload=runtime/lib/{}".format(bundle.libpython.basename)))
+            extra_artifacts["runtime/lib/{}".format(bundle.libpython.basename)] = bundle.libpython
         if link_strategy != NativeLinkStrategy("native"):
             entry_point = "runtime/bin/{}".format(bundle.py_bin.basename)
             build_args.append(cmd_args(["--passthrough=--runtime-binary={}".format(entry_point)]))
@@ -334,13 +355,14 @@ def _compute_pex_providers(
             stripped_shlibs.append((shlib, libdir))
             debuginfo_files.append(((libdir, shlib, ".debuginfo"), debuginfo))
         shared_libs = stripped_shlibs
+        stripped_extensions = {}
         for name, (extension, label) in extensions.items():
             stripped, debuginfo = strip_debug_with_gnu_debuglink(
                 ctx = ctx,
                 name = name,
                 obj = extension.unstripped_output,
             )
-            extensions[name] = (
+            stripped_extensions[name] = (
                 LinkedObject(
                     output = stripped,
                     unstripped_output = extension.unstripped_output,
@@ -349,6 +371,7 @@ def _compute_pex_providers(
                 label,
             )
             debuginfo_files.append((name + ".debuginfo", debuginfo))
+        extensions = stripped_extensions
 
     # Combine sources and extensions into a map of all modules.
     pex_modules = PexModules(
@@ -369,6 +392,7 @@ def _compute_pex_providers(
     pex = make_py_package(
         ctx = ctx,
         python_toolchain = python_toolchain,
+        python_internal_tools = python_internal_tools,
         make_py_package_cmd = ctx.attrs.make_py_package[RunInfo] if ctx.attrs.make_py_package != None else None,
         package_style = package_style,
         build_args = build_args,
@@ -397,10 +421,11 @@ def _convert_python_library_to_executable(
         src_manifest: ManifestInfo | None,
         python_deps: list[PythonLibraryInfo],
         source_db_no_deps: DefaultInfo,
-        executable_type: ExecutableType) -> list[Provider]:
+        executable_type: ExecutableType) -> list[Provider] | Promise:
     extra = {}
 
     python_toolchain = ctx.attrs._python_toolchain[PythonToolchainInfo]
+    python_internal_tools = ctx.attrs._python_internal_tools[PythonInternalToolsInfo]
     package_style = get_package_style(ctx)
 
     extra_artifacts = {}
@@ -408,13 +433,75 @@ def _convert_python_library_to_executable(
     link_strategy = compute_link_strategy(ctx)
 
     if link_strategy == NativeLinkStrategy("native"):
-        shared_libs, extensions, link_args, extra, extra_artifacts = process_native_linking(
-            ctx,
-            deps,
-            python_toolchain,
-            package_style,
-            allow_cache_upload,
-        )
+        use_anon_target = getattr(ctx.attrs, "use_anon_target_for_analysis", False)
+        if use_anon_target:
+            # For caching link groups, we just need to pass cxx_deps
+            native_deps = {}
+            for dep in library.native_deps.traverse():
+                native_deps.update(dep.native_deps)
+
+            explicit_attrs = {
+                "allow_cache_upload": allow_cache_upload,
+                "deps": list(native_deps.values()),
+                "name": "python_linking:" + ctx.attrs.name,
+                "package_style": package_style,
+                "python_toolchain": ctx.attrs._python_toolchain,
+                "rpath": ctx.attrs.name,
+                "static_extension_utils": ctx.attrs.static_extension_utils,
+                "transformation_spec": ctx.attrs.transformation_spec,
+                "_cxx_toolchain": ctx.attrs._cxx_toolchain,
+                "_python_internal_tools": ctx.attrs._python_internal_tools,
+            }
+            implicit_attrs = {
+                a: getattr(ctx.attrs, a)
+                for a in (set(cxx_implicit_attrs.keys()) | set(python_implicit_attrs.keys())) - set(explicit_attrs.keys())
+            }
+            return ctx.actions.anon_target(
+                process_native_linking_rule,
+                explicit_attrs | implicit_attrs,
+            ).promise.map(lambda providers: _compute_pex_providers(
+                ctx,
+                src_manifest,
+                python_deps,
+                source_db_no_deps,
+                main,
+                compile,
+                library,
+                allow_cache_upload,
+                providers[LinkProviders].shared_libraries,
+                providers[LinkProviders].extensions,
+                providers[LinkProviders].link_args,
+                providers[LinkProviders].extra,
+                providers[LinkProviders].extra_artifacts,
+                executable_type,
+            ))
+        else:
+            shared_libs, extensions, link_args, extra, extra_artifacts = process_native_linking(
+                ctx,
+                deps,
+                python_toolchain,
+                python_internal_tools,
+                package_style,
+                allow_cache_upload,
+            )
+            if ctx.attrs.runtime_bundle:
+                runtime_bundle = ctx.attrs.runtime_bundle[PythonRuntimeBundleInfo]
+
+                # On some platforms libpython does not link with system libraries. Include libraries
+                # in the PAR in this case.
+                for dep in runtime_bundle.shared_libs:
+                    lib = dep.get(DefaultInfo).default_outputs[0]
+                    shared_libs.append((
+                        # There's probably a smarter way to get the shared library object out of the
+                        # dependency, but I'm not sure what that is.
+                        SharedLibrary(
+                            soname = to_soname(lib.basename),
+                            label = dep.label,
+                            lib = LinkedObject(output = lib, unstripped_output = lib),
+                        ),
+                        "",
+                    ))
+
     else:
         extensions = {}
         for manifest in library.manifests.traverse():
@@ -425,14 +512,14 @@ def _convert_python_library_to_executable(
         else:
             shared_libs = [
                 (shared_lib, "")
-                for shared_lib in traverse_shared_library_info(library.shared_libraries)
+                for shared_lib in traverse_shared_library_info(library.shared_libraries, transformation_provider = None)
             ]
 
             # darwin and windows expect self-contained dynamically linked
             # python extensions without additional transitive shared libraries
             shared_libs += [
                 (extension_shared_lib, "")
-                for extension_shared_lib in traverse_shared_library_info(library.extension_shared_libraries)
+                for extension_shared_lib in traverse_shared_library_info(library.extension_shared_libraries, transformation_provider = None)
             ]
 
     return _compute_pex_providers(
@@ -452,7 +539,7 @@ def _convert_python_library_to_executable(
         executable_type,
     )
 
-def python_binary_impl(ctx: AnalysisContext) -> list[Provider]:
+def python_binary_impl(ctx: AnalysisContext) -> list[Provider] | Promise:
     main_module = ctx.attrs.main_module
     main_function = ctx.attrs.main_function
     if main_module != None and ctx.attrs.main != None:
@@ -491,6 +578,9 @@ def python_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     standalone_resources = qualify_srcs(ctx.label, ctx.attrs.base_module, standalone_resources_map)
     default_resources = qualify_srcs(ctx.label, ctx.attrs.base_module, default_resources_map)
 
+    cxx_toolchain_info = get_opt_cxx_toolchain_info(ctx)
+    toolchain_allow_cache_upload = cxx_toolchain_info.cxx_compiler_info.allow_cache_upload if cxx_toolchain_info else None
+
     return python_executable(
         ctx,
         main,
@@ -498,6 +588,6 @@ def python_binary_impl(ctx: AnalysisContext) -> list[Provider]:
         default_resources,
         standalone_resources,
         compile = value_or(ctx.attrs.compile, False),
-        allow_cache_upload = cxx_attrs_get_allow_cache_upload(ctx.attrs),
+        allow_cache_upload = cxx_attrs_get_allow_cache_upload(ctx.attrs, toolchain_allow_cache_upload),
         executable_type = ExecutableType("binary"),
     )

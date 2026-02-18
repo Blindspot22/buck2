@@ -1,20 +1,26 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![allow(dead_code)] // Unused in oss
 
+use dupe::Dupe;
+
 #[cfg(fbcode_build)]
-use crate::health_checks::facebook::stable_revision::stable_revision_check::StableRevisionCheck;
+use crate::health_checks::slowness_check::SlownessCheck;
+#[cfg(fbcode_build)]
+use crate::health_checks::stable_revision::stable_revision_check::StableRevisionCheck;
 use crate::health_checks::vpn_check::VpnCheck;
 use crate::interface::HealthCheck;
 use crate::interface::HealthCheckContext;
 use crate::interface::HealthCheckContextEvent;
+use crate::interface::HealthCheckSnapshotData;
 use crate::report::Report;
 
 /// This executor is responsible for maintaining the health check context and running the checks.
@@ -42,9 +48,9 @@ impl HealthCheckExecutor {
             if let Ok(stable_revision_check) = StableRevisionCheck::new() {
                 health_checks.push(Box::new(stable_revision_check));
             }
+            health_checks.push(Box::new(SlownessCheck::new()));
         }
         health_checks.push(Box::new(VpnCheck::new()));
-
         health_checks
     }
 
@@ -53,8 +59,20 @@ impl HealthCheckExecutor {
         event: HealthCheckContextEvent,
     ) -> buck2_error::Result<()> {
         match event {
-            HealthCheckContextEvent::CommandStart(command_start) => {
-                self.health_check_context.command_data = command_start.data;
+            HealthCheckContextEvent::CommandStart(command_start_with_trace_id) => {
+                if let Some(command_start) = command_start_with_trace_id.command_start {
+                    self.health_check_context.command_data = command_start.data;
+                } else {
+                    self.health_check_context.command_data = None;
+                }
+                self.health_check_context.trace_id = Some(command_start_with_trace_id.trace_id);
+                self.health_check_context.command_start_time =
+                    command_start_with_trace_id.timestamp.map(|ts| {
+                        use std::time::Duration;
+                        use std::time::UNIX_EPOCH;
+                        let duration = Duration::new(ts.seconds as u64, ts.nanos as u32);
+                        UNIX_EPOCH + duration
+                    });
             }
             HealthCheckContextEvent::ParsedTargetPatterns(parsed_target_patterns) => {
                 self.health_check_context.parsed_target_patterns = Some(parsed_target_patterns);
@@ -77,10 +95,13 @@ impl HealthCheckExecutor {
         Ok(())
     }
 
-    pub async fn run_checks(&mut self) -> buck2_error::Result<Vec<Report>> {
+    pub async fn run_checks(
+        &mut self,
+        snapshot: HealthCheckSnapshotData,
+    ) -> buck2_error::Result<Vec<Report>> {
         let mut reports = Vec::new();
-        for check in &self.health_checks {
-            if let Some(report) = check.run_check().ok().flatten() {
+        for check in self.health_checks.iter_mut() {
+            if let Some(report) = check.run_check(snapshot.dupe()).ok().flatten() {
                 reports.push(report);
             }
         }

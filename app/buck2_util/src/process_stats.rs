@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::default::Default;
@@ -62,7 +63,9 @@ pub fn process_stats() -> ProcessStats {
 #[cfg(windows)]
 pub fn process_stats() -> ProcessStats {
     use winapi::shared::minwindef::DWORD;
+    use winapi::shared::minwindef::FILETIME;
     use winapi::um::processthreadsapi::GetCurrentProcess;
+    use winapi::um::processthreadsapi::GetProcessTimes;
     use winapi::um::psapi::K32GetProcessMemoryInfo;
     use winapi::um::psapi::PROCESS_MEMORY_COUNTERS;
 
@@ -79,6 +82,34 @@ pub fn process_stats() -> ProcessStats {
             ),
         };
 
+    // Get CPU times using GetProcessTimes
+    // API reference: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes
+    let (user_cpu_us, system_cpu_us) = unsafe {
+        let mut creation_time: FILETIME = std::mem::zeroed();
+        let mut exit_time: FILETIME = std::mem::zeroed();
+        let mut kernel_time: FILETIME = std::mem::zeroed();
+        let mut user_time: FILETIME = std::mem::zeroed();
+
+        match GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation_time,
+            &mut exit_time,
+            &mut kernel_time,
+            &mut user_time,
+        ) {
+            0 => (None, None),
+            _ => {
+                // FILETIME is in 100-nanosecond intervals, convert to microseconds
+                let kernel_us = ((kernel_time.dwHighDateTime as u64) << 32
+                    | kernel_time.dwLowDateTime as u64)
+                    / 10;
+                let user_us =
+                    ((user_time.dwHighDateTime as u64) << 32 | user_time.dwLowDateTime as u64) / 10;
+                (Some(user_us), Some(kernel_us))
+            }
+        }
+    };
+
     // Technically, `GetProcessMemoryInfo` returns working set size, not resident set size. However,
     // we log it as rss for two reasons:
     // (1) Reading https://learn.microsoft.com/en-us/windows/win32/memory/working-set, the definition of
@@ -88,9 +119,8 @@ pub fn process_stats() -> ProcessStats {
     ProcessStats {
         rss_bytes: wss_bytes,
         max_rss_bytes: max_wss_bytes,
-        // TODO T219499802: Add CPU stats for Windows
-        user_cpu_us: None,
-        system_cpu_us: None,
+        user_cpu_us,
+        system_cpu_us,
     }
 }
 

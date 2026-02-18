@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -70,10 +71,16 @@ pub struct TCodeReasonGroup(pub i32);
 
 impl TCodeReasonGroup {
     pub const UNKNOWN: Self = TCodeReasonGroup(0i32);
+    pub const RE_CONNECTION: Self = TCodeReasonGroup(1i32);
+    pub const USER_QUOTA: Self = TCodeReasonGroup(2i32);
 }
 
 impl Display for TCodeReasonGroup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "UNKNOWN")
+        match *self {
+            TCodeReasonGroup::RE_CONNECTION => write!(f, "RE_CONNECTION"),
+            TCodeReasonGroup::USER_QUOTA => write!(f, "USER_QUOTA"),
+            _ => write!(f, "UNKNOWN"),
+        }
     }
 }

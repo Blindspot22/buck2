@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin.buildtools
@@ -49,7 +50,8 @@ internal class JvmCompilationConfigurationFactoryTest {
         .thenReturn(jvmCompilationConfiguration)
     whenever(
             jvmCompilationConfiguration
-                .makeClasspathSnapshotBasedIncrementalCompilationConfiguration())
+                .makeClasspathSnapshotBasedIncrementalCompilationConfiguration()
+        )
         .thenReturn(classpathSnapshotBasedIncrementalJvmCompilationConfiguration)
 
     jvmCompilationConfigurationFactory =
@@ -66,7 +68,8 @@ internal class JvmCompilationConfigurationFactoryTest {
             workingDirectory = any(),
             sourcesChanges = any(),
             approachParameters = any(),
-            options = any())
+            options = any(),
+        )
   }
 
   @Test
@@ -79,7 +82,8 @@ internal class JvmCompilationConfigurationFactoryTest {
             workingDirectory = any(),
             sourcesChanges = any(),
             approachParameters = any(),
-            options = any())
+            options = any(),
+        )
   }
 
   @Test
@@ -93,7 +97,8 @@ internal class JvmCompilationConfigurationFactoryTest {
             workingDirectory = eq(fakeIncrementalKotlincMode.kotlicWorkingDir.toFile()),
             sourcesChanges = any(),
             approachParameters = any(),
-            options = any())
+            options = any(),
+        )
   }
 
   @Test
@@ -105,7 +110,8 @@ internal class JvmCompilationConfigurationFactoryTest {
             workingDirectory = any(),
             sourcesChanges = eq(SourcesChanges.ToBeCalculated),
             approachParameters = any(),
-            options = any())
+            options = any(),
+        )
   }
 
   @Test
@@ -116,7 +122,8 @@ internal class JvmCompilationConfigurationFactoryTest {
 
     val expectedClasspathSnapshotBasedIncrementalCompilationApproachParameters =
         createClasspathSnapshotBasedIncrementalCompilationApproachParameters(
-            fakeIncrementalKotlincMode)
+            fakeIncrementalKotlincMode
+        )
     verify(jvmCompilationConfiguration)
         .useIncrementalCompilation(
             workingDirectory = any(),
@@ -131,7 +138,8 @@ internal class JvmCompilationConfigurationFactoryTest {
                           expectedClasspathSnapshotBasedIncrementalCompilationApproachParameters
                               .shrunkClasspathSnapshot
                 },
-            options = any())
+            options = any(),
+        )
   }
 
   @Test
@@ -145,7 +153,8 @@ internal class JvmCompilationConfigurationFactoryTest {
             workingDirectory = any(),
             sourcesChanges = any(),
             approachParameters = any(),
-            options = eq(classpathSnapshotBasedIncrementalJvmCompilationConfiguration))
+            options = eq(classpathSnapshotBasedIncrementalJvmCompilationConfiguration),
+        )
     verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration)
         .setRootProjectDir(fakeIncrementalKotlincMode.rootProjectDir.toFile())
     verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration)
@@ -155,7 +164,8 @@ internal class JvmCompilationConfigurationFactoryTest {
   @Test
   fun `when there are no classpath changes, compiler is assured about no classpath changes`() {
     jvmCompilationConfigurationFactory.create(
-        createFakeIncrementalKotlincMode(ClasspathChanges.NoChanges(ImmutableList.of())))
+        createFakeIncrementalKotlincMode(ClasspathChanges.NoChanges(ImmutableList.of()))
+    )
 
     verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration)
         .assureNoClasspathSnapshotsChanges(true)
@@ -166,7 +176,8 @@ internal class JvmCompilationConfigurationFactoryTest {
   @Test
   fun `when classpath changes can not be detected, non-incremental mode is forced`() {
     jvmCompilationConfigurationFactory.create(
-        createFakeIncrementalKotlincMode(ClasspathChanges.Unknown))
+        createFakeIncrementalKotlincMode(ClasspathChanges.Unknown)
+    )
 
     verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration)
         .forceNonIncrementalMode(true)
@@ -177,7 +188,8 @@ internal class JvmCompilationConfigurationFactoryTest {
   @Test
   fun `when requires rebuild, non-incremental mode is forced`() {
     jvmCompilationConfigurationFactory.create(
-        createFakeIncrementalKotlincMode(rebuildReason = mock()))
+        createFakeIncrementalKotlincMode(rebuildReason = mock())
+    )
 
     verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration)
         .forceNonIncrementalMode(true)
@@ -186,10 +198,40 @@ internal class JvmCompilationConfigurationFactoryTest {
   @Test
   fun `when rebuild is not required, non-incremental mode is not forced`() {
     jvmCompilationConfigurationFactory.create(
-        createFakeIncrementalKotlincMode(rebuildReason = null))
+        createFakeIncrementalKotlincMode(rebuildReason = null)
+    )
 
     verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration, never())
         .forceNonIncrementalMode(true)
+  }
+
+  @Test
+  fun `when classpath has removals, non-incremental mode is forced`() {
+    jvmCompilationConfigurationFactory.create(
+        createFakeIncrementalKotlincMode(
+            classpathChanges = ClasspathChanges.HasRemovals(ImmutableList.of())
+        )
+    )
+
+    verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration)
+        .forceNonIncrementalMode(true)
+    verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration, never())
+        .assureNoClasspathSnapshotsChanges(true)
+  }
+
+  @Test
+  fun `when classpath has additions or modifications only, non-incremental mode is not forced`() {
+    jvmCompilationConfigurationFactory.create(
+        createFakeIncrementalKotlincMode(
+            classpathChanges =
+                ClasspathChanges.ToBeComputedByIncrementalCompiler(ImmutableList.of())
+        )
+    )
+
+    verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration, never())
+        .forceNonIncrementalMode(true)
+    verify(classpathSnapshotBasedIncrementalJvmCompilationConfiguration, never())
+        .assureNoClasspathSnapshotsChanges(true)
   }
 
   private fun createClasspathSnapshotBasedIncrementalCompilationApproachParameters(
@@ -198,12 +240,13 @@ internal class JvmCompilationConfigurationFactoryTest {
       ClasspathSnapshotBasedIncrementalCompilationApproachParameters(
           newClasspathSnapshotFiles = mode.classpathChanges.classpathSnapshotFiles,
           shrunkClasspathSnapshot =
-              mode.kotlicWorkingDir.resolve("shrunk-classpath-snapshot.bin").toFile())
+              mode.kotlicWorkingDir.resolve("shrunk-classpath-snapshot.bin").toFile(),
+      )
 
   private fun createFakeIncrementalKotlincMode(
       classpathChanges: ClasspathChanges = createFakeClasspathChanges(),
       kotlinDepFile: AbsPath? = createExistingFileMock(),
-      rebuildReason: RebuildReason? = null
+      rebuildReason: RebuildReason? = null,
   ): KotlincMode.Incremental {
     val rootProjectDir = AbsPath.get("/home/root")
     val buildDir = AbsPath.get("/home/root/buildDir")
@@ -216,7 +259,8 @@ internal class JvmCompilationConfigurationFactoryTest {
         KotlinSourceChanges.ToBeCalculated,
         classpathChanges,
         kotlinDepFile,
-        rebuildReason)
+        rebuildReason,
+    )
   }
 
   private fun createFakeClasspathChanges(): ClasspathChanges =

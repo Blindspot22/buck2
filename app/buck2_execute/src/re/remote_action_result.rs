@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
@@ -25,8 +26,8 @@ use remote_execution::TTimestamp;
 use crate::digest_config::DigestConfig;
 use crate::execute::kind::CommandExecutionKind;
 use crate::execute::kind::RemoteCommandExecutionDetails;
-use crate::execute::result::CommandExecutionMetadata;
 use crate::re::manager::ManagedRemoteExecutionClient;
+use crate::re::queue_stats::QueueStats;
 use crate::re::streams::RemoteCommandStdStreams;
 
 pub struct ActionCacheResult(pub ActionResultResponse, pub buck2_data::CacheType);
@@ -46,7 +47,7 @@ pub trait RemoteActionResult: Send + Sync {
         materialized_outputs_for_failed_actions: Option<Vec<ProjectRelativePathBuf>>,
     ) -> CommandExecutionKind;
 
-    fn timing(&self) -> CommandExecutionMetadata;
+    fn timing(&self) -> ReMetadataTiming;
 
     fn std_streams(
         &self,
@@ -58,17 +59,22 @@ pub trait RemoteActionResult: Send + Sync {
     fn ttl(&self) -> i64;
 }
 
-impl RemoteActionResult for ExecuteResponse {
+pub struct ExecuteResponseWithQueueStats {
+    pub execute_response: ExecuteResponse,
+    pub queue_stats: QueueStats,
+}
+
+impl RemoteActionResult for ExecuteResponseWithQueueStats {
     fn output_files(&self) -> &[TFile] {
-        &self.action_result.output_files
+        &self.execute_response.action_result.output_files
     }
 
     fn output_directories(&self) -> &[TDirectory2] {
-        &self.action_result.output_directories
+        &self.execute_response.action_result.output_directories
     }
 
     fn output_symlinks(&self) -> &[TSymlink] {
-        &self.action_result.output_symlinks
+        &self.execute_response.action_result.output_symlinks
     }
 
     fn execution_kind(&self, details: RemoteCommandExecutionDetails) -> CommandExecutionKind {
@@ -81,21 +87,16 @@ impl RemoteActionResult for ExecuteResponse {
         materialized_inputs_for_failed: Option<Vec<ProjectRelativePathBuf>>,
         materialized_outputs_for_failed_actions: Option<Vec<ProjectRelativePathBuf>>,
     ) -> CommandExecutionKind {
-        let meta = &self.action_result.execution_metadata;
-        let queue_time = meta
-            .last_queued_timestamp
-            .saturating_duration_since(&meta.queued_timestamp);
-
         CommandExecutionKind::Remote {
             details,
-            queue_time,
+            queue_time: self.queue_stats.cumulative_queue_duration,
             materialized_inputs_for_failed,
             materialized_outputs_for_failed_actions,
         }
     }
 
-    fn timing(&self) -> CommandExecutionMetadata {
-        timing_from_re_metadata(&self.action_result.execution_metadata)
+    fn timing(&self) -> ReMetadataTiming {
+        timing_from_re_metadata(&self.execute_response.action_result.execution_metadata)
     }
 
     fn std_streams(
@@ -103,11 +104,11 @@ impl RemoteActionResult for ExecuteResponse {
         client: &ManagedRemoteExecutionClient,
         digest_config: DigestConfig,
     ) -> RemoteCommandStdStreams {
-        RemoteCommandStdStreams::new(&self.action_result, client, digest_config)
+        RemoteCommandStdStreams::new(&self.execute_response.action_result, client, digest_config)
     }
 
     fn ttl(&self) -> i64 {
-        self.action_result_ttl
+        self.execute_response.action_result_ttl
     }
 }
 
@@ -142,10 +143,8 @@ impl RemoteActionResult for ActionCacheResult {
         self.execution_kind(details)
     }
 
-    fn timing(&self) -> CommandExecutionMetadata {
+    fn timing(&self) -> ReMetadataTiming {
         let mut timing = timing_from_re_metadata(&self.0.action_result.execution_metadata);
-        // This was a cache hit so we didn't wait at all
-        timing.wall_time = Duration::ZERO;
         timing.input_materialization_duration = Duration::ZERO;
         timing.queue_duration = None;
         timing
@@ -164,7 +163,15 @@ impl RemoteActionResult for ActionCacheResult {
     }
 }
 
-fn timing_from_re_metadata(meta: &TExecutedActionMetadata) -> CommandExecutionMetadata {
+pub struct ReMetadataTiming {
+    pub execution_time: Duration,
+    pub start_time: SystemTime,
+    pub execution_stats: Option<buck2_data::CommandExecutionStats>,
+    pub input_materialization_duration: Duration,
+    pub queue_duration: Option<Duration>,
+}
+
+fn timing_from_re_metadata(meta: &TExecutedActionMetadata) -> ReMetadataTiming {
     let execution_time = meta
         .execution_completed_timestamp
         .saturating_duration_since(&meta.execution_start_timestamp);
@@ -190,14 +197,11 @@ fn timing_from_re_metadata(meta: &TExecutedActionMetadata) -> CommandExecutionMe
         .worker_start_timestamp
         .saturating_duration_since(&meta.queued_timestamp);
 
-    CommandExecutionMetadata {
-        wall_time: execution_time,
+    ReMetadataTiming {
         execution_time,
         start_time,
         execution_stats,
         input_materialization_duration: fetch_input_time,
-        hashing_duration: Duration::ZERO,
-        hashed_artifacts_count: 0,
         queue_duration: Some(queue_duration),
     }
 }

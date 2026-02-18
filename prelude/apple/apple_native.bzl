@@ -1,14 +1,15 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:prelude.bzl", "native")
 load(
     "@prelude//platforms/apple:constants.bzl",
-    "APPLE",
+    "apple_sdks",
 )
 load("@prelude//platforms/apple:platforms.bzl", "config_backed_apple_target_platform", "get_default_target_platform_for_platform", "set_apple_platforms")
 load("@prelude//platforms/apple:platforms_map.bzl", "APPLE_SDK_DEFAULT_PLATFORM_MAP")
@@ -55,7 +56,8 @@ def _apple_xcframework(**kwargs):
     native.apple_xcframework(**kwargs)
 
 def _update_platforms(**kwargs):
-    platform = _get_default_platform()
+    sdk = kwargs.pop("sdk", apple_sdks.IOS)
+    platform = _get_default_platform(sdk)
 
     default_target_platform = kwargs.pop("default_target_platform", None)
     base_config_backed_target_platform = kwargs.pop("config_backed_target_platform", None)
@@ -78,11 +80,11 @@ def _update_platforms(**kwargs):
 
     return kwargs
 
-def _get_default_platform():
+def _get_default_platform(sdk: str) -> str:
     config_platform = read("cxx", "default_platform")
     if config_platform != None:
         return config_platform
-    return APPLE_SDK_DEFAULT_PLATFORM_MAP.get(APPLE)
+    return APPLE_SDK_DEFAULT_PLATFORM_MAP.get(sdk)
 
 apple_native = struct(
     apple_asset_catalog = _apple_asset_catalog,

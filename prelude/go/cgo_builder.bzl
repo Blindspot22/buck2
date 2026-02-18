@@ -1,11 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
+load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info", "get_opt_cxx_toolchain_info")
 load("@prelude//cxx:cxx_library.bzl", "cxx_compile_srcs")
 load(
     "@prelude//cxx:cxx_sources.bzl",
@@ -16,7 +18,7 @@ load(
     "@prelude//cxx:cxx_types.bzl",
     "CxxRuleConstructorParams",  # @unused Used as a type
 )
-load("@prelude//cxx:headers.bzl", "cxx_attr_header_namespace", "cxx_get_regular_cxx_headers_layout", "prepare_headers")
+load("@prelude//cxx:headers.bzl", "CxxHeadersLayout", "cxx_attr_header_namespace", "cxx_get_regular_cxx_headers_layout", "prepare_headers")
 load(
     "@prelude//cxx:preprocessor.bzl",
     "CPreprocessor",
@@ -33,7 +35,6 @@ load(
 load("@prelude//linking:types.bzl", "Linkage")
 load("@prelude//os_lookup:defs.bzl", "OsLookup")
 load("@prelude//utils:cmd_script.bzl", "cmd_script")
-load("@prelude//utils:expect.bzl", "expect")
 load(":toolchain.bzl", "GoToolchainInfo", "get_toolchain_env_vars")
 
 # A map of expected linkages for provided link style
@@ -51,35 +52,76 @@ CGoToolOut = record(
     cgo2_c_files = field(list[Artifact]),  # *.cgo2.c
 )
 
+# Parameters extracted from ctx.attrs
+CGoBuildContext = record(
+    # Values from implicit attrs
+    cxx_toolchain_info = field(CxxToolchainInfo),
+    target_sdk_version_flags = field(list[str]),
+    exec_os_type = field(OsLookup),
+
+    # Values from explicit attrs
+    header_namespace = field(str),
+    headers_layout = field(CxxHeadersLayout),
+    cxx_compiler_flags = field(list[typing.Any]),
+    cxx_preprocessor_flags = field(list[typing.Any]),
+    link_style = field(str),
+
+    # Deps info
+    inherited_preprocessor_infos = field(list[CPreprocessorInfo]),
+
+    # Store "_cxx_toolchain" as "Dependency" for use in "anon_target"
+    _cxx_toolchain = field(Dependency | None, None),
+)
+
+def get_cgo_build_context(ctx: AnalysisContext) -> CGoBuildContext | None:
+    cxx_toolchain_info = get_opt_cxx_toolchain_info(ctx)
+    if cxx_toolchain_info == None:
+        return None
+
+    return CGoBuildContext(
+        cxx_toolchain_info = get_cxx_toolchain_info(ctx),
+        target_sdk_version_flags = get_target_sdk_version_flags(ctx),
+        exec_os_type = ctx.attrs._exec_os_type[OsLookup],
+        header_namespace = cxx_attr_header_namespace(ctx),
+        headers_layout = cxx_get_regular_cxx_headers_layout(ctx),
+        cxx_compiler_flags = ctx.attrs.cxx_compiler_flags,
+        cxx_preprocessor_flags = ctx.attrs.cxx_preprocessor_flags,
+        link_style = ctx.attrs.link_style or "static",
+        inherited_preprocessor_infos = cxx_inherited_preprocessor_infos(ctx.attrs.deps),
+        _cxx_toolchain = ctx.attrs._cxx_toolchain,
+    )
+
 def _cgo(
-        ctx: AnalysisContext,
+        actions: AnalysisActions,
+        go_toolchain: GoToolchainInfo,
+        cgo_build_context: CGoBuildContext,
         srcs: list[Artifact],
         own_pre: list[CPreprocessor],
-        inherited_pre: list[CPreprocessorInfo],
-        c_flags: list[str],
-        cpp_flags: list[str]) -> (CGoToolOut, Artifact):
+        cgo_c_flags: list[str],
+        cgo_cpp_flags: list[str]) -> (CGoToolOut, Artifact):
     """
     Run `cgo` on `.go` sources to generate Go, C, and C-Header sources.
     """
-    gen_dir = ctx.actions.declare_output("cgo_gen_tmp", dir = True)
+    gen_dir = actions.declare_output("cgo_gen_tmp", dir = True, has_content_based_path = True)
 
     # Return a `cmd_args` to use as the generated sources.
-    go_toolchain = ctx.attrs._go_toolchain[GoToolchainInfo]
 
     cmd = cmd_args(
-        go_toolchain.cgo_wrapper,
-        cmd_args(go_toolchain.cgo, format = "--cgo={}"),
-        cmd_args(gen_dir.as_output(), format = "--output={}"),
+        go_toolchain.go_wrapper,
+        ["--go", go_toolchain.cgo],
         "--",
-        c_flags + cpp_flags,
-        ctx.attrs.cxx_compiler_flags,
+        cmd_args(gen_dir.as_output(), format = "-objdir={}"),
+        ["-trimpath", "%cwd%"],
+        "--",
+        cgo_c_flags + cgo_cpp_flags,
+        cgo_build_context.cxx_compiler_flags,
         srcs,
     )
 
     env = get_toolchain_env_vars(go_toolchain)
-    env["CC"] = _cxx_wrapper(ctx, own_pre, inherited_pre)
+    env["CC"] = _cxx_wrapper(actions, go_toolchain, cgo_build_context, own_pre)
 
-    ctx.actions.run(cmd, env = env, category = "cgo")
+    actions.run(cmd, env = env, category = "cgo")
 
     return project_go_and_c_files(srcs, gen_dir), gen_dir
 
@@ -92,56 +134,69 @@ def project_go_and_c_files(cgo_srcs: list[Artifact], gen_dir: Artifact) -> CGoTo
         cgo2_c_files = [gen_dir.project(paths.replace_extension(src.basename, ".cgo2.c")) for src in cgo_srcs],
     )
 
-def _cxx_wrapper(ctx: AnalysisContext, own_pre: list[CPreprocessor], inherited_pre: list[CPreprocessorInfo]) -> cmd_args:
-    pre = cxx_merge_cpreprocessors(ctx, own_pre, inherited_pre)
+def _cxx_wrapper(actions: AnalysisActions, go_toolchain: GoToolchainInfo, cgo_build_context: CGoBuildContext, own_pre: list[CPreprocessor]) -> cmd_args:
+    pre = cxx_merge_cpreprocessors(actions, own_pre, cgo_build_context.inherited_preprocessor_infos)
     pre_args = pre.set.project_as_args("args")
     pre_include_dirs = pre.set.project_as_args("include_dirs")
 
-    go_toolchain = ctx.attrs._go_toolchain[GoToolchainInfo]
-    expect(CxxToolchainInfo in ctx.attrs._cxx_toolchain)
-    cxx_toolchain = ctx.attrs._cxx_toolchain[CxxToolchainInfo]
-
-    c_compiler = cxx_toolchain.c_compiler_info
+    c_compiler = cgo_build_context.cxx_toolchain_info.c_compiler_info
 
     # Construct the full C/C++ command needed to preprocess/compile sources.
     cxx_cmd = cmd_args(
         c_compiler.compiler,
         c_compiler.preprocessor_flags,
-        get_target_sdk_version_flags(ctx),
+        cgo_build_context.target_sdk_version_flags,
         c_compiler.compiler_flags,
         pre_args,
         pre_include_dirs,
-        go_toolchain.c_compiler_flags,
+        go_toolchain.cxx_compiler_flags,
     )
 
     # Wrap the C/C++ command in a wrapper script to avoid arg length limits.
     return cmd_script(
-        ctx = ctx,
+        actions = actions,
         name = "cxx_wrapper",
         cmd = cxx_cmd,
-        language = ctx.attrs._exec_os_type[OsLookup].script,
+        language = cgo_build_context.exec_os_type.script,
+        has_content_based_path = True,
     )
 
 # build CPreprocessor similar as cxx_private_preprocessor_info does, but with our filtered headers
-def _own_pre(ctx: AnalysisContext, h_files: list[Artifact]) -> CPreprocessor:
-    namespace = cxx_attr_header_namespace(ctx)
-    header_map = {paths.join(namespace, h.short_path): h for h in h_files}
-    header_root = prepare_headers(ctx, header_map, "h_files-private-headers")
+def _own_pre(actions: AnalysisActions, cgo_build_context: CGoBuildContext, h_files: list[Artifact]) -> CPreprocessor:
+    header_map = {paths.join(cgo_build_context.header_namespace, h.short_path): h for h in h_files}
+    header_root = prepare_headers(actions, cgo_build_context.cxx_toolchain_info, header_map, "h_files-private-headers", uses_content_based_paths = True)
 
     return CPreprocessor(
         args = CPreprocessorArgs(args = ["-I", header_root.include_path] if header_root != None else []),
     )
 
-def build_cgo(ctx: AnalysisContext, cgo_files: list[Artifact], h_files: list[Artifact], c_files: list[Artifact], c_flags: list[str], cpp_flags: list[str]) -> (list[Artifact], list[Artifact], Artifact):
+def build_cgo(
+        actions: AnalysisActions,
+        target_label: Label,
+        go_toolchain_info: GoToolchainInfo,
+        cgo_build_context: CGoBuildContext | None,
+        cgo_files: list[Artifact],
+        h_files: list[Artifact],
+        c_files: list[Artifact],
+        c_flags: list[str],
+        cpp_flags: list[str],
+        anon_targets_allowed: bool = True) -> (list[Artifact], list[Artifact], Artifact):
+    """
+    Arguments:
+        anon_targets_allowed: Set to `True` if the execution context allows calls to the `AnalysisActions#anon_target` API.
+                              For example, this API is NOT allowed in the context of the `AnalaysisActions#dynamic_outputs` callback.
+    """
     if len(cgo_files) == 0:
-        return [], [], ctx.actions.copied_dir("cgo_gen_tmp", {})
+        return [], [], actions.copied_dir("cgo_gen_tmp", {}, has_content_based_path = True)
+
+    if cgo_build_context == None:
+        fail("cgo_build_context is None. This is likely because C++ toolchain is not available for the current target platform, but CGo files provided.")
 
     # Gather preprocessor inputs.
-    own_pre = _own_pre(ctx, h_files)
-    inherited_pre = cxx_inherited_preprocessor_infos(ctx.attrs.deps)
+    own_pre = _own_pre(actions, cgo_build_context, h_files)
 
     # Separate sources into C++ and GO sources.
-    cgo_tool_out, gen_dir = _cgo(ctx, cgo_files, [own_pre], inherited_pre, c_flags, cpp_flags)
+    cgo_tool_out, gen_dir = _cgo(actions, go_toolchain_info, cgo_build_context, cgo_files, [own_pre], c_flags, cpp_flags)
     go_gen_srcs = [cgo_tool_out.cgo_gotypes] + cgo_tool_out.cgo1_go_files
     c_gen_headers = [cgo_tool_out.cgo_export_h]
     c_gen_srcs = [cgo_tool_out.cgo_export_c] + cgo_tool_out.cgo2_c_files
@@ -150,32 +205,34 @@ def build_cgo(ctx: AnalysisContext, cgo_files: list[Artifact], h_files: list[Art
     cgo_headers_pre = CPreprocessor(args = CPreprocessorArgs(args = [
         "-I",
         prepare_headers(
-            ctx,
+            actions,
+            cgo_build_context.cxx_toolchain_info,
             {h.basename: h for h in c_gen_headers},
             "cgo-private-headers",
+            uses_content_based_paths = True,
         ).include_path,
     ]))
 
-    link_style = ctx.attrs.link_style
-    if link_style == None:
-        link_style = "static"
-    linkage = _LINKAGE_FOR_LINK_STYLE[LinkStyle(link_style)]
-
-    go_toolchain = ctx.attrs._go_toolchain[GoToolchainInfo]
+    linkage = _LINKAGE_FOR_LINK_STYLE[LinkStyle(cgo_build_context.link_style)]
 
     # Compile C++ sources into object files.
     c_compile_cmds = cxx_compile_srcs(
-        ctx,
+        actions,
+        target_label,
+        cgo_build_context.cxx_toolchain_info,
         CxxRuleConstructorParams(
             rule_type = "cgo_sources",
-            headers_layout = cxx_get_regular_cxx_headers_layout(ctx),
+            headers_layout = cgo_build_context.headers_layout,
             srcs = [CxxSrcWithFlags(file = src) for src in c_files + c_gen_srcs],
-            compiler_flags = go_toolchain.c_compiler_flags + c_flags + ctx.attrs.cxx_compiler_flags + get_target_sdk_version_flags(ctx),
-            preprocessor_flags = cpp_flags + ctx.attrs.cxx_preprocessor_flags,
+            compiler_flags = go_toolchain_info.cxx_compiler_flags + c_flags + cgo_build_context.cxx_compiler_flags + cgo_build_context.target_sdk_version_flags,
+            preprocessor_flags = cpp_flags + cgo_build_context.cxx_preprocessor_flags,
+            anon_targets_allowed = anon_targets_allowed,
+            _cxx_toolchain = cgo_build_context._cxx_toolchain,
+            use_content_based_paths = True,
         ),
         # Create private header tree and propagate via args.
         [own_pre, cgo_headers_pre],
-        inherited_pre,
+        cgo_build_context.inherited_preprocessor_infos,
         [],
         linkage,
         False,  # add_coverage_instrumentation_compiler_flags

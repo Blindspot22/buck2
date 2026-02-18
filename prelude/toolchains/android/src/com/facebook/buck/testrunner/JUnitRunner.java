@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testrunner;
@@ -13,12 +14,12 @@ import com.facebook.buck.test.result.type.ResultType;
 import com.facebook.buck.test.selectors.TestDescription;
 import com.facebook.buck.test.selectors.TestSelector;
 import com.facebook.buck.testresultsoutput.TestResultsOutputSender;
+import com.facebook.buck.testrunner.JavaUtilLoggingHelper.LogHandlers;
 import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.PrintStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -26,17 +27,13 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.logging.Formatter;
-import java.util.logging.Handler;
 import java.util.logging.Level;
-import java.util.logging.LogManager;
-import java.util.logging.StreamHandler;
+import javax.annotation.Nullable;
 import junit.framework.TestCase;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.experimental.runners.Enclosed;
 import org.junit.internal.builders.AllDefaultPossibilitiesBuilder;
-import org.junit.internal.builders.AnnotatedBuilder;
 import org.junit.internal.builders.JUnit4Builder;
 import org.junit.runner.Computer;
 import org.junit.runner.Description;
@@ -91,6 +88,10 @@ public final class JUnitRunner extends BaseRunner {
       stdErrLogLevel = Level.parse(unparsedStdErrLogLevel);
     }
 
+    // TPX sets the env var that enables the Standard Output format
+    Optional<TestResultsOutputSender> testResultsOutputSender =
+        TestResultsOutputSender.fromDefaultEnvName();
+
     for (String className : testClassNames) {
       Class<?> testClass = Class.forName(className);
       Class<?>[] testClasses;
@@ -107,19 +108,35 @@ public final class JUnitRunner extends BaseRunner {
         Runner suite = new Computer().getSuite(createRunnerBuilder(), testClasses);
         Request request = Request.runner(suite);
         request = request.filterWith(filter);
-        jUnitCore.addListener(new TestListener(results, stdOutLogLevel, stdErrLogLevel));
 
-        // testResultsOutputSender will only be present if the environment variable is set to use
-        // TPX Standard Output. In that case, we want to add the listener so the test results JSON
-        // file is written.
-        Optional<TestResultsOutputSender> testResultsOutputSender =
-            TestResultsOutputSender.fromDefaultEnvName();
+        JUnitTpxStandardOutputListener tpxListener = null;
         if (testResultsOutputSender.isPresent()) {
-          JUnitTpxStandardOutputListener tpxListener =
-              new JUnitTpxStandardOutputListener(testResultsOutputSender.get());
+          tpxListener = new JUnitTpxStandardOutputListener(testResultsOutputSender.get());
           jUnitCore.addListener(tpxListener);
+
+          // Add Robolectric timeout enforcement listener if this is a Robolectric test
+          if (isRobolectricTest(suite)
+              && "true".equals(System.getProperty("android.per.test.timeout.enabled"))) {
+            RobolectricTimeoutEnforcingRunListener timeoutListener =
+                new RobolectricTimeoutEnforcingRunListener(testResultsOutputSender.get());
+            jUnitCore.addListener(timeoutListener);
+          }
+        } else {
+          jUnitCore.addListener(new TestListener(results, stdOutLogLevel, stdErrLogLevel));
         }
         jUnitCore.run(request);
+
+        // Report filtered-out tests (e.g., @Ignore) to TPX output so they're not retried
+        if (tpxListener != null) {
+          for (TestResult filteredTest : filter.filteredOut) {
+            if (filteredTest.type == ResultType.DISABLED) {
+              String testName =
+                  JUnitTpxStandardOutputListener.getFullTestName(
+                      filteredTest.testMethodName, filteredTest.testClassName);
+              tpxListener.reportOmittedTest(testName, "Test disabled (@Ignore annotation)");
+            }
+          }
+        }
       }
       // Combine the results with the tests we filtered out
       List<TestResult> actualResults = combineResults(results, filter.filteredOut);
@@ -151,7 +168,10 @@ public final class JUnitRunner extends BaseRunner {
       String configuredTestArtifacts = System.getenv("TEST_RESULT_ARTIFACTS_DIR");
       if (configuredTestArtifacts != null) {
         File testArtifactsDir = new File(configuredTestArtifacts);
-        testArtifactsDir.mkdirs();
+        if (!testArtifactsDir.mkdirs() && !testArtifactsDir.exists()) {
+          System.err.println(
+              "Failed to create test artifacts directory: " + testArtifactsDir.getAbsolutePath());
+        }
 
         String robolectricLogLocation =
             new File(testArtifactsDir, "robolectric-logs.txt").getAbsolutePath();
@@ -160,7 +180,11 @@ public final class JUnitRunner extends BaseRunner {
       String configuredTestAnnotations = System.getenv("TEST_RESULT_ARTIFACT_ANNOTATIONS_DIR");
       if (configuredTestAnnotations != null) {
         File artifactAnnotationsDir = new File(configuredTestAnnotations);
-        artifactAnnotationsDir.mkdirs();
+        if (!artifactAnnotationsDir.mkdirs() && !artifactAnnotationsDir.exists()) {
+          System.err.println(
+              "Failed to create artifact annotations directory: "
+                  + artifactAnnotationsDir.getAbsolutePath());
+        }
 
         try (BufferedWriter writer =
             new BufferedWriter(
@@ -175,7 +199,7 @@ public final class JUnitRunner extends BaseRunner {
     }
   }
 
-  private Class<?>[] collectTestClasses(Class<?> testClass) {
+  private static Class<?>[] collectTestClasses(Class<?> testClass) {
     ArrayList<Class<?>> classes = new ArrayList<>();
     // Get all nested classes
     Class<?>[] declaredClasses = testClass.getDeclaredClasses();
@@ -196,11 +220,11 @@ public final class JUnitRunner extends BaseRunner {
       }
     }
     classes.add(testClass);
-    return classes.toArray(new Class<?>[classes.size()]);
+    return classes.toArray(new Class<?>[0]);
   }
 
   /** Guessing whether or not a class is a test class is an imperfect art form. */
-  private boolean mightBeATestClass(Class<?> klass) {
+  private static boolean mightBeATestClass(Class<?> klass) {
     if (klass.getAnnotation(RunWith.class) != null) {
       return true; // If the class is explicitly marked with @RunWith, it's a test class.
     }
@@ -253,7 +277,8 @@ public final class JUnitRunner extends BaseRunner {
    * if you are using a filter then a class-without-tests will cause a NoTestsRemainException to be
    * thrown, which is propagated back as an error.
    */
-  List<TestResult> combineResults(List<TestResult> results, List<TestResult> filteredResults) {
+  static List<TestResult> combineResults(
+      List<TestResult> results, List<TestResult> filteredResults) {
     List<TestResult> combined = new ArrayList<>(filteredResults);
     if (!isSingleResultCausedByNoTestsRemainException(results)) {
       combined.addAll(results);
@@ -279,7 +304,7 @@ public final class JUnitRunner extends BaseRunner {
    * only run the test class and all its test methods and handle the erroneous exception JUnit
    * throws if no test-methods were actually run.)
    */
-  private boolean isSingleResultCausedByNoTestsRemainException(List<TestResult> results) {
+  private static boolean isSingleResultCausedByNoTestsRemainException(List<TestResult> results) {
     if (results.size() != 1) {
       return false;
     }
@@ -304,35 +329,76 @@ public final class JUnitRunner extends BaseRunner {
           }
         };
 
-    return new AllDefaultPossibilitiesBuilder(/* canUseSuiteMethod */ true) {
+    return new AllDefaultPossibilitiesBuilder() {
       @Override
       protected JUnit4Builder junit4Builder() {
         return jUnit4RunnerBuilder;
       }
-
-      @Override
-      protected AnnotatedBuilder annotatedBuilder() {
-        // If there is no default timeout specified in .buckconfig, then use
-        // the original behavior of AllDefaultPossibilitiesBuilder.
-        //
-        // Additionally, if we are using test selectors or doing a dry-run then
-        // we should use the original behavior to use our
-        // BuckBlockJUnit4ClassRunner, which provides the Descriptions needed
-        // to do test selecting properly.
-        if (defaultTestTimeoutMillis <= 0 || isDryRun || !testSelectorList.isEmpty()) {
-          return super.annotatedBuilder();
-        }
-
-        return new AnnotatedBuilder(this) {
-          @Override
-          public Runner buildRunner(Class<? extends Runner> runnerClass, Class<?> testClass)
-              throws Exception {
-            Runner originalRunner = super.buildRunner(runnerClass, testClass);
-            return new DelegateRunnerWithTimeout(originalRunner, defaultTestTimeoutMillis);
-          }
-        };
-      }
     };
+  }
+
+  /**
+   * Checks if a test class is a Robolectric test by examining its runner.
+   *
+   * <p>This method handles two cases:
+   *
+   * <ol>
+   *   <li>Direct Robolectric runners: The runner class directly extends RobolectricTestRunner
+   *   <li>Suite-based Robolectric runners: The runner extends Suite (e.g.,
+   *       WhatsAppParameterizedRobolectricTestRunner) but its children extend RobolectricTestRunner
+   * </ol>
+   *
+   * @param runner The instantiated runner for this test class
+   */
+  private boolean isRobolectricTest(Runner runner) {
+    Class<?> runnerClass = runner.getClass();
+    try {
+      Class<?> robolectricTestRunner = Class.forName("org.robolectric.RobolectricTestRunner");
+
+      // Case 1: Runner directly extends RobolectricTestRunner
+      if (robolectricTestRunner.isAssignableFrom(runnerClass)) {
+        return true;
+      }
+
+      // Case 2: Runner extends Suite - check if children extend RobolectricTestRunner
+      Class<?> suiteClass = Class.forName("org.junit.runners.Suite");
+      if (suiteClass.isAssignableFrom(runnerClass)) {
+        return isRobolectricSuiteRunner(runner, robolectricTestRunner);
+      }
+    } catch (ClassNotFoundException e) {
+      // Not a Robolectric test
+    }
+    return false;
+  }
+
+  /**
+   * Checks if a Suite-based runner has children that extend RobolectricTestRunner.
+   *
+   * <p>This handles parameterized Robolectric test runners like
+   * WhatsAppParameterizedRobolectricTestRunner which extend Suite but have child runners that
+   * extend RobolectricTestRunner.
+   *
+   * @param runner The instantiated runner
+   * @param robolectricTestRunner The RobolectricTestRunner class to check against
+   */
+  private boolean isRobolectricSuiteRunner(Runner runner, Class<?> robolectricTestRunner) {
+    try {
+      // getChildren() is a protected method defined in ParentRunner
+      Class<?> parentRunner = Class.forName("org.junit.runners.ParentRunner");
+      Method getChildrenMethod = parentRunner.getDeclaredMethod("getChildren");
+      getChildrenMethod.setAccessible(true);
+      @SuppressWarnings("unchecked")
+      List<Runner> children = (List<Runner>) getChildrenMethod.invoke(runner);
+
+      // Check if first child extends RobolectricTestRunner (we only ever deal with one child)
+      if (!children.isEmpty()) {
+        Runner firstChild = children.get(0);
+        return robolectricTestRunner.isAssignableFrom(firstChild.getClass());
+      }
+    } catch (ReflectiveOperationException e) {
+      // Not a Robolectric suite runner
+    }
+    return false;
   }
 
   /**
@@ -343,17 +409,16 @@ public final class JUnitRunner extends BaseRunner {
     private final List<TestResult> results;
     private final Level stdErrLogLevel;
     private final Level stdOutLogLevel;
-    /* @Nullable */ private PrintStream originalOut, originalErr, stdOutStream, stdErrStream;
-    /* @Nullable */ private ByteArrayOutputStream rawStdOutBytes, rawStdErrBytes;
-    /* @Nullable */ private ByteArrayOutputStream julLogBytes, julErrLogBytes;
-    /* @Nullable */ private Handler julLogHandler;
-    /* @Nullable */ private Handler julErrLogHandler;
-    /* @Nullable */ private Result result;
-    /* @Nullable */ private RunListener resultListener;
-    /* @Nullable */ private Failure assumptionFailure;
+    @Nullable private PrintStream originalOut, originalErr, stdOutStream, stdErrStream;
+    @Nullable private ByteArrayOutputStream rawStdOutBytes, rawStdErrBytes;
+    @Nullable private ByteArrayOutputStream julLogBytes, julErrLogBytes;
+    @Nullable private LogHandlers logHandlers;
+    @Nullable private Result result;
+    @Nullable private RunListener resultListener;
+    @Nullable private Failure assumptionFailure;
 
     // To help give a reasonable (though imprecise) guess at the runtime for unpaired failures
-    private long startTime = System.currentTimeMillis();
+    private final long startTime = System.currentTimeMillis();
 
     TestListener(List<TestResult> results, Level stdOutLogLevel, Level stdErrLogLevel) {
       this.results = results;
@@ -376,17 +441,10 @@ public final class JUnitRunner extends BaseRunner {
       System.setOut(stdOutStream);
       System.setErr(stdErrStream);
 
-      // Listen to any java.util.logging messages reported by the test and write them to
-      // julLogBytes / julErrLogBytes.
-      java.util.logging.Logger rootLogger = LogManager.getLogManager().getLogger("");
-
-      if (rootLogger != null) {
-        rootLogger.setLevel(Level.FINE);
-      }
-
-      JulLogFormatter formatter = new JulLogFormatter();
-      julLogHandler = addStreamHandler(rootLogger, julLogBytes, formatter, stdOutLogLevel);
-      julErrLogHandler = addStreamHandler(rootLogger, julErrLogBytes, formatter, stdErrLogLevel);
+      // Set up logging handlers
+      logHandlers =
+          JavaUtilLoggingHelper.setupLogging(
+              julLogBytes, julErrLogBytes, stdOutLogLevel, stdErrLogLevel);
 
       // Prepare single-test result.
       result = new Result();
@@ -406,14 +464,9 @@ public final class JUnitRunner extends BaseRunner {
       System.setOut(originalOut);
       System.setErr(originalErr);
 
-      // Flush any debug logs and remove the handlers.
-      java.util.logging.Logger rootLogger = LogManager.getLogManager().getLogger("");
-
-      flushAndRemoveLogHandler(rootLogger, julLogHandler);
-      julLogHandler = null;
-
-      flushAndRemoveLogHandler(rootLogger, julErrLogHandler);
-      julErrLogHandler = null;
+      // Clean up logging handlers
+      JavaUtilLoggingHelper.cleanupLogging(logHandlers);
+      logHandlers = null;
 
       // Get the stdout/stderr written during the test as strings.
       stdOutStream.flush();
@@ -542,31 +595,6 @@ public final class JUnitRunner extends BaseRunner {
               failure.getException(),
               null,
               null));
-    }
-
-    private Handler addStreamHandler(
-        java.util.logging.Logger rootLogger,
-        OutputStream stream,
-        Formatter formatter,
-        Level level) {
-      Handler result;
-      if (rootLogger != null) {
-        result = new StreamHandler(stream, formatter);
-        result.setLevel(level);
-        rootLogger.addHandler(result);
-      } else {
-        result = null;
-      }
-      return result;
-    }
-
-    private void flushAndRemoveLogHandler(java.util.logging.Logger rootLogger, Handler handler) {
-      if (handler != null) {
-        handler.flush();
-      }
-      if (rootLogger != null && handler != null) {
-        rootLogger.removeHandler(handler);
-      }
     }
   }
 

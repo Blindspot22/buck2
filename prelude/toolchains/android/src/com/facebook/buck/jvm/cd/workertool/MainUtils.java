@@ -1,17 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.cd.workertool;
 
 import com.facebook.buck.core.util.log.Logger;
 import com.facebook.buck.util.Console;
-import com.facebook.buck.util.ErrorLogger;
 import com.facebook.buck.util.perf.PerfStatsTracking;
 import com.facebook.buck.util.unit.SizeUnit;
 import java.util.concurrent.TimeUnit;
@@ -60,14 +60,11 @@ public class MainUtils {
     Logger logger = Logger.get("");
     logger.cleanHandlers();
 
-    String errorMessage = ErrorLogger.getUserFriendlyMessage(throwable);
     // this method logs the message with log.warn that would be noop as all logger handlers have
     // been cleaned and prints the message into a std err.
-    console.printErrorText(
-        "Failed to execute compilation action. Thread: "
-            + thread
-            + System.lineSeparator()
-            + errorMessage);
-    System.exit(1);
+    console.printErrorText("Failed to execute compilation action. Thread: " + thread);
+    throwable.printStackTrace(console.getStdErr());
+
+    System.exit(3);
   }
 }

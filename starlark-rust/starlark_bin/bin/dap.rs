@@ -77,22 +77,23 @@ impl Backend {
         let go = move || -> anyhow::Result<String> {
             client.log(&format!("EVALUATION PREPARE: {}", path.display()));
             let ast = AstModule::parse_file(&path, &dialect).into_anyhow_result()?;
-            let module = Module::new();
-            let mut eval = Evaluator::new(&module);
-            wrapper.add_dap_hooks(&mut eval);
+            Module::with_temp_heap(|module| {
+                let mut eval = Evaluator::new(&module);
+                wrapper.add_dap_hooks(&mut eval);
 
-            // No way to pass back success/failure to the caller
-            client.log(&format!("EVALUATION START: {}", path.display()));
-            let v = eval.eval_module(ast, &globals).into_anyhow_result()?;
-            let s = v.to_string();
-            client.log(&format!("EVALUATION FINISHED: {}", path.display()));
-            Ok(s)
+                // No way to pass back success/failure to the caller
+                client.log(&format!("EVALUATION START: {}", path.display()));
+                let v = eval.eval_module(ast, &globals).into_anyhow_result()?;
+                let s = v.to_string();
+                client.log(&format!("EVALUATION FINISHED: {}", path.display()));
+                Ok::<_, anyhow::Error>(s)
+            })
         };
 
         thread::spawn(move || {
             let res = go();
             let output = match &res {
-                Err(e) => format!("{:#}", e),
+                Err(e) => format!("{e:#}"),
                 Ok(v) => v.to_owned(),
             };
             client2.event_output(OutputEventBody {

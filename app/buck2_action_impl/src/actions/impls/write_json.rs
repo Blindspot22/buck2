@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -27,14 +28,18 @@ use buck2_build_api::actions::impls::json::JsonUnpack;
 use buck2_build_api::actions::impls::json::validate_json;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::command_line_arg_like_impl;
+use buck2_build_api::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
 use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
+use buck2_build_signals::env::WaitingData;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_core::category::CategoryRef;
-use buck2_error::BuckErrorContext;
+use buck2_core::content_hash::ContentBasedPathHash;
+use buck2_error::internal_error;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::WriteRequest;
@@ -49,7 +54,6 @@ use starlark::starlark_complex_value;
 use starlark::starlark_module;
 use starlark::values::Demand;
 use starlark::values::Freeze;
-use starlark::values::FreezeResult;
 use starlark::values::NoSerialize;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::StarlarkValue;
@@ -62,11 +66,12 @@ use starlark::values::starlark_value;
 use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
+use crate::actions::impls::run::DepFilesPlaceholderArtifactPathMapper;
+use crate::actions::impls::write::CommandLineContentBasedInputVisitor;
+
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Tier0)]
 enum WriteJsonActionValidationError {
-    #[error("WriteJsonAction received inputs")]
-    TooManyInputs,
     #[error("WriteJsonAction received no outputs")]
     NoOutputs,
     #[error("WriteJsonAction received more than one output")]
@@ -77,11 +82,20 @@ enum WriteJsonActionValidationError {
 pub(crate) struct UnregisteredWriteJsonAction {
     pretty: bool,
     absolute: bool,
+    use_dep_files_placeholder_for_content_based_paths: bool,
 }
 
 impl UnregisteredWriteJsonAction {
-    pub(crate) fn new(pretty: bool, absolute: bool) -> Self {
-        Self { pretty, absolute }
+    pub(crate) fn new(
+        pretty: bool,
+        absolute: bool,
+        use_dep_files_placeholder_for_content_based_paths: bool,
+    ) -> Self {
+        Self {
+            pretty,
+            absolute,
+            use_dep_files_placeholder_for_content_based_paths,
+        }
     }
 
     pub(crate) fn cli<'v>(
@@ -95,13 +109,12 @@ impl UnregisteredWriteJsonAction {
 impl UnregisteredAction for UnregisteredWriteJsonAction {
     fn register(
         self: Box<Self>,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         let contents = starlark_data.expect("module data to be present");
-        let action = WriteJsonAction::new(contents, inputs, outputs, *self)?;
+        let action = WriteJsonAction::new(contents, outputs, *self)?;
         Ok(Box::new(action))
     }
 }
@@ -116,7 +129,6 @@ struct WriteJsonAction {
 impl WriteJsonAction {
     fn new(
         contents: OwnedFrozenValue,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         inner: UnregisteredWriteJsonAction,
     ) -> buck2_error::Result<Self> {
@@ -132,10 +144,6 @@ impl WriteJsonAction {
             }
         };
 
-        if !inputs.is_empty() {
-            return Err(WriteJsonActionValidationError::TooManyInputs.into());
-        }
-
         Ok(WriteJsonAction {
             contents,
             output,
@@ -143,7 +151,11 @@ impl WriteJsonAction {
         })
     }
 
-    fn get_contents(&self, fs: &ExecutorFs) -> buck2_error::Result<Vec<u8>> {
+    fn get_contents(
+        &self,
+        fs: &ExecutorFs,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
+    ) -> buck2_error::Result<Vec<u8>> {
         let mut writer = Vec::new();
         json::write_json(
             JsonUnpack::unpack_value_err(self.contents.value())?,
@@ -151,6 +163,7 @@ impl WriteJsonAction {
             &mut writer,
             self.inner.pretty,
             self.inner.absolute,
+            artifact_path_mapping,
         )?;
         Ok(writer)
     }
@@ -163,7 +176,15 @@ impl Action for WriteJsonAction {
     }
 
     fn inputs(&self) -> buck2_error::Result<Cow<'_, [ArtifactGroup]>> {
-        Ok(Cow::Borrowed(&[]))
+        if self.inner.use_dep_files_placeholder_for_content_based_paths {
+            return Ok(Cow::Borrowed(&[]));
+        }
+
+        let mut visitor = CommandLineContentBasedInputVisitor::new();
+        json::visit_json_artifacts(self.contents.value(), &mut visitor)?;
+        Ok(Cow::Owned(
+            visitor.content_based_inputs.into_iter().collect(),
+        ))
     }
 
     fn outputs(&self) -> Cow<'_, [BuildArtifact]> {
@@ -174,7 +195,7 @@ impl Action for WriteJsonAction {
         &self.output
     }
 
-    fn category(&self) -> CategoryRef {
+    fn category(&self) -> CategoryRef<'_> {
         CategoryRef::unchecked_new("write_json")
     }
 
@@ -182,13 +203,20 @@ impl Action for WriteJsonAction {
         Some(self.output.get_path().path().as_str())
     }
 
-    fn aquery_attributes(&self, fs: &ExecutorFs) -> IndexMap<String, String> {
-        let res: buck2_error::Result<String> = try { String::from_utf8(self.get_contents(fs)?)? };
+    fn aquery_attributes(
+        &self,
+        fs: &ExecutorFs,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
+    ) -> IndexMap<String, String> {
+        let res: buck2_error::Result<String> = try {
+            let content = self.get_contents(fs, artifact_path_mapping)?;
+            String::from_utf8(content).map_err(buck2_error::Error::from)?
+        };
         // TODO(cjhopman): We should change this api to support returning a Result.
         indexmap! {
             "contents".to_owned() => match res {
                 Ok(v) => v,
-                Err(e) => format!("ERROR: constructing contents ({})", e)
+                Err(e) => format!("ERROR: constructing contents ({e})")
             },
             "absolute".to_owned() => self.inner.absolute.to_string(),
         }
@@ -197,18 +225,38 @@ impl Action for WriteJsonAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
+        waiting_data: WaitingData,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
         let fs = ctx.fs();
 
         let mut execution_start = None;
-
         let value = ctx
             .materializer()
             .declare_write(Box::new(|| {
                 execution_start = Some(Instant::now());
-                let content = self.get_contents(&ctx.executor_fs())?;
+                let content = if self.inner.use_dep_files_placeholder_for_content_based_paths {
+                    self.get_contents(
+                        &ctx.executor_fs(),
+                        &DepFilesPlaceholderArtifactPathMapper {},
+                    )?
+                } else {
+                    self.get_contents(&ctx.executor_fs(), &ctx.artifact_path_mapping(None))?
+                };
+                let path = fs.resolve_build(
+                    self.output.get_path(),
+                    if self.output.get_path().is_content_based_path() {
+                        let digest = TrackedFileDigest::from_content(
+                            &content,
+                            ctx.digest_config().cas_digest_config(),
+                        );
+                        Some(ContentBasedPathHash::new(digest.raw_digest().as_bytes())?)
+                    } else {
+                        None
+                    }
+                    .as_ref(),
+                )?;
                 Ok(vec![WriteRequest {
-                    path: fs.resolve_build(self.output.get_path())?,
+                    path,
                     content,
                     is_executable: false,
                 }])
@@ -216,11 +264,11 @@ impl Action for WriteJsonAction {
             .await?
             .into_iter()
             .next()
-            .buck_error_context("Write did not execute")?;
+            .ok_or_else(|| internal_error!("Write did not execute"))?;
 
-        let wall_time = execution_start
-            .buck_error_context("Action did not set execution_start")?
-            .elapsed();
+        let wall_time = Instant::now()
+            - execution_start
+                .ok_or_else(|| internal_error!("Action did not set execution_start"))?;
 
         Ok((
             ActionOutputs::new(indexmap![self.output.get_path().dupe() => value]),
@@ -228,6 +276,7 @@ impl Action for WriteJsonAction {
                 execution_kind: ActionExecutionKind::Simple,
                 timing: ActionExecutionTimingData { wall_time },
                 input_files_bytes: None,
+                waiting_data,
             },
         ))
     }
@@ -265,7 +314,17 @@ where
     }
 }
 
-impl<'v, V: ValueLike<'v>> CommandLineArgLike for StarlarkWriteJsonCommandLineArgGen<V> {
+impl<'v, V: ValueLike<'v>> StarlarkWriteJsonCommandLineArgGen<V> {
+    pub fn visit_contents(
+        &self,
+        visitor: &mut dyn CommandLineArtifactVisitor<'v>,
+    ) -> buck2_error::Result<()> {
+        let content = self.content.to_value();
+        json::visit_json_artifacts(content, visitor)
+    }
+}
+
+impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for StarlarkWriteJsonCommandLineArgGen<V> {
     fn register_me(&self) {
         command_line_arg_like_impl!(StarlarkWriteJsonCommandLineArg::starlark_type_repr());
     }
@@ -274,15 +333,16 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike for StarlarkWriteJsonCommandLineAr
         &self,
         builder: &mut dyn CommandLineBuilder,
         context: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         ValueAsCommandLineLike::unpack_value_err(self.artifact.to_value())?
             .0
-            .add_to_command_line(builder, context)
+            .add_to_command_line(builder, context, artifact_path_mapping)
     }
 
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
         let artifact = self.artifact.to_value();
         let content = self.content.to_value();
@@ -300,6 +360,7 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike for StarlarkWriteJsonCommandLineAr
     fn visit_write_to_file_macros(
         &self,
         _visitor: &mut dyn WriteToFileMacroVisitor,
+        _artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         // In the write_json implementation, the commandlinebuilders we use don't support args.
         Ok(())

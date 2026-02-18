@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
@@ -12,7 +13,6 @@ package com.facebook.buck.jvm.java;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-import com.facebook.buck.util.string.MoreStrings;
 import java.nio.file.Paths;
 import java.util.Locale;
 import javax.annotation.Nullable;
@@ -59,22 +59,22 @@ public class DiagnosticPrettyPrinterTest {
 
   @Test
   public void ifThereAreLineNumbersErrorContextIsDisplayed() {
-    String code = MoreStrings.linesToText("some line of", "code with an", "error");
+    String code = String.join("\n", "some line of", "code with an", "error");
     //                           123
     String formatted =
         DiagnosticPrettyPrinter.format(createDiagnostic("EOL", "Example.java", code, 2, 3));
 
-    assertTrue(formatted, formatted.contains(MoreStrings.linesToText("code with an", "  ^")));
+    assertTrue(formatted, formatted.contains(String.join("\n", "code with an", "  ^")));
   }
 
   @Test
   public void errorContextIsDisplayedAfterTheSummaryButBeforeTheRemainderOfTheMessage() {
-    String code = MoreStrings.linesToText("some line of", "code with an", "error");
+    String code = String.join("\n", "some line of", "code with an", "error");
     //                           123
     String formatted =
         DiagnosticPrettyPrinter.format(
             createDiagnostic(
-                MoreStrings.linesToText("Oh noes!", "All your build", "Are Belong to Fail"),
+                String.join("\n", "Oh noes!", "All your build", "Are Belong to Fail"),
                 "Example.java",
                 code,
                 2,
@@ -84,7 +84,8 @@ public class DiagnosticPrettyPrinterTest {
     assertTrue(
         formatted,
         formatted.contains(
-            MoreStrings.linesToText(
+            String.join(
+                "\n",
                 "Example.java:2: error: Oh noes!",
                 "code with an",
                 "  ^",

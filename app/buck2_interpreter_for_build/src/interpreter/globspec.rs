@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -12,10 +13,10 @@ use std::fmt;
 use std::fmt::Debug;
 
 use buck2_common::package_listing::file_listing::PackageFileListing;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::package::package_relative_path::PackageRelativePath;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use derivative::Derivative;
 
 #[derive(Debug, buck2_error::Error)]
@@ -53,7 +54,7 @@ impl GlobPattern {
     fn new(pattern: &str) -> buck2_error::Result<GlobPattern> {
         let parsed_pattern = glob::Pattern::new(pattern)
             .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Input))
-            .with_buck_error_context(|| format!("Error creating globspec for `{}`", pattern))?;
+            .with_buck_error_context(|| format!("Error creating globspec for `{pattern}`"))?;
         if pattern.contains("//") {
             return Err(GlobError::DoubleSlash(pattern.to_owned()).into());
         }

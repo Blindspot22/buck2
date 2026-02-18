@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::RefCell;
@@ -149,7 +150,7 @@ impl<'v> Display for BxlFunction<'v> {
 }
 
 impl<'v> AllocValue<'v> for BxlFunction<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -244,7 +245,7 @@ impl FrozenBxlFunction {
                 cli.parse_clap(ArgAccessor::Clap { clap: &clap, arg }, ctx)
                     .await
                     .with_buck_error_context(|| {
-                        format!("Error parsing cli flag `{}` for bxl function", arg)
+                        format!("Error parsing cli flag `{arg}` for bxl function")
                     })?,
             );
         }

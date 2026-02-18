@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Implementation of the cli and query_* attr query language.
@@ -214,7 +215,7 @@ async fn resolve_literals_in_universe(
                 universe_ref.get(&resolved_pattern)
             };
 
-            (lit.to_owned(), result.map_err(buck2_error::Error::from))
+            (lit.to_owned(), result)
         })
         .collect();
 

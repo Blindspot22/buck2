@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _error_handler_produced_error_categories(ctx):
     def error_handler(ctx: ActionErrorCtx) -> list[ActionSubError]:
@@ -11,10 +12,14 @@ def _error_handler_produced_error_categories(ctx):
 
         categories.append(ctx.new_sub_error(
             category = "FirstError",
+            message = "FirstError message",
+            show_in_stderr = True,
         ))
 
         categories.append(ctx.new_sub_error(
             category = "SecondError",
+            message = "SecondError message",
+            show_in_stderr = True,
         ))
 
         return categories

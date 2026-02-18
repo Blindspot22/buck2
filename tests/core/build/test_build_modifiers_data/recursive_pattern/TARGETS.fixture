@@ -1,0 +1,14 @@
+load(":defs.bzl", "dummy")
+
+dummy(
+    name = "recursive_target",
+    os = select({
+        "DEFAULT": "default",
+        "root//:linux": "linux",
+        "root//:macos": "macos",
+    }),
+    cpu = select({
+        "DEFAULT": "default",
+        "root//:arm": "arm",
+    }),
+)

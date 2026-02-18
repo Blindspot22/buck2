@@ -1,13 +1,12 @@
 [package]
 description = "Tests for buck2_build_api crate"
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_build_api_tests"
 repository = { workspace = true }
 version = "0.1.0"
 
 [dev-dependencies]
-anyhow = { workspace = true }
 assert_matches = { workspace = true }
 async-trait = { workspace = true }
 ctor = { workspace = true }
@@ -34,6 +33,8 @@ buck2_analysis = { workspace = true }
 buck2_anon_target = { workspace = true }
 buck2_artifact = { workspace = true }
 buck2_build_api = { workspace = true }
+buck2_build_signals = { workspace = true }
+buck2_certs = { workspace = true }
 buck2_common = { workspace = true }
 buck2_configured = { workspace = true }
 buck2_core = { workspace = true }
@@ -43,6 +44,7 @@ buck2_error = { workspace = true }
 buck2_events = { workspace = true }
 buck2_execute = { workspace = true }
 buck2_file_watcher = { workspace = true }
+buck2_fs = { workspace = true }
 buck2_http = { workspace = true }
 buck2_interpreter = { workspace = true }
 buck2_interpreter_for_build = { workspace = true }

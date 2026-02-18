@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.bundle;
@@ -13,17 +14,13 @@ import com.android.tools.build.bundletool.commands.BuildBundleCommand;
 import com.facebook.buck.android.apk.sdk.ApkCreationException;
 import com.facebook.buck.android.apk.sdk.DuplicateFileException;
 import com.facebook.buck.android.apk.sdk.SealedApkException;
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.util.zip.ZipScrubber;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.io.CharStreams;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.Reader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -66,9 +63,6 @@ public class AndroidBundleBuilderExecutableMain {
 
   @Option(name = "--jar-files-that-may-contain-resources-list", required = true)
   private String jarFilesThatMayContainResourcesList;
-
-  @Option(name = "--zipalign_tool", required = true)
-  private String zipalignTool;
 
   @Option(name = "--package-meta-inf-version-files")
   private boolean packageMetaInfVersionFiles;
@@ -147,7 +141,7 @@ public class AndroidBundleBuilderExecutableMain {
     } catch (ApkCreationException | SealedApkException e) {
       throw new RuntimeException(e);
     } catch (DuplicateFileException e) {
-      throw new HumanReadableException(
+      throw new RuntimeException(
           String.format(
               "Found duplicate file for APK: %1$s\nOrigin 1: %2$s\nOrigin 2: %3$s",
               e.getArchivePath(), e.getFile1(), e.getFile2()));
@@ -246,17 +240,17 @@ public class AndroidBundleBuilderExecutableMain {
       } catch (ApkCreationException | SealedApkException e) {
         throw new RuntimeException(e);
       } catch (DuplicateFileException e) {
-        throw new HumanReadableException(
+        throw new RuntimeException(
             String.format(
                 "Found duplicate file for APK: %1$s\nOrigin 1: %2$s\nOrigin 2: %3$s",
                 e.getArchivePath(), e.getFile1(), e.getFile2()));
       }
     }
 
-    Path unalignedBundle = tempDir.resolve("unalignedBundle.aab");
+    Path outputPath = Paths.get(outputBundle);
     BuildBundleCommand.Builder bundleBuilder =
         BuildBundleCommand.builder()
-            .setOutputPath(unalignedBundle)
+            .setOutputPath(outputPath)
             .setOverwriteOutput(true)
             .setModulesPaths(modulePaths.build());
 
@@ -265,27 +259,7 @@ public class AndroidBundleBuilderExecutableMain {
     }
     bundleBuilder.build().execute();
 
-    ZipScrubber.scrubZip(unalignedBundle);
-    Process zipalignProcess =
-        new ProcessBuilder()
-            .command(
-                zipalignTool,
-                "-f",
-                "4",
-                unalignedBundle.toString(),
-                Paths.get(outputBundle).toString())
-            .start();
-    try {
-      zipalignProcess.waitFor();
-      if (zipalignProcess.exitValue() != 0) {
-        try (Reader reader = new InputStreamReader(zipalignProcess.getErrorStream())) {
-          String errorMessage = CharStreams.toString(reader);
-          throw new RuntimeException("zipalign failed to process apk file:\n" + errorMessage);
-        }
-      }
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    }
+    ZipScrubber.scrubZip(outputPath);
   }
 
   private static class ThrowingDuplicateFileListener

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -14,16 +15,16 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
-use buck2_directory::directory::directory::Directory;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::artifact::group::artifact_group_values_dyn::ArtifactGroupValuesDyn;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest_config::DigestConfig;
-use buck2_execute::directory::ActionDirectoryBuilder;
 use buck2_execute::directory::ActionSharedDirectory;
 use buck2_execute::directory::INTERNER;
-use buck2_execute::directory::insert_artifact;
+use buck2_execute::directory::LazyActionDirectoryBuilder;
+use buck2_execute::directory::insert_artifact_lazy;
 use dupe::Dupe;
 use smallvec::SmallVec;
 use smallvec::smallvec;
@@ -41,31 +42,38 @@ impl ArtifactGroupValues {
         artifact_fs: &ArtifactFs,
         digest_config: DigestConfig,
     ) -> buck2_error::Result<Self> {
-        let mut builder = ActionDirectoryBuilder::empty();
+        let mut builder = LazyActionDirectoryBuilder::empty();
 
         for (artifact, value) in values.iter() {
-            let path = artifact
-                .resolve_path(artifact_fs)
-                .buck_error_context("Invalid artifact")?;
-            insert_artifact(&mut builder, path.as_ref(), value)?;
+            if artifact.path_resolution_requires_artifact_value() {
+                let path = artifact
+                    .resolve_path(artifact_fs, Some(&value.content_based_path_hash()))
+                    .buck_error_context("Invalid artifact")?;
+                insert_artifact_lazy(&mut builder, path, value)?;
+            } else {
+                let path = artifact
+                    .resolve_path(artifact_fs, None)
+                    .buck_error_context("Invalid artifact")?;
+                insert_artifact_lazy(&mut builder, path, value)?;
+            }
         }
 
         for child in children.iter() {
             // NOTE: Technically, we could fall back to iterating the artifacts in the
             // ArtifactGroupValues here, but we *do* rely on the fact that TransitiveSetProjections
             // produce intermediate directories, so if they don't, it is preferable to report it.
-            let child_dir = child
-                .0
-                .directory
-                .as_ref()
-                .buck_error_context("TransitiveSetProjection was missing directory!")?;
+            let child_dir =
+                child.0.directory.as_ref().ok_or_else(|| {
+                    internal_error!("TransitiveSetProjection was missing directory!")
+                })?;
 
             builder
-                .merge(child_dir.to_builder())
+                .merge(child_dir.dupe())
                 .buck_error_context("Merge failed")?;
         }
 
         let directory = builder
+            .finalize()?
             .fingerprint(digest_config.as_directory_serializer())
             .shared(&*INTERNER);
 
@@ -86,17 +94,25 @@ impl ArtifactGroupValues {
 
     pub fn add_to_directory(
         &self,
-        builder: &mut ActionDirectoryBuilder,
+        builder: &mut LazyActionDirectoryBuilder,
         artifact_fs: &ArtifactFs,
     ) -> buck2_error::Result<()> {
         if let Some(d) = self.0.directory.as_ref() {
-            builder.merge(d.to_builder())?;
+            builder.merge(d.dupe())?;
             return Ok(());
         }
 
         for (artifact, value) in self.iter() {
-            let projrel_path = artifact.resolve_path(artifact_fs)?;
-            insert_artifact(builder, projrel_path.as_ref(), value)?;
+            let projrel_path = artifact.resolve_path(
+                artifact_fs,
+                if artifact.path_resolution_requires_artifact_value() {
+                    Some(value.content_based_path_hash())
+                } else {
+                    None
+                }
+                .as_ref(),
+            )?;
+            insert_artifact_lazy(builder, projrel_path, value)?;
         }
 
         Ok(())
@@ -149,7 +165,7 @@ impl TransitiveSetContainer for ArtifactGroupValues {
     }
 }
 
-pub trait TransitiveSetContainer: Sized {
+trait TransitiveSetContainer: Sized {
     type Value: Sized;
     type Identity: Hash + Eq + PartialEq;
 
@@ -160,7 +176,7 @@ pub trait TransitiveSetContainer: Sized {
     fn identity(&self) -> Self::Identity;
 }
 
-pub struct TransitiveSetIterator<'a, C, V, I> {
+struct TransitiveSetIterator<'a, C, V, I> {
     values: &'a [V],
     queue: Vec<&'a C>,
     seen: HashSet<I>,
@@ -176,7 +192,7 @@ impl<'a, C>
 where
     C: TransitiveSetContainer,
 {
-    pub fn new(container: &'a C) -> Self {
+    fn new(container: &'a C) -> Self {
         let mut ret = Self {
             values: container.values(),
             queue: Vec::new(),
@@ -186,7 +202,7 @@ where
         ret
     }
 
-    pub fn enqueue_children(&mut self, transitive: &'a [C]) {
+    fn enqueue_children(&mut self, transitive: &'a [C]) {
         for t in transitive.iter().rev() {
             if self.seen.insert(t.identity()) {
                 self.queue.push(t);
@@ -231,7 +247,7 @@ impl ArtifactGroupValuesDyn for ArtifactGroupValues {
 
     fn add_to_directory(
         &self,
-        builder: &mut ActionDirectoryBuilder,
+        builder: &mut LazyActionDirectoryBuilder,
         artifact_fs: &ArtifactFs,
     ) -> buck2_error::Result<()> {
         self.add_to_directory(builder, artifact_fs)

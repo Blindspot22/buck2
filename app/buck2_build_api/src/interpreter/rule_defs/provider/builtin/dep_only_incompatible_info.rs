@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -24,7 +25,6 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::values::Coerce;
 use starlark::values::Freeze;
-use starlark::values::FreezeResult;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLifetimeless;
@@ -87,8 +87,10 @@ fn dep_only_incompatible_info_creator(globals: &mut GlobalsBuilder) {
         let mut result = SmallMap::with_capacity(custom_soft_errors.entries.len());
         for (category, value) in custom_soft_errors.entries {
             let category_str = category.to_value().unpack_str().ok_or_else(|| {
-                starlark::Error::from(anyhow::anyhow!("Expected string via type checking"))
-                    .into_internal_error()
+                starlark::Error::from(buck2_error::internal_error!(
+                    "Expected string via type checking"
+                ))
+                .into_internal_error()
             })?;
             validate_logview_category(category_str)?;
             result.insert(category_str, value.value);

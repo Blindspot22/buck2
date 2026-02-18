@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -16,15 +17,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use buck2_error::BuckErrorContext;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::RelativePath;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use dupe::Dupe;
 use ref_cast::RefCast;
 use relative_path::RelativePathBuf;
-
-use crate::fs::fs_util;
-use crate::fs::paths::RelativePath;
-use crate::fs::paths::abs_norm_path::AbsNormPath;
-use crate::fs::paths::abs_norm_path::AbsNormPathBuf;
-use crate::fs::paths::forward_rel_path::ForwardRelativePath;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(input)]
@@ -56,7 +57,7 @@ impl ProjectRootTemp {
     /// same root
     pub fn new() -> buck2_error::Result<Self> {
         let temp = tempfile::tempdir()?;
-        let path = fs_util::canonicalize(AbsPath::new(temp.path())?)?;
+        let path = fs_util::canonicalize(AbsPath::new(temp.path())?).categorize_internal()?;
         let path = ProjectRoot::new(path)?;
         Ok(Self { path, _temp: temp })
     }
@@ -73,7 +74,9 @@ impl ProjectRootTemp {
 
 impl ProjectRoot {
     pub fn new(root: AbsNormPathBuf) -> buck2_error::Result<Self> {
-        let canon = fs_util::canonicalize(&root).buck_error_context("canonicalize project root")?;
+        let canon = fs_util::canonicalize(&root)
+            .categorize_internal()
+            .buck_error_context("canonicalize project root")?;
         if canon != root {
             return Err(ProjectRootError::NotCanonical(root, canon).into());
         }
@@ -103,9 +106,9 @@ impl ProjectRoot {
     /// `project root`, yielding a 'AbsPathBuf'
     ///
     /// ```
-    /// use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
     /// use buck2_core::fs::project::ProjectRoot;
     /// use buck2_core::fs::project_rel_path::ProjectRelativePath;
+    /// use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
     ///
     /// if cfg!(not(windows)) {
     ///     let root = AbsNormPathBuf::from("/usr/local/fbsource/".into())?;
@@ -137,9 +140,9 @@ impl ProjectRoot {
     /// ```
     /// use std::path::PathBuf;
     ///
-    /// use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
     /// use buck2_core::fs::project::ProjectRoot;
     /// use buck2_core::fs::project_rel_path::ProjectRelativePath;
+    /// use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
     ///
     /// let root = if cfg!(not(windows)) {
     ///     AbsNormPathBuf::from("/usr/local/fbsource/".into())?
@@ -169,10 +172,10 @@ impl ProjectRoot {
     /// ```
     /// use std::borrow::Cow;
     ///
-    /// use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-    /// use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
     /// use buck2_core::fs::project::ProjectRoot;
     /// use buck2_core::fs::project_rel_path::ProjectRelativePath;
+    /// use buck2_fs::paths::abs_norm_path::AbsNormPath;
+    /// use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
     ///
     /// if cfg!(not(windows)) {
     ///     let root = AbsNormPathBuf::from("/usr/local/fbsource/".into())?;
@@ -254,7 +257,9 @@ impl ProjectRoot {
             };
 
             // This is not very efficient, but efficient cross-platform implementation is not easy.
-            let canonicalized_current_prefix = fs_util::canonicalize(current_prefix)?;
+            // Categorize as input because relativize_any should not be called on internal paths.
+            let canonicalized_current_prefix =
+                fs_util::canonicalize(current_prefix).categorize_input()?;
 
             if let Ok(rem) = canonicalized_current_prefix
                 .as_path()
@@ -304,18 +309,18 @@ impl ProjectRoot {
         let abs_path = self.root().join(path.as_ref());
         if let Some(parent) = abs_path.parent() {
             fs_util::create_dir_all(parent).with_buck_error_context(|| {
-                format!(
-                    "`write_file` for `{}` creating directory `{}`",
-                    abs_path, parent
-                )
+                format!("`write_file` for `{abs_path}` creating directory `{parent}`")
             })?;
         }
         fs_util::write(&abs_path, contents)
-            .with_buck_error_context(|| format!("`write_file` writing `{}`", abs_path))?;
+            .categorize_internal()
+            .with_buck_error_context(|| format!("`write_file` writing `{abs_path}`"))?;
         if executable {
-            fs_util::set_executable(&abs_path).with_buck_error_context(|| {
-                format!("`write_file` setting executable `{}`", abs_path)
-            })?;
+            fs_util::set_executable(&abs_path, true)
+                .categorize_internal()
+                .with_buck_error_context(|| {
+                    format!("`write_file` setting executable `{abs_path}`")
+                })?;
         }
         Ok(())
     }
@@ -329,18 +334,17 @@ impl ProjectRoot {
         let abs_path = self.root().join(path.as_ref());
         if let Some(parent) = abs_path.parent() {
             fs_util::create_dir_all(parent).with_buck_error_context(|| {
-                format!(
-                    "`create_file` for `{}` creating directory `{}`",
-                    abs_path, parent
-                )
+                format!("`create_file` for `{abs_path}` creating directory `{parent}`")
             })?;
         }
         let file = File::create(&abs_path)
-            .with_buck_error_context(|| format!("`create_file` creating `{}`", abs_path))?;
+            .with_buck_error_context(|| format!("`create_file` creating `{abs_path}`"))?;
         if executable {
-            fs_util::set_executable(&abs_path).with_buck_error_context(|| {
-                format!("`create_file` setting executable `{}`", abs_path)
-            })?;
+            fs_util::set_executable(&abs_path, true)
+                .categorize_internal()
+                .with_buck_error_context(|| {
+                    format!("`create_file` setting executable `{abs_path}`")
+                })?;
         }
         Ok(file)
     }
@@ -348,7 +352,7 @@ impl ProjectRoot {
     // TODO(nga): refactor this to global function.
     pub fn set_executable(&self, path: impl AsRef<ProjectRelativePath>) -> buck2_error::Result<()> {
         let path = self.root().join(path.as_ref());
-        fs_util::set_executable(path)
+        fs_util::set_executable(path, true).categorize_internal()
     }
 
     /// Create a soft link from one location to another.
@@ -373,7 +377,7 @@ impl ProjectRoot {
         if let Some(parent) = dest_abs.parent() {
             fs_util::create_dir_all(parent)?;
         }
-        fs_util::symlink(src, dest_abs)
+        fs_util::symlink(src, dest_abs).categorize_internal()
     }
 
     /// Create a relative symlink between two relative paths
@@ -403,7 +407,7 @@ impl ProjectRoot {
         if let Some(parent) = dest_abs.parent() {
             fs_util::create_dir_all(parent)?;
         }
-        fs_util::symlink(target_relative, dest_abs)
+        fs_util::symlink(target_relative, dest_abs).categorize_internal()
     }
 
     /// Copy from one path to another. This works for both files and directories.
@@ -423,10 +427,7 @@ impl ProjectRoot {
 
         let result = self.copy_resolved(&src_abs, &dest_abs);
         result.with_buck_error_context(|| {
-            format!(
-                "Error copying from src path `{}` to dest path `{}`",
-                src_abs, dest_abs
-            )
+            format!("Error copying from src path `{src_abs}` to dest path `{dest_abs}`")
         })
     }
 
@@ -435,7 +436,9 @@ impl ProjectRoot {
         src_abs: &AbsNormPathBuf,
         dest_abs: &AbsNormPathBuf,
     ) -> buck2_error::Result<()> {
-        let src_type = fs_util::symlink_metadata(src_abs)?.file_type();
+        let src_type = fs_util::symlink_metadata(src_abs)
+            .categorize_internal()?
+            .file_type();
 
         if let Some(parent) = dest_abs.parent() {
             fs_util::create_dir_all(parent)?;
@@ -510,7 +513,7 @@ impl ProjectRoot {
 
     /// Creates symbolic link `dest` which points at the same location as symlink `src`.
     fn copy_symlink(src: &AbsNormPathBuf, dest: &AbsNormPathBuf) -> buck2_error::Result<()> {
-        let mut target = fs_util::read_link(src)?;
+        let mut target = fs_util::read_link(src).categorize_internal()?;
         if target.is_relative() {
             // Grab the absolute path, then re-relativize the path to the destination
             let relative_target = fs_util::relative_path_from_system(target.as_path())?;
@@ -520,16 +523,16 @@ impl ProjectRoot {
             );
             target = Self::find_relative_path(&AbsNormPathBuf::try_from(absolute_target)?, dest);
         }
-        fs_util::symlink(target, dest)
+        fs_util::symlink(target, dest).categorize_internal()
     }
 
     fn copy_file(src: &AbsNormPathBuf, dst: &AbsNormPathBuf) -> buck2_error::Result<()> {
-        fs_util::copy(src, dst).map(|_| ()).map_err(Into::into)
+        fs_util::copy(src, dst).categorize_internal().map(|_| ())
     }
 
     fn copy_dir(src_dir: &AbsNormPathBuf, dest_dir: &AbsNormPathBuf) -> buck2_error::Result<()> {
         fs_util::create_dir_all(dest_dir)?;
-        for file in fs_util::read_dir(src_dir)? {
+        for file in fs_util::read_dir(src_dir).categorize_internal()? {
             let file = file?;
             let filetype = file.file_type()?;
             let src_file = file.path();
@@ -547,9 +550,9 @@ impl ProjectRoot {
 }
 
 use allocative::Allocative;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::abs_path::AbsPathBuf;
 
-use crate::fs::paths::abs_path::AbsPath;
-use crate::fs::paths::abs_path::AbsPathBuf;
 use crate::fs::project_rel_path::ProjectRelativePath;
 use crate::fs::project_rel_path::ProjectRelativePathBuf;
 
@@ -558,9 +561,10 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
-    use crate::fs::fs_util;
-    use crate::fs::paths::abs_path::AbsPath;
-    use crate::fs::paths::forward_rel_path::ForwardRelativePath;
+    use buck2_fs::fs_util::uncategorized as fs_util;
+    use buck2_fs::paths::abs_path::AbsPath;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+
     use crate::fs::project::ProjectRoot;
     use crate::fs::project::ProjectRootTemp;
     use crate::fs::project_rel_path::ProjectRelativePath;

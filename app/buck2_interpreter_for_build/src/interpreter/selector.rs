@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -12,10 +13,14 @@ use std::fmt::Display;
 
 use allocative::Allocative;
 use buck2_error::BuckErrorContext;
+use buck2_interpreter::types::select_fail::StarlarkSelectFail;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
+use starlark::environment::Methods;
+use starlark::environment::MethodsBuilder;
+use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_complex_value;
 use starlark::starlark_module;
@@ -82,18 +87,18 @@ impl<'v> StarlarkSelector<'v> {
         StarlarkSelector::Primary(d.as_unchecked().cast())
     }
 
-    fn sum(left: Value<'v>, right: Value<'v>, heap: &'v Heap) -> Value<'v> {
+    fn sum(left: Value<'v>, right: Value<'v>, heap: Heap<'v>) -> Value<'v> {
         heap.alloc(StarlarkSelector::Sum(left, right))
     }
 
-    pub fn from_concat<I>(iter: I, heap: &'v Heap) -> buck2_error::Result<Value<'v>>
+    pub fn from_concat<I>(iter: I, heap: Heap<'v>) -> buck2_error::Result<Value<'v>>
     where
         I: IntoIterator<Item = Value<'v>>,
     {
         fn values_to_selector<'v, I>(
             selector: Option<StarlarkSelector<'v>>,
             values: &mut I,
-            heap: &'v Heap,
+            heap: Heap<'v>,
         ) -> buck2_error::Result<NoneOr<StarlarkSelector<'v>>>
         where
             I: Iterator<Item = Value<'v>>,
@@ -121,15 +126,20 @@ impl<'v> StarlarkSelector<'v> {
         Ok(heap.alloc(selector))
     }
 
-    fn select_map<'a>(
-        val: Value<'a>,
+    fn select_map<'a, const RECURSE: bool>(
         eval: &mut Evaluator<'a, '_, '_>,
+        val: Value<'a>,
         func: Value<'a>,
     ) -> starlark::Result<Value<'a>> {
+        // The recursion depth of this function is determined by the depth of
+        // the input `select()` objects, which could be unbounded. Detect such
+        // cases and return an error nicely rather than panic'ing.
+        buck2_util::threads::check_stack_overflow()?;
+
         fn invoke<'v>(
             eval: &mut Evaluator<'v, '_, '_>,
-            func: Value<'v>,
             val: Value<'v>,
+            func: Value<'v>,
         ) -> starlark::Result<Value<'v>> {
             eval.eval_function(func, &[val], &[])
         }
@@ -140,7 +150,19 @@ impl<'v> StarlarkSelector<'v> {
                     let selector = DictRef::from_value(selector.get()).unwrap();
                     let mut mapped = SmallMap::with_capacity(selector.len());
                     for (k, v) in selector.iter_hashed() {
-                        mapped.insert_hashed(k, invoke(eval, func, v)?);
+                        if StarlarkSelectFail::from_value(v).is_some() {
+                            // mappings don't get applied to SelectFail values.
+                            mapped.insert_hashed(k, v);
+                        } else {
+                            mapped.insert_hashed(
+                                k,
+                                if RECURSE {
+                                    Self::select_map::<RECURSE>(eval, v, func)
+                                } else {
+                                    invoke(eval, v, func)
+                                }?,
+                            );
+                        }
                     }
                     Ok(eval.heap().alloc(StarlarkSelector::new(
                         ValueOf::unpack_value_err(eval.heap().alloc(Dict::new(mapped)))
@@ -149,13 +171,13 @@ impl<'v> StarlarkSelector<'v> {
                 }
                 StarlarkSelectorGen::Sum(left, right) => {
                     Ok(eval.heap().alloc(StarlarkSelectorGen::Sum(
-                        Self::select_map(left, eval, func)?,
-                        Self::select_map(right, eval, func)?,
+                        Self::select_map::<RECURSE>(eval, left, func)?,
+                        Self::select_map::<RECURSE>(eval, right, func)?,
                     )))
                 }
             }
         } else {
-            invoke(eval, func, val)
+            invoke(eval, val, func)
         }
     }
 
@@ -172,13 +194,11 @@ impl<'v> StarlarkSelector<'v> {
             eval.eval_function(func, &[val], &[])?
                 .unpack_bool()
                 .ok_or_else(|| {
-                    starlark::Error::new_kind(starlark::ErrorKind::Native(
-                        buck2_error::buck2_error!(
-                            buck2_error::ErrorTag::Input,
-                            "Expected testing function to have a boolean return type"
-                        )
-                        .into(),
-                    ))
+                    buck2_error::buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "Expected testing function to have a boolean return type"
+                    )
+                    .into()
                 })
         }
 
@@ -187,9 +207,12 @@ impl<'v> StarlarkSelector<'v> {
                 StarlarkSelectorGen::Primary(selector) => {
                     let selector = DictRef::from_value(selector.get()).unwrap();
                     for v in selector.values() {
-                        let result = invoke(eval, func, v)?;
-                        if result {
-                            return Ok(true);
+                        // select_test only applies the test to non-SelectFail values.
+                        if StarlarkSelectFail::from_value(v).is_none() {
+                            let result = invoke(eval, func, v)?;
+                            if result {
+                                return Ok(true);
+                            }
                         }
                     }
                     Ok(false)
@@ -250,7 +273,7 @@ where
         true
     }
 
-    fn radd(&self, left: Value<'v>, heap: &'v Heap) -> Option<starlark::Result<Value<'v>>> {
+    fn radd(&self, left: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
         let right = heap.alloc(match self {
             StarlarkSelectorGen::Primary(x) => StarlarkSelectorGen::Primary(x.to_value()),
             StarlarkSelectorGen::Sum(x, y) => StarlarkSelectorGen::Sum(x.to_value(), y.to_value()),
@@ -258,20 +281,26 @@ where
         Some(Ok(StarlarkSelector::sum(left, right, heap)))
     }
 
-    fn add(&self, other: Value<'v>, heap: &'v Heap) -> Option<starlark::Result<Value<'v>>> {
+    fn add(&self, other: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
         match self {
-            Self::Primary(ref v) => match ValueOf::unpack_value_err(v.get().to_value()) {
+            Self::Primary(v) => match ValueOf::unpack_value_err(v.get().to_value()) {
                 Ok(v) => {
                     let this = heap.alloc(StarlarkSelector::new(v));
                     Some(Ok(StarlarkSelector::sum(this, other, heap)))
                 }
-                Err(e) => Some(Err(e.into())),
+                Err(e) => Some(Err(e)),
             },
-            Self::Sum(ref l, ref r) => {
+            Self::Sum(l, r) => {
                 let this = StarlarkSelector::sum(l.to_value(), r.to_value(), heap);
                 Some(Ok(StarlarkSelector::sum(this, other, heap)))
             }
         }
+    }
+
+    // used to provide the type documentation here
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(selector_methods)
     }
 }
 
@@ -285,35 +314,90 @@ pub fn register_select(globals: &mut GlobalsBuilder) {
         Ok(StarlarkSelector::new(d))
     }
 
+    /// Create a value to be used in select() statements to indicate a failure case.
+    ///
+    /// This function is used within a `select()` statement to provide a clear error message
+    /// when a particular configuration condition is selected but should not be valid.
+    ///
+    /// # Example
+    /// ```python
+    /// # Fail with a custom message if the build is configured for iOS but the feature is not supported
+    /// some_attr = select({
+    ///     "//conditions:is_android": "android_value",
+    ///     "//conditions:is_ios": select_fail("This feature is not supported on iOS"),
+    ///     "DEFAULT": "default_value",
+    /// })
+    /// ```
+    ///
+    /// During configuration, if the iOS case is selected, the build will fail with a message that includes
+    /// "This feature is not supported on iOS". If the target is loaded but never configured, it's not an error
+    /// and if the target is configured such that the iOS case is not selected, the build will not fail.
+    fn select_fail<'v>(
+        #[starlark(require = pos)] msg: StringValue<'v>,
+    ) -> starlark::Result<StarlarkSelectFail<'v>> {
+        Ok(StarlarkSelectFail::new(msg))
+    }
+
     /// Maps a selector.
     ///
-    /// Each value within a selector map and on each side of an addition will be passed to the
-    /// mapping function. The returned selector will have the same structure as this one.
+    /// For selector additions values:
+    ///
+    ///   Each value on each side of an addition is always passed to select_map
+    ///   recursively.
+    ///
+    /// For selector maps values, for each value within a selector:
+    ///
+    ///   If recurse is False, the value will be passed to the mapping function.
+    ///   This may be a selector, or not.
+    ///
+    ///   If recurse is True, the value will be passed to select_map()
+    ///   recursively
+    ///
+    /// For non-selector value, the value will be passed to the mapping
+    /// function.
+    ///
+    /// Generally the returned selector will have the same key/depth structure
+    /// as the input selector. In the recurse=False case a mapping function that
+    /// turns a selector into a non-selector may prune the structure. In the
+    /// recurse=True case, the mapping functino cannot change the existing
+    /// structure. In either case the mapping function can return a selector for
+    /// a non-selector input, causing the selector structure to get deeper.
+    ///
+    /// The mapping is not applied to `select_fail()` values.
     ///
     /// Ex:
     /// ```python
     /// def increment_items(a):
     ///     return [v + 1 for v in a]
     ///
-    /// select_map([1, 2] + select({"c": [2]}), increment_items) == [2, 3] + select({"c": [3]})
+    /// select_map([1, 2] + select({"c": [2]}), increment_items, False) == [2, 3] + select({"c": [3]})
+    ///
+    /// select_apply([1, 2] + select({"c": select({"d": [2]}}), increment_items, True) == [2, 3] + select({"c": select("d": [3]})})
     /// ```
     fn select_map<'v>(
         #[starlark(require = pos)] d: Value<'v>,
         #[starlark(require = pos)] func: Value<'v>,
+        // TODO(T245559941): change the default to recurse=true
+        #[starlark(require = named, default = false)] recurse: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
-        StarlarkSelector::select_map(d, eval, func)
+        if recurse {
+            StarlarkSelector::select_map::<true>(eval, d, func)
+        } else {
+            StarlarkSelector::select_map::<false>(eval, d, func)
+        }
     }
 
     /// Test values in the select expression using the given function.
     ///
-    /// Returns True, if any value in the select passes, else False.
+    /// Returns True, if any value in the select passes, else False. The function is not tested against select_fail values.
     ///
     /// Ex:
     /// ```python
     /// select_test([1] + select({"c": [1]}), lambda a: len(a) > 1) == False
     /// select_test([1, 2] + select({"c": [1]}), lambda a: len(a) > 1) == True
     /// select_test([1] + select({"c": [1, 2]}), lambda a: len(a) > 1) == True
+    /// select_test(select({"c": select_fail("")}), lambda a: True) == False
     /// ```
     fn select_test<'v>(
         #[starlark(require = pos)] d: Value<'v>,
@@ -334,3 +418,257 @@ pub fn register_select_internal(globals: &mut GlobalsBuilder) {
         Ok(left.to_repr() == right.to_repr())
     }
 }
+
+/// The `Select` type represents a conditional attribute value in Buck2.
+///
+/// `Select` objects are created using the `select()` function and enable build rules to have
+/// different attribute values based on the target's configuration.
+/// This is essential for cross-platform builds and conditional compilation.
+///
+/// # Resolution Timing
+///
+/// `Select` objects are resolved during Buck2's **configuration phase**, which happens after
+/// BUCK file evaluation but before rule implementation. This means:
+/// - Starlark code in BUCK files and macro rules cannot see resolved values
+/// - Use `select_map()` or `select_test()` for macro-level operations
+///
+/// # Operations
+///
+/// `Select` supports the addition operator (`+`) for combining conditional values:
+///
+/// ```python
+/// # Combine multiple selects
+/// deps = select({
+///     "//config:linux": ["//lib:linux"],
+///     "DEFAULT": [],
+/// }) + select({
+///     "//config:debug": ["//debug:tools"],
+///     "DEFAULT": [],
+/// })
+///
+/// # Add to regular values
+/// flags = ["-Wall"] + select({
+///     "//config:optimize": ["-O3"],
+///     "DEFAULT": ["-O0"],
+/// })
+/// ```
+///
+/// # Resolution Algorithm
+///
+/// When Buck2 resolves a `Select`:
+///
+/// 1. Evaluates each key of select options
+/// 2. Collects all keys that match the current configuration
+/// 3. Applies **refinement** to choose the most specific match:
+///    - If zero matches: Use DEFAULT or error if no DEFAULT
+///    - If one match: Use that value
+///    - If multiple matches: Select the one that is most specific
+/// 4. If ties exist (equally specific):
+///    - Same values: OK, use that value
+///    - Different values: Error
+///
+/// # Select Refinement Example
+///
+/// ```python
+/// config_setting(
+///     name = "linux",
+///     constraint_values = ["//constraints:linux"],  # 1 constraint
+/// )
+///
+/// config_setting(
+///     name = "linux-arm64",
+///     constraint_values = [
+///         "//constraints:linux",
+///         "//constraints:arm64",  # 2 constraints - more specific
+///     ],
+/// )
+///
+/// my_rule(
+///     srcs = select({
+///         ":linux": ["generic_linux.cpp"],
+///         ":linux-arm64": ["optimized_arm64.cpp"],  # This wins when both match
+///     }),
+/// )
+/// ```
+///
+/// **Key point**: Order in the dictionary doesn't matter; specificity always wins.
+///
+/// # Configuration System
+///
+/// ## Constraints
+///
+/// - **constraint_setting**: Defines a configuration dimension
+///   ```python
+///   constraint_setting(name = "os")
+///   constraint_setting(name = "cpu")
+///   ```
+///
+/// - **constraint_value**: Specific value for a dimension
+///   ```python
+///   constraint_value(name = "linux", constraint_setting = ":os")
+///   constraint_value(name = "arm64", constraint_setting = ":cpu")
+///   ```
+///
+/// - **platform**: Collection of constraint values
+///   ```python
+///   platform(
+///       name = "linux-arm64",
+///       constraint_values = [":linux", ":arm64"],
+///   )
+///   ```
+///
+/// ## config_setting
+///
+/// Matches specific configuration conditions:
+///
+/// ```python
+/// # Match constraints
+/// config_setting(
+///     name = "linux-arm",
+///     constraint_values = [
+///         "//constraints:linux",
+///         "//constraints:arm",
+///     ],
+/// )
+///
+/// # Match buckconfig values
+/// config_setting(
+///     name = "fastmode",
+///     values = {
+///         "build.fastmode": "true",
+///     },
+/// )
+///
+/// # Combine both
+/// config_setting(
+///     name = "linux-fastmode",
+///     constraint_values = ["//constraints:linux"],
+///     values = {"build.fastmode": "true"},
+/// )
+/// ```
+///
+/// # Platform Selection
+///
+/// Buck2 determines the target platform through:
+///
+/// 1. `--target-platforms` command-line flag (highest priority)
+/// 2. `default_target_platform` attribute on the target
+/// 3. Cell's default platform from buckconfig
+///
+/// Example:
+/// ```bash
+/// buck2 build //app:main --target-platforms //platforms:linux-x86_64
+/// ```
+///
+/// # Target Compatibility
+///
+/// Buck2 provides two attributes for platform compatibility:
+///
+/// ## target_compatible_with
+///
+/// **ALL semantics**: Target is compatible only if **all** listed constraints match:
+///
+/// ```python
+/// cxx_library(
+///     name = "windows_dev_only",
+///     target_compatible_with = [
+///         "//constraints:windows",  # Must be Windows AND
+///         "//constraints:dev",      # Must be dev mode
+///     ],
+/// )
+/// ```
+///
+/// ## compatible_with
+///
+/// **ANY semantics**: Target is compatible if **any** listed constraint matches:
+///
+/// ```python
+/// cxx_library(
+///     name = "unix_compatible",
+///     compatible_with = [
+///         "//constraints:linux",    # Linux OR
+///         "//constraints:macos",    # macOS (either works)
+///     ],
+/// )
+/// ```
+///
+/// # Common Patterns
+///
+/// ## Platform-Specific Dependencies
+///
+/// ```python
+/// cxx_library(
+///     name = "mylib",
+///     srcs = ["common.cpp"],
+///     deps = [
+///         "//common:base",
+///     ] + select({
+///         "//config:linux": ["//platform:linux_support"],
+///         "//config:macos": ["//platform:macos_support"],
+///         "//config:windows": ["//platform:windows_support"],
+///     }),
+/// )
+/// ```
+///
+/// ## Build Mode Flags
+///
+/// ```python
+/// cxx_binary(
+///     name = "app",
+///     compiler_flags = select({
+///         "//config:debug": ["-g", "-O0"],
+///         "//config:release": ["-O3", "-DNDEBUG"],
+///         "DEFAULT": ["-O2"],
+///     }),
+/// )
+/// ```
+///
+/// ## Architecture-Specific Optimizations
+///
+/// ```python
+/// cxx_library(
+///     name = "simd",
+///     compiler_flags = select({
+///         "//config:x86_64": ["-msse4.2"],
+///         "//config:arm64": ["-march=armv8-a"],
+///         "DEFAULT": [],
+///     }),
+/// )
+/// ```
+///
+/// # Working with Selects in Macros
+///
+/// Since `select()` values aren't resolved during BUCK evaluation, use these functions:
+///
+/// - **select_map(value, func)**: Transform all possible values
+///   ```python
+///   # Add suffix to all possible values
+///   new_deps = select_map(
+///       deps_select,
+///       lambda items: [item + "_wrapper" for item in items]
+///   )
+///   ```
+///
+/// - **select_test(value, func)**: Test if any value matches predicate
+///   ```python
+///   # Check if any branch has more than 2 items
+///   has_many = select_test(deps_select, lambda items: len(items) > 2)
+///   ```
+///
+/// # Error Messages
+///
+/// Common errors:
+///
+/// - **No match without DEFAULT**: "None of N conditions matched configuration ... and no default was set"
+/// - **Ambiguous match**: "Both select keys `X` and `Y` match the configuration, but neither is more specific and they have different values"
+/// - **Invalid usage**: Cannot use `select()` inside config_setting or other configuration rules
+///
+/// # See Also
+///
+/// - `select()` - Creates a Select object
+/// - `select_map()` - Applies a function to all possible values
+/// - `select_test()` - Tests if any value passes a predicate
+/// - `target_compatible_with` - Platform compatibility filtering
+/// - Buck2 docs: "Configurations By Example"
+#[starlark_module]
+fn selector_methods(builder: &mut MethodsBuilder) {}

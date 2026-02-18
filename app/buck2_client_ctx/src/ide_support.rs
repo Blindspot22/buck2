@@ -1,14 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use bytes::BytesMut;
 use futures::Stream;
 use futures::StreamExt;
@@ -66,7 +68,8 @@ impl<T: for<'a> Deserialize<'a>> Decoder for LspMessageLikeDecoder<T> {
             }
         }
 
-        let content_length = content_length.buck_error_context("Content-Length is missing")?;
+        let content_length =
+            content_length.ok_or_else(|| internal_error!("Content-Length is missing"))?;
 
         if src.len() < headers_length + content_length {
             return Ok(None);

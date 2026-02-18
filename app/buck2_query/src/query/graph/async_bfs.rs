@@ -1,16 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future;
-use std::mem;
 
-use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
 use futures::StreamExt;
 use futures::future::Either;
@@ -39,7 +38,7 @@ impl<N: LabeledNode + 'static> BfsVisited<N> {
         let node = self
             .visited
             .remove(last)
-            .with_internal_error(|| format!("missing node {}", last))?;
+            .ok_or_else(|| internal_error!("missing node {last}"))?;
         if node.node.is_some() {
             return Err(internal_error!("duplicate node {}", last));
         }
@@ -48,10 +47,10 @@ impl<N: LabeledNode + 'static> BfsVisited<N> {
             let node = self
                 .visited
                 .remove(&key)
-                .with_internal_error(|| format!("missing node {}", key))?;
+                .ok_or_else(|| internal_error!("missing node {key}"))?;
             item(
                 node.node
-                    .with_internal_error(|| format!("missing node {}", key))?,
+                    .ok_or_else(|| internal_error!("missing node {key}"))?,
             );
             parent_key = node.parent;
         }
@@ -142,20 +141,18 @@ pub(crate) async fn async_bfs_find_path<'a, N: LabeledNode + 'static>(
                     path.reverse();
                     return Ok(Some(path));
                 }
-                let prev = mem::replace(
-                    &mut visited
-                        .visited
-                        .get_mut(&key)
-                        .with_internal_error(|| format!("missing node {}", key))?
-                        .node,
-                    Some(node),
-                );
+                let prev = visited
+                    .visited
+                    .get_mut(&key)
+                    .ok_or_else(|| internal_error!("missing node {key}"))?
+                    .node
+                    .replace(node);
                 if prev.is_some() {
                     return Err(internal_error!("duplicate node {}", key));
                 }
             }
             Err(mut e) => {
-                e = e.context(format!("traversing {}", key));
+                e = e.context(format!("traversing {key}"));
                 let mut nodes = Vec::new();
                 visited.take_path(&key, |node| nodes.push(node))?;
                 for node in nodes {

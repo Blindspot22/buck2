@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -25,8 +26,6 @@ class TestDiscovery(Enum):
 @buck_test()
 async def test_discovery_cached_on_dice(buck: Buck) -> None:
     args = [
-        "-c",
-        "buck2.cache_test_listings=//:ok",
         "//:ok",
     ]
     await run_test_and_check_discovery_presence(buck, TestDiscovery.EXECUTED, args)
@@ -36,8 +35,6 @@ async def test_discovery_cached_on_dice(buck: Buck) -> None:
 @buck_test()
 async def test_failed_discovery_not_cached_on_dice(buck: Buck) -> None:
     args = [
-        "-c",
-        "buck2.cache_test_listings=//:bad",
         "//:bad",
     ]
     await expect_failure(
@@ -57,31 +54,9 @@ async def test_failed_discovery_not_cached_on_dice(buck: Buck) -> None:
 
 
 @buck_test()
-async def test_discovery_not_cached_for_not_matching_pattern(buck: Buck) -> None:
-    args = [
-        "-c",
-        "buck2.cache_test_listings=//:not_ok",
-        "//:ok",
-    ]
-    await run_test_and_check_discovery_presence(buck, TestDiscovery.EXECUTED, args)
-    await run_test_and_check_discovery_presence(buck, TestDiscovery.EXECUTED, args)
-
-
-@buck_test()
-async def test_discovery_cache_turned_off(buck: Buck) -> None:
-    args = [
-        "//:ok",
-    ]
-    await run_test_and_check_discovery_presence(buck, TestDiscovery.EXECUTED, args)
-    await run_test_and_check_discovery_presence(buck, TestDiscovery.EXECUTED, args)
-
-
-@buck_test()
 async def test_listing_uncacheable(buck: Buck) -> None:
     seed = random_string()
     args = [
-        "-c",
-        "buck2.cache_test_listings=//:listing_uncacheable",
         "-c",
         f"test.seed={seed}",
         "-c",
@@ -106,8 +81,6 @@ async def test_discovery_cached_on_re(buck: Buck) -> None:
     seed = random_string()
     args = [
         "-c",
-        "buck2.cache_test_listings=//:ok",
-        "-c",
         f"test.seed={seed}",
         "-c",
         "test.local_enabled=false",
@@ -122,8 +95,6 @@ async def test_discovery_cached_on_re(buck: Buck) -> None:
     await run_test_and_check_discovery_presence(buck, TestDiscovery.CACHED, args)
     await buck.kill()
     args = [
-        "-c",
-        "buck2.cache_test_listings=//:ok",
         "-c",
         f"test.seed={seed}",
         "-c",
@@ -142,8 +113,6 @@ async def test_discovery_cached_on_re(buck: Buck) -> None:
 async def test_local_discovery_uploaded_to_cache(buck: Buck) -> None:
     seed = random_string()
     args = [
-        "-c",
-        "buck2.cache_test_listings=//:ok",
         "-c",
         f"test.seed={seed}",
         "-c",

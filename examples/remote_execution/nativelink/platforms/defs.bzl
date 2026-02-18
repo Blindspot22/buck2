@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _platforms(ctx):
     configuration = ConfigurationInfo(
@@ -21,7 +22,7 @@ def _platforms(ctx):
             # Set those up based on what workers you've registered with NativeLink.
             remote_execution_properties = {
                 "OSFamily": "linux",
-                "container-image": "docker://buck2-github:latest",
+                "container-image": "docker://nativelink-toolchain-buck2:latest",
             },
             remote_execution_use_case = "buck2-default",
             remote_output_paths = "output_paths",

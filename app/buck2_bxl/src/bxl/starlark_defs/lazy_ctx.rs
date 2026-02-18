@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -52,8 +53,6 @@ enum BxlBuildArtifactError {
     NotSupportDeclaredArtifact(String),
 }
 
-/// Context for lazy/batch/error handling operations.
-/// Available as `ctx.lazy`, has type `bxl.LazyContext`.
 #[derive(
     ProvidesStaticType,
     Derivative,
@@ -71,7 +70,7 @@ pub(crate) struct StarlarkLazyCtx<'v> {
 }
 
 impl<'v> AllocValue<'v> for StarlarkLazyCtx<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -90,6 +89,9 @@ impl<'v> StarlarkValue<'v> for StarlarkLazyCtx<'v> {
     }
 }
 
+/// Context for lazy/batch/error handling operations.
+///
+/// Available as [`bxl.Context.lazy`](../Context#contextlazy).
 #[starlark_module]
 fn lazy_ctx_methods(builder: &mut MethodsBuilder) {
     /// Join two lazy operations into a single operation that can be evaluated.
@@ -158,13 +160,13 @@ fn lazy_ctx_methods(builder: &mut MethodsBuilder) {
 
     /// Gets the configured target node for the `expr`.
     /// If given a string target pattern, it will resolve to a target set of configured target nodes.
-    /// it also accepts an optional `target_platform` and an optional modifers list which is used
+    /// it also accepts an optional `target_platform` and an optional modifiers list which is used
     /// to resolve configurations of any unconfigured target nodes.
     /// The `target_platform` is either a string that can be parsed as a target label, or a
     /// target label.
     ///
     /// The given `expr` is either:
-    ///     - a single string that is a target ot a target pattern.
+    ///     - a single string that is a target or a target pattern.
     ///     - a single target node or label, configured or unconfigured
     ///
     /// Note that this function does not accept `ConfiguredProviderLabel` (which is a configured provider label), since this
@@ -206,7 +208,7 @@ fn lazy_ctx_methods(builder: &mut MethodsBuilder) {
     /// Gets the unconfigured target node(s) for the `expr`
     ///
     /// The given `expr` is either:
-    ///     - a single string that is a target ot a target pattern.
+    ///     - a single string that is a target or a target pattern.
     ///     - a single unconfigured target node or label
     ///
     /// This returns either a target set of `UnconfiguredTargetNode`s if the given `expr` is a target pattern string,
@@ -217,6 +219,47 @@ fn lazy_ctx_methods(builder: &mut MethodsBuilder) {
     ) -> starlark::Result<StarlarkLazy> {
         let expr = OwnedTargetNodeArg::from_ref(&expr);
         Ok(StarlarkLazy::new_unconfigured_target_node(expr))
+    }
+
+    /// Gets the unconfigured target nodes for the given target pattern with keep-going behavior.
+    /// This method will continue processing even when errors are encountered, similar to
+    /// `buck2 targets --keep-going`.
+    ///
+    /// Unlike `ctx.lazy.unconfigured_target_node`, this method accepts only a single string target pattern
+    /// and returns a lazy operation that resolves to a tuple containing both successful results and errors,
+    /// allowing you to handle failures gracefully rather than failing fast.
+    ///
+    /// The given `pattern` must be a string that is a valid target pattern, such as:
+    ///     - `"//path/to:target"` - A specific target
+    ///     - `"//path/to:"` - All targets in a package
+    ///     - `"//path/to/..."` - All targets in a path
+    ///
+    /// This returns a lazy operation (`bxl.Lazy[(UnconfiguredTargetSet, dict[PackagePath, bxl.Error])]`) that resolves to a tuple where:
+    /// - First element: A `UnconfiguredTargetSet` containing successfully loaded unconfigured target nodes
+    /// - Second element: A dict mapping `PackagePath` to `Error` for packages that failed to load
+    ///
+    ///
+    /// Sample usage:
+    /// ```python
+    /// def _impl_keep_going(ctx):
+    ///     lazy_result = ctx.lazy.unconfigured_target_nodes_keep_going("//my/package/...")
+    ///     success_targets, error_map = lazy_result.resolve()
+    ///     
+    ///     # Process successful targets
+    ///     for target in success_targets:
+    ///         ctx.output.print(f"Successfully loaded: {target.label}")
+    ///     
+    ///     # Handle errors
+    ///     for package_path, error in error_map.items():
+    ///         ctx.output.print(f"Failed to load package {package_path}: {error}")
+    /// ```
+    fn unconfigured_target_nodes_keep_going<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyCtx,
+        #[starlark(require = pos)] pattern: &str,
+    ) -> starlark::Result<StarlarkLazy> {
+        Ok(StarlarkLazy::new_unconfigured_target_node_keep_going(
+            pattern.to_owned(),
+        ))
     }
 
     /// Gets the lazy uquery context.
@@ -247,7 +290,7 @@ fn lazy_ctx_methods(builder: &mut MethodsBuilder) {
         #[starlark(this)] _this: &'v StarlarkLazyCtx<'v>,
         // Use `ArtifactArg` instead of `StarlarkArtifact` to avoid the confused type mismatch error "Type of parameter 'artifact' doesn't match, expected 'artifact', actual 'artifact'" when given declared artifacts.
         #[starlark(require = pos)] artifact: ArtifactArg<'v>,
-    ) -> anyhow::Result<StarlarkLazy> {
+    ) -> starlark::Result<StarlarkLazy> {
         match artifact {
             ArtifactArg::DeclaredArtifact(_) => {
                 return Err(buck2_error::Error::from(

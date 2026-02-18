@@ -1,14 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 pub mod builder;
+pub mod builder_lazy;
 pub mod dashmap_directory_interner;
+#[allow(clippy::module_inception)]
 pub mod directory;
 pub mod directory_data;
 pub mod directory_hasher;

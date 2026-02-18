@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::path::Path;
@@ -15,20 +16,20 @@ use buck2_certs::certs::find_internal_cert;
 use buck2_certs::certs::supports_vpnless;
 use buck2_certs::certs::tls_config_with_single_cert;
 use buck2_certs::certs::tls_config_with_system_roots;
-use buck2_error::BuckErrorContext;
-use hyper::Body;
+use buck2_error::internal_error;
 use hyper::Uri;
-use hyper::client::HttpConnector;
-use hyper::service::Service;
-use hyper_proxy::Proxy;
-use hyper_proxy::ProxyConnector;
+use hyper_http_proxy::Proxy;
+use hyper_http_proxy::ProxyConnector;
 use hyper_rustls::HttpsConnector;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_timeout::TimeoutConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use rustls::ClientConfig;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
+use tokio::sync::Semaphore;
 use tokio_rustls::TlsConnector;
+use tower_service::Service as TowerService;
 
 use super::HttpClient;
 use super::RequestClient;
@@ -46,8 +47,8 @@ pub struct TimeoutConfig {
 impl TimeoutConfig {
     fn to_connector<C>(&self, connector: C) -> TimeoutConnector<C>
     where
-        C: Service<Uri> + Send,
-        C::Response: AsyncRead + AsyncWrite + Send + Unpin,
+        C: TowerService<Uri> + Send,
+        C::Response: hyper::rt::Read + hyper::rt::Write + Send + Unpin,
         C::Future: Send + 'static,
         C::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
@@ -66,6 +67,7 @@ pub struct HttpClientBuilder {
     supports_vpnless: bool,
     http2: bool,
     timeout_config: Option<TimeoutConfig>,
+    max_concurrent_requests: Option<usize>,
 }
 
 impl HttpClientBuilder {
@@ -82,7 +84,7 @@ impl HttpClientBuilder {
         let mut builder = Self::https_with_system_roots().await?;
         if supports_vpnless() {
             tracing::debug!("Using vpnless client");
-            let proxy = x2p::find_proxy()?.buck_error_context("Expected unix domain socket or http proxy port for x2p client but did not find either")?;
+            let proxy = x2p::find_proxy()?.ok_or_else(|| internal_error!("Expected unix domain socket or http proxy port for x2p client but did not find either"))?;
             builder.with_x2p_proxy(proxy);
         } else if let Some(cert_path) = find_internal_cert() {
             tracing::debug!("Using internal https client");
@@ -104,6 +106,7 @@ impl HttpClientBuilder {
             supports_vpnless: false,
             http2: true,
             timeout_config: None,
+            max_concurrent_requests: None,
         })
     }
 
@@ -214,6 +217,14 @@ impl HttpClientBuilder {
         self.supports_vpnless
     }
 
+    pub fn with_max_concurrent_requests(
+        &mut self,
+        max_concurrent_requests: Option<usize>,
+    ) -> &mut Self {
+        self.max_concurrent_requests = max_concurrent_requests;
+        self
+    }
+
     fn build_inner(&self) -> Arc<dyn RequestClient> {
         match (self.proxies.as_slice(), &self.timeout_config) {
             // Construct x2p unix socket client.
@@ -222,20 +233,22 @@ impl HttpClientBuilder {
             (proxies @ [_, ..], Some(timeout_config))
                 if let Some(unix_socket) = find_unix_proxy(proxies) =>
             {
-                let timeout_connector =
-                    timeout_config.to_connector(hyper_unix_connector::UnixClient);
-                let proxy_connector =
-                    build_proxy_connector(&[unix_socket.clone()], timeout_connector, None);
-                Arc::new(hyper::Client::builder().build::<_, Body>(proxy_connector))
+                let timeout_connector = timeout_config.to_connector(hyperlocal::UnixConnector);
+                let proxy_connector = build_proxy_connector(
+                    std::slice::from_ref(unix_socket),
+                    timeout_connector,
+                    None,
+                );
+                Arc::new(Client::builder(TokioExecutor::new()).build(proxy_connector))
             }
             #[cfg(unix)]
             (proxies @ [_, ..], None) if let Some(unix_socket) = find_unix_proxy(proxies) => {
                 let proxy_connector = build_proxy_connector(
-                    &[unix_socket.clone()],
-                    hyper_unix_connector::UnixClient,
+                    std::slice::from_ref(unix_socket),
+                    hyperlocal::UnixConnector,
                     None,
                 );
-                Arc::new(hyper::Client::builder().build::<_, Body>(proxy_connector))
+                Arc::new(Client::builder(TokioExecutor::new()).build(proxy_connector))
             }
 
             // Construct x2p http proxy client.
@@ -245,14 +258,14 @@ impl HttpClientBuilder {
                 http_connector.enforce_http(true);
                 let timeout_connector = timeout_config.to_connector(http_connector);
                 let proxy_connector = build_proxy_connector(proxies, timeout_connector, None);
-                Arc::new(hyper::Client::builder().build::<_, Body>(proxy_connector))
+                Arc::new(Client::builder(TokioExecutor::new()).build(proxy_connector))
             }
             (proxies @ [_, ..], None) if self.supports_vpnless => {
                 let mut http_connector = HttpConnector::new();
                 // When talking to local x2pagent proxy, only http is supported.
                 http_connector.enforce_http(true);
                 let proxy_connector = build_proxy_connector(proxies, http_connector, None);
-                Arc::new(hyper::Client::builder().build::<_, Body>(proxy_connector))
+                Arc::new(Client::builder(TokioExecutor::new()).build(proxy_connector))
             }
 
             // Proxied http client with TLS.
@@ -265,24 +278,24 @@ impl HttpClientBuilder {
                     timeout_connector,
                     Some(self.tls_config.clone()),
                 );
-                Arc::new(hyper::Client::builder().build::<_, Body>(proxy_connector))
+                Arc::new(Client::builder(TokioExecutor::new()).build(proxy_connector))
             }
             (proxies @ [_, ..], None) => {
                 let https_connector = build_https_connector(self.tls_config.clone(), self.http2);
                 let proxy_connector =
                     build_proxy_connector(proxies, https_connector, Some(self.tls_config.clone()));
-                Arc::new(hyper::Client::builder().build::<_, Body>(proxy_connector))
+                Arc::new(Client::builder(TokioExecutor::new()).build(proxy_connector))
             }
 
             // Client with TLS only.
             ([], Some(timeout_config)) => {
                 let https_connector = build_https_connector(self.tls_config.clone(), self.http2);
                 let timeout_connector = timeout_config.to_connector(https_connector);
-                Arc::new(hyper::Client::builder().build::<_, Body>(timeout_connector))
+                Arc::new(Client::builder(TokioExecutor::new()).build(timeout_connector))
             }
             ([], None) => {
                 let https_connector = build_https_connector(self.tls_config.clone(), self.http2);
-                Arc::new(hyper::Client::builder().build::<_, Body>(https_connector))
+                Arc::new(Client::builder(TokioExecutor::new()).build(https_connector))
             }
         }
     }
@@ -294,6 +307,9 @@ impl HttpClientBuilder {
             supports_vpnless: self.supports_vpnless,
             http2: self.http2,
             stats: HttpNetworkStats::new(),
+            concurrent_requests_budget: self
+                .max_concurrent_requests
+                .map(|v| Arc::new(Semaphore::new(v))),
         }
     }
 }
@@ -322,8 +338,8 @@ fn build_proxy_connector<C>(
     tls_config: Option<ClientConfig>,
 ) -> ProxyConnector<C>
 where
-    C: Service<Uri> + Send,
-    C::Response: AsyncRead + AsyncWrite + Send + Unpin,
+    C: TowerService<Uri> + Send,
+    C::Response: hyper::rt::Read + hyper::rt::Write + Send + Unpin,
     C::Future: Send + 'static,
     C::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
@@ -352,12 +368,13 @@ fn find_unix_proxy(proxies: &[Proxy]) -> Option<&Proxy> {
 
 #[cfg(test)]
 mod tests {
-    use hyper_proxy::Intercept;
+    use hyper_http_proxy::Intercept;
 
     use super::*;
 
     #[tokio::test]
     async fn test_default_builder() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let builder = HttpClientBuilder::https_with_system_roots().await?;
 
         assert_eq!(None, builder.max_redirects);
@@ -368,6 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_supports_vpnless_set_true() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let mut builder = HttpClientBuilder::https_with_system_roots().await?;
         builder.with_supports_vpnless();
 
@@ -377,6 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_http2_option() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let mut builder = HttpClientBuilder::https_with_system_roots().await?;
         assert!(builder.http2);
         builder.with_http2(false);
@@ -387,6 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_max_redirects_overrides_default() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let mut builder = HttpClientBuilder::https_with_system_roots().await?;
         builder.with_max_redirects(5);
 
@@ -396,6 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_with_proxy_adds_proxy() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let proxy = Proxy::new(Intercept::All, "http://localhost:12345".try_into()?);
         let mut builder = HttpClientBuilder::https_with_system_roots().await?;
         builder.with_proxy(proxy);
@@ -406,6 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_connect_timeout() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let mut builder = HttpClientBuilder::https_with_system_roots().await?;
         builder.with_connect_timeout(Some(Duration::from_millis(1000)));
 
@@ -423,11 +445,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_connect_and_read_timeouts() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let mut builder = HttpClientBuilder::https_with_system_roots().await?;
         builder
             .with_connect_timeout(Some(Duration::from_millis(1000)))
             .with_read_timeout(Some(Duration::from_millis(2000)));
-
         assert_eq!(
             Some(TimeoutConfig {
                 connect_timeout: Some(Duration::from_millis(1000)),

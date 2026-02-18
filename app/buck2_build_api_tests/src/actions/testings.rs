@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -20,6 +21,7 @@ use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
 use buck2_build_api::artifact_groups::ArtifactGroup;
+use buck2_build_signals::env::WaitingData;
 use buck2_core::category::Category;
 use buck2_core::category::CategoryRef;
 use buck2_execute::execute::request::CommandExecutionOutput;
@@ -39,14 +41,21 @@ use starlark::values::OwnedFrozenValue;
 /// modules
 #[derive(Allocative, Clone, PartialEq)]
 pub(crate) struct SimpleUnregisteredAction {
+    inputs: IndexSet<ArtifactGroup>,
     cmd: Vec<String>,
     category: Category,
     identifier: Option<String>,
 }
 
 impl SimpleUnregisteredAction {
-    pub(crate) fn new(cmd: Vec<String>, category: Category, identifier: Option<String>) -> Self {
+    pub(crate) fn new(
+        inputs: IndexSet<ArtifactGroup>,
+        cmd: Vec<String>,
+        category: Category,
+        identifier: Option<String>,
+    ) -> Self {
         Self {
+            inputs,
             cmd,
             category,
             identifier,
@@ -86,13 +95,12 @@ impl SimpleAction {
 impl UnregisteredAction for SimpleUnregisteredAction {
     fn register(
         self: Box<Self>,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         _starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         Ok(Box::new(SimpleAction {
-            inputs: BoxSliceSet::from(inputs),
+            inputs: BoxSliceSet::from(self.inputs),
             outputs: BoxSliceSet::from(outputs),
             cmd: self.cmd,
             category: self.category,
@@ -119,7 +127,7 @@ impl Action for SimpleAction {
         &self.outputs.as_slice()[0]
     }
 
-    fn category(&self) -> CategoryRef {
+    fn category(&self) -> CategoryRef<'_> {
         self.category.as_ref()
     }
 
@@ -130,6 +138,7 @@ impl Action for SimpleAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
+        _waiting_data: WaitingData,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
         let req = CommandExecutionRequest::new(
             vec![],
@@ -141,16 +150,18 @@ impl Action for SimpleAction {
                     .map(|b| CommandExecutionOutput::BuildArtifact {
                         path: b.get_path().dupe(),
                         output_type: OutputType::File,
+                        supports_incremental_remote: false,
                     })
                     .collect(),
                 ctx.fs(),
                 ctx.digest_config(),
+                None,
             )?,
             sorted_vector_map![],
         );
 
-        let prepared_action = ctx.prepare_action(&req)?;
-        let manager = ctx.command_execution_manager();
+        let prepared_action = ctx.prepare_action(&req, true)?;
+        let manager = ctx.command_execution_manager(WaitingData::new());
         let result = ctx.exec_cmd(manager, &req, &prepared_action).await;
         let (outputs, meta) = ctx.unpack_command_execution_result(
             req.executor_preference,
@@ -158,6 +169,7 @@ impl Action for SimpleAction {
             false,
             false,
             None,
+            buck2_data::IncrementalKind::NonIncremental,
         )?;
 
         Ok((outputs, meta))

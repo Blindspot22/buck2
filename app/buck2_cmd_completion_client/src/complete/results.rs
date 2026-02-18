@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeSet;
@@ -16,8 +17,9 @@ use buck2_common::buildfiles::parse_buildfile_name;
 use buck2_common::invocation_roots::InvocationRoots;
 use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
 use buck2_core::cells::name::CellName;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::file_name::FileNameBuf;
 
 use super::path_sanitizer::SanitizedPath;
 
@@ -55,7 +57,7 @@ impl<'a> CompletionResults<'a> {
         } else if nickname.ends_with('/') {
             self.insert(nickname);
         } else {
-            self.insert(&format!("{}/", nickname));
+            self.insert(&format!("{nickname}/"));
             self.insert_package_colon_if_buildfile_exists(abs_dir, nickname)
                 .await;
         }
@@ -68,8 +70,8 @@ impl<'a> CompletionResults<'a> {
         nickname: &str,
     ) -> &mut Self {
         for f in self.buildfile_names(abs_dir).await.unwrap() {
-            if abs_dir.join(f).exists() {
-                self.insert(&format!("{}:", nickname));
+            if let Ok(true) = fs_util::try_exists(abs_dir.join(f)) {
+                self.insert(&format!("{nickname}:"));
                 break;
             }
         }
@@ -82,7 +84,7 @@ impl<'a> CompletionResults<'a> {
     ) -> buck2_error::Result<&Vec<FileNameBuf>> {
         let relative_to_project = self.roots.project_root.relativize(abs_dir)?;
         let cell_configs = &self.cell_configs;
-        let cell_name = cell_configs.cell_resolver.find(&relative_to_project)?;
+        let cell_name = cell_configs.cell_resolver.find(&relative_to_project);
         if let Entry::Vacant(e) = self.buildfiles.entry(cell_name) {
             let cell_config = cell_configs
                 .parse_single_cell(cell_name, &self.roots.project_root)

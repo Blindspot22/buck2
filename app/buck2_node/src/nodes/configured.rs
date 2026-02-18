@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -390,7 +391,7 @@ impl ConfiguredTargetNode {
     }
 
     /// Return the `tests` declared for this target configured in same target platform as this target.
-    pub fn tests(&self) -> impl Iterator<Item = ConfiguredProvidersLabel> {
+    pub fn tests(&self) -> impl Iterator<Item = ConfiguredProvidersLabel> + use<> {
         #[derive(Default)]
         struct TestCollector {
             labels: Vec<ConfiguredProvidersLabel>,
@@ -667,7 +668,7 @@ impl<'a> ConfiguredTargetNodeRef<'a> {
     fn attr_configuration_context(self) -> AttrConfigurationContextImpl<'a> {
         AttrConfigurationContextImpl::new(
             &self.0.get().resolved_configuration,
-            self.0.get().execution_platform_resolution.cfg(),
+            &self.0.get().execution_platform_resolution,
             &self.0.get().resolved_transition_configurations,
             &self.0.get().platform_cfgs,
         )
@@ -731,7 +732,6 @@ impl<'a> ConfiguredTargetNodeRef<'a> {
                 self.special_attr_or_none(key).unwrap(),
             )
         })
-        .into_iter()
     }
 
     pub fn attrs(

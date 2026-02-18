@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use async_trait::async_trait;
@@ -24,7 +25,6 @@ use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::daemon::client::NoPartialResultHandler;
 use buck2_client_ctx::events_ctx::EventsCtx;
-use buck2_client_ctx::exit_result::ExitCode;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::final_console::FinalConsole;
 use buck2_client_ctx::output_destination_arg::OutputDestinationArg;
@@ -33,11 +33,14 @@ use buck2_client_ctx::stdio::eprint_line;
 use buck2_client_ctx::streaming::StreamingCommand;
 use buck2_client_ctx::subscribers::superconsole::test::TestCounterColumn;
 use buck2_client_ctx::subscribers::superconsole::test::span_from_build_failure_count;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
+use buck2_error::ExitCode;
 use buck2_error::buck2_error;
+use buck2_error::internal_error;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::working_dir::AbsWorkingDir;
 use superconsole::Line;
 use superconsole::Span;
 
@@ -49,6 +52,8 @@ fn forward_output_to_path(
     working_dir: &AbsWorkingDir,
 ) -> buck2_error::Result<()> {
     fs_util::write(path_arg.resolve(working_dir), output)
+        // input path from --test-executor-stderr=FILEPATH
+        .categorize_input()
         .buck_error_context("Failed to write test executor output to path")
 }
 
@@ -61,7 +66,7 @@ fn print_error_counter(
     if counter.count > 0 {
         console.print_error(&format!("{} {}", counter.count, error_type))?;
         for test_name in &counter.example_tests {
-            console.print_error(&format!("  {} {}", symbol, test_name))?;
+            console.print_error(&format!("  {symbol} {test_name}"))?;
         }
         if counter.count > counter.max {
             console.print_error(&format!(
@@ -153,6 +158,24 @@ If include patterns are present, regardless of whether exclude patterns are pres
     #[clap(name = "TEST_EXECUTOR_ARGS", raw = true)]
     test_executor_args: Vec<String>,
 
+    /// Also build DefaultInfo provider, which is what `buck2 build` command builds (this is not the default)
+    #[clap(long, group = "default-info")]
+    build_default_info: bool,
+
+    /// Do not build DefaultInfo provider (this is the default)
+    #[allow(unused)]
+    #[clap(long, group = "default-info")]
+    skip_default_info: bool,
+
+    /// Also build RunInfo provider, which builds artifacts needed for `buck2 run` (this is not the default)
+    #[clap(long, group = "run-info")]
+    build_run_info: bool,
+
+    /// Do not build RunInfo provider (this is the default)
+    #[allow(unused)]
+    #[clap(long, group = "run-info")]
+    skip_run_info: bool,
+
     /// This option does nothing. It is here to keep compatibility with Buck1 and ci
     #[clap(long = "deep", hide = true)]
     _deep: bool,
@@ -209,6 +232,8 @@ impl StreamingCommand for TestCommand {
                     }),
                     timeout: self.timeout_options.overall_timeout()?,
                     ignore_tests_attribute: self.ignore_tests_attribute,
+                    build_default_info: self.build_default_info,
+                    build_run_info: self.build_run_info,
                 },
                 events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
@@ -224,23 +249,31 @@ impl StreamingCommand for TestCommand {
         let listing_failed = statuses
             .listing_failed
             .as_ref()
-            .buck_error_context("Missing `listing_failed`")?;
+            .ok_or_else(|| internal_error!("Missing `listing_failed`"))?;
         let passed = statuses
             .passed
             .as_ref()
-            .buck_error_context("Missing `passed`")?;
+            .ok_or_else(|| internal_error!("Missing `passed`"))?;
         let failed = statuses
             .failed
             .as_ref()
-            .buck_error_context("Missing `failed`")?;
+            .ok_or_else(|| internal_error!("Missing `failed`"))?;
         let fatals = statuses
             .fatals
             .as_ref()
-            .buck_error_context("Missing `fatals`")?;
+            .ok_or_else(|| internal_error!("Missing `fatals`"))?;
         let skipped = statuses
             .skipped
             .as_ref()
-            .buck_error_context("Missing `skipped`")?;
+            .ok_or_else(|| internal_error!("Missing `skipped`"))?;
+        let omitted = statuses
+            .omitted
+            .as_ref()
+            .ok_or_else(|| internal_error!("Missing `omitted`"))?;
+        let infra_failure = statuses
+            .infra_failure
+            .as_ref()
+            .ok_or_else(|| internal_error!("Missing `infra failure`"))?;
 
         let console = self.common_opts.console_opts.final_console();
         print_build_result(&console, &response.errors)?;
@@ -260,6 +293,8 @@ impl StreamingCommand for TestCommand {
             TestCounterColumn::FAIL,
             TestCounterColumn::FATAL,
             TestCounterColumn::SKIP,
+            TestCounterColumn::OMIT,
+            TestCounterColumn::INFRA_FAILURE,
         ];
         for column in columns {
             line.push(column.to_span_from_test_statuses(statuses)?);
@@ -271,7 +306,16 @@ impl StreamingCommand for TestCommand {
         print_error_counter(&console, listing_failed, "LISTINGS FAILED", "⚠")?;
         print_error_counter(&console, failed, "TESTS FAILED", "✗")?;
         print_error_counter(&console, fatals, "TESTS FATALS", "⚠")?;
-        if passed.count + failed.count + fatals.count + skipped.count == 0 {
+        print_error_counter(&console, infra_failure, "TESTS Infra Failed", "🛠")?;
+
+        if passed.count
+            + failed.count
+            + fatals.count
+            + skipped.count
+            + omitted.count
+            + infra_failure.count
+            == 0
+        {
             console.print_warning("NO TESTS RAN")?;
         }
 
@@ -297,7 +341,10 @@ impl StreamingCommand for TestCommand {
         let exit_result = if let Some(exit_code) = response.exit_code {
             // If exit code is set in response, it should be used and not derived from command errors.
             let exit_code = if let Ok(code) = exit_code.try_into() {
-                ExitCode::TestRunner(code)
+                match code {
+                    0 => ExitCode::Success,
+                    _ => ExitCode::TestRunner(code),
+                }
             } else {
                 // The exit code isn't an allowable value, so just switch to generic failure
                 ExitCode::UnknownFailure

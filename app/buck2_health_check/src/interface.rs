@@ -1,11 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
+
+use std::time::SystemTime;
+
+use dupe::Dupe;
 
 use crate::report::Report;
 
@@ -16,6 +21,7 @@ pub enum HealthCheckType {
     SlowDownloadSpeed,
     VpnEnabled,
     StableRevision,
+    SlowBuild,
 }
 
 /// Trait to generalize a buck2 health check.
@@ -27,7 +33,10 @@ pub(crate) trait HealthCheck: Send + Sync {
     /// `None`: Health check cannot run. e.g. not applicable for this command/target
     /// `tag: None and health_issue: None`: Health check ran but nothing to report (all healthy)
     /// `tag: Some/None and health_issue: Some/None`: The issue could either be reported to user on console, logged to scuba or both.
-    fn run_check(&self) -> buck2_error::Result<Option<Report>>;
+    fn run_check(
+        &mut self,
+        snapshot: HealthCheckSnapshotData,
+    ) -> buck2_error::Result<Option<Report>>;
 
     /// Trigger when the health check context updates.
     /// The `run_check` method is executed repeatedly at every snapshot and should be optimized.
@@ -42,7 +51,10 @@ pub(crate) trait HealthCheckService: Sync + Send {
     async fn update_context(&mut self, event: HealthCheckContextEvent) -> buck2_error::Result<()>;
 
     /// Run all registered health checks.
-    async fn run_checks(&mut self) -> buck2_error::Result<Vec<Report>>;
+    async fn run_checks(
+        &mut self,
+        snapshot: HealthCheckSnapshotData,
+    ) -> buck2_error::Result<Vec<Report>>;
 }
 
 /// A subset of the client data that is relevant for health checks.
@@ -52,6 +64,10 @@ pub(crate) struct HealthCheckContext {
     /// Data from the command start.
     /// Example use: Run a check only on a subset of commands.
     pub command_data: Option<buck2_data::command_start::Data>,
+
+    pub trace_id: Option<String>,
+
+    pub command_start_time: Option<SystemTime>,
 
     /// Target patterns.
     /// Example use: Project/target specific checks, target specific configs e.g. warm revision.
@@ -68,18 +84,27 @@ pub(crate) struct HealthCheckContext {
     pub experiment_configurations: Option<buck2_data::SystemInfo>,
 }
 
+/// A subset of the Snapshot data specifically for health check use.
+/// This struct contains timing metrics extracted from buck2_data::Snapshot.
+#[derive(Dupe, Clone)]
+pub struct HealthCheckSnapshotData {
+    /// Timestamp when the snapshot was created
+    pub timestamp: SystemTime,
+}
+
 /// An event from the daemon event subscriber to the health check client.
+#[allow(clippy::large_enum_variant)]
 pub enum HealthCheckEvent {
     HealthCheckContextEvent(HealthCheckContextEvent),
-    // This snapshot can be used to pass a subset of the buck2_data::Snapshot data to health checks.
-    // Presently, unused since the existing health checks do not need this data.
-    Snapshot(),
+    // This snapshot passes a subset of the buck2_data::Snapshot data to health checks.
+    // Contains timing metrics and other relevant data for health check analysis.
+    Snapshot(HealthCheckSnapshotData),
 }
 
 /// An event to trigger update of context in the health check server.
 /// This may result in side effects like precomputing data, etc. in health checks.
 pub enum HealthCheckContextEvent {
-    CommandStart(buck2_data::CommandStart),
+    CommandStart(buck2_data::CommandStartWithTraceId),
     ParsedTargetPatterns(buck2_data::ParsedTargetPatterns),
     BranchedFromRevision(String),
     /// Sent only once and communicates if buck2 is experiencing excess cache misses.

@@ -5,8 +5,6 @@ oncall("android_devxx")
 
 source_listing()
 
-KOTLIN_VERSION = read_config("kotlin", "kotlin_version")
-
 # KSP2 is not available on pre Kotlin 2.0 versions, which are still used by AOSP builds
 NO_OP_FILES = ["Ksp2StepNoOp.kt"]
 
@@ -19,11 +17,11 @@ buck_kotlin_library(
         "prelude//toolchains/android/test/com/facebook/buck/jvm/kotlin/...",
     ],
     deps = [
-        "prelude//toolchains/android/src/com/facebook/buck/core/exceptions:exceptions",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/cd/command/kotlin:language-version",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/core:core",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/java:support",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/cd/analytics:analytics",
+        "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/ksp/incremental:incremental",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/util:util",
         "prelude//toolchains/android/src/com/facebook/buck/step/isolatedsteps/common:common",
         "prelude//toolchains/android/third-party:guava",

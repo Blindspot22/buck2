@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ use remote_execution::TActionResult2;
 
 use crate::digest_config::DigestConfig;
 use crate::execute::action_digest_and_blobs::ActionDigestAndBlobs;
+use crate::execute::dep_file_digest::DepFileDigest;
 use crate::execute::result::CommandExecutionResult;
 use crate::execute::target::CommandExecutionTarget;
 use crate::materialize::materializer::Materializer;
@@ -22,23 +24,32 @@ use crate::materialize::materializer::Materializer;
 pub struct CacheUploadInfo<'a> {
     pub target: &'a dyn CommandExecutionTarget,
     pub digest_config: DigestConfig,
+    pub mergebase: &'a Option<String>,
+    pub re_platform: &'a remote_execution::Platform,
 }
 
 #[async_trait]
 pub trait IntoRemoteDepFile: Send {
-    fn remote_dep_file_action(&self) -> &ActionDigestAndBlobs;
+    fn remote_dep_file_action(
+        &self,
+        digest_config: DigestConfig,
+        mergebase: &Option<String>,
+        re_platform: &remote_execution::Platform,
+    ) -> ActionDigestAndBlobs;
 
     async fn make_remote_dep_file(
         &mut self,
         digest_config: DigestConfig,
         fs: &ArtifactFs,
         materializer: &dyn Materializer,
-    ) -> buck2_error::Result<RemoteDepFile>;
+        result: &CommandExecutionResult,
+    ) -> buck2_error::Result<Option<RemoteDepFile>>;
 }
 
 pub struct CacheUploadResult {
     pub did_cache_upload: bool,
     pub did_dep_file_cache_upload: bool,
+    pub dep_file_cache_upload_key: Option<DepFileDigest>,
 }
 
 // This is for quick testing of cache upload without configuring executors.
@@ -82,6 +93,7 @@ impl UploadCache for NoOpCacheUploader {
         Ok(CacheUploadResult {
             did_cache_upload: false,
             did_dep_file_cache_upload: false,
+            dep_file_cache_upload_key: None,
         })
     }
 }

@@ -30,6 +30,9 @@
 ## rule
 ## rule\_exists
 ## select
+## select\_fail
+# Example
+# Fail with a custom message if the build is configured for iOS but the feature is not supported
 ## select\_map
 ## select\_test
 ## set\_cfg\_constructor
@@ -38,6 +41,7 @@
 ## sha1
 ## sha256
 ## soft\_error
+## test\_config\_unification\_rollout
 ## transition
 ## transitive\_set
 ## warning

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//linking:types.bzl", "Linkage")
 
@@ -13,6 +14,11 @@ MATCH_ALL_LABEL = "MATCH_ALL"
 # Label for special group mapping which makes every target associated with it to be linked directly
 # against the final binary
 NO_MATCH_LABEL = "NO_MATCH"
+
+# Label for special group mapping which causes every target associated with it to be included
+# in any groups that contain any targets with direct dependencies on it.
+# Sample use case: Vendor-supplied shared libraries that are used from multiple link-groups.
+MATCH_DIRECT_DEPS_LABEL = "MATCH_DIRECT_DEPS"
 
 Traversal = enum(
     # Includes the target and all of it's transitive dependencies in the group.
@@ -30,9 +36,11 @@ GroupFilterInfo = provider(
     fields = {
         # What should be dumped in the link-groups-info subtarget.
         "info": provider_field(dict[str, typing.Any]),
-        # A function which is given a target label and list[str] and returns whether
-        # it matches.
-        "matches": provider_field(typing.Callable[[Label, list[str]], bool]),
+        # A function which is given an optional root label, a target label and
+        # a list of its labels returns if the target label matches.
+        "matches": provider_field(typing.Callable[[[Label, None], Label, list[str]], bool]),
+        # If the matching should stop once the filter no longer matches.
+        "stop_at_first_non_match": provider_field(bool, default = False),
     },
 )
 
@@ -58,10 +66,15 @@ GroupAttrs = record(
     # from the build graph.
     discard_group = field(bool, False),
     # Adds additional linker flags used to link the link group shared object.
-    linker_flags = field(list, []),
+    linker_flags = field(list[typing.Any], []),
+    # Passes a linker script to the link group shared library's link command.
+    linker_script = field([Artifact, None], None),
     # Adds additional linker flags to apply to dependents that link against the
     # link group's shared object.
-    exported_linker_flags = field(list, []),
+    exported_linker_flags = field(list[typing.Any], []),
+    # Controls link execution location: "any" (default), "full_hybrid", "local",
+    # "local_only", or "remote".
+    link_execution_preference = field([str, None, typing.Any], None),
     # Wraps the link group shared library with `--no-as-needed/--as-needed`,
     # used for link groups that are required at runtime but not statically referenced.
     # Only applicable to gnu.

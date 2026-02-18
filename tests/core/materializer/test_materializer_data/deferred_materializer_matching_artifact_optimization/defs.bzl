@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _copy_impl(ctx):
     out = ctx.actions.declare_output("action_output")
@@ -30,7 +31,7 @@ def _download(ctx: AnalysisContext):
     sha1 = "1a45666759704bf08fc670aa96118a0415c470fc"
 
     download = ctx.actions.declare_output("download")
-    ctx.actions.download_file(download, url, sha1 = sha1, is_deferrable = True)
+    ctx.actions.download_file(download, url, sha1 = sha1)
 
     return [
         DefaultInfo(default_output = download),

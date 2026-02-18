@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -16,10 +17,10 @@ use std::sync::atomic::Ordering;
 use allocative::Allocative;
 use assert_matches::assert_matches;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use derivative::Derivative;
 use derive_more::Display;
 use dice_error::DiceErrorImpl;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use tokio::sync::oneshot;
@@ -34,7 +35,6 @@ use crate::api::cycles::DetectCycles;
 use crate::api::injected::InjectedKey;
 use crate::api::key::Key;
 use crate::api::user_data::UserComputationData;
-use crate::impls::dice::DiceModern;
 use crate::versions::VersionNumber;
 
 #[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative)]
@@ -84,7 +84,7 @@ impl Key for KeyThatRuns {
 
 #[tokio::test]
 async fn set_injected_multiple_times_per_commit() -> anyhow::Result<()> {
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
 
     {
         let mut ctx = dice.updater();
@@ -111,13 +111,13 @@ async fn set_injected_multiple_times_per_commit() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn set_injected_with_no_change_no_new_ctx() -> anyhow::Result<()> {
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
 
     {
         let mut ctx = dice.updater();
         ctx.changed_to(vec![(Foo(0), 0)])?;
 
-        let ctx = ctx.commit().await;
+        let ctx = ctx.commit().await.0;
 
         assert_eq!(ctx.get_version(), VersionNumber::new(1));
     }
@@ -126,43 +126,11 @@ async fn set_injected_with_no_change_no_new_ctx() -> anyhow::Result<()> {
         let mut ctx = dice.updater();
         ctx.changed_to(vec![(Foo(0), 0)])?;
 
-        let ctx = ctx.commit().await;
+        let ctx = ctx.commit().await.0;
         assert_eq!(ctx.get_version(), VersionNumber::new(1));
     }
 
     Ok(())
-}
-
-#[derive(Clone, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative)]
-#[display("{:?}", self)]
-struct K(i32);
-
-#[async_trait]
-impl Key for K {
-    type Value = Result<K, Arc<anyhow::Error>>;
-
-    async fn compute(
-        &self,
-        ctx: &mut DiceComputations,
-        _cancellations: &CancellationContext,
-    ) -> Self::Value {
-        let mut sum = self.0;
-        for i in 0..self.0 {
-            sum += ctx
-                .compute(&K(i))
-                .await
-                .map_err(|e| Arc::new(anyhow::anyhow!(e)))??
-                .0;
-        }
-        Ok(K(sum))
-    }
-
-    fn equality(x: &Self::Value, y: &Self::Value) -> bool {
-        match (x, y) {
-            (Ok(x), Ok(y)) => x == y,
-            _ => false,
-        }
-    }
 }
 
 #[test]
@@ -204,7 +172,7 @@ fn dice_computations_are_parallel() {
     }
 
     rt.block_on(async move {
-        let dice = DiceModern::builder().build(DetectCycles::Disabled);
+        let dice = Dice::builder().build(DetectCycles::Disabled);
         let mut sum = 0;
 
         let dice = &dice;
@@ -257,7 +225,7 @@ async fn different_data_per_compute_ctx() {
         }
     }
 
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
     let per_cmd_data0 = {
         let mut d = UserComputationData::new();
         d.data.set(U(0));
@@ -306,7 +274,7 @@ fn invalid_update() {
         }
     }
 
-    let dice = DiceModern::new(DiceData::new());
+    let dice = Dice::new(DiceData::new());
     let mut updater = dice.updater();
 
     assert!(updater.changed_to([(Invalid, ())]).is_err());
@@ -407,7 +375,7 @@ impl UserCycleDetectorGuard for CycleDetectorGuard {
 
 #[test]
 fn user_cycle_detector_receives_events() -> anyhow::Result<()> {
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -523,7 +491,7 @@ async fn dropping_request_future_cancels_execution() {
     let (tx, rx) = oneshot::channel();
     let drop_signal = DropSignal(Some(tx));
 
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
 
     let mut ctx = dice.updater().commit().await;
 
@@ -565,9 +533,9 @@ async fn dropping_request_future_doesnt_cancel_if_multiple_requests_active() {
         is_ran: is_ran.dupe(),
     };
 
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
 
-    let mut ctx = dice.updater().commit().await;
+    let mut ctx = dice.updater().commit().await.0.0;
     let (req1, req2) = ctx.compute2(
         |ctx| ctx.compute(key).boxed(),
         |ctx| ctx.compute(key).boxed(),
@@ -587,13 +555,8 @@ async fn dropping_request_future_doesnt_cancel_if_multiple_requests_active() {
 }
 
 #[tokio::test]
-async fn user_cycle_detector_is_present_legacy() -> anyhow::Result<()> {
-    user_cycle_detector_is_present(Dice::builder().build(DetectCycles::Disabled)).await
-}
-
-#[tokio::test]
 async fn user_cycle_detector_is_present_modern() -> anyhow::Result<()> {
-    user_cycle_detector_is_present(Dice::modern().build(DetectCycles::Disabled)).await
+    user_cycle_detector_is_present(Dice::builder().build(DetectCycles::Disabled)).await
 }
 
 async fn user_cycle_detector_is_present(dice: Arc<Dice>) -> anyhow::Result<()> {
@@ -653,7 +616,7 @@ async fn user_cycle_detector_is_present(dice: Arc<Dice>) -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_dice_usable_after_cancellations() {
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
 
     let mut ctx = dice.updater().commit().await;
 
@@ -695,7 +658,7 @@ async fn test_dice_usable_after_cancellations() {
 
 #[tokio::test]
 async fn test_is_idle_respects_active_transactions() {
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
 
     let mut ctx = dice.updater().commit().await;
 

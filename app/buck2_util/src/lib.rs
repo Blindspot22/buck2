@@ -1,19 +1,20 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
+#![feature(decl_macro)]
 #![feature(error_generic_member_access)]
 #![feature(once_cell_try)]
-#![feature(round_char_boundary)]
+#![feature(used_with_arg)]
 
 pub mod arc_str;
-#[cfg(unix)]
-pub mod cgroup_info;
+pub mod async_move_clone;
 pub mod commas;
 pub mod cycle_detector;
 pub mod future;
@@ -34,5 +35,9 @@ pub mod strong_hasher;
 pub mod system_stats;
 pub mod thin_box;
 pub mod threads;
+pub mod time_span;
 pub mod tokio_runtime;
 pub mod truncate;
+
+// Re-export this to encourage people to use it in a fully qualified way.
+pub use async_move_clone::async_move_clone;

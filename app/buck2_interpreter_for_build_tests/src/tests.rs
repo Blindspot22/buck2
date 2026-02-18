@@ -1,17 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 
 use buck2_common::dice::cells::SetCellResolver;
 use buck2_common::dice::data::testing::SetTestingIoProvider;
-use buck2_common::file_ops::HasReadDirCache;
+use buck2_common::file_ops::io::initialize_read_dir_cache;
 use buck2_common::legacy_configs::cells::ExternalBuckconfigData;
 use buck2_common::legacy_configs::dice::SetLegacyConfigs;
 use buck2_core::bzl::ImportPath;
@@ -33,7 +34,6 @@ use buck2_interpreter::starlark_profiler::config::StarlarkProfilerConfiguration;
 use buck2_interpreter_for_build::interpreter::configuror::BuildInterpreterConfiguror;
 use buck2_interpreter_for_build::interpreter::context::SetInterpreterContext;
 use buck2_node::nodes::frontend::TargetGraphCalculation;
-use dashmap::DashMap;
 use dice::DetectCycles;
 use dice::Dice;
 use dice::DiceTransaction;
@@ -48,7 +48,7 @@ pub(crate) async fn calculation(fs: &ProjectRootTemp) -> DiceTransaction {
     let dice = dice.build(DetectCycles::Enabled);
 
     let mut per_transaction_data = UserComputationData::new();
-    per_transaction_data.set_read_dir_cache(DashMap::new());
+    initialize_read_dir_cache(&mut per_transaction_data);
     per_transaction_data.data.set(EventDispatcher::null());
     per_transaction_data.set_starlark_debugger_handle(None);
     let mut ctx = dice.updater_with_data(per_transaction_data);
@@ -73,7 +73,7 @@ pub(crate) async fn calculation(fs: &ProjectRootTemp) -> DiceTransaction {
         .unwrap(),
     )
     .unwrap();
-    ctx.set_legacy_config_external_data(Arc::new(ExternalBuckconfigData::testing_default()))
+    ctx.set_legacy_config_external_data(ExternalBuckconfigData::testing_default())
         .unwrap();
     ctx.set_starlark_profiler_configuration(StarlarkProfilerConfiguration::default())
         .unwrap();

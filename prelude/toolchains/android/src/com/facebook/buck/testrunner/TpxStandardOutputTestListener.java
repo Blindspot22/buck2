@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testrunner;
@@ -51,19 +52,21 @@ public class TpxStandardOutputTestListener {
   /**
    * Registers a test identifier with the listener.
    *
-   * @param test the test identifier to register
+   * @param identifier the test identifier to register
+   * @param startedTime the time the test started, in milliseconds since Unix epoch
    */
-  private void registerTest(String identifier) {
-    testIdentifierStatuses.put(identifier, new TestIdentifierStatus(System.currentTimeMillis()));
+  private void registerTest(String identifier, long startedTime) {
+    testIdentifierStatuses.put(identifier, new TestIdentifierStatus(startedTime));
   }
 
   /**
    * Sends a test start event to the TestResultsOutputSender.
    *
-   * @param test the test identifier to send the start event for
+   * @param identifier the test identifier to send the start event for
+   * @param startedTime the time the test started, in milliseconds since Unix epoch
    */
-  private void sendTestStart(String identifier) {
-    sender.sendTestStart(identifier);
+  private void sendTestStart(String identifier, long startedTime) {
+    sender.sendTestStart(identifier, startedTime);
   }
 
   /**
@@ -72,8 +75,9 @@ public class TpxStandardOutputTestListener {
    * @param test identifies the test
    */
   public void testStarted(String identifier) {
-    registerTest(identifier);
-    sendTestStart(identifier);
+    long startedTime = System.currentTimeMillis();
+    registerTest(identifier, startedTime);
+    sendTestStart(identifier, startedTime);
   }
 
   /**
@@ -122,6 +126,20 @@ public class TpxStandardOutputTestListener {
 
     status.setSkipped(
         "Test ignored, generally because the test method is annotated with org.junit.Ignore");
+  }
+
+  /**
+   * Reports that a test was omitted (e.g., @Ignore annotation). Unlike testIgnored(), this method
+   * handles tests that were filtered out before reaching the listener and creates a complete
+   * start/finish sequence with OMIT status so TPX knows not to retry them.
+   *
+   * @param identifier the test identifier
+   * @param reason the reason the test was omitted
+   */
+  public void testOmitted(String identifier, String reason) {
+    long currentTime = System.currentTimeMillis();
+    sender.sendTestStart(identifier, currentTime);
+    sender.sendTestFinish(identifier, TestStatus.OMIT, currentTime, 0, Optional.of(reason));
   }
 
   /**

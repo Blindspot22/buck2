@@ -1,18 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![cfg(target_os = "linux")]
 
 use std::fs;
 
-use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
+use buck2_error::internal_error;
 
 use crate::os::host_cpu_usage::HostCpuUsage;
 
@@ -24,7 +25,7 @@ pub fn host_cpu_usage() -> buck2_error::Result<HostCpuUsage> {
     let line = contents
         .lines()
         .next()
-        .buck_error_context("Failed to read /proc/stat")?;
+        .ok_or_else(|| internal_error!("Failed to read /proc/stat"))?;
 
     let mut line = line.split_whitespace();
     // Expected values at indices:
@@ -32,10 +33,10 @@ pub fn host_cpu_usage() -> buck2_error::Result<HostCpuUsage> {
     if line.next() == Some("cpu") {
         let user_millis_str = line
             .next()
-            .buck_error_context("Failed to read user CPU usage")?;
+            .ok_or_else(|| internal_error!("Failed to read user CPU usage"))?;
         let system_millis_str = line
             .nth(1)
-            .buck_error_context("Failed to read system CPU usage")?;
+            .ok_or_else(|| internal_error!("Failed to read system CPU usage"))?;
 
         return Ok(HostCpuUsage {
             user_millis: user_millis_str.parse::<u64>()?,

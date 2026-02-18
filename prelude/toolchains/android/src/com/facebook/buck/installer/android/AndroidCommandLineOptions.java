@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.installer.android;
@@ -85,8 +86,6 @@ class AndroidCommandLineOptions {
       usage = "Install .apk on all connected devices and/or emulators (multi-install mode)")
   public boolean multiInstallMode;
 
-  public final int adbTimeout = 60_000;
-
   @Option(
       name = "--tcp-port",
       usage = "TCP port used for connection in case TCP protocol is chosen")
@@ -159,6 +158,23 @@ class AndroidCommandLineOptions {
       aliases = {IGNORE_MISSING_DEVICES_SHORT_ARG},
       usage = "Do not exit with nonzero, even if ADB detects no devices connected.")
   public boolean ignoreMissingDevices = false;
+
+  @Option(
+      name = "--enable-app-links",
+      usage =
+          "Enable app links after installation. If not specified, only enables for allowlisted"
+              + " packages.")
+  @Nullable
+  public Boolean enableAppLinks = null;
+
+  public enum RestartMode {
+    auto,
+    yes,
+    no,
+  }
+
+  @Option(name = "--restart", usage = "Restart the device after installing APEX files.")
+  public RestartMode restartMode = RestartMode.auto;
 
   public AndroidCommandLineOptions() {}
 

@@ -1,17 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::iter;
 use std::marker::PhantomData;
 use std::vec;
 
-use buck2_core::fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileName;
 use either::Either;
 
 use crate::directory::directory_iterator::DirectoryIterator;
@@ -83,7 +84,7 @@ impl<'a, T: WalkType<'a>> DirectoryIterator for Walk<'a, T> {
                     DirectoryEntry::Dir(dir) => {
                         self.stack.push(WalkFrame {
                             name: Some(name),
-                            entries: T::Entries::from(T::directory_entries(dir)),
+                            entries: T::directory_entries(dir),
                             _phantom: PhantomData,
                         });
                         None
@@ -214,5 +215,98 @@ impl<'a, D: DirectoryRef<'a>> WalkType<'a> for OrderedDirectoryWalkType<'a, D> {
         let mut entries = Vec::from_iter(directory.entries());
         entries.sort_by_key(|(name, _)| *name);
         entries.into_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert_matches::assert_matches;
+
+    use crate::directory::directory::Directory;
+    use crate::directory::directory_iterator::DirectoryIterator;
+    use crate::directory::directory_iterator::DirectoryIteratorPathStack;
+    use crate::directory::entry::DirectoryEntry;
+    use crate::directory::test::NopEntry;
+    use crate::directory::test::TestDirectoryBuilder;
+    use crate::directory::test::path;
+    use crate::directory::walk::ordered_entry_walk;
+
+    #[test]
+    fn test_walk() -> buck2_error::Result<()> {
+        let mut b = TestDirectoryBuilder::empty();
+        b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(
+            path("b"),
+            DirectoryEntry::Dir(TestDirectoryBuilder::empty()),
+        )?;
+
+        {
+            let mut it = b.ordered_walk().with_paths();
+
+            assert_matches!(
+                it.next(),
+                Some((p, _)) => assert_eq!(p, path("a"))
+            );
+
+            assert_matches!(
+                it.next(),
+                Some((p, _)) => assert_eq!(p, path("a/b"))
+            );
+
+            assert_matches!(
+                it.next(),
+                Some((p, _)) => assert_eq!(p, path("b"))
+            );
+
+            assert_matches!(it.next(), None);
+        }
+
+        {
+            let it = b.unordered_walk().with_paths();
+            let mut collected = it.collect::<Vec<_>>();
+            collected.sort_by_key(|(name, _)| name.clone());
+            let mut it = collected.into_iter();
+
+            assert_matches!(
+                it.next(),
+                Some((p, _)) => assert_eq!(p, path("a"))
+            );
+
+            assert_matches!(
+                it.next(),
+                Some((p, _)) => assert_eq!(p, path("a/b"))
+            );
+
+            assert_matches!(
+                it.next(),
+                Some((p, _)) => assert_eq!(p, path("b"))
+            );
+
+            assert_matches!(it.next(), None);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_entry_walk() {
+        {
+            let e = DirectoryEntry::<TestDirectoryBuilder, _>::Leaf(NopEntry);
+            let mut it = ordered_entry_walk(e.as_ref().map_dir(|d| d.as_ref()));
+
+            assert_matches!(
+                it.next(),
+                Some((p, _)) => assert_eq!(p.get(), path(""))
+            );
+
+            assert_matches!(it.next(), None);
+        }
+
+        {
+            let e = DirectoryEntry::<_, NopEntry>::Dir(TestDirectoryBuilder::empty());
+            let mut it = ordered_entry_walk(e.as_ref().map_dir(|d| d.as_ref()));
+
+            assert_matches!(it.next(), None);
+        }
     }
 }

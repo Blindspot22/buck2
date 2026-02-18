@@ -1,16 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.build_config;
 
 import com.facebook.buck.android.build_config.BuildConfigFields.Field;
-import com.facebook.buck.core.exceptions.HumanReadableException;
+import com.facebook.infer.annotation.Nullsafe;
 import com.google.common.base.Joiner;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableMap;
@@ -22,11 +23,13 @@ import java.util.Objects;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * List of fields to add to a generated {@code BuildConfig.java} file. Each field knows its Java
  * type, variable name, and value.
  */
+@Nullsafe(Nullsafe.Mode.LOCAL)
 public class BuildConfigFields implements Iterable<Field> {
 
   /** An individual field in a {@link BuildConfigFields}. */
@@ -74,7 +77,7 @@ public class BuildConfigFields implements Iterable<Field> {
     }
 
     @Override
-    public boolean equals(Object obj) {
+    public boolean equals(@Nullable Object obj) {
       if (this == obj) {
         return true;
       }
@@ -107,10 +110,13 @@ public class BuildConfigFields implements Iterable<Field> {
       input -> {
         Matcher matcher = VARIABLE_DEFINITION_PATTERN.matcher(input);
         if (matcher.matches()) {
-          return Field.of(matcher.group("type"), matcher.group("name"), matcher.group("value"));
+          return Field.of(
+              Objects.requireNonNull(matcher.group("type")),
+              Objects.requireNonNull(matcher.group("name")),
+              Objects.requireNonNull(matcher.group("value")));
         } else {
-          throw new HumanReadableException(
-              "Not a valid BuildConfig variable declaration: %s", input);
+          throw new RuntimeException(
+              String.format("Not a valid BuildConfig variable declaration: %s", input));
         }
       };
 
@@ -192,8 +198,8 @@ public class BuildConfigFields implements Iterable<Field> {
         // type is a non-numeric primitive.
         boolean isTrue = "true".equals(field.getValue());
         if (!(isTrue || "false".equals(field.getValue()))) {
-          throw new HumanReadableException(
-              "expected boolean literal but was: %s", field.getValue());
+          throw new RuntimeException(
+              String.format("expected boolean literal but was: %s", field.getValue()));
         }
         String value;
         if (useConstantExpressions) {

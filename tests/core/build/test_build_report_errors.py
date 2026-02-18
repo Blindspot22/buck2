@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -11,15 +12,21 @@
 import json
 import sys
 from pathlib import Path
-from typing import List
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test
-from buck2.tests.e2e_util.helper.golden import golden, sanitize_hashes, sanitize_stderr
+from buck2.tests.e2e_util.helper.golden import (
+    golden,
+    sanitize_build_report,
+    sanitize_hashes,
+    sanitize_python,
+    sanitize_stderr,
+    strip_waiting_on,
+)
 
 
-def build_report_test(name: str, command: List[str]) -> None:
+def build_report_test(name: str, command: list[str]) -> None:
     async def impl(buck: Buck, tmp_path: Path) -> None:
         report = tmp_path / "build-report.json"
         await expect_failure(
@@ -33,30 +40,13 @@ def build_report_test(name: str, command: List[str]) -> None:
         )
         with open(report) as f:
             report = json.loads(f.read())
-        del report["trace_id"]
-        del report["project_root"]
 
-        # string cache keys can vary due to differences in platform hashes within the message,
-        # so do something dumb here to still be able to use golden tests on all platforms:
-        #
-        # 1. sort by sanitized values
-        # 2. create a new dict where the keys are 1 + a large number so that we can
-        #    sanitize it using the message regex above
-        strings = dict(
-            sorted(
-                report["strings"].items(),
-                key=lambda item: sanitize_hashes(item[1]),
-            )
-        )
-        updated_strings = {}
-        start = 10000000000000000
-        for i, v in enumerate(strings.values()):
-            updated_strings[i + start] = v
-
-        report["strings"] = updated_strings
+        sanitize_build_report(report)
 
         golden(
-            output=sanitize_hashes(json.dumps(report, indent=2, sort_keys=True)),
+            output=sanitize_hashes(
+                sanitize_python(json.dumps(report, indent=2, sort_keys=True), buck.cwd)
+            ),
             rel_path="fixtures/" + name + ".golden.json",
         )
         pass
@@ -95,10 +85,7 @@ def running_on_mac() -> bool:
     return sys.platform == "darwin"
 
 
-# TODO(@wendyy) - windows adds some extra characters to stdout/stderr.
-# Python reports compile errors with the full path on mac as well, which
-# breaks golden tests.
-# Fix for both os types later.
+# TODO fix on windows and mac
 if not running_on_windows() and not running_on_mac():
     build_report_test(
         "test_action_fail_with_stdout_stderr",
@@ -120,6 +107,9 @@ if not running_on_windows() and not running_on_mac():
         ["//fail_action:fail_one_with_error_handler_no_op"],
     )
 
+    def sanitize_error_stderr(stderr: str, buck: Buck) -> str:
+        return strip_waiting_on(sanitize_stderr(sanitize_python(stderr, buck.cwd)))
+
     @buck_test()
     async def test_stderr_with_empty_error_diagnostics(buck: Buck) -> None:
         result = await expect_failure(
@@ -127,7 +117,7 @@ if not running_on_windows() and not running_on_mac():
         )
 
         golden(
-            output=sanitize_stderr(result.stderr),
+            output=sanitize_error_stderr(result.stderr, buck),
             rel_path="fixtures/test_stderr_with_empty_error_diagnostics.golden.txt",
         )
 
@@ -138,7 +128,7 @@ if not running_on_windows() and not running_on_mac():
         )
 
         golden(
-            output=sanitize_stderr(result.stderr),
+            output=sanitize_error_stderr(result.stderr, buck),
             rel_path="fixtures/test_stderr_with_error_diagnostics.golden.txt",
         )
 
@@ -147,7 +137,7 @@ if not running_on_windows() and not running_on_mac():
         result = await expect_failure(buck.build("//fail_action:fail_script"))
 
         golden(
-            output=sanitize_stderr(result.stderr),
+            output=sanitize_error_stderr(result.stderr, buck),
             rel_path="fixtures/test_stderr_with_no_error_diagnostics.golden.txt",
         )
 
@@ -156,7 +146,7 @@ if not running_on_windows() and not running_on_mac():
         result = await expect_failure(buck.build("//fail_action:error_handler_failed"))
 
         golden(
-            output=sanitize_stderr(result.stderr),
+            output=sanitize_error_stderr(result.stderr, buck),
             rel_path="fixtures/test_stderr_could_not_produce_error_diagnostics.golden.txt",
         )
 
@@ -168,6 +158,26 @@ if not running_on_windows() and not running_on_mac():
     build_report_test(
         "test_action_fail_error_handler_with_output_local_only",
         ["//fail_action:fail_error_handler_with_output", "--local-only"],
+    )
+
+    build_report_test(
+        "test_action_fail_error_handler_with_output_content_based_path_remote_only",
+        [
+            "//fail_action:fail_error_handler_with_output",
+            "--remote-only",
+            "-c",
+            "test.use_content_based_path=true",
+        ],
+    )
+
+    build_report_test(
+        "test_action_fail_error_handler_with_output_content_based_path_local_only",
+        [
+            "//fail_action:fail_error_handler_with_output",
+            "--local-only",
+            "-c",
+            "test.use_content_based_path=true",
+        ],
     )
 
     build_report_test(
@@ -329,3 +339,64 @@ async def test_missing_report_on_wrong_package(buck: Buck, tmp_path: Path) -> No
     )
     if report.exists():
         raise AssertionError("Expected no report to be written")
+
+
+# TODO fix on windows and mac
+if not running_on_windows() and not running_on_mac():
+
+    @buck_test()
+    async def test_exclude_action_error_diagnostics(buck: Buck, tmp_path: Path) -> None:
+        # Test that --build-report-options=exclude-action-error-diagnostics removes
+        # error_diagnostics from the build report.
+        report = tmp_path / "build-report.json"
+        await expect_failure(
+            buck.build(
+                "--build-report",
+                str(report),
+                "--build-report-options",
+                "fill-out-failures,exclude-action-error-diagnostics",
+                "//fail_action:fail_one_with_error_handler",
+            )
+        )
+        with open(report) as f:
+            report_data = json.loads(f.read())
+
+        sanitize_build_report(report_data)
+
+        golden(
+            output=sanitize_hashes(
+                sanitize_python(
+                    json.dumps(report_data, indent=2, sort_keys=True), buck.cwd
+                )
+            ),
+            rel_path="fixtures/test_exclude_action_error_diagnostics.golden.json",
+        )
+
+    @buck_test()
+    async def test_truncate_error_content(buck: Buck, tmp_path: Path) -> None:
+        # Test that --build-report-options=truncate-error-content truncates
+        # error message content in the build report when errors exceed 20KB.
+        # Uses a target that produces a 25KB+ error message.
+        report = tmp_path / "build-report.json"
+        await expect_failure(
+            buck.build(
+                "--build-report",
+                str(report),
+                "--build-report-options",
+                "fill-out-failures,truncate-error-content",
+                "//fail_action:fail_large_error",
+            )
+        )
+        with open(report) as f:
+            report_data = json.loads(f.read())
+
+        sanitize_build_report(report_data)
+
+        golden(
+            output=sanitize_hashes(
+                sanitize_python(
+                    json.dumps(report_data, indent=2, sort_keys=True), buck.cwd
+                )
+            ),
+            rel_path="fixtures/test_truncate_error_content.golden.json",
+        )

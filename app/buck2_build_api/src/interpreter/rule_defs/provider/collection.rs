@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::convert::Infallible;
@@ -19,7 +20,7 @@ use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::NonDefaultProvidersName;
 use buck2_core::provider::label::ProviderName;
 use buck2_core::provider::label::ProvidersName;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_interpreter::starlark_promise::StarlarkPromise;
 use buck2_interpreter::types::provider::callable::ValueAsProviderCallableLike;
 use display_container::fmt_container;
@@ -75,7 +76,7 @@ fn format_provider_keys_for_error(keys: &[String]) -> String {
     format!(
         "[{}]",
         keys.iter()
-            .map(|k| format!("`{}`", k))
+            .map(|k| format!("`{k}`"))
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -141,7 +142,7 @@ fn empty_provider_collection_value() -> FrozenValueTyped<'static, FrozenProvider
 }
 
 impl<'v> AllocValue<'v> for ProviderCollectionGen<Value<'v>> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         if self.providers.is_empty() {
             // Provider collection is immutable, so it's OK to return frozen value here.
             empty_provider_collection_value().to_value()
@@ -290,7 +291,7 @@ impl<'v, V: ValueLike<'v>> ProviderCollectionGen<V> {
     /// Should only be used for subtargets, where an empty `DefaultInfo` can be inferred.
     pub fn try_from_value_subtarget(
         value: Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> buck2_error::Result<ProviderCollection<'v>> {
         let mut providers = Self::try_from_value_impl(value)?;
 
@@ -360,17 +361,15 @@ impl FrozenProviderCollection {
     }
 }
 
-/// Holds a collection of `UserProvider`s. These can be accessed in Starlark by indexing on
-/// a `ProviderCallable` object.
+/// Holds a set of providers.
 ///
-/// e.g.
+/// Accessed by indexing with a provider type, e.g.
+///
 /// ```ignore
 /// FooInfo = provider(fields=["bar"])
 /// ....
 /// collection.get(FooInfo) # None if absent, a FooInfo instance if present
 /// ```
-///
-/// This is the result of all UDR implementation functions
 #[starlark_module]
 fn provider_collection_methods(builder: &mut MethodsBuilder) {
     fn get<'v>(
@@ -386,15 +385,16 @@ impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ProviderCollectionGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
-    fn at(&self, index: Value<'v>, _heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         match self.get_impl(index, GetOp::At)? {
             Either::Left(v) => Ok(v),
-            Either::Right(provider_id) => Err(starlark::Error::new_other(
-                buck2_error::Error::from(ProviderCollectionError::AtNotFound(
+            Either::Right(provider_id) => Err(buck2_error::Error::from(
+                ProviderCollectionError::AtNotFound(
                     provider_id.name.clone(),
                     self.providers.keys().map(|k| k.name.clone()).collect(),
-                )),
-            )),
+                ),
+            )
+            .into()),
         }
     }
 
@@ -431,9 +431,11 @@ impl<'v> Freeze for ProviderCollection<'v> {
 
 impl FrozenProviderCollection {
     pub fn default_info<'a>(&'a self) -> buck2_error::Result<FrozenRef<'a, FrozenDefaultInfo>> {
-        self.builtin_provider().internal_error(
-            "DefaultInfo should always be set for providers returned from rule function",
-        )
+        self.builtin_provider().ok_or_else(|| {
+            internal_error!(
+                "DefaultInfo should always be set for providers returned from rule function"
+            )
+        })
     }
 
     pub fn contains_provider(&self, provider_id: &ProviderId) -> bool {
@@ -518,14 +520,14 @@ impl FrozenProviderCollectionValue {
 
     pub fn add_heap_ref<'v>(
         &self,
-        heap: &'v FrozenHeap,
+        heap: Heap<'v>,
     ) -> FrozenValueTyped<'v, FrozenProviderCollection> {
         self.as_ref().add_heap_ref(heap)
     }
 
-    pub fn add_heap_ref_static(
+    pub fn add_heap_ref_static<'v>(
         &self,
-        heap: &FrozenHeap,
+        heap: Heap<'v>,
     ) -> FrozenValueTyped<'static, FrozenProviderCollection> {
         unsafe {
             mem::transmute::<
@@ -574,7 +576,7 @@ impl<'f> FrozenProviderCollectionValueRef<'f> {
 
     pub fn add_heap_ref<'v>(
         self,
-        heap: &'v FrozenHeap,
+        heap: Heap<'v>,
     ) -> FrozenValueTyped<'v, FrozenProviderCollection> {
         heap.add_reference(self.heap);
         unsafe {

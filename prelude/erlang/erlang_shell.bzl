@@ -1,49 +1,54 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(":erlang_build.bzl", "erlang_build")
-load(":erlang_dependencies.bzl", "flatten_dependencies")
-load(":erlang_info.bzl", "ErlangAppInfo")
-load(":erlang_toolchain.bzl", "get_primary", "get_primary_tools")
+load(":erlang_dependencies.bzl", "erlang_deps_rule")
+load(":erlang_info.bzl", "ErlangDependencyInfo")
+load(":erlang_toolchain.bzl", "get_toolchain")
 
 def _build_run_info(
         ctx: AnalysisContext,
         *,
-        dependencies: list[Dependency],
-        additional_app_paths: list[Artifact] = [],
-        additional_paths: list[Artifact] = [],
-        additional_args: [cmd_args, None] = None) -> Provider:
+        dep_info: ErlangDependencyInfo,
+        additional_code_path: cmd_args,
+        additional_shell_deps: list[Dependency] = [],
+        additional_args: [cmd_args, None] = None) -> Promise:
     """Builds an Erlang shell with the dependencies and additional code paths available."""
-    primary_toolchain_name = get_primary(ctx)
+    shell_dep_info = ctx.actions.anon_target(erlang_deps_rule, {"deps": additional_shell_deps + ctx.attrs.shell_libs})
 
-    app_paths = [
-        dep[ErlangAppInfo].app_folders[primary_toolchain_name]
-        for dep in dependencies
-        if ErlangAppInfo in dep and not dep[ErlangAppInfo].virtual
-    ]
-    app_paths.extend(additional_app_paths)
+    return shell_dep_info.promise.map(lambda shell_dep_info: _do_build_run_info(
+        ctx,
+        dep_info,
+        additional_code_path,
+        additional_args,
+        shell_dep_info[ErlangDependencyInfo],
+    ))
 
-    all_shell_dependencies = flatten_dependencies(ctx, ctx.attrs.shell_libs)
-    for dep in all_shell_dependencies.values():
-        if dep[ErlangAppInfo].virtual:
-            continue
-        app_paths.append(dep[ErlangAppInfo].app_folders[primary_toolchain_name])
-
-    tools = get_primary_tools(ctx)
-    erl = cmd_args(cmd_args(tools.erl, delimiter = " "), format = "\"${REPO_ROOT}\"/{}")
+def _do_build_run_info(
+        ctx: AnalysisContext,
+        dep_info: ErlangDependencyInfo,
+        additional_code_path: cmd_args,
+        additional_args: [cmd_args, None],
+        shell_dep_info: ErlangDependencyInfo) -> RunInfo:
+    tools = get_toolchain(ctx).otp_binaries
+    if len(tools.erl.inputs) != 0:
+        erl = cmd_args(cmd_args(tools.erl, delimiter = " "), format = "\"${REPO_ROOT}\"/{}")
+    else:
+        erl = cmd_args(cmd_args(tools.erl, delimiter = " "), format = "{}")
     erl_args = cmd_args("exec", erl, delimiter = " \\\n")
 
     # add paths
-    erl_args.add(cmd_args(app_paths, format = "-pa \"${REPO_ROOT}\"/{}/ebin"))
-    erl_args.add(cmd_args(additional_paths, format = "-pa \"${REPO_ROOT}\"/{}"))
+    code_path = cmd_args(dep_info.code_path, additional_code_path, shell_dep_info.code_path, prepend = "-pa", absolute_prefix = "\"${REPO_ROOT}\"/")
+    erl_args.add(code_path)
 
     # add configs
     config_files = _shell_config_files(ctx)
-    erl_args.add(cmd_args(config_files, format = "-config \"${REPO_ROOT}\"/{}"))
+    erl_args.add(cmd_args(config_files, prepend = "-config", absolute_prefix = "\"${REPO_ROOT}\"/"))
 
     # add extra args
     if additional_args:
@@ -57,11 +62,12 @@ def _build_run_info(
         "",
     )
 
-    shell_script = ctx.actions.write(
+    shell_script, _ = ctx.actions.write(
         "start_shell.sh",
         start_shell_content,
         is_executable = True,
         with_inputs = True,
+        allow_args = True,
     )
 
     return RunInfo(shell_script)

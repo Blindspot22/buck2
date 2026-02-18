@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -13,6 +14,7 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 
 use buck2_data::ActionName;
+use buck2_data::SchedulingMode;
 use buck2_data::re_platform::Property;
 use buck2_events::span::SpanId;
 use dupe::Dupe;
@@ -49,7 +51,7 @@ pub struct WhatRanOptionsRegex<'a> {
 impl<'a> WhatRanOptionsRegex<'a> {
     pub fn from_options(options: &'a WhatRanOptions) -> buck2_error::Result<Self> {
         let filter_category_regex = match &options.filter_category {
-            Some(filter_category) => Some(Regex::new(&format!(r"^{}$", filter_category))?),
+            Some(filter_category) => Some(Regex::new(&format!(r"^{filter_category}$"))?),
             None => None,
         };
         Ok(Self {
@@ -99,6 +101,7 @@ pub struct WhatRanOutputCommand<'a> {
     pub extra: Option<WhatRanOutputCommandExtra<'a>>,
     pub std_err: Option<&'a str>,
     pub duration: Option<std::time::Duration>,
+    pub scheduling_mode: Option<SchedulingMode>,
 }
 
 impl WhatRanOutputCommand<'_> {
@@ -156,6 +159,7 @@ pub fn emit_what_ran_entry(
     options: &WhatRanOptionsRegex,
     std_err: Option<&str>,
     duration: Option<std::time::Duration>,
+    scheduling_mode: Option<SchedulingMode>,
 ) -> buck2_error::Result<()> {
     let should_emit = options
         .filter_category_regex
@@ -210,16 +214,18 @@ pub fn emit_what_ran_entry(
         extra,
         std_err,
         duration,
+        scheduling_mode,
     })?;
 
     Ok(())
 }
 
 /// The reproduction details for this command.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum CommandReproducer {
     CacheQuery(buck2_data::CacheQuery),
     CacheHit(buck2_data::CacheHit),
+    LocalDepFileCacheHit,
     ReExecute(buck2_data::ReExecute),
     LocalExecute(buck2_data::LocalExecute),
     WorkerExecute(buck2_data::WorkerExecute),
@@ -239,6 +245,7 @@ impl CommandReproducer {
                     _ => "cache".to_owned(),
                 }
             }
+            Self::LocalDepFileCacheHit => "dep_file".to_owned(),
             Self::ReExecute(execute) => executor_with_platform(execute),
             Self::LocalExecute(..) => "local".to_owned(),
             Self::WorkerExecute(..) => "worker".to_owned(),
@@ -323,6 +330,7 @@ impl fmt::Display for CommandReproducer {
             CommandReproducer::CacheHit(cache_hit) => {
                 write!(formatter, "{}", cache_hit.action_digest)
             }
+            CommandReproducer::LocalDepFileCacheHit => Ok(()),
             CommandReproducer::ReExecute(re_execute) => {
                 write!(formatter, "{}", re_execute.action_digest)
             }
@@ -397,21 +405,29 @@ pub fn worker_command_as_fallback_to_string(command: &buck2_data::WorkerCommand)
 }
 
 pub fn command_to_string<'a>(command: impl Into<Command<'a>>) -> String {
+    // TODO: the `env` command and `shlex` quoting below is POSIX-specific. How can we best support windows?
     let command = command.into();
-    let mut cmd = vec![];
+    let mut cmd = "env --chdir=\"$(buck2 root --kind project)\" --".to_owned();
 
-    if !command.env.is_empty() {
-        cmd.push(Cow::Borrowed("env"));
-        cmd.push(Cow::Borrowed("--"));
-        for entry in command.env.iter() {
-            cmd.push(Cow::Owned(format!("{}={}", entry.key, entry.value)))
-        }
+    for entry in command.env.iter() {
+        cmd.push(' ');
+        cmd.push_str(
+            shlex::try_quote(format!("{}={}", entry.key, entry.value).as_ref())
+                .expect("Null byte unexpected")
+                .as_ref(),
+        );
     }
 
     for arg in command.argv.iter() {
-        cmd.push(Cow::Borrowed(arg));
+        cmd.push(' ');
+        cmd.push_str(
+            shlex::try_quote(arg)
+                .expect("Null byte unexpected")
+                .as_ref(),
+        );
     }
-    shlex::try_join(cmd.iter().map(|e| e.as_ref())).expect("Null byte unexpected")
+
+    cmd
 }
 
 impl WhatRanOutputWriter for SuperConsole {
@@ -449,16 +465,22 @@ impl fmt::Display for WhatRanCommandConsoleFormat<'_> {
 }
 
 fn executor_with_platform(execute: &buck2_data::ReExecute) -> String {
+    let exec = if execute.persistent_worker {
+        "re_worker"
+    } else {
+        "re"
+    };
+
     if let Some(platform) = &execute.platform {
         let platform = platform
             .properties
             .iter()
-            .map(|Property { name, value }| format!("{}={}", name, value))
+            .map(|Property { name, value }| format!("{name}={value}"))
             .collect::<Vec<String>>()
             .join(",");
-        format!("re({})", platform)
+        format!("{exec}({platform})")
     } else {
-        "re".to_owned()
+        exec.to_owned()
     }
 }
 
@@ -487,6 +509,7 @@ mod tests {
             }),
             action_key: None,
             use_case: "".to_owned(),
+            persistent_worker: false,
         };
         let result = executor_with_platform(&execute);
         assert_eq!(

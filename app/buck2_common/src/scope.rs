@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future::Future;
@@ -52,11 +53,13 @@ pub async unsafe fn scope_and_collect_with_dispatcher<'d, 'a, T, R, F>(
         T: Send + 'static,
         F: for<'x> FnOnce(&mut Scope<'a, 'x, T>) -> R,
 {
-    async_scoped::TokioScope::scope_and_collect(|scope| {
-        let mut scope = Scope { scope, dispatcher };
-        f(&mut scope)
-    })
-    .await
+    unsafe {
+        async_scoped::TokioScope::scope_and_collect(|scope| {
+            let mut scope = Scope { scope, dispatcher };
+            f(&mut scope)
+        })
+        .await
+    }
 }
 
 /// Wrap `async_scoped::TokioScope::scope_and_collect` propagating the event dispatcher.
@@ -71,6 +74,8 @@ where
     T: Send + 'static,
     F: for<'x> FnOnce(&'c mut DiceComputations<'d>, &mut Scope<'a, 'x, T>) -> R,
 {
-    let dispatcher = ctx.per_transaction_data().get_dispatcher().dupe();
-    scope_and_collect_with_dispatcher(dispatcher, |scope| f(ctx, scope)).await
+    unsafe {
+        let dispatcher = ctx.per_transaction_data().get_dispatcher().dupe();
+        scope_and_collect_with_dispatcher(dispatcher, |scope| f(ctx, scope)).await
+    }
 }

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Rules for mapping requirements to options
 
@@ -80,6 +81,7 @@ Emit = enum(
 ProfileMode = enum(
     "llvm-time-trace",
     "self-profile",
+    "remarks",
 )
 
 # The different quantities of Rust metadata that can be requested from
@@ -94,17 +96,17 @@ MetadataKind = enum(
 # Emitting this artifact generates code
 def dep_metadata_of_emit(emit: Emit) -> MetadataKind:
     return {
-        Emit("asm"): MetadataKind("link"),
-        Emit("llvm-bc"): MetadataKind("link"),
-        Emit("llvm-ir"): MetadataKind("link"),
-        Emit("llvm-ir-noopt"): MetadataKind("link"),
-        Emit("obj"): MetadataKind("link"),
+        Emit("asm"): MetadataKind("full"),
+        Emit("llvm-bc"): MetadataKind("full"),
+        Emit("llvm-ir"): MetadataKind("full"),
+        Emit("llvm-ir-noopt"): MetadataKind("full"),
+        Emit("obj"): MetadataKind("full"),
         Emit("link"): MetadataKind("link"),
-        Emit("mir"): MetadataKind("link"),
+        Emit("mir"): MetadataKind("full"),
         Emit("metadata-fast"): MetadataKind("fast"),
         Emit("clippy"): MetadataKind("fast"),
-        Emit("dep-info"): MetadataKind("full"),
-        Emit("expand"): MetadataKind("full"),
+        Emit("dep-info"): MetadataKind("fast"),
+        Emit("expand"): MetadataKind("fast"),
         Emit("metadata-full"): MetadataKind("full"),
     }[emit]
 
@@ -126,30 +128,6 @@ RustcFlags = record(
     platform_to_affix = field(typing.Callable),
     link_strategy = field(LinkStrategy | None),
 )
-
-# Filenames used for various emitted forms
-# `None` for a prefix or suffix means use the build_param version
-_EMIT_PREFIX_SUFFIX = {
-    Emit("asm"): ("", ".s"),
-    Emit("llvm-bc"): ("", ".bc"),
-    Emit("llvm-ir"): ("", ".ll"),
-    Emit("llvm-ir-noopt"): ("", ".ll"),
-    Emit("obj"): ("", ".o"),
-    Emit("metadata-fast"): ("lib", ".rmeta"),  # even binaries get called 'libfoo.rmeta'
-    Emit("metadata-full"): (None, None),  # Hollow rlibs, so they get the same name
-    Emit("link"): (None, None),  # crate type and reloc model dependent
-    Emit("dep-info"): ("", ".d"),
-    Emit("mir"): (None, ".mir"),
-    Emit("expand"): (None, ".rs"),
-    Emit("clippy"): ("lib", ".rmeta"),  # Treated like metadata-fast
-}
-
-# Return the filename for a particular emitted artifact type
-def output_filename(cratename: str, emit: Emit, buildparams: BuildParams, extra: [str, None] = None) -> str:
-    epfx, esfx = _EMIT_PREFIX_SUFFIX[emit]
-    prefix = epfx if epfx != None else buildparams.prefix
-    suffix = esfx if esfx != None else buildparams.suffix
-    return prefix + cratename + (extra or "") + suffix
 
 # Rule type - 'binary' also covers 'test'
 RuleType = enum("binary", "library")
@@ -232,7 +210,7 @@ _BUILD_PARAMS = {
         platform_to_affix = _library_prefix_suffix,
         # cdylibs statically link all rust code and export a single C-style dylib
         # for consumption by other languages
-        link_strategy = LinkStrategy("shared"),
+        link_strategy = LinkStrategy("static_pic"),
     ),
     _RUST_DYLIB_SHARED: RustcFlags(
         crate_type = CrateType("dylib"),

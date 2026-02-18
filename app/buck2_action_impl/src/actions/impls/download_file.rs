@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -21,12 +22,14 @@ use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
 use buck2_build_api::artifact_groups::ArtifactGroup;
+use buck2_build_signals::env::WaitingData;
 use buck2_common::cas_digest::RawDigest;
-use buck2_common::file_ops::FileDigest;
-use buck2_common::file_ops::FileMetadata;
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_common::io::trace::TracingIoProvider;
 use buck2_core::category::CategoryRef;
+use buck2_core::fs::buck_out_path::BuildArtifactPath;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
 use buck2_error::conversion::from_any_with_tag;
@@ -36,6 +39,7 @@ use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::http::Checksum;
 use buck2_execute::materialize::http::http_download;
 use buck2_execute::materialize::http::http_head;
+use buck2_execute::materialize::materializer::DeclareArtifactPayload;
 use buck2_execute::materialize::materializer::HttpDownloadInfo;
 use buck2_http::HttpClient;
 use dupe::Dupe;
@@ -47,10 +51,12 @@ use crate::actions::impls::offline;
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
 enum DownloadFileActionError {
-    #[error("download file action should not have inputs, got {0}")]
-    WrongNumberOfInputs(usize),
     #[error("Exactly one output file must be specified for a download file action, got {0}")]
     WrongNumberOfOutputs(usize),
+    #[error(
+        "Downloads using content-based path {0} must supply metadata (usually in the form of a sha1)!"
+    )]
+    ContentBasedPathWithoutMetadata(BuildArtifactPath),
 }
 
 #[derive(Debug, Allocative)]
@@ -60,7 +66,6 @@ pub(crate) struct UnregisteredDownloadFileAction {
     url: Arc<str>,
     vpnless_url: Option<Arc<str>>,
     is_executable: bool,
-    is_deferrable: bool,
 }
 
 impl UnregisteredDownloadFileAction {
@@ -70,7 +75,6 @@ impl UnregisteredDownloadFileAction {
         url: Arc<str>,
         vpnless_url: Option<Arc<str>>,
         is_executable: bool,
-        is_deferrable: bool,
     ) -> Self {
         Self {
             checksum,
@@ -78,7 +82,6 @@ impl UnregisteredDownloadFileAction {
             size_bytes,
             vpnless_url,
             is_executable,
-            is_deferrable,
         }
     }
 }
@@ -86,35 +89,29 @@ impl UnregisteredDownloadFileAction {
 impl UnregisteredAction for UnregisteredDownloadFileAction {
     fn register(
         self: Box<Self>,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         _starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
-        Ok(Box::new(DownloadFileAction::new(inputs, outputs, *self)?))
+        Ok(Box::new(DownloadFileAction::new(outputs, *self)?))
     }
 }
 
 #[derive(Debug, Allocative)]
 struct DownloadFileAction {
-    inputs: Box<[ArtifactGroup]>,
     outputs: Box<[BuildArtifact]>,
     inner: UnregisteredDownloadFileAction,
 }
 
 impl DownloadFileAction {
     fn new(
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         inner: UnregisteredDownloadFileAction,
     ) -> buck2_error::Result<Self> {
-        if !inputs.is_empty() {
-            Err(DownloadFileActionError::WrongNumberOfInputs(inputs.len()).into())
-        } else if outputs.len() != 1 {
+        if outputs.len() != 1 {
             Err(DownloadFileActionError::WrongNumberOfOutputs(outputs.len()).into())
         } else {
             Ok(Self {
-                inputs: inputs.into_iter().collect(),
                 outputs: outputs.into_iter().collect(),
                 inner,
             })
@@ -142,10 +139,6 @@ impl DownloadFileAction {
         client: &HttpClient,
         digest_config: DigestConfig,
     ) -> buck2_error::Result<Option<FileMetadata>> {
-        if !self.inner.is_deferrable {
-            return Ok(None);
-        }
-
         let digest = if digest_config.cas_digest_config().allows_sha1() {
             self.inner
                 .checksum
@@ -169,9 +162,9 @@ impl DownloadFileAction {
             Some(s) => Some(s),
             None => {
                 let url = self.url(client);
-                let head = http_head(client, url).await.map_err(|e| {
-                    buck2_error::Error::from(e).tag([ErrorTag::DownloadFileHeadRequest])
-                })?;
+                let head = http_head(client, url)
+                    .await
+                    .map_err(|e| e.tag([ErrorTag::DownloadFileHeadRequest]))?;
 
                 head.headers()
                     .get(http::header::CONTENT_LENGTH)
@@ -182,7 +175,7 @@ impl DownloadFileAction {
                             .buck_error_context("Header is not valid utf-8")?;
                         let content_length_number =
                             content_length.parse().with_buck_error_context(|| {
-                                format!("Header is not a number: `{}`", content_length)
+                                format!("Header is not a number: `{content_length}`")
                             })?;
                         buck2_error::Ok(content_length_number)
                     })
@@ -217,7 +210,7 @@ impl DownloadFileAction {
         &self,
         ctx: &mut dyn ActionExecutionCtx,
     ) -> buck2_error::Result<(ActionOutputs, ActionExecutionMetadata)> {
-        let outputs = offline::declare_copy_from_offline_cache(ctx, self.output()).await?;
+        let outputs = offline::declare_copy_from_offline_cache(ctx, &[self.output()]).await?;
 
         Ok((
             outputs,
@@ -225,6 +218,7 @@ impl DownloadFileAction {
                 execution_kind: ActionExecutionKind::Simple,
                 timing: ActionExecutionTimingData::default(),
                 input_files_bytes: None,
+                waiting_data: WaitingData::new(),
             },
         ))
     }
@@ -237,7 +231,7 @@ impl Action for DownloadFileAction {
     }
 
     fn inputs(&self) -> buck2_error::Result<Cow<'_, [ArtifactGroup]>> {
-        Ok(Cow::Borrowed(&self.inputs))
+        Ok(Cow::Borrowed(&[]))
     }
 
     fn outputs(&self) -> Cow<'_, [BuildArtifact]> {
@@ -248,7 +242,7 @@ impl Action for DownloadFileAction {
         self.output()
     }
 
-    fn category(&self) -> CategoryRef {
+    fn category(&self) -> CategoryRef<'_> {
         CategoryRef::unchecked_new("download_file")
     }
 
@@ -262,6 +256,7 @@ impl Action for DownloadFileAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
+        waiting_data: WaitingData,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
         // Early return - if this path exists, it's because we're running in a
         // special offline mode where the HEAD request below will likely fail.
@@ -279,7 +274,16 @@ impl Action for DownloadFileAction {
             match self.declared_metadata(&client, ctx.digest_config()).await? {
                 Some(metadata) => {
                     let artifact_fs = ctx.fs();
-                    let rel_path = artifact_fs.resolve_build(self.output().get_path())?;
+                    let value = ArtifactValue::file(metadata.dupe());
+                    let rel_path = artifact_fs.resolve_build(
+                        self.output().get_path(),
+                        if self.output().get_path().is_content_based_path() {
+                            Some(value.content_based_path_hash())
+                        } else {
+                            None
+                        }
+                        .as_ref(),
+                    )?;
 
                     // Fast path: download later via the materializer.
                     ctx.materializer()
@@ -288,21 +292,30 @@ impl Action for DownloadFileAction {
                             HttpDownloadInfo {
                                 url: url.dupe(),
                                 checksum: self.inner.checksum.dupe(),
-                                metadata: metadata.dupe(),
+                                metadata,
                                 owner: ctx.target().owner().dupe(),
                             },
-                            ctx.cancellation_context(),
                         )
                         .await?;
 
-                    (ArtifactValue::file(metadata), ActionExecutionKind::Deferred)
+                    (value, ActionExecutionKind::Deferred)
                 }
                 None => {
+                    if self.output().get_path().is_content_based_path() {
+                        return Err(ExecuteError::Error {
+                            error: DownloadFileActionError::ContentBasedPathWithoutMetadata(
+                                self.output().get_path().dupe(),
+                            )
+                            .into(),
+                        });
+                    }
+
                     ctx.cleanup_outputs().await?;
 
                     let artifact_fs = ctx.fs();
                     let project_fs = artifact_fs.fs();
-                    let rel_path = artifact_fs.resolve_build(self.output().get_path())?;
+
+                    let rel_path = artifact_fs.resolve_build(self.output().get_path(), None)?;
 
                     // Slow path: download now.
                     let digest = http_download(
@@ -321,7 +334,11 @@ impl Action for DownloadFileAction {
                         is_executable: self.inner.is_executable,
                     };
                     ctx.materializer()
-                        .declare_existing(vec![(rel_path, ArtifactValue::file(metadata.dupe()))])
+                        .declare_existing(vec![DeclareArtifactPayload {
+                            path: rel_path,
+                            artifact: ArtifactValue::file(metadata.dupe()),
+                            persist_full_directory_structure: false,
+                        }])
                         .await?;
 
                     (ArtifactValue::file(metadata), ActionExecutionKind::Simple)
@@ -345,6 +362,7 @@ impl Action for DownloadFileAction {
                 execution_kind,
                 timing: ActionExecutionTimingData::default(),
                 input_files_bytes: None,
+                waiting_data,
             },
         ))
     }

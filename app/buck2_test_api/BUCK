@@ -1,4 +1,4 @@
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
 
 oncall("build_infra")
 
@@ -11,14 +11,13 @@ rust_library(
         "fbsource//third-party/rust:assert_matches",
     ],
     deps = [
-        "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:derivative",
         "fbsource//third-party/rust:derive_more",
         "fbsource//third-party/rust:futures",
-        "fbsource//third-party/rust:prost-types",
+        "fbsource//third-party/rust:prost-types-0-13-4",
         "fbsource//third-party/rust:tokio",
-        "fbsource//third-party/rust:tonic",
+        "fbsource//third-party/rust:tonic-0-12-3",
         "fbsource//third-party/rust:tower-layer",
         "fbsource//third-party/rust:tower-service",
         "fbsource//third-party/rust:tracing",
@@ -28,7 +27,9 @@ rust_library(
         "//buck2/app/buck2_downward_api_proto:buck2_downward_api_proto",
         "//buck2/app/buck2_error:buck2_error",
         "//buck2/app/buck2_events:buck2_events",
+        "//buck2/app/buck2_fs:buck2_fs",
         "//buck2/app/buck2_grpc:buck2_grpc",
+        "//buck2/app/buck2_host_sharing_proto:buck2_host_sharing_proto",
         "//buck2/app/buck2_test_proto:buck2_test_proto",
         "//buck2/gazebo/dupe:dupe",
         "//buck2/gazebo/gazebo:gazebo",

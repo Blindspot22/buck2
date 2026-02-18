@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -13,7 +14,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use buck2_action_metadata_proto::REMOTE_DEP_FILE_KEY;
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_core::buck2_env;
 use buck2_core::execution_types::executor_config::RePlatformFields;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
@@ -72,6 +73,7 @@ pub struct CacheUploader {
     platform: RePlatformFields,
     max_bytes: Option<u64>,
     cache_upload_permission_checker: Arc<ActionCacheUploadPermissionChecker>,
+    deduplicate_get_digests_ttl_calls: bool,
 }
 
 impl CacheUploader {
@@ -82,6 +84,7 @@ impl CacheUploader {
         platform: RePlatformFields,
         max_bytes: Option<u64>,
         cache_upload_permission_checker: Arc<ActionCacheUploadPermissionChecker>,
+        deduplicate_get_digests_ttl_calls: bool,
     ) -> CacheUploader {
         CacheUploader {
             artifact_fs,
@@ -90,6 +93,7 @@ impl CacheUploader {
             platform,
             max_bytes,
             cache_upload_permission_checker,
+            deduplicate_get_digests_ttl_calls,
         }
     }
 
@@ -128,7 +132,7 @@ impl CacheUploader {
                         }
                     }
 
-                    if let Err(rejected) = self.check_upload_permission().await? {
+                    if let Err(rejected) = self.check_upload_permission(info).await? {
                         return Ok(rejected);
                     }
 
@@ -177,7 +181,7 @@ impl CacheUploader {
                     Ok(CacheUploadOutcome::Success(result_for_dep_file))
                 }
                 .await
-                .map_err(|e: buck2_error::Error| buck2_error::Error::from(e))
+                .map_err(|e: buck2_error::Error| e)
                 .unwrap_or_else(CacheUploadOutcome::Failed);
 
                 let cache_upload_end_event = buck2_data::CacheUploadEnd {
@@ -206,11 +210,12 @@ impl CacheUploader {
     async fn upload_dep_file(
         &self,
         info: &CacheUploadInfo<'_>,
+        result: &CommandExecutionResult,
         action_result: Option<TActionResult2>,
         dep_file_bundle: &mut dyn IntoRemoteDepFile,
+        remote_dep_file_action: &ActionDigestAndBlobs,
         error_on_cache_upload: bool,
     ) -> buck2_error::Result<CacheUploadOutcome> {
-        let remote_dep_file_action = dep_file_bundle.remote_dep_file_action().clone();
         let remote_dep_file_key = remote_dep_file_action.action.to_string();
         span_async(
             buck2_data::DepFileUploadStart {
@@ -224,7 +229,7 @@ impl CacheUploader {
                         DepFileReActionResultMissingError(remote_dep_file_key.clone()),
                     )?;
 
-                    if let Err(rejected) = self.check_upload_permission().await? {
+                    if let Err(rejected) = self.check_upload_permission(info).await? {
                         return Ok(rejected);
                     }
                     let remote_dep_file = dep_file_bundle
@@ -232,8 +237,13 @@ impl CacheUploader {
                             info.digest_config,
                             &self.artifact_fs,
                             self.materializer.as_ref(),
+                            result,
                         )
-                        .await?;
+                        .await?
+                        .ok_or_else(|| {
+                            DepFileUploadNoDeclaredDepFiles(remote_dep_file_key.clone())
+                        })?;
+
                     let digest = remote_dep_file_action.action;
                     let dep_file_tany = TAny {
                         type_url: REMOTE_DEP_FILE_KEY.to_owned(),
@@ -285,10 +295,13 @@ impl CacheUploader {
         .await
     }
 
-    async fn check_upload_permission(&self) -> buck2_error::Result<Result<(), CacheUploadOutcome>> {
+    async fn check_upload_permission(
+        &self,
+        info: &CacheUploadInfo<'_>,
+    ) -> buck2_error::Result<Result<(), CacheUploadOutcome>> {
         let outcome = if let Err(reason) = self
             .cache_upload_permission_checker
-            .has_permission_to_upload_to_cache(&self.re_client, &self.platform)
+            .has_permission_to_upload_to_cache(&self.re_client, &self.platform, info.digest_config)
             .await?
         {
             Err(CacheUploadOutcome::Rejected(
@@ -377,6 +390,7 @@ impl CacheUploader {
                                 &d.dupe().as_immutable(),
                                 identity,
                                 digest_config,
+                                self.deduplicate_get_digests_ttl_calls,
                             )
                             .await
                             .map(|_| ())
@@ -471,17 +485,14 @@ enum CacheUploadOutcome {
 
 impl CacheUploadOutcome {
     fn uploaded(&self) -> bool {
-        match self {
-            CacheUploadOutcome::Success(_) => true,
-            _ => false,
-        }
+        matches!(self, CacheUploadOutcome::Success(_))
     }
 
     fn error(&self) -> String {
         match self {
             CacheUploadOutcome::Success(_) => String::new(),
-            CacheUploadOutcome::Rejected(reason) => format!("Rejected: {}", reason),
-            CacheUploadOutcome::Failed(e) => format!("{:#}", e),
+            CacheUploadOutcome::Rejected(reason) => format!("Rejected: {reason}"),
+            CacheUploadOutcome::Failed(e) => format!("{e:#}"),
         }
     }
 
@@ -545,6 +556,11 @@ enum CacheUploadRejectionReason {
 #[buck2(tag = Tier0)]
 struct DepFileReActionResultMissingError(String);
 
+#[derive(Debug, buck2_error::Error)]
+#[error("No dep files were declared, nothing to upload for dep file key `{0}`")]
+#[buck2(tag = Input)]
+struct DepFileUploadNoDeclaredDepFiles(String);
+
 #[async_trait]
 impl UploadCache for CacheUploader {
     async fn upload(
@@ -594,23 +610,40 @@ impl UploadCache for CacheUploader {
         let should_upload_dep_file =
             res.was_locally_executed() || res.was_remotely_executed() || res.was_action_cache_hit();
 
-        let did_dep_file_cache_upload = if let Some(dep_file_bundle) = dep_file_bundle
+        let (did_dep_file_cache_upload, dep_file_cache_upload_key) = if let Some(dep_file_bundle) =
+            dep_file_bundle
             && should_upload_dep_file
         {
-            self.upload_dep_file(info, action_result, dep_file_bundle, error_on_cache_upload)
+            let remote_dep_file_action = dep_file_bundle.remote_dep_file_action(
+                info.digest_config,
+                info.mergebase,
+                info.re_platform,
+            );
+            (
+                self.upload_dep_file(
+                    info,
+                    res,
+                    action_result,
+                    dep_file_bundle,
+                    &remote_dep_file_action,
+                    error_on_cache_upload,
+                )
                 .await?
-                .uploaded()
+                .uploaded(),
+                Some(remote_dep_file_action.action.coerce()),
+            )
         } else {
             tracing::info!(
                 "Dep file cache upload for `{}` not attempted",
                 action_digest_and_blobs.action
             );
-            false
+            (false, None)
         };
 
         Ok(CacheUploadResult {
             did_cache_upload,
             did_dep_file_cache_upload,
+            dep_file_cache_upload_key,
         })
     }
 }

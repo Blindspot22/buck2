@@ -2,4 +2,13 @@
 
 # ConfigurationInfo
 ## ConfigurationInfo.constraints
+## ConfigurationInfo.copy
+# Create a copy and modify it without affecting the original
+# Original config_info remains unchanged
+## ConfigurationInfo.get
+# Get constraint value by setting
+## ConfigurationInfo.insert
+# Insert a new constraint value
+## ConfigurationInfo.pop
+# Remove a constraint
 ## ConfigurationInfo.values

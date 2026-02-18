@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(":apple_sdk.bzl", "get_apple_sdk_name")
 load(":apple_target_sdk_version.bzl", "get_min_deployment_version_for_node")
@@ -78,6 +79,7 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "macosx": (10, 2, 0),
     },
     "AddressBookUI": {"iphoneos": (2, 0, 0), "maccatalyst": (14, 0, 0)},
+    "AlarmKit": {"iphoneos": (26, 0, 0)},
     "AppClip": {"iphoneos": (14, 0, 0), "maccatalyst": (14, 0, 0)},
     "AppIntents": {
         "appletvos": (16, 0, 0),
@@ -87,6 +89,7 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "watchos": (9, 0, 0),
     },
     "AppKit": {"maccatalyst": (13, 0, 0), "macosx": (10, 0, 0)},
+    "AppMigrationKit": {"iphoneos": (26, 1, 0)},
     "AppTrackingTransparency": {
         "appletvos": (14, 0, 0),
         "iphoneos": (14, 0, 0),
@@ -238,6 +241,9 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "macosx": (10, 4, 0),
         "watchos": (2, 0, 0),
     },
+    "CoreDisplay": {
+        "macosx": (10, 8, 0),
+    },
     "CoreFoundation": {
         "appletvos": (9, 0, 0),
         "iphoneos": (2, 0, 0),
@@ -379,6 +385,11 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "macosx": (12, 0, 0),
         "watchos": (8, 0, 0),
     },
+    "DeclaredAgeRange": {
+        "iphoneos": (26, 0, 0),
+        "maccatalyst": (26, 0, 0),
+        "macosx": (26, 0, 0),
+    },
     "DeveloperToolsSupport": {
         "appletvos": (14, 0, 0),
         "iphoneos": (14, 0, 0),
@@ -453,6 +464,11 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "maccatalyst": (13, 0, 0),
         "macosx": (10, 0, 0),
         "watchos": (2, 0, 0),
+    },
+    "FoundationModels": {
+        "iphoneos": (26, 0, 0),
+        "maccatalyst": (26, 0, 0),
+        "macosx": (26, 0, 0),
     },
     "GLKit": {
         "appletvos": (9, 0, 0),
@@ -547,6 +563,11 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "macosx": (10, 8, 0),
         "watchos": (2, 0, 0),
     },
+    "ImagePlayground": {
+        "iphoneos": (18, 1, 0),
+        "maccatalyst": (18, 1, 0),
+        "macosx": (15, 1, 0),
+    },
     "InputMethodKit": {"macosx": (10, 5, 0)},
     "InstallerPlugins": {"macosx": (10, 4, 0)},
     "InstantMessage": {"macosx": (10, 4, 0)},
@@ -582,6 +603,12 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "iphoneos": (13, 0, 0),
         "maccatalyst": (13, 0, 0),
         "macosx": (10, 15, 0),
+    },
+    "LiveCommunicationKit": {
+        "iphoneos": (17, 4, 0),
+        "maccatalyst": (17, 4, 0),
+        "visionos": (1, 1, 0),
+        "watchos": (10, 4, 0),
     },
     "LocalAuthentication": {
         "iphoneos": (8, 0, 0),
@@ -936,6 +963,20 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "macosx": (10, 7, 0),
         "watchos": (6, 2, 0),
     },
+    "StoreKitTest": {
+        "appletvos": (14, 0, 0),
+        "iphoneos": (14, 0, 0),
+        "maccatalyst": (14, 0, 0),
+        "macosx": (11, 0, 0),
+        "watchos": (7, 4, 0),
+    },
+    "SwiftData": {
+        "appletvos": (17, 0, 0),
+        "iphoneos": (17, 0, 0),
+        "maccatalyst": (17, 0, 0),
+        "macosx": (14, 0, 0),
+        "watchos": (10, 0, 0),
+    },
     "SwiftUI": {
         "appletvos": (13, 0, 0),
         "iphoneos": (13, 0, 0),
@@ -987,6 +1028,11 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "macosx": (13, 0, 0),
     },
     "Tk": {"macosx": (10, 4, 0)},
+    "Translation": {
+        "iphoneos": (17, 4, 0),
+        "maccatalyst": (26, 0, 0),
+        "macosx": (14, 4, 0),
+    },
     "UIKit": {
         "appletvos": (9, 0, 0),
         "iphoneos": (2, 0, 0),
@@ -1054,10 +1100,14 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
         "maccatalyst": (13, 0, 0),
         "macosx": (10, 2, 0),
     },
+    "WiFiAware": {
+        "iphoneos": (26, 0, 0),
+    },
     "WidgetKit": {
         "iphoneos": (14, 0, 0),
         "maccatalyst": (14, 0, 0),
         "macosx": (11, 0, 0),
+        "watchos": (9, 0, 0),
     },
     "iAd": {"iphoneos": (4, 0, 0), "maccatalyst": (13, 0, 0)},
     "iTunesLibrary": {"maccatalyst": (14, 0, 0), "macosx": (10, 13, 0)},
@@ -1067,7 +1117,7 @@ FRAMEWORK_INTRODUCED_VERSIONS = {
 
 def _parse_version(version: str) -> (int, int, int):
     result = [0, 0, 0]
-    components = [int(x) for x in version.split(".")]
+    components = [int(x) if x != "0" else 0 for x in version.split(".")]
     for i in range(0, len(components)):
         result[i] = components[i]
     return (result[0], result[1], result[2])
@@ -1079,7 +1129,7 @@ def validate_sdk_frameworks(frameworks: list[str]) -> None:
             if framework_name not in FRAMEWORK_INTRODUCED_VERSIONS:
                 fail("Framework {} is missing version information".format(framework_name))
 
-def get_framework_linker_args(ctx: AnalysisContext, framework_names: list[str]) -> list[str]:
+def get_framework_linker_args(ctx: AnalysisContext, framework_names: list[str]) -> cmd_args:
     if not has_apple_toolchain(ctx):
         return _get_unchecked_framework_linker_args(framework_names)
 
@@ -1095,8 +1145,12 @@ def get_framework_linker_args(ctx: AnalysisContext, framework_names: list[str]) 
     if sdk_name.endswith("simulator"):
         sdk_name = sdk_name[:-len("simulator")] + "os"
 
-    args = []
+    weak_frameworks = []
+    strong_frameworks = []
+
+    args = cmd_args()
     for name in framework_names:
+        is_weak = False
         versions = FRAMEWORK_INTRODUCED_VERSIONS.get(name, None)
         if versions:
             introduced = versions.get(sdk_name, None)
@@ -1106,24 +1160,22 @@ def get_framework_linker_args(ctx: AnalysisContext, framework_names: list[str]) 
                 fail(message)
 
             if _version_is_greater_than(introduced, deployment_target):
-                args.append("-weak_framework")
-            else:
-                args.append("-framework")
+                is_weak = True
+
+        if is_weak:
+            weak_frameworks.append(name)
         else:
-            # Assume this is a non-SDK framework
-            args.append("-framework")
+            strong_frameworks.append(name)
 
-        args.append(name)
-
-    return args
-
-def _get_unchecked_framework_linker_args(framework_names: list[str]) -> list[str]:
-    args = []
-    for f in framework_names:
-        args.append("-framework")
-        args.append(f)
+    if strong_frameworks:
+        args.add(cmd_args(strong_frameworks, prepend = "-framework"))
+    if weak_frameworks:
+        args.add(cmd_args(weak_frameworks, prepend = "-weak_framework"))
 
     return args
+
+def _get_unchecked_framework_linker_args(framework_names: list[str]) -> cmd_args:
+    return cmd_args(framework_names, prepend = "-framework")
 
 def _version_is_greater_than(x: (int, int, int), y: (int, int, int)) -> bool:
     return x[0] > y[0] or (x[0] == y[0] and x[1] > y[1]) or (x[0] == y[0] and x[1] == y[1] and x[2] > y[2])

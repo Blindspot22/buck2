@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::iter::zip;
@@ -18,10 +19,16 @@ use buck2_artifact::artifact::artifact_type::ArtifactKind;
 use buck2_artifact::artifact::artifact_type::BaseArtifactKind;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_artifact::artifact::source_artifact::SourceArtifact;
-use buck2_common::dice::file_ops::DiceFileComputations;
-use buck2_common::file_ops::PathMetadata;
-use buck2_common::file_ops::PathMetadataOrRedirection;
+use buck2_common::dice::cells::HasCellResolver;
+use buck2_common::file_ops::dice::DiceFileComputations;
+use buck2_common::file_ops::metadata::RawPathMetadata;
+use buck2_common::file_ops::metadata::RawSymlink;
+use buck2_common::legacy_configs::dice::HasLegacyConfigs;
+use buck2_common::legacy_configs::key::BuckconfigKeyRef;
+use buck2_common::package_listing::dice::DicePackageListingResolver;
+use buck2_core::build_file_path::BuildFilePath;
 use buck2_core::cells::cell_path::CellPath;
+use buck2_core::package::PackageLabel;
 use buck2_directory::directory::directory_data::DirectoryData;
 use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
@@ -34,16 +41,18 @@ use buck2_execute::directory::ActionSharedDirectory;
 use buck2_execute::directory::INTERNER;
 use buck2_execute::directory::extract_artifact_value;
 use buck2_execute::directory::insert_artifact;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::Future;
 use futures::FutureExt;
 use itertools::Itertools;
 use ref_cast::RefCast;
 use smallvec::SmallVec;
+use sorted_vector_map::SortedVectorMap;
 
 use crate::actions::artifact::get_artifact_fs::GetArtifactFs;
 use crate::actions::calculation::ActionCalculation;
@@ -99,7 +108,7 @@ impl ArtifactGroupCalculation for DiceComputations<'_> {
 pub(crate) fn ensure_artifact_group_staged<'a>(
     ctx: &'a mut DiceComputations,
     input: ResolvedArtifactGroup<'a>,
-) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + 'a {
+) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + use<'a> {
     match input {
         ResolvedArtifactGroup::Artifact(artifact) => {
             ensure_artifact_staged(ctx, artifact.clone()).left_future()
@@ -115,7 +124,7 @@ pub(crate) fn ensure_artifact_group_staged<'a>(
 pub(super) fn ensure_base_artifact_staged<'a>(
     dice: &'a mut DiceComputations,
     artifact: BaseArtifactKind,
-) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + 'a {
+) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + use<'a> {
     match artifact {
         BaseArtifactKind::Build(built) => ensure_build_artifact_staged(dice, built).left_future(),
         BaseArtifactKind::Source(source) => {
@@ -128,7 +137,7 @@ pub(super) fn ensure_base_artifact_staged<'a>(
 pub(super) fn ensure_artifact_staged<'a>(
     dice: &'a mut DiceComputations,
     artifact: Artifact,
-) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + 'a {
+) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + use<'a> {
     let ArtifactKind { base, path } = artifact.data();
     match path.is_empty() {
         true => ensure_base_artifact_staged(dice, base.clone()).left_future(),
@@ -142,7 +151,7 @@ pub(super) fn ensure_artifact_staged<'a>(
 fn ensure_build_artifact_staged<'a>(
     dice: &'a mut DiceComputations,
     built: BuildArtifact,
-) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + 'a {
+) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + use<'a> {
     ActionCalculation::build_action(dice, built.key()).map(move |action_outputs| {
         let action_outputs = action_outputs?;
         if let Some(value) = action_outputs.get(built.get_path()) {
@@ -159,12 +168,15 @@ fn ensure_build_artifact_staged<'a>(
 fn ensure_source_artifact_staged<'a>(
     dice: &'a mut DiceComputations,
     source: SourceArtifact,
-) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + 'a {
+) -> impl Future<Output = buck2_error::Result<EnsureArtifactGroupReady>> + use<'a> {
     async move {
         Ok(EnsureArtifactGroupReady::Single(
-            path_artifact_value(dice, Arc::new(source.get_path().to_cell_path()))
-                .await?
-                .into(),
+            path_artifact_value(
+                dice,
+                Arc::new(source.get_path().to_cell_path()),
+                Some(source.get_path().package()),
+            )
+            .await?,
         ))
     }
     .boxed()
@@ -232,7 +244,7 @@ impl EnsureArtifactGroupReady {
     }
 }
 
-static_assertions::assert_eq_size!(EnsureArtifactGroupReady, [usize; 3]);
+static_assertions::assert_eq_size!(EnsureArtifactGroupReady, [usize; 4]);
 
 // This assertion assures we don't unknowingly regress the size of this critical future.
 // TODO(cjhopman): We should be able to wrap this in a convenient assertion macro.
@@ -275,21 +287,20 @@ fn _assert_ensure_artifact_group_future_size() {
 async fn dir_artifact_value(
     ctx: &mut DiceComputations<'_>,
     cell_path: Arc<CellPath>,
-) -> buck2_error::Result<ActionDirectoryEntry<ActionSharedDirectory>> {
-    // We keep running into this performance footgun where a large directory is declared
-    // as a source on a toolchain, and then every BuildKey using that toolchain ends up taking
-    // a DICE edge on PathMetadataKey of every file inside that directory, blowing up Buck2's
-    // memory use. This diff introduces an intermediate DICE key `DirArtifactValueKey` for
-    // getting the artifact value of a source directory. Every BuildKey
-    // using that directory now only depends on one DirArtifactValueKey, and that DirArtifactValueKey
-    // depends on the PathMetadataKey of every member of the directory.
+) -> buck2_error::Result<ArtifactValue> {
+    // We kept running into this performance footgun where a large directory is declared as a source
+    // on a toolchain, and then every `BuildKey` using that toolchain ends up taking a DICE edge on
+    // `PathMetadataKey` of every file inside that directory, blowing up Buck2's memory use.
+    // `DirArtifactValueKey` is an intermediate DICE key to prevent that -  every `BuildKey` using
+    // that directory now only depends on one `DirArtifactValueKey`, and that `DirArtifactValueKey`
+    // depends on the `PathMetadataKey` of every member of the directory.
     #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
     #[display("dir_artifact_value({})", _0)]
     struct DirArtifactValueKey(Arc<CellPath>);
 
     #[async_trait]
     impl Key for DirArtifactValueKey {
-        type Value = buck2_error::Result<ActionSharedDirectory>;
+        type Value = buck2_error::Result<ArtifactValue>;
 
         async fn compute(
             &self,
@@ -300,61 +311,173 @@ async fn dir_artifact_value(
                 .await?
                 .included;
 
-            let entries = ctx
+            let entry_values = ctx
                 .try_compute_join(files.iter(), |ctx, x| {
                     async move {
                         // TODO(scottcao): This current creates a `DirArtifactValueKey` for each subdir of a source directory.
                         // Instead, this should be 1 key for the entire top-level directory since there's almost
                         // no chance of getting cache hit with a sub-directory.
-                        let value =
-                            path_artifact_value(ctx, Arc::new(self.0.as_ref().join(&x.file_name)))
-                                .await?;
+                        let value = path_artifact_value(
+                            ctx,
+                            Arc::new(self.0.as_ref().join(&x.file_name)),
+                            None,
+                        )
+                        .await?;
                         buck2_error::Ok((x.file_name.clone(), value))
                     }
                     .boxed()
                 })
                 .await?;
+
+            enum DepsMerger {
+                None,
+                One(ActionSharedDirectory),
+                Multiple(ActionDirectoryBuilder),
+            }
+
+            let mut entries = SortedVectorMap::new();
+            let mut deps_merger = DepsMerger::None;
+            for (file_name, value) in entry_values {
+                entries.insert(file_name, value.entry().dupe());
+                if let Some(deps) = value.deps() {
+                    deps_merger = match deps_merger {
+                        DepsMerger::None => DepsMerger::One(deps.dupe()),
+                        DepsMerger::One(first_deps) => {
+                            let mut builder = first_deps.into_builder();
+                            builder.merge(deps.dupe().into_builder())?;
+                            DepsMerger::Multiple(builder)
+                        }
+                        DepsMerger::Multiple(mut builder) => {
+                            builder.merge(deps.dupe().into_builder())?;
+                            DepsMerger::Multiple(builder)
+                        }
+                    }
+                }
+            }
             let entries = entries.into_iter().collect();
 
             let digest_config = ctx.global_data().get_digest_config();
             let d: DirectoryData<_, _, _> =
                 DirectoryData::new(entries, digest_config.as_directory_serializer());
-            Ok(INTERNER.intern(d))
+            let d = INTERNER.intern(d);
+
+            let deps = match deps_merger {
+                DepsMerger::None => None,
+                DepsMerger::One(deps) => Some(deps),
+                DepsMerger::Multiple(builder) => Some(
+                    builder
+                        .fingerprint(digest_config.as_directory_serializer())
+                        .shared(&*INTERNER),
+                ),
+            };
+
+            Ok(ArtifactValue::new(ActionDirectoryEntry::Dir(d), deps))
         }
 
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
             match (x, y) {
-                (Ok(x), Ok(y)) => x.fingerprint() == y.fingerprint(),
+                (Ok(x), Ok(y)) => x == y,
                 _ => false,
             }
         }
     }
 
-    let res = ctx.compute(&DirArtifactValueKey(cell_path)).await??;
-    Ok(ActionDirectoryEntry::Dir(res))
+    ctx.compute(&DirArtifactValueKey(cell_path)).await?
 }
 
 #[async_recursion]
 async fn path_artifact_value(
     ctx: &mut DiceComputations<'_>,
     cell_path: Arc<CellPath>,
-) -> buck2_error::Result<ActionDirectoryEntry<ActionSharedDirectory>> {
-    let raw = DiceFileComputations::read_path_metadata(ctx, cell_path.as_ref().as_ref()).await?;
-    match PathMetadataOrRedirection::from(raw) {
-        PathMetadataOrRedirection::PathMetadata(meta) => match meta {
-            PathMetadata::ExternalSymlink(symlink) => Ok(ActionDirectoryEntry::Leaf(
-                ActionDirectoryMember::ExternalSymlink(symlink),
-            )),
-            PathMetadata::File(metadata) => Ok(ActionDirectoryEntry::Leaf(
-                ActionDirectoryMember::File(metadata),
-            )),
-            PathMetadata::Directory => dir_artifact_value(ctx, cell_path).await,
-        },
-        PathMetadataOrRedirection::Redirection(r) => {
+    label: Option<PackageLabel>,
+) -> buck2_error::Result<ArtifactValue> {
+    let raw = match DiceFileComputations::read_path_metadata(ctx, cell_path.as_ref().as_ref()).await
+    {
+        Ok(raw) => Ok(raw),
+        Err(e) => {
+            if let Some(label) = label {
+                if let Ok(listing) = DicePackageListingResolver(ctx)
+                    .resolve_package_listing(label.dupe())
+                    .await
+                {
+                    return Err(e.with_package_context_information(
+                        BuildFilePath::new(label, listing.buildfile().to_owned())
+                            .path()
+                            .path()
+                            .to_string(),
+                    ));
+                }
+            }
+
+            // Suggestion is best effort, don't want it to override the actual error
+            Err(e.without_package_context_information())
+        }
+    }?;
+
+    match raw {
+        RawPathMetadata::Symlink {
+            at: _,
+            to: RawSymlink::External(external_symlink),
+        } => Ok(ArtifactValue::new(
+            ActionDirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(external_symlink)),
+            None,
+        )),
+        RawPathMetadata::File(metadata) => Ok(ArtifactValue::new(
+            ActionDirectoryEntry::Leaf(ActionDirectoryMember::File(metadata)),
+            None,
+        )),
+        RawPathMetadata::Directory => dir_artifact_value(ctx, cell_path).await,
+        RawPathMetadata::Symlink {
+            at,
+            to: RawSymlink::Relative(target, target_rel),
+        } => {
             // TODO (T126181780): This should have a limit on recursion.
-            path_artifact_value(ctx, r).await
+            let target_artifact_value = path_artifact_value(ctx, target.dupe(), label).await?;
+            let root_cell = ctx.get_cell_resolver().await?.root_cell();
+            let use_correct_source_symlink_reading = ctx
+                .parse_legacy_config_property(
+                    root_cell,
+                    BuckconfigKeyRef {
+                        section: "buck2",
+                        property: "use_correct_source_symlink_reading",
+                    },
+                )
+                .await?
+                .unwrap_or(true);
+            // In the case where this is a source artifact like `dir/link/foo`, where the symlink is
+            // actually at `link`, `ArtifactValue` doesn't have a representation for the kind of
+            // thing that'd require, so we read through the symlink instead. We could enhance
+            // `ArtifactValue` to make that possible, but Jakob isn't sure that's a good idea
+            let dont_read_through_symlink = use_correct_source_symlink_reading && at == cell_path;
+            if dont_read_through_symlink {
+                let artifact_fs = ctx.get_artifact_fs().await?;
+                let target_path = artifact_fs.resolve_cell_path((*target).as_ref())?;
+                let mut builder = ActionDirectoryBuilder::empty();
+                insert_artifact(&mut builder, target_path, &target_artifact_value)?;
+                let deps = builder
+                    .fingerprint(
+                        ctx.global_data()
+                            .get_digest_config()
+                            .as_directory_serializer(),
+                    )
+                    .shared(&*INTERNER);
+                Ok(ArtifactValue::new(
+                    ActionDirectoryEntry::Leaf(ActionDirectoryMember::Symlink(target_rel.dupe())),
+                    Some(deps),
+                ))
+            } else {
+                Ok(target_artifact_value)
+            }
         }
     }
+}
+
+#[derive(Debug, buck2_error::Error)]
+#[buck2(tag = Input)]
+enum ProjectedArtifactError {
+    #[error("The path `{0}` does not exist in the artifact `{1}`")]
+    #[buck2(tag = buck2_error::ErrorTag::ProjectMissingPath)]
+    MissingInProjectedArtifact(ForwardRelativePathBuf, BaseArtifactKind),
 }
 
 #[derive(Clone, Dupe, Eq, PartialEq, Hash, Display, Debug, Allocative, RefCast)]
@@ -375,33 +498,40 @@ impl Key for EnsureProjectedArtifactKey {
         if path.is_empty() {
             return Err(internal_error!(
                 "EnsureProjectedArtifactKey with non-empty projected path"
-            )
-            .into());
+            ));
         }
 
         let base_value = ensure_base_artifact_staged(ctx, base.dupe())
             .await?
             .unpack_single()?;
+        let base_content_based_path_hash = base_value.content_based_path_hash();
 
         let artifact_fs = ctx.get_artifact_fs().await?;
         let digest_config = ctx.global_data().get_digest_config();
 
         let base_path = match base {
-            BaseArtifactKind::Build(built) => artifact_fs.resolve_build(built.get_path())?,
+            BaseArtifactKind::Build(built) => {
+                artifact_fs.resolve_build(built.get_path(), Some(&base_content_based_path_hash))?
+            }
             BaseArtifactKind::Source(source) => artifact_fs.resolve_source(source.get_path())?,
         };
 
-        let mut builder = ActionDirectoryBuilder::empty();
-        insert_artifact(&mut builder, base_path.as_ref(), &base_value)?;
+        let projected_path = base_path.join(path);
 
-        let value = extract_artifact_value(&builder, &base_path.join(path), digest_config)
+        let mut builder = ActionDirectoryBuilder::empty();
+        insert_artifact(&mut builder, base_path, &base_value)?;
+
+        let value = extract_artifact_value(&builder, &projected_path, digest_config)
             .with_buck_error_context(|| {
                 format!("The path `{path}` cannot be projected in the artifact `{base}`. Are you calling project() on a symlink?")
             })?
-            .with_buck_error_context(|| {
-                format!("The path `{path}` does not exist in the artifact `{base}`")
-            })
-            .tag(buck2_error::ErrorTag::ProjectMissingPath)?;
+            .ok_or_else(|| {
+                ProjectedArtifactError::MissingInProjectedArtifact(path.to_buf(), base.dupe())
+            })?;
+
+        // Projected artifacts are located in the same directory as the base artifact, so we
+        // need to store the same content based path hash in order to find them in the correct place.
+        let value = value.with_content_based_path_hash(base_content_based_path_hash);
 
         Ok(value)
     }

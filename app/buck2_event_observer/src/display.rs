@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 // TODO(brasselsprouts): move this onto the original core types and convert in events
@@ -26,7 +27,7 @@ use buck2_data::TargetLabel;
 use buck2_data::action_key;
 use buck2_data::span_start_event::Data;
 use buck2_error::BuckErrorContext;
-use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_events::BuckEvent;
 use buck2_test_api::data::TestStatus;
 use buck2_util::commas::commas;
@@ -40,6 +41,7 @@ use superconsole::style::Stylize;
 use termwiz::escape::Action;
 use termwiz::escape::ControlCode;
 
+use crate::action_sub_error_display::ActionSubErrorDisplay;
 use crate::fmt_duration;
 use crate::verbosity::Verbosity;
 use crate::what_ran::command_to_string;
@@ -88,7 +90,7 @@ pub fn display_configured_target_label(
         Ok(if opts.with_configuration {
             format!("{}:{} ({})", package, name, configuration.full_name)
         } else {
-            format!("{}:{}", package, name)
+            format!("{package}:{name}")
         })
     } else {
         Err(ParseEventError::InvalidConfiguredTargetLabel.into())
@@ -116,7 +118,7 @@ pub fn display_anon_target(ctl: &AnonTarget) -> buck2_error::Result<String> {
         hash,
     } = ctl
     {
-        Ok(format!("{}:{}@{}", package, name, hash))
+        Ok(format!("{package}:{name}@{hash}"))
     } else {
         Err(ParseEventError::InvalidAnonTarget.into())
     }
@@ -135,7 +137,7 @@ pub fn display_analysis_target(
             match dynamic
                 .owner
                 .as_ref()
-                .buck_error_context("Missing `owner`")?
+                .ok_or_else(|| internal_error!("Missing `owner`"))?
             {
                 Owner::TargetLabel(target_label) => {
                     display_configured_target_label(target_label, opts)
@@ -152,7 +154,7 @@ pub fn display_bxl_key(ctl: &BxlFunctionKey) -> buck2_error::Result<String> {
         label: Some(BxlFunctionLabel { bxl_path, name }),
     } = ctl
     {
-        Ok(format!("{}:{}", bxl_path, name))
+        Ok(format!("{bxl_path}:{name}"))
     } else {
         Err(ParseEventError::MissingBxlFunctionLabel.into())
     }
@@ -208,19 +210,19 @@ pub fn display_action_identity(
         Some(ActionName {
             category,
             identifier,
-        }) if !identifier.is_empty() => format!(" ({} {})", category, identifier),
-        Some(ActionName { category, .. }) => format!(" ({})", category),
+        }) if !identifier.is_empty() => format!(" ({category} {identifier})"),
+        Some(ActionName { category, .. }) => format!(" ({category})"),
         None => String::new(),
     };
 
-    Ok(format!("{}{}", key_string, action_string))
+    Ok(format!("{key_string}{action_string}"))
 }
 
 /// Formats event payloads for display.
 pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_error::Result<String> {
     let res: buck2_error::Result<_> = try {
         let data = match event.data() {
-            buck2_data::buck_event::Data::SpanStart(ref start) => start.data.as_ref().unwrap(),
+            buck2_data::buck_event::Data::SpanStart(start) => start.data.as_ref().unwrap(),
             _ => Err(buck2_error::Error::from(ParseEventError::UnexpectedEvent))?,
         };
 
@@ -229,7 +231,7 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                 Some(key) => {
                     let string = display_action_key(key, opts)?;
                     let action_descriptor = display_action_name_opt(action.name.as_ref());
-                    Ok(format!("{} -- action ({})", string, action_descriptor))
+                    Ok(format!("{string} -- action ({action_descriptor})"))
                 }
                 None => Err(ParseEventError::MissingActionKey.into()),
             },
@@ -237,28 +239,29 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                 let build = &materialization
                     .artifact
                     .as_ref()
-                    .ok_or(ParseEventError::MissingArtifact)?;
+                    .ok_or_else(|| buck2_error::Error::from(ParseEventError::MissingArtifact))?;
 
                 let key = display_action_key(
-                    build
-                        .key
-                        .as_ref()
-                        .ok_or(ParseEventError::MissingActionKey)?,
+                    build.key.as_ref().ok_or_else(|| {
+                        buck2_error::Error::from(ParseEventError::MissingActionKey)
+                    })?,
                     opts,
                 )?;
                 let path = {
                     if build.path.is_empty() {
-                        Err(ParseEventError::MissingMaterializationPath)
+                        Err(buck2_error::Error::from(
+                            ParseEventError::MissingMaterializationPath,
+                        ))
                     } else {
                         Ok(&build.path)
                     }
                 }?;
-                Ok(format!("{} -- materializing `{}`", key, path))
+                Ok(format!("{key} -- materializing `{path}`"))
             }
             Data::Analysis(analysis) => match &analysis.target {
                 Some(target) => {
                     let target = display_analysis_target(target, opts)?;
-                    Ok(format!("{} -- running analysis", target))
+                    Ok(format!("{target} -- running analysis"))
                 }
                 None => Err(ParseEventError::MissingConfiguredTargetLabel.into()),
             },
@@ -266,7 +269,7 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                 let stage = info
                     .stage
                     .as_ref()
-                    .buck_error_context("analysis stage is missing")?;
+                    .ok_or_else(|| internal_error!("analysis stage is missing"))?;
                 let stage = display_analysis_stage(stage);
                 Ok(stage.into())
             }
@@ -283,9 +286,9 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                 let stage = info
                     .stage
                     .as_ref()
-                    .buck_error_context("executor stage is missing")?;
-                let stage =
-                    display_executor_stage(stage).buck_error_context("unknown executor stage")?;
+                    .ok_or_else(|| internal_error!("executor stage is missing"))?;
+                let stage = display_executor_stage(stage)
+                    .ok_or_else(|| internal_error!("unknown executor stage"))?;
                 Ok(stage.into())
             }
             Data::TestDiscovery(discovery) => Ok(format!(
@@ -294,7 +297,17 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
             )),
             Data::TestStart(start) => match &start.suite {
                 Some(suite) => {
-                    let tests = suite.test_names.join(" ");
+                    let tests = {
+                        if suite.test_names.len() < 100 {
+                            suite.test_names.join(" ")
+                        } else {
+                            format!(
+                                "{}...({} more)",
+                                suite.test_names.first().unwrap(),
+                                suite.test_names.len() - 1
+                            )
+                        }
+                    };
                     Ok(format!("Test {} -- {}", suite.suite_name, tests))
                 }
                 None => Err(ParseEventError::MissingSuiteName.into()),
@@ -319,11 +332,10 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                 } else {
                     "partial"
                 };
-                Ok(format!("dep_files({},{})", detail, location))
+                Ok(format!("dep_files({detail},{location})"))
             }
             Data::SharedTask(buck2_data::SharedTaskStart { owner_trace_id }) => Ok(format!(
-                "Waiting on task from another command: {}",
-                owner_trace_id
+                "Waiting on task from another command: {owner_trace_id}"
             )),
             Data::CacheUpload(_) => Ok("upload (action)".to_owned()),
             Data::DepFileUpload(_) => Ok("upload (dep_file)".to_owned()),
@@ -343,14 +355,18 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
             Data::DiceCleanup(..) => Ok("Cleaning up graph state".to_owned()),
             Data::ExclusiveCommandWait(buck2_data::ExclusiveCommandWaitStart { command_name }) => {
                 if let Some(name) = command_name {
-                    Ok(format!("Waiting for command [{}] to finish", name))
+                    Ok(format!("Waiting for command [{name}] to finish"))
                 } else {
                     Ok("Waiting for dice".to_owned())
                 }
             }
             Data::DeferredPreparationStage(prep) => {
                 use buck2_data::deferred_preparation_stage_start::Stage;
-                match prep.stage.as_ref().buck_error_context("Missing `stage`")? {
+                match prep
+                    .stage
+                    .as_ref()
+                    .ok_or_else(|| internal_error!("Missing `stage`"))?
+                {
                     Stage::MaterializedArtifacts(_) => Ok("local_materialize_inputs".to_owned()),
                 }
             }
@@ -360,7 +376,7 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                 let label = match lambda
                     .owner
                     .as_ref()
-                    .buck_error_context("Missing `owner`")?
+                    .ok_or_else(|| internal_error!("Missing `owner`"))?
                 {
                     Owner::TargetLabel(target_label) => {
                         display_configured_target_label(target_label, opts)
@@ -369,7 +385,7 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                     Owner::AnonTarget(anon_target) => display_anon_target(anon_target),
                 }?;
 
-                Ok(format!("{} -- dynamic analysis", label))
+                Ok(format!("{label} -- dynamic analysis"))
             }
             Data::BxlExecution(execution) => {
                 Ok(format!("Executing BXL script `{}`", execution.name))
@@ -377,7 +393,7 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
             Data::BxlDiceInvocation(..) => Ok("Waiting for graph computations".to_owned()),
             Data::ReUpload(..) => Ok("re_upload".to_owned()),
             Data::ConnectToInstaller(buck2_data::ConnectToInstallerStart { tcp_port }) => {
-                Ok(format!("Connecting to installer on port {}", tcp_port))
+                Ok(format!("Connecting to installer on port {tcp_port}"))
             }
             Data::Fake(fake) => Ok(format!("{} -- speak of the devil", fake.caramba)),
             Data::LocalResources(..) => Ok("Local resources setup".to_owned()),
@@ -440,7 +456,7 @@ pub fn display_file_watcher_end(file_watcher_end: &buck2_data::FileWatcherEnd) -
                 FileWatcherKind::Directory => "Directory",
                 FileWatcherKind::File | FileWatcherKind::Symlink => "File",
             };
-            res.push(format!("{} changed: {}", kind, path));
+            res.push(format!("{kind} changed: {path}"));
         }
         let unprinted_paths =
             // those we have the names of but didn't print
@@ -448,7 +464,7 @@ pub fn display_file_watcher_end(file_watcher_end: &buck2_data::FileWatcherEnd) -
                 // plus those we didn't get the names for
                 (stats.events_processed as usize).saturating_sub(stats.events.len());
         if unprinted_paths > 0 {
-            res.push(format!("{} additional file change events", unprinted_paths));
+            res.push(format!("{unprinted_paths} additional file change events"));
         }
 
         if let Some(fresh_instance) = &stats.fresh_instance_data {
@@ -458,7 +474,7 @@ pub fn display_file_watcher_end(file_watcher_end: &buck2_data::FileWatcherEnd) -
                 "File Watcher"
             };
 
-            let mut msg = format!("{} fresh instance: ", file_watcher);
+            let mut msg = format!("{file_watcher} fresh instance: ");
             let mut comma = commas();
             if fresh_instance.new_mergebase {
                 comma(&mut msg).unwrap();
@@ -564,6 +580,7 @@ pub struct InvalidBuckEvent(pub Arc<BuckEvent>);
 
 pub fn format_test_result(
     test_result: &buck2_data::TestResult,
+    verbosity: Verbosity,
 ) -> buck2_error::Result<Option<Lines>> {
     let buck2_data::TestResult {
         name,
@@ -572,13 +589,15 @@ pub fn format_test_result(
         details,
         ..
     } = test_result;
-    let status = TestStatus::try_from(*status)
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::TestStatusInvalid))?;
+    let status = TestStatus::try_from(*status)?;
 
     // Pass results normally have no details, unless the --print-passing-details is set.
-    // Do not display anything for passing tests unless details are present to avoid
-    // cluttering the UI with unimportant test results.
-    if matches!(&status, TestStatus::PASS | TestStatus::LISTING_SUCCESS) && details.is_empty() {
+    // Do not display anything for passing tests unless verbosity is high or details are present
+    // to avoid cluttering the UI with unimportant test results.
+    if matches!(&status, TestStatus::PASS | TestStatus::LISTING_SUCCESS)
+        && details.is_empty()
+        && !verbosity.print_all_commands()
+    {
         return Ok(None);
     }
 
@@ -588,21 +607,20 @@ pub fn format_test_result(
         TestStatus::OMITTED => Span::new_styled("\u{20E0} Omitted".to_owned().cyan()),
         TestStatus::FATAL => Span::new_styled("⚠ Fatal".to_owned().red()),
         TestStatus::TIMEOUT => Span::new_styled("✉ Timeout".to_owned().cyan()),
+        TestStatus::INFRA_FAILURE => Span::new_styled("🛠 Infra Failure".to_owned().magenta()),
         TestStatus::PASS => Span::new_styled("✓ Pass".to_owned().green()),
         TestStatus::LISTING_SUCCESS => Span::new_styled("✓ Listing success".to_owned().green()),
         TestStatus::UNKNOWN => Span::new_styled("? Unknown".to_owned().cyan()),
         TestStatus::RERUN => Span::new_styled("↻ Rerun".to_owned().cyan()),
         TestStatus::LISTING_FAILED => Span::new_styled("⚠ Listing failed".to_owned().red()),
     }?;
-    let mut base = Line::from_iter([prefix, Span::new_unstyled(format!(": {}", name,))?]);
+    let mut base = Line::from_iter([prefix, Span::new_unstyled(format!(": {name}",))?]);
 
     if let Some(duration) = duration {
-        if let Ok(duration) = Duration::try_from(duration.clone()) {
+        if let Ok(duration) = Duration::try_from(*duration) {
             base.push(Span::new_unstyled(format!(
                 " ({})",
-                // Set time_speed parameter as 1.0 because this is taking the duration of something that was measured somewhere else,
-                // so it doesn't make sense to apply the speed adjustment.
-                fmt_duration::fmt_duration(duration, 1.0)
+                fmt_duration::fmt_duration(duration)
             ))?);
         }
     }
@@ -714,12 +732,12 @@ impl ActionErrorDisplay<'_> {
             } else {
                 append!("{name}:");
                 let contents = strip_trailing_newline(contents);
-                writeln!(s, "{}", contents).unwrap();
+                writeln!(s, "{contents}").unwrap();
             }
         };
 
-        append_stream("Stdout", &command_failed.stdout);
-        append_stream("Stderr", &command_failed.stderr);
+        append_stream("Stdout", &command_failed.cmd_stdout);
+        append_stream("Stderr", &command_failed.cmd_stderr);
 
         if let Some(additional_info) = &command_failed.additional_message {
             if !additional_info.is_empty() {
@@ -734,20 +752,19 @@ impl ActionErrorDisplay<'_> {
                     if !sub_errors.is_empty() {
                         let mut all_sub_errors = String::new();
                         for sub_error in sub_errors {
-                            let mut sub_error_line = String::new();
-
-                            write!(sub_error_line, "[{}]", sub_error.category).unwrap();
-                            if let Some(message) = &sub_error.message {
-                                write!(sub_error_line, " {}", message).unwrap();
+                            // Display errors based on show_in_stderr flag is true
+                            if sub_error.show_in_stderr {
+                                if let Some(display_msg) = sub_error.display() {
+                                    writeln!(all_sub_errors, "- {}", display_msg).unwrap();
+                                }
                             }
-
-                            // TODO(@wendyy) - handle locations later
-                            writeln!(all_sub_errors, "- {}", sub_error_line).unwrap();
                         }
-                        append_stream(
-                            "\nAction sub-errors produced by error handlers",
-                            &all_sub_errors,
-                        );
+                        if !all_sub_errors.is_empty() {
+                            append_stream(
+                                "\nAction sub-errors produced by error handlers",
+                                &all_sub_errors,
+                            );
+                        }
                     }
                 }
                 buck2_data::action_error_diagnostics::Data::HandlerInvocationError(error) => {
@@ -766,7 +783,7 @@ pub fn get_action_error_reason(error: &buck2_data::ActionError) -> buck2_error::
         match error
             .error
             .as_ref()
-            .buck_error_context("Internal error: Missing error in action error")?
+            .ok_or_else(|| internal_error!("Internal error: Missing error in action error"))?
         {
             Error::MissingOutputs(missing_outputs) => {
                 format!("Required outputs are missing: {}", missing_outputs.message)
@@ -812,12 +829,12 @@ fn failure_reason_for_command_execution(
     let command = command_execution
         .details
         .as_ref()
-        .buck_error_context("CommandExecution did not include a `command`")?;
+        .ok_or_else(|| internal_error!("CommandExecution did not include a `command`"))?;
 
     let status = command_execution
         .status
         .as_ref()
-        .buck_error_context("CommandExecution did not include a `status`")?;
+        .ok_or_else(|| internal_error!("CommandExecution did not include a `status`"))?;
 
     let locality = if let Some(command_kind) = command.command_kind.as_ref() {
         use buck2_data::command_execution_kind::Command;
@@ -844,10 +861,10 @@ fn failure_reason_for_command_execution(
                     match self.code {
                         Some(code) => {
                             if (i16::MIN as i32) < code && code < (i16::MAX as i32) {
-                                write!(f, "{}", code)
+                                write!(f, "{code}")
                             } else {
                                 let code = code as u32;
-                                write!(f, "{} ({:#X})", code, code)
+                                write!(f, "{code} ({code:#X})")
                             }
                         }
                         None => write!(f, "<no exit code>"),
@@ -866,14 +883,14 @@ fn failure_reason_for_command_execution(
         Status::Timeout(Timeout { duration }) => {
             let duration = duration
                 .as_ref()
-                .buck_error_context("Timeout did not include a `duration`")?
+                .ok_or_else(|| internal_error!("Timeout did not include a `duration`"))?
                 .try_into_duration()
                 .buck_error_context("Timeout `duration` was invalid")?;
 
             format!("Command timed out after {:.3}s", duration.as_secs_f64(),)
         }
         Status::Error(Error { stage, error }) => {
-            format!("Internal error (stage: {}): {}", stage, error)
+            format!("Internal error (stage: {stage}): {error}")
         }
         Status::Cancelled(Cancelled {}) => "Command was cancelled".to_owned(),
     })
@@ -892,8 +909,8 @@ pub fn success_stderr(
             &command
                 .details
                 .as_ref()
-                .buck_error_context("CommandExecution did not include a `command`")?
-                .stderr
+                .ok_or_else(|| internal_error!("CommandExecution did not include a `command`"))?
+                .cmd_stderr
         }
         None => return Ok(None),
     };
@@ -919,6 +936,135 @@ pub fn sanitize_output_colors(stderr: &[u8]) -> String {
         _ => {}
     });
     sanitized
+}
+
+/// Display information extracted from a CriticalPathEntry2.
+pub struct CriticalPathEntryDisplay<'a> {
+    /// The kind of critical path entry (e.g., "action", "analysis", "materialization").
+    pub kind: &'a str,
+    /// The name/label of the entry (e.g., target label, package name).
+    pub name: String,
+    /// Optional category (e.g., for actions).
+    pub category: Option<&'a str>,
+    /// Optional identifier (e.g., action identifier, file path for materializations).
+    pub identifier: Option<&'a str>,
+    /// Optional execution kind for actions (e.g., "local", "remote").
+    pub execution_kind: Option<&'static str>,
+}
+
+impl<'a> CriticalPathEntryDisplay<'a> {
+    /// Extracts display information from a CriticalPathEntry2.
+    pub fn from_entry(
+        entry: &'a buck2_data::CriticalPathEntry2,
+        opts: TargetDisplayOptions,
+    ) -> buck2_error::Result<Option<Self>> {
+        use buck2_data::critical_path_entry2::Entry;
+
+        let entry_data = match &entry.entry {
+            Some(entry) => entry,
+            None => return Ok(None),
+        };
+
+        let (kind, name, category, identifier, execution_kind) = match entry_data {
+            Entry::Analysis(analysis) => {
+                use buck2_data::critical_path_entry2::analysis::Target;
+
+                let name = match &analysis.target {
+                    Some(Target::StandardTarget(t)) => display_configured_target_label(t, opts)?,
+                    None => "unknown".to_owned(),
+                };
+                ("analysis", name, None, None, None)
+            }
+            Entry::DynamicAnalysis(analysis) => {
+                use buck2_data::critical_path_entry2::dynamic_analysis::Target;
+
+                let name = match &analysis.target {
+                    Some(Target::StandardTarget(t)) => display_configured_target_label(t, opts)?,
+                    None => "anon-unknown".to_owned(),
+                };
+                ("dynamic_analysis", name, None, None, None)
+            }
+            Entry::ActionExecution(action_execution) => {
+                use buck2_data::critical_path_entry2::action_execution::Owner;
+
+                let category = action_execution.name.as_ref().map(|n| n.category.as_str());
+                let identifier = action_execution
+                    .name
+                    .as_ref()
+                    .map(|n| n.identifier.as_str());
+
+                let execution_kind = Some(
+                    buck2_data::ActionExecutionKind::try_from(action_execution.execution_kind)
+                        .unwrap_or(buck2_data::ActionExecutionKind::NotSet)
+                        .as_str_name(),
+                );
+
+                let name = match &action_execution.owner {
+                    Some(Owner::TargetLabel(t)) => display_configured_target_label(t, opts)?,
+                    Some(Owner::BxlKey(t)) => display_bxl_key(t)?,
+                    Some(Owner::AnonTarget(t)) => display_anon_target(t)?,
+                    None => "unknown".to_owned(),
+                };
+                ("action", name, category, identifier, execution_kind)
+            }
+            Entry::FinalMaterialization(materialization) => {
+                use buck2_data::critical_path_entry2::final_materialization::Owner;
+
+                let identifier = Some(materialization.path.as_str());
+
+                let name = match &materialization.owner {
+                    Some(Owner::TargetLabel(t)) => display_configured_target_label(t, opts)?,
+                    Some(Owner::BxlKey(t)) => display_bxl_key(t)?,
+                    Some(Owner::AnonTarget(t)) => display_anon_target(t)?,
+                    None => "unknown".to_owned(),
+                };
+                ("materialization", name, None, identifier, None)
+            }
+            Entry::ComputeCriticalPath(..) => {
+                ("compute-critical-path", String::new(), None, None, None)
+            }
+            Entry::Load(load) => ("load", load.package.clone(), None, None, None),
+            Entry::Listing(listing) => ("listing", listing.package.clone(), None, None, None),
+            Entry::GenericEntry(generic_entry) => {
+                (generic_entry.kind.as_str(), String::new(), None, None, None)
+            }
+            Entry::Waiting(entry) => {
+                let name = entry.category.clone().unwrap_or_default();
+                ("waiting", name, None, None, None)
+            }
+            Entry::TestExecution(test_execution) => {
+                let name = match &test_execution.target_label {
+                    Some(t) => display_configured_target_label(t, opts)?,
+                    None => "unknown".to_owned(),
+                };
+                ("test-execution", name, None, None, None)
+            }
+            Entry::TestListing(test_listing) => {
+                let name = match &test_listing.target_label {
+                    Some(t) => display_configured_target_label(t, opts)?,
+                    None => "unknown".to_owned(),
+                };
+                ("test-listing", name, None, None, None)
+            }
+        };
+
+        Ok(Some(CriticalPathEntryDisplay {
+            kind,
+            name,
+            category,
+            identifier,
+            execution_kind,
+        }))
+    }
+
+    /// Returns a formatted display name combining kind and name.
+    pub fn display_name(&self) -> String {
+        if self.name.is_empty() {
+            self.kind.to_owned()
+        } else {
+            format!("{}: {}", self.kind, self.name)
+        }
+    }
 }
 
 #[cfg(test)]

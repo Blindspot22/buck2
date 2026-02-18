@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Data structure akin to a map, but where the key is a sequence.
@@ -114,7 +115,7 @@ impl<K: 'static + Eq + Hash + Clone, V: 'static> DataTree<K, V> {
         I: Iterator<Item = &'a Q>,
     {
         let mut entries = match self {
-            Self::Tree(ref t) => t,
+            Self::Tree(t) => t,
             Self::Data(..) => {
                 return Err(buck2_error!(
                     buck2_error::ErrorTag::Tier0,
@@ -130,7 +131,7 @@ impl<K: 'static + Eq + Hash + Clone, V: 'static> DataTree<K, V> {
             };
 
             entries = match node {
-                Self::Tree(ref t) => t,
+                Self::Tree(t) => t,
                 Self::Data(..) => {
                     return Err(buck2_error!(
                         buck2_error::ErrorTag::Tier0,
@@ -245,8 +246,8 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Stack(ref mut stack, _) => loop {
-                let (_, ref mut last) = stack.last_mut()?;
+            Self::Stack(stack, _) => loop {
+                let (_, last) = stack.last_mut()?;
 
                 match last.next() {
                     Some((k, DataTree::Tree(t))) => {
@@ -285,8 +286,8 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Stack(ref mut stack, _) => loop {
-                let (_, ref mut last) = stack.last_mut()?;
+            Self::Stack(stack, _) => loop {
+                let (_, last) = stack.last_mut()?;
 
                 match last.next() {
                     Some((k, DataTree::Tree(t))) => {
@@ -314,8 +315,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use assert_matches::assert_matches;
-    use buck2_core::fs::paths::file_name::FileNameBuf;
-    use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
+    use buck2_fs::paths::file_name::FileNameBuf;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 
     use super::*;
 

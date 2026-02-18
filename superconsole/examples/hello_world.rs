@@ -1,14 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! A basic example of using components and emitting content.
 
+use std::convert::Infallible;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -29,9 +31,11 @@ struct Foo {
 }
 
 impl Component for Foo {
+    type Error = Infallible;
+
     /// Draws the number of seconds that have elapsed since the component was created.
     /// On a second line, draws the string "Hello world!".
-    fn draw_unchecked(&self, _dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
+    fn draw_unchecked(&self, _dimensions: Dimensions, mode: DrawMode) -> Result<Lines, Infallible> {
         Ok(match mode {
             DrawMode::Final => Lines::new(),
             DrawMode::Normal => {

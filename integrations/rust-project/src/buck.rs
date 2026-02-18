@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ffi::OsStr;
@@ -31,13 +32,13 @@ use tracing::warn;
 use crate::Crate;
 use crate::Dep;
 use crate::cli::Input;
-use crate::json_project::Build;
-use crate::json_project::Edition;
-use crate::json_project::JsonProject;
-use crate::json_project::Runnable;
-use crate::json_project::RunnableKind;
-use crate::json_project::Source;
-use crate::json_project::Sysroot;
+use crate::project_json::Build;
+use crate::project_json::Edition;
+use crate::project_json::ProjectJson;
+use crate::project_json::Runnable;
+use crate::project_json::RunnableKind;
+use crate::project_json::Source;
+use crate::project_json::Sysroot;
 use crate::target::AliasedTargetInfo;
 use crate::target::ExpandedAndResolved;
 use crate::target::Kind;
@@ -47,16 +48,15 @@ use crate::target::TargetInfo;
 
 const CLIENT_METADATA_RUST_PROJECT: &str = "--client-metadata=id=rust-project";
 
-pub(crate) fn to_json_project(
+pub(crate) fn to_project_json(
     sysroot: Sysroot,
     expanded_and_resolved: ExpandedAndResolved,
     aliases: FxHashMap<Target, AliasedTargetInfo>,
     check_cycles: bool,
     include_all_buildfiles: bool,
     extra_cfgs: &[String],
-) -> Result<JsonProject, anyhow::Error> {
-    let mode = select_mode(None);
-    let buck = Buck::new(mode);
+    buck: &Buck,
+) -> Result<ProjectJson, anyhow::Error> {
     let project_root = buck.resolve_project_root()?;
 
     let ExpandedAndResolved {
@@ -141,18 +141,37 @@ pub(crate) fn to_json_project(
             );
         }
 
-        let mut include_dirs = FxHashSet::default();
+        let mut include_dirs = vec![];
         if let Some(out_dir) = info.env.get("OUT_DIR") {
             // to ensure that the `OUT_DIR` is included as part of the `PackageRoot` in rust-analyzer,
             // manually insert the parent of the `out_dir` into `include_dirs`.
             if let Some(parent) = Path::new(out_dir).parent() {
-                include_dirs.insert(parent.to_owned());
+                include_dirs.push(parent.to_owned());
             }
         }
 
+        // We want to include all the directories from srcs, because sometimes the source files on
+        // disk aren't in the same layout as buck-out. In this situation, the root_module directory
+        // isn't sufficient to find all files in the module tree.
+        //
+        // You could construct a pathological case using mapped_srcs that means we miss
+        // directories here, but this covers all the cases I've tested.
+        let mut src_dirs: Vec<PathBuf> = info
+            .srcs
+            .iter()
+            .filter_map(|p| p.parent())
+            .map(|p| p.to_owned())
+            .collect();
+        src_dirs.sort();
+        include_dirs.extend(src_dirs.into_iter());
+
+        // We want to include the directory that contains the root module. Typically this file
+        // will be listed the srcs declaration, but it may be a generated file listed in mapped_srcs.
         if let Some(parent) = root_module.parent() {
-            include_dirs.insert(parent.to_owned());
+            include_dirs.push(parent.to_owned());
         }
+
+        include_dirs = remove_duplicates_preserve_order(include_dirs);
 
         let build = if include_all_buildfiles || info.in_workspace {
             let build = Build {
@@ -173,7 +192,7 @@ pub(crate) fn to_json_project(
             is_workspace_member: info.in_workspace,
             source: Some(Source {
                 include_dirs,
-                exclude_dirs: FxHashSet::default(),
+                exclude_dirs: vec![],
             }),
             cfg: info
                 .cfg()
@@ -193,34 +212,22 @@ pub(crate) fn to_json_project(
         check_cycles_in_crate_graph(&crates);
     }
 
-    let jp = JsonProject {
+    let jp = ProjectJson {
         sysroot: Box::new(sysroot),
         crates,
-        runnables: vec![
-            Runnable {
-                program: "buck".to_owned(),
-                args: vec![
-                    "build".to_owned(),
-                    CLIENT_METADATA_RUST_PROJECT.to_owned(),
-                    "{label}".to_owned(),
-                ],
-                cwd: project_root.to_owned(),
-                kind: RunnableKind::Check,
-            },
-            Runnable {
-                program: "buck".to_owned(),
-                args: vec![
-                    "test".to_owned(),
-                    CLIENT_METADATA_RUST_PROJECT.to_owned(),
-                    "{label}".to_owned(),
-                    "--".to_owned(),
-                    "{test_id}".to_owned(),
-                    "--print-passing-details".to_owned(),
-                ],
-                cwd: project_root.to_owned(),
-                kind: RunnableKind::TestOne,
-            },
-        ],
+        runnables: vec![Runnable {
+            program: "buck".to_owned(),
+            args: vec![
+                "test".to_owned(),
+                CLIENT_METADATA_RUST_PROJECT.to_owned(),
+                "{label}".to_owned(),
+                "--".to_owned(),
+                "{test_id}".to_owned(),
+                "--print-passing-details".to_owned(),
+            ],
+            cwd: project_root.to_owned(),
+            kind: RunnableKind::TestOne,
+        }],
         // needed to ignore the generated `rust-project.json` in diffs, but including the actual
         // string will mark this file as generated
         generated: String::from("\x40generated"),
@@ -375,6 +382,8 @@ fn as_deps(
         }
     }
 
+    deps.sort_by_key(|dep| dep.crate_index);
+
     deps
 }
 
@@ -427,12 +436,16 @@ fn merge_unit_test_targets(
 
 #[derive(Debug, Default)]
 pub(crate) struct Buck {
+    command: String,
     mode: Option<String>,
 }
 
 impl Buck {
-    pub(crate) fn new(mode: Option<String>) -> Self {
-        Buck { mode }
+    pub(crate) fn new(command: Option<String>, mode: Option<String>) -> Self {
+        Buck {
+            command: command.unwrap_or_else(|| "buck2".into()),
+            mode,
+        }
     }
 
     /// Invoke `buck2` with the given subcommands.
@@ -446,10 +459,28 @@ impl Buck {
     {
         let mut cmd = self.command_without_config(subcommands);
         cmd.args([
-            "-c=client.id=rust-project",
-            "-c=xplat.available_platforms=CXX,FBCODE",
+            CLIENT_METADATA_RUST_PROJECT,
             "-c=rust.rust_project_build=true",
+            // Buck owner() queries stop at the innermost BUCK file unless
+            // package_boundary_exceptions is set.
+            //
+            // This is arguably a bug in buck, because it's possible for a parent BUCK
+            // file to own a file in a subdirectory that has its own BUCK file.
+            //
+            // Buck probably didn't intend to allow this pattern: it doesn't work when you
+            // use `srcs = glob()`, but it does work for srcs with explicit paths.
+            //
+            // The intent of package_boundary_exceptions (added to buck2 in D34073360,
+            // rolled out in D4339610) was to enforce boundaries with an explicit opt-out
+            // list.
+            //
+            // However, due to the confusion with srcs, we can end up with owner() not
+            // finding the target even when the package is not opted-out. Instead, opt-out
+            // all packages for this query, so owner() always looks at parent BUCK files
+            // and finds the relevant target.
+            "-c=project.package_boundary_exceptions=.",
         ]);
+
         cmd
     }
 
@@ -462,7 +493,7 @@ impl Buck {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut cmd = Command::new("buck2");
+        let mut cmd = Command::new(&self.command);
 
         // rust-analyzer invokes the check-on-save command with `RUST_BACKTRACE=short`
         // set. Unfortunately, buck2 doesn't handle that well and becomes extremely
@@ -577,15 +608,155 @@ impl Buck {
             "--targets",
         ]);
         command.args(targets);
-        deserialize_file_output(command.output(), &command)
+
+        let mut res: ExpandedAndResolved = deserialize_file_output(command.output(), &command)?;
+
+        res.expanded_targets = res
+            .expanded_targets
+            .into_iter()
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        res.expanded_targets.sort();
+
+        Ok(res)
     }
 
-    #[instrument(skip_all)]
+    /// Given a list of `targets`, find all the aliases in their transitive dependencies, and
+    /// expand all those aliases to the final target.
     pub(crate) fn query_aliased_libraries(
         &self,
         targets: &[Target],
+        universe_targets: &[Target],
+    ) -> anyhow::Result<FxHashMap<Target, AliasedTargetInfo>> {
+        let mut alias_map = self.query_aliased_dependencies(targets, universe_targets)?;
+
+        info!("resolving aliased targets");
+        // Recursively expand aliases until we find a target that isn't an alias, or
+        // we've queried buck 5 times.
+        for _ in 0..5 {
+            let mut alias_destinations = alias_map
+                .values()
+                .map(|info| info.actual.clone())
+                .collect::<FxHashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            alias_destinations.sort();
+
+            let new_aliases =
+                match self.query_aliased_targets(&alias_destinations, &universe_targets) {
+                    Ok(new_aliases) => new_aliases,
+                    Err(_) => {
+                        warn!("buck cquery failed, falling back to best-effort uquery");
+                        self.query_aliased_targets_lossy(&alias_destinations)
+                    }
+                };
+
+            if new_aliases.is_empty() {
+                break;
+            }
+
+            for destination in alias_map.values_mut() {
+                if let Some(new_destination) = new_aliases.get(&destination.actual) {
+                    destination.actual = new_destination.actual.clone();
+                }
+            }
+        }
+
+        Ok(alias_map)
+    }
+
+    /// Work out which items in `sysroot_package` (e.g. `fbsource//xplat/rust/toolchain/sysroot/1.93.0:`) are
+    /// visible to `universe_targets` (e.g. `fbcode//your/wonderful:project`).
+    pub(crate) fn query_sysroot_targets(
+        &self,
+        sysroot_package: &str,
+        universe_targets: &[Target],
+    ) -> Vec<Target> {
+        let mut command = self.command(["cquery"]);
+        if let Some(mode) = &self.mode {
+            command.arg(mode);
+        }
+
+        command.args(["--json", sysroot_package]);
+
+        let universe_arg = universe_targets
+            .iter()
+            .map(|t| format!("{t}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        command.args(["--target-universe", &universe_arg]);
+
+        match deserialize_output::<Vec<Target>>(command.output(), &command) {
+            Ok(targets) => targets,
+            Err(e) => {
+                tracing::warn!("Failed to query sysroot targets: {e:?}");
+                vec![Target::new(sysroot_package)]
+            }
+        }
+    }
+
+    /// Given a list of targets, for all targets that are aliases, return the targets
+    /// that the aliases point to.
+    ///
+    /// Note that the pointed-to targets might themselves be aliases as well.
+    fn query_aliased_targets(
+        &self,
+        targets: &[Target],
+        universe_targets: &[Target],
+    ) -> anyhow::Result<FxHashMap<Target, AliasedTargetInfo>> {
+        let mut command = self.command(["cquery"]);
+
+        if let Some(mode) = &self.mode {
+            command.arg(mode);
+        }
+        command.args(["--output-attribute", "actual", "kind('^alias$', %Ss)"]);
+        command.args(targets);
+
+        let universe_arg = universe_targets
+            .iter()
+            .map(|t| format!("{t}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        command.args(["--target-universe", &universe_arg]);
+
+        deserialize_output(command.output(), &command)
+    }
+
+    fn query_aliased_targets_lossy(
+        &self,
+        targets: &[Target],
+    ) -> FxHashMap<Target, AliasedTargetInfo> {
+        let mut command = self.command(["uquery"]);
+
+        if let Some(mode) = &self.mode {
+            command.arg(mode);
+        }
+        command.args(["--output-attribute", "actual", "kind('^alias$', %Ss)"]);
+        command.args(targets);
+
+        let Ok(output) = command.output() else {
+            warn!("Buck uquery failed");
+            return FxHashMap::default();
+        };
+
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+            warn!("Failed to parse buck uquery output");
+            return FxHashMap::default();
+        };
+        deserialize_uquery_alias_info(v)
+    }
+
+    /// Return a mapping for all the transitive dependencies of `targets` that are aliases.
+    fn query_aliased_dependencies(
+        &self,
+        targets: &[Target],
+        universe_targets: &[Target],
     ) -> Result<FxHashMap<Target, AliasedTargetInfo>, anyhow::Error> {
         // FIXME: Do this in bxl as well instead of manually writing a separate query
+
         let mut command = self.command(["cquery"]);
 
         // Fetch all aliases used by transitive deps. This is so we
@@ -597,10 +768,17 @@ impl Buck {
         if let Some(mode) = &self.mode {
             command.arg(mode);
         }
-        command.args(["--output-all-attributes", "kind('^alias$', deps(%Ss))"]);
+        command.args(["--output-attribute", "actual", "kind('^alias$', deps(%Ss))"]);
         command.args(targets);
 
-        info!("resolving aliased libraries");
+        let universe_arg = universe_targets
+            .iter()
+            .map(|t| format!("{t}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        command.args(["--target-universe", &universe_arg]);
+
+        info!("resolving aliased dependencies");
         let raw: FxHashMap<Target, AliasedTargetInfo> =
             deserialize_output(command.output(), &command)?;
 
@@ -627,11 +805,7 @@ impl Buck {
             "--",
         ]);
 
-        info!(
-            kind = "progress",
-            ?input,
-            "querying buck to determine owning buildfile and its targets"
-        );
+        info!(kind = "progress", ?input, "finding relevant buck targets");
 
         match input {
             Input::Targets(targets) => {
@@ -651,7 +825,12 @@ impl Buck {
         command.arg("--max_extra_targets");
         command.arg(max_extra_targets.to_string());
 
-        let out = deserialize_output(command.output(), &command)?;
+        let out: FxHashMap<PathBuf, Vec<Target>> = deserialize_output(command.output(), &command)?;
+
+        for (k, v) in out.iter() {
+            info!("Found {} with {} targets", k.display(), v.len());
+        }
+
         Ok(out)
     }
 }
@@ -682,9 +861,9 @@ pub(crate) fn utf8_output(
             stderr,
             status,
         }) => Err(cmd_err(command, status, &stderr))
-            .with_context(|| format!("command ended with {}", status)),
+            .with_context(|| format!("command ended with {status}")),
         Err(err) => Err(err)
-            .with_context(|| format!("command `{:?}`", command))
+            .with_context(|| format!("command `{command:?}`"))
             .context("failed to execute command"),
     }
 }
@@ -699,13 +878,35 @@ where
             stderr,
             status,
         }) => {
+            let stderr_str = String::from_utf8_lossy(&stderr);
+
+            for line in stderr_str.lines() {
+                if let Some(pos) = line.find("Buck UI") {
+                    tracing::info!("{}", &line[pos..]);
+                }
+            }
+
+            // If we have a non-zero exit code due to a compiler crash (a rustc
+            // ICE), then we should exit with a non-zero exit code. If the
+            // compiler is crashing, we may not be showing all diagnostics, so
+            // the user should know something is wrong.
+            //
+            // Ignore non-zero exit codes otherwise. It's possible to configure
+            // a build to fail on warnings, such that we get well-formed JSON of
+            // the rustc diagnostics but the exit code is non-zero (D46666035).
+            if !status.success() {
+                if stderr_str.contains("error: the compiler unexpectedly panicked") {
+                    return Err(anyhow::anyhow!("{}", stderr_str));
+                }
+            }
+
             tracing::debug!(?command, "parsing command output");
-            serde_json::from_slice(&stdout)
+            deserialize_json_bytes(&stdout)
                 .with_context(|| cmd_err(command, status, &stderr))
                 .context("failed to deserialize command output")
         }
         Err(err) => Err(err)
-            .with_context(|| format!("command `{:?}`", command))
+            .with_context(|| format!("command `{command:?}`"))
             .context("failed to execute command"),
     }
 }
@@ -724,12 +925,19 @@ where
             status,
         }) => {
             tracing::debug!(?command, "parsing file output");
+
+            for line in String::from_utf8_lossy(&stderr).lines() {
+                if let Some(pos) = line.find("Buck UI") {
+                    tracing::info!("{}", &line[pos..]);
+                }
+            }
+
             serde_json_from_stdout_path(&stdout)
                 .with_context(|| cmd_err(command, status, &stderr))
                 .context("failed to deserialize command output")
         }
         Err(err) => Err(err)
-            .with_context(|| format!("command `{:?}`", command))
+            .with_context(|| format!("command `{command:?}`"))
             .context("failed to execute command"),
     }
 }
@@ -741,8 +949,8 @@ where
     let file_path = std::str::from_utf8(stdout)?;
     let file_path = Path::new(file_path.lines().next().context("no file path in output")?);
     let contents =
-        fs::read_to_string(file_path).with_context(|| format!("failed to read {:?}", file_path))?;
-    serde_json::from_str(&contents).context("failed to deserialize file")
+        fs::read_to_string(file_path).with_context(|| format!("failed to read {file_path:?}"))?;
+    deserialize_json_str(&contents).context("failed to deserialize file")
 }
 
 fn cmd_err(command: &Command, status: ExitStatus, stderr: &[u8]) -> anyhow::Error {
@@ -752,6 +960,38 @@ fn cmd_err(command: &Command, status: ExitStatus, stderr: &[u8]) -> anyhow::Erro
         status,
         String::from_utf8_lossy(stderr),
     )
+}
+
+/// Deserialize bytes with serde_path_to_error so error messages report
+/// the offending fields.
+fn deserialize_json_bytes<T>(bytes: &[u8]) -> Result<T, anyhow::Error>
+where
+    T: for<'a> Deserialize<'a>,
+{
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|err| {
+        anyhow::anyhow!(
+            "JSON parse error in object '{}': {}",
+            err.path(),
+            err.inner()
+        )
+    })
+}
+
+/// Deserialize string with serde_path_to_error so error messages report
+/// the offending fields.
+fn deserialize_json_str<T>(s: &str) -> Result<T, anyhow::Error>
+where
+    T: for<'a> Deserialize<'a>,
+{
+    let mut deserializer = serde_json::Deserializer::from_str(s);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|err| {
+        anyhow::anyhow!(
+            "JSON parse error in object '{}': {}",
+            err.path(),
+            err.inner()
+        )
+    })
 }
 
 /// Trim a trailing new line from `String`.
@@ -765,14 +1005,85 @@ pub(crate) fn truncate_line_ending(s: &mut String) {
 pub(crate) fn select_mode(mode: Option<&str>) -> Option<String> {
     if let Some(mode) = mode {
         Some(mode.to_owned())
-    } else if cfg!(all(fbcode_build, target_os = "macos")) {
-        Some("@fbcode//mode/mac".to_owned())
     } else if cfg!(all(fbcode_build, target_os = "windows")) {
         Some("@fbcode//mode/win".to_owned())
     } else {
         // fallback to the platform default mode. This is likely slower than optimal, but
         // `rust-project check` will work.
         None
+    }
+}
+
+fn remove_duplicates_preserve_order(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut uniq_paths = Vec::with_capacity(paths.len());
+    let mut seen = FxHashSet::default();
+
+    for path in paths {
+        if seen.insert(path.clone()) {
+            uniq_paths.push(path);
+        }
+    }
+
+    uniq_paths
+}
+
+fn deserialize_uquery_alias_info(v: serde_json::Value) -> FxHashMap<Target, AliasedTargetInfo> {
+    let serde_json::Value::Object(v_items) = v else {
+        return FxHashMap::default();
+    };
+
+    let mut map = FxHashMap::default();
+    for (target_str, alias_info) in v_items {
+        let Some(actual) = alias_info.get("actual") else {
+            continue;
+        };
+        let Some(actual_str) = unwrap_selector_best_effort(actual) else {
+            continue;
+        };
+        let actual = Target::new(actual_str);
+        map.insert(Target::new(target_str), AliasedTargetInfo { actual });
+    }
+
+    map
+}
+
+/// If this JSON value is a plain string, return it. If it's a selector, try to guess
+/// the best value to return.
+fn unwrap_selector_best_effort(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(map) => {
+            let map_type = map.get("__type")?;
+            if map_type != "selector" {
+                return None;
+            }
+
+            let entries = map.get("entries")?;
+            let serde_json::Value::Object(entries_map) = entries else {
+                return None;
+            };
+
+            // If the selector has a DEFAULT value, use that.
+            //
+            // {
+            //   "__type": "selector",
+            //   "entries": {
+            //     "DEFAULT": "some-value",
+            //     "platform-specific": "other-value"
+            //   }
+            // }
+            if let Some(v) = entries_map.get("DEFAULT") {
+                return unwrap_selector_best_effort(v);
+            };
+
+            // Otherwise, arbitrarily pick the first value.
+            if let Some(v) = entries_map.values().next() {
+                return unwrap_selector_best_effort(v);
+            };
+
+            None
+        }
+        _ => None,
     }
 }
 
@@ -1128,15 +1439,6 @@ fn test_select_mode() {
         );
     }
 
-    // Test behavior with the fbcode_build cfg enabled
-    if cfg!(all(fbcode_build, target_os = "macos")) {
-        assert_eq!(select_mode(None), Some("@fbcode//mode/mac".to_owned()));
-        assert_eq!(
-            select_mode(Some("custom-mode")),
-            Some("custom-mode".to_owned())
-        );
-    }
-
     if cfg!(all(fbcode_build, target_os = "windows")) {
         assert_eq!(select_mode(None), Some("@fbcode//mode/win".to_owned()));
         assert_eq!(
@@ -1145,10 +1447,7 @@ fn test_select_mode() {
         );
     }
 
-    if cfg!(all(
-        fbcode_build,
-        not(any(target_os = "macos", target_os = "windows"))
-    )) {
+    if cfg!(all(fbcode_build, not(target_os = "windows"))) {
         assert_eq!(select_mode(None), None);
         assert_eq!(
             select_mode(Some("custom-mode")),

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -67,6 +68,11 @@ async def test_copies_files(buck: Buck) -> None:
     )
 
 
+# In Windows, we convert all symlinks to be absolute and mostly canonical
+def get_canonicalized_for_windows(dest: Path, relative_link: str) -> str:
+    return "\\\\?\\" + os.path.realpath(dest.parent / relative_link)
+
+
 @buck_test(
     data_dir="actions",
     # Because we use eden symlink redirection on MacOS
@@ -91,10 +97,6 @@ async def test_symlink_dir(buck: Buck) -> None:
     expected_link4 = "../../../__dep__/dep.txt"
 
     if platform.system() == "Windows":
-        # In Windows, we convert all symlinks to be absolute and mostly canonical
-        def get_canonicalized_for_windows(dest: Path, relative_link: str) -> str:
-            return "\\\\?\\" + os.path.realpath(dest.parent / relative_link)
-
         expected_link1 = get_canonicalized_for_windows(dest1, expected_link1)
         expected_link2 = get_canonicalized_for_windows(dest2, expected_link2)
         expected_link3 = get_canonicalized_for_windows(dest3, expected_link3)
@@ -114,6 +116,28 @@ async def test_symlink_dir(buck: Buck) -> None:
     assert dest2.read_text().strip() == "dep contents"
     assert dest3.read_text().strip() == "dir1_1 out contents"
     assert dest4.read_text().strip() == "dep contents"
+
+
+@buck_test(
+    data_dir="actions",
+    # See note on test_symlink_dir
+    setup_eden=False,
+)
+async def test_symlink_dir_associated_artifacts(buck: Buck) -> None:
+    result = await buck.build("//symlinked_dir:symlinked_transitive_files_target")
+    build_report = result.get_build_report()
+    output = build_report.output_for_target(
+        "//symlinked_dir:symlinked_transitive_files_target"
+    )
+
+    # This is set up in symlinked_dir:target_with_tdep
+    dest = output / "out_file"
+
+    # The direct src of the symlink is handled properly
+    assert dest.is_symlink()
+
+    # The transitive dependency of the symlink is not handled properly
+    assert not (output / "tdep1").exists()
 
 
 @buck_test(data_dir="actions")
@@ -161,17 +185,17 @@ async def test_anon_targets(buck: Buck) -> None:
 
     await expect_failure(
         buck.build("//anon_invalid_defaults/source:default_source_fails"),
-        stderr_regex="Anon targets do not support default values for `attrs.source\\(\\)`",
+        stderr_regex="Anon targets do not support default values for `attrs.source\\(\\)`, specify `source_attr` explicitly",
     )
 
     await expect_failure(
         buck.build("//anon_invalid_defaults/dep:default_dep_fails"),
-        stderr_regex="Anon targets do not support default values for `attrs.dep\\(\\)`",
+        stderr_regex="Anon targets do not support default values for `attrs.dep\\(\\)`, specify `dep_attr` explicitly",
     )
 
     await expect_failure(
         buck.build("//anon_invalid_defaults/arg:default_arg_fails"),
-        stderr_regex="Anon targets do not support default values for `attrs.arg\\(\\)`",
+        stderr_regex="Anon targets do not support default values for `attrs.arg\\(\\)`, specify `arg_attr` explicitly",
     )
 
     await expect_failure(
@@ -227,7 +251,7 @@ async def test_download_file(buck: Buck) -> None:
 
     await runner.cleanup()
 
-    assert attempt == 3
+    assert attempt == 4
 
 
 @buck_test(data_dir="actions")
@@ -362,7 +386,12 @@ async def test_artifact_cycle(buck: Buck) -> None:
 
 @buck_test(data_dir="actions")
 async def test_associated_artifacts(buck: Buck) -> None:
-    await buck.build("//associated_artifacts:check")
+    await buck.build("//associated_artifacts:check_artifacts")
+
+
+@buck_test(data_dir="actions")
+async def test_associated_artifacts_transitive_dep(buck: Buck) -> None:
+    await buck.build("//associated_artifacts:check_dropped_artifacts")
 
 
 @buck_test(data_dir="actions")
@@ -383,6 +412,10 @@ async def test_failure_has_wall_time(buck: Buck) -> None:
     )
 
     assert wall_time
+    print(wall_time)
+    print(
+        await filter_events(buck, "Event", "data", "SpanEnd", "data", "ActionExecution")
+    )
     for time in wall_time:
         assert time > 0
 
@@ -403,9 +436,9 @@ async def test_local_action_has_input_size(buck: Buck) -> None:
     assert input_size
 
     if platform.system() == "Windows":
-        assert input_size[0] == 370
+        assert input_size[0] == 448
     else:
-        assert input_size[0] == 342
+        assert input_size[0] == 416
 
 
 @buck_test(data_dir="actions")
@@ -424,9 +457,9 @@ async def test_remote_action_has_input_size(buck: Buck) -> None:
     assert input_size
 
     if platform.system() == "Windows":
-        assert input_size[0] == 370
+        assert input_size[0] == 448
     else:
-        assert input_size[0] == 342
+        assert input_size[0] == 416
 
 
 @buck_test(data_dir="actions")

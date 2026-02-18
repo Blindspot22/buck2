@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use async_trait::async_trait;
@@ -20,11 +21,11 @@ use buck2_client_ctx::daemon::client::BuckdClientConnector;
 use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::events_ctx::PartialResultCtx;
 use buck2_client_ctx::events_ctx::PartialResultHandler;
-use buck2_client_ctx::exit_result::ExitCode;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::stream_util::reborrow_stream_for_static;
 use buck2_client_ctx::streaming::StreamingCommand;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_subscription_proto::SubscriptionRequest;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
@@ -92,7 +93,7 @@ impl StreamingCommand for SubscribeCommand {
                 Err(e) => {
                     // NOTE: if stderr is gone there is not much we can do besides not write to
                     // stderr.
-                    let reason = format!("Error parsing request: {:#}", e);
+                    let reason = format!("Error parsing request: {e:#}");
                     let _ignored = buck2_client_ctx::eprintln!("{}", reason);
                     SubscriptionRequest {
                         request: Some(
@@ -155,7 +156,8 @@ impl StreamingCommand for SubscribeCommand {
         } else {
             // FIXME(JakobDegen): This command should propagate some error information back from the
             // server so that we can do error handling here.
-            ExitResult::status(ExitCode::UnknownFailure)
+            buck2_error::buck2_error!(buck2_error::ErrorTag::Tier0, "Subscribe command failed")
+                .into()
         }
     }
 
@@ -207,7 +209,7 @@ impl PartialResultHandler for SubscriptionPartialResultHandler {
     ) -> buck2_error::Result<()> {
         let response = partial_res
             .response
-            .buck_error_context("Empty `SubscriptionResponseWrapper`")?;
+            .ok_or_else(|| internal_error!("Empty `SubscriptionResponseWrapper`"))?;
 
         if let Some(buck2_subscription_proto::subscription_response::Response::Goodbye(goodbye)) =
             &response.response

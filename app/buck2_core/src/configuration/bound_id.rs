@@ -1,13 +1,12 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
-
-use buck2_error::BuckErrorContext;
 
 use crate::configuration::bound_label::BoundConfigurationLabel;
 use crate::configuration::hash::ConfigurationHash;
@@ -17,8 +16,6 @@ use crate::configuration::hash::ConfigurationHash;
 enum BoundConfigurationIdError {
     #[error("Bound configuration id must contain a hash, got: `{0}`")]
     MissingHash(String),
-    #[error("Error parsing bound configuration id: `{0}`")]
-    Error(String),
 }
 
 #[derive(derive_more::Display, Eq, PartialEq, Clone, Debug)]
@@ -32,11 +29,9 @@ impl BoundConfigurationId {
     pub fn parse(id: &str) -> buck2_error::Result<BoundConfigurationId> {
         let (label, hash) = id
             .split_once('#')
-            .with_buck_error_context(|| BoundConfigurationIdError::MissingHash(id.to_owned()))?;
-        let label = BoundConfigurationLabel::new(label.to_owned())
-            .with_buck_error_context(|| BoundConfigurationIdError::Error(id.to_owned()))?;
-        let hash = ConfigurationHash::from_str(hash)
-            .with_buck_error_context(|| BoundConfigurationIdError::Error(id.to_owned()))?;
+            .ok_or_else(|| BoundConfigurationIdError::MissingHash(id.to_owned()))?;
+        let label = BoundConfigurationLabel::new(label.to_owned())?;
+        let hash = ConfigurationHash::from_str(hash)?;
         Ok(BoundConfigurationId { label, hash })
     }
 }

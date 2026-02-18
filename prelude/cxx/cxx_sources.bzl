@@ -1,21 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
-
-load(
-    "@prelude//utils:utils.bzl",
-    "flatten",
-)
-load(":platform.bzl", "cxx_by_platform")
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # An input to cxx compilation, consisting of a file to compile and optional
 # file specific flags to compile with.
 CxxSrcWithFlags = record(
     file = field(Artifact),
-    flags = field(list[ResolvedStringWithMacros], []),
+    flags = field(list[[ResolvedStringWithMacros, str]], []),
     # If we have multiple source entries with same files but different flags,
     # specify an index so we can differentiate them. Otherwise, use None.
     index = field([int, None], None),
@@ -24,7 +19,7 @@ CxxSrcWithFlags = record(
 
 # The source files
 def get_srcs_with_flags(ctx: AnalysisContext, additional_srcs: list = []) -> list[CxxSrcWithFlags]:
-    all_srcs = ctx.attrs.srcs + flatten(cxx_by_platform(ctx, ctx.attrs.platform_srcs)) + additional_srcs
+    all_srcs = ctx.attrs.srcs + additional_srcs
 
     # src -> flags_hash -> flags
     flags_sets_by_src = {}

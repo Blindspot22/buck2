@@ -204,7 +204,7 @@ pub(crate) enum Builtin2 {
 }
 
 impl Builtin2 {
-    fn eval<'v>(self, a: Value<'v>, b: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    fn eval<'v>(self, a: Value<'v>, b: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         match self {
             Builtin2::Equals => a.equals(b).map(Value::new_bool),
             Builtin2::Compare(cmp) => a.compare(b).map(|c| Value::new_bool(cmp.apply(c))),
@@ -295,12 +295,12 @@ impl ExprCompiled {
     }
 
     /// Expression is known to be a constant which is a `def`.
-    pub(crate) fn as_frozen_def(&self) -> Option<FrozenValueTyped<FrozenDef>> {
+    pub(crate) fn as_frozen_def(&self) -> Option<FrozenValueTyped<'_, FrozenDef>> {
         FrozenValueTyped::new(self.as_value()?)
     }
 
     /// Expression is known to be a frozen bound method.
-    pub(crate) fn as_frozen_bound_method(&self) -> Option<FrozenValueTyped<FrozenBoundMethod>> {
+    pub(crate) fn as_frozen_bound_method(&self) -> Option<FrozenValueTyped<'_, FrozenBoundMethod>> {
         FrozenValueTyped::new(self.as_value()?)
     }
 
@@ -467,7 +467,7 @@ impl<'a> IrSpanned<ExprShortList<'a>> {
 
 impl IrSpanned<ExprCompiled> {
     /// Try to extract `[e0, e1, ..., en]` from this expression.
-    fn as_short_list(&self) -> Option<IrSpanned<ExprShortList>> {
+    fn as_short_list(&self) -> Option<IrSpanned<ExprShortList<'_>>> {
         // Prevent exponential explosion during optimization.
         const MAX_LEN: usize = 1000;
         match &self.node {
@@ -1025,6 +1025,7 @@ pub(crate) enum EvalError {
 
 /// Try fold expression `cmp(l == r)` into `cmp(type(x) == "y")`.
 /// Return original `l` and `r` arguments if fold was unsuccessful.
+#[allow(clippy::result_large_err)]
 fn try_eval_type_is(
     l: IrSpanned<ExprCompiled>,
     r: IrSpanned<ExprCompiled>,
@@ -1143,7 +1144,7 @@ impl<'v, 'a> MemberOrValue<'v, 'a> {
 pub(crate) fn get_attr_hashed_raw<'v>(
     x: Value<'v>,
     attribute: &Symbol,
-    heap: &'v Heap,
+    heap: Heap<'v>,
 ) -> crate::Result<MemberOrValue<'v, 'static>> {
     let aref = x.get_ref();
     if let Some(methods) = aref.vtable().methods() {
@@ -1160,7 +1161,7 @@ pub(crate) fn get_attr_hashed_raw<'v>(
 pub(crate) fn get_attr_hashed_bind<'v>(
     x: Value<'v>,
     attribute: &Symbol,
-    heap: &'v Heap,
+    heap: Heap<'v>,
 ) -> crate::Result<Value<'v>> {
     let aref = x.get_ref();
     if let Some(methods) = aref.vtable().methods() {

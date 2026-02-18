@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -16,6 +17,8 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
+use strong_hash::StrongHash;
 
 use crate::provider::label::ProvidersLabel;
 use crate::target::configured_target_label::ConfiguredTargetLabel;
@@ -84,7 +87,9 @@ impl<T> MaybeCompatible<T> {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative)]
+#[derive(
+    Debug, Eq, PartialEq, Hash, StrongHash, Clone, Dupe, Allocative, Pagable
+)]
 pub enum IncompatiblePlatformReasonCause {
     /// Target is incompatible because of unsatisfied config setting.
     UnsatisfiedConfig(ProvidersLabel),
@@ -92,7 +97,9 @@ pub enum IncompatiblePlatformReasonCause {
     Dependency(Arc<IncompatiblePlatformReason>),
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative)]
+#[derive(
+    Debug, Eq, PartialEq, Hash, StrongHash, Clone, Dupe, Allocative, Pagable
+)]
 pub struct IncompatiblePlatformReason {
     pub target: ConfiguredTargetLabel,
     pub cause: IncompatiblePlatformReasonCause,
@@ -133,7 +140,7 @@ impl IncompatiblePlatformReason {
     }
 
     pub fn skipping_message(&self, target: &ConfiguredTargetLabel) -> String {
-        format!("Skipping target incompatible node `{}`", target)
+        format!("Skipping target incompatible node `{target}`")
     }
 
     pub fn skipping_message_for_multiple<'t>(
@@ -151,15 +158,15 @@ impl IncompatiblePlatformReason {
         .unwrap();
         if incompatible_targets.len() < 10 {
             for target in incompatible_targets.iter() {
-                writeln!(message, "  {}", target).unwrap();
+                writeln!(message, "  {target}").unwrap();
             }
         } else {
             for target in incompatible_targets.iter().take(3) {
-                writeln!(message, "  {}", target).unwrap();
+                writeln!(message, "  {target}").unwrap();
             }
             writeln!(message, "  ...").unwrap();
             for target in incompatible_targets.iter().rev().take(3).rev() {
-                writeln!(message, "  {}", target).unwrap();
+                writeln!(message, "  {target}").unwrap();
             }
         }
         message
@@ -215,7 +222,7 @@ mod tests {
             IncompatiblePlatformReason::skipping_message_for_multiple(&set);
 
             set.push(
-                TargetLabel::testing_parse(&format!("plate//foo:bar{}", i))
+                TargetLabel::testing_parse(&format!("plate//foo:bar{i}"))
                     .configure(ConfigurationData::testing_new()),
             );
         }

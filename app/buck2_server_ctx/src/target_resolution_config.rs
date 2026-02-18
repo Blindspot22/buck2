@@ -1,16 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_cli_proto::TargetCfg;
 use buck2_core::configuration::bound_id::BoundConfigurationId;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
+use buck2_core::pattern::pattern::ModifiersError;
+use buck2_core::pattern::pattern::ProvidersLabelWithModifiers;
 use buck2_core::pattern::pattern::TargetLabelWithExtra;
 use buck2_core::pattern::pattern_type::ConfigurationPredicate;
 use buck2_core::pattern::pattern_type::ConfiguredTargetPatternExtra;
@@ -22,6 +25,7 @@ use buck2_node::configured_universe::CqueryUniverse;
 use buck2_node::configured_universe::UNIVERSE_FROM_LITERALS;
 use buck2_node::target_calculation::ConfiguredTargetCalculation;
 use dice::DiceComputations;
+use dupe::Dupe;
 use gazebo::prelude::VecExt;
 
 use crate::ctx::ServerCommandContextTrait;
@@ -73,12 +77,32 @@ impl TargetResolutionConfig {
         &self,
         ctx: &mut DiceComputations<'_>,
         label: &TargetLabel,
+        modifiers: Option<&[String]>,
     ) -> buck2_error::Result<Vec<ConfiguredTargetLabel>> {
         match self {
-            TargetResolutionConfig::Default(global_cfg_options) => Ok(vec![
-                ctx.get_configured_target(label, global_cfg_options).await?,
-            ]),
+            TargetResolutionConfig::Default(global_cfg_options) => {
+                let local_cfg_options = match modifiers {
+                    None => global_cfg_options.dupe(),
+                    Some(modifiers) => {
+                        if !global_cfg_options.cli_modifiers.is_empty() {
+                            return Err(ModifiersError::PatternModifiersWithGlobalModifiers.into());
+                        }
+
+                        GlobalCfgOptions {
+                            target_platform: global_cfg_options.target_platform.dupe(),
+                            cli_modifiers: modifiers.to_vec().into(),
+                        }
+                    }
+                };
+                Ok(vec![
+                    ctx.get_configured_target(label, &local_cfg_options).await?,
+                ])
+            }
             TargetResolutionConfig::Universe(universe) => {
+                if modifiers.is_some() {
+                    return Err(ModifiersError::PatternModifiersWithTargetUniverse.into());
+                }
+
                 // TODO(nga): whoever called this function,
                 //    they may have resolved pattern unnecessarily.
                 Ok(universe.get_target_label(label))
@@ -92,10 +116,31 @@ impl TargetResolutionConfig {
         label: &ProvidersLabel,
     ) -> buck2_error::Result<Vec<ConfiguredProvidersLabel>> {
         Ok(self
-            .get_configured_target(ctx, label.target())
+            .get_configured_target(ctx, label.target(), None)
             .await?
             .into_map(|configured_target_label| {
                 ConfiguredProvidersLabel::new(configured_target_label, label.name().clone())
+            }))
+    }
+
+    pub async fn get_configured_provider_label_with_modifiers(
+        &self,
+        ctx: &mut DiceComputations<'_>,
+        label_with_modifiers: &ProvidersLabelWithModifiers,
+    ) -> buck2_error::Result<Vec<ConfiguredProvidersLabel>> {
+        let ProvidersLabelWithModifiers {
+            providers_label,
+            modifiers,
+        } = label_with_modifiers;
+
+        Ok(self
+            .get_configured_target(ctx, providers_label.target(), modifiers.as_slice())
+            .await?
+            .into_map(|configured_target_label| {
+                ConfiguredProvidersLabel::new(
+                    configured_target_label,
+                    providers_label.name().clone(),
+                )
             }))
     }
 
@@ -107,9 +152,12 @@ impl TargetResolutionConfig {
         let TargetLabelWithExtra {
             target_label,
             extra,
+            modifiers: _,
         } = &label;
         match &extra.cfg {
-            ConfigurationPredicate::Any => self.get_configured_target(ctx, &target_label).await,
+            ConfigurationPredicate::Any => {
+                self.get_configured_target(ctx, &target_label, None).await
+            }
             ConfigurationPredicate::Builtin(p) => Err(
                 PatternNotSupportedError::BuiltinConfigurationsNotSupported(p.to_string()).into(),
             ),

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 GoCompilerInfo = provider(
     doc = "Information about how to invoke the go compiler.",
@@ -44,7 +45,7 @@ def _download_toolchain(ctx: AnalysisContext):
 
     # Download archive.
     archive = ctx.actions.declare_output("archive." + archive_extension)
-    ctx.actions.download_file(archive.as_output(), url, sha256 = sha256, is_deferrable = True)
+    ctx.actions.download_file(archive.as_output(), url, sha256 = sha256)
 
     output = ctx.actions.declare_output(ctx.label.name)
 

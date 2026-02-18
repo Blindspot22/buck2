@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -36,6 +37,14 @@ pub fn get_re_error_tag(tcode: &TCode) -> ErrorTag {
     }
 }
 
+pub fn get_re_group_tag(group: &TCodeReasonGroup) -> Option<ErrorTag> {
+    match *group {
+        TCodeReasonGroup::RE_CONNECTION => Some(ErrorTag::ReConnection),
+        TCodeReasonGroup::USER_QUOTA => Some(ErrorTag::ReUserQuota),
+        _ => None,
+    }
+}
+
 #[derive(Allocative, Debug, Clone, buck2_error::Error)]
 #[error("Remote Execution Error on {} for ReSession {}\nError: ({})", .re_action, .re_session_id, .message)]
 #[buck2(tag = get_re_error_tag(code))]
@@ -57,8 +66,8 @@ impl TypedContext for RemoteExecutionError {
         }
     }
 
-    fn should_display(&self) -> bool {
-        false
+    fn display(&self) -> Option<String> {
+        None
     }
 }
 
@@ -69,16 +78,19 @@ fn re_error(
     code: TCode,
     group: TCodeReasonGroup,
 ) -> buck2_error::Error {
-    let err = RemoteExecutionError {
+    let re_error = RemoteExecutionError {
         re_action: re_action.to_owned(),
         re_session_id: re_session_id.to_owned(),
         message,
         code,
         group,
     };
-    let buck2_error: buck2_error::Error = err.clone().into();
-
-    buck2_error.context(err).string_tag(&group.to_string())
+    let error = buck2_error::Error::from(re_error.clone()).context(re_error);
+    if let Some(tag) = get_re_group_tag(&group) {
+        error.tag([tag])
+    } else {
+        error.string_tag(&group.to_string())
+    }
 }
 
 pub(crate) async fn with_error_handler<T>(
@@ -94,7 +106,13 @@ pub(crate) async fn with_error_handler<T>(
                 .map(|e| (e.code, e.group))
                 .unwrap_or((TCode::UNKNOWN, TCodeReasonGroup::UNKNOWN));
 
-            Err(re_error(re_action, re_session_id, format!("{:#}", e), code, group).into())
+            Err(re_error(
+                re_action,
+                re_session_id,
+                format!("{e:#}"),
+                code,
+                group,
+            ))
         }
     }
 }

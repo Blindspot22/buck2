@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Calculations relating to 'TargetNode's that runs on Dice
@@ -35,6 +36,7 @@ use buck2_core::configuration::pair::ConfigurationWithExec;
 use buck2_core::configuration::transition::applied::TransitionApplied;
 use buck2_core::configuration::transition::id::TransitionId;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
+use buck2_core::execution_types::execution::ExecutionPlatformResolutionPartial;
 use buck2_core::pattern::pattern::ParsedPattern;
 use buck2_core::pattern::pattern_type::TargetPatternExtra;
 use buck2_core::plugins::PluginKind;
@@ -50,7 +52,6 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_core::target::target_configured_target_label::TargetConfiguredTargetLabel;
 use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
-use buck2_futures::cancellation::CancellationContext;
 use buck2_node::attrs::coerced_attr::CoercedAttr;
 use buck2_node::attrs::configuration_context::AttrConfigurationContext;
 use buck2_node::attrs::configuration_context::AttrConfigurationContextImpl;
@@ -80,6 +81,7 @@ use derive_more::Display;
 use dice::Demand;
 use dice::DiceComputations;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use itertools::Itertools;
@@ -90,6 +92,7 @@ use starlark_map::small_set::SmallSet;
 use crate::configuration::compute_platform_cfgs;
 use crate::configuration::get_matched_cfg_keys_for_node;
 use crate::cycle::ConfiguredGraphCycleDescriptor;
+use crate::execution::configure_exec_dep_with_modifiers;
 use crate::execution::find_execution_platform_by_configuration;
 use crate::execution::resolve_execution_platform;
 
@@ -181,7 +184,7 @@ fn unpack_target_compatible_with_attr(
             self.resolved_cfg.cfg().dupe()
         }
 
-        fn exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec> {
+        fn base_exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec> {
             Err(internal_error!(
                 "exec_cfg() is not needed to resolve `{}` or `{}`",
                 TARGET_COMPATIBLE_WITH_ATTRIBUTE.name,
@@ -332,7 +335,7 @@ async fn check_plugin_deps(
                 .get_target_node(dep_label)
                 .await
                 .with_buck_error_context(|| {
-                    format!("looking up unconfigured target node `{}`", dep_label)
+                    format!("looking up unconfigured target node `{dep_label}`")
                 })?;
             if dep_node.is_toolchain_rule() {
                 return Err(PluginDepError::PluginDepIsToolchainRule(dep_label.dupe()).into());
@@ -406,7 +409,7 @@ impl ErrorsAndIncompatibilities {
                         );
                     }
                     Err(e) => {
-                        self.errs.push(e.into());
+                        self.errs.push(e);
                     }
                 }
             }
@@ -421,7 +424,7 @@ impl ErrorsAndIncompatibilities {
             return Some(Ok(MaybeCompatible::Incompatible(incompat)));
         }
         if let Some(err) = self.errs.pop() {
-            return Some(Err(err.into()));
+            return Some(Err(err));
         }
         None
     }
@@ -578,7 +581,7 @@ async fn resolve_transition_attrs<'a>(
             self.matched_cfg_keys.cfg().dupe()
         }
 
-        fn exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec> {
+        fn base_exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec> {
             Err(internal_error!(
                 "exec_cfg() is not needed in pre transition attribute resolution."
             ))
@@ -652,15 +655,14 @@ fn verify_transitioned_attrs(
     node: &ConfiguredTargetNode,
 ) -> buck2_error::Result<()> {
     for (attr, attr_value) in pre_transition_attrs {
-        let transition_configured_attr = node
-            .get(attr, AttrInspectOptions::All)
-            .with_internal_error(|| {
-                format!(
+        let transition_configured_attr =
+            node.get(attr, AttrInspectOptions::All).ok_or_else(|| {
+                internal_error!(
                     "Attr {} was not found in transition for target {} ({})",
                     attr,
                     node.label(),
                     node.attrs(AttrInspectOptions::All)
-                        .format_with(", ", |v, f| f(&format_args!("{:?}", v)))
+                        .format_with(", ", |v, f| f(&format_args!("{v:?}")))
                 )
             })?;
         if &transition_configured_attr.value != attr_value.as_ref() {
@@ -699,7 +701,7 @@ async fn compute_configured_target_node_no_transition(
     )
     .await
     .with_buck_error_context(|| {
-        format!("Error resolving configuration deps of `{}`", target_label)
+        format!("Error resolving configuration deps of `{target_label}`")
     })?;
 
     // Must check for compatibility before evaluating non-compatibility attributes.
@@ -731,12 +733,13 @@ async fn compute_configured_target_node_no_transition(
 
     // We need to collect deps and to ensure that all attrs can be successfully
     // configured so that we don't need to support propagate configuration errors on attr access.
+    let unspecified_resolution = ExecutionPlatformResolution::unspecified();
     let attr_cfg_ctx = AttrConfigurationContextImpl::new(
         &resolved_configuration,
-        // We have not yet done exec platform resolution so for now we just use `unbound_exec`
+        // We have not yet done exec platform resolution so for now we just use `unspecified`
         // here. We only use this when collecting exec deps and toolchain deps. In both of those
         // cases, we replace the exec cfg later on in this function with the "proper" exec cfg.
-        ConfigurationNoExec::unbound_exec(),
+        &unspecified_resolution,
         &resolved_transitions,
         &platform_cfgs,
     );
@@ -753,17 +756,17 @@ async fn compute_configured_target_node_no_transition(
         .boxed()
         .await?;
 
-    let execution_platform_resolution = if target_cfg.is_unbound() {
+    let execution_platform_partial = if target_cfg.is_unbound() {
         // The unbound configuration is used when evaluation configuration nodes.
         // That evaluation is
         // (1) part of execution platform resolution and
         // (2) isn't allowed to do execution
         // And so we use an "unspecified" execution platform to avoid cycles and cause any attempts at execution to fail.
-        ExecutionPlatformResolution::unspecified()
+        None
     } else if let Some(exec_cfg) = target_label.exec_cfg() {
         // The label was produced by a toolchain_dep, so we use the execution platform of our parent
         // We need to convert that to an execution platform, so just find the one with the same configuration.
-        ExecutionPlatformResolution::new(
+        Some(ExecutionPlatformResolutionPartial::new(
             Some(
                 find_execution_platform_by_configuration(
                     ctx,
@@ -773,23 +776,30 @@ async fn compute_configured_target_node_no_transition(
                 .await?,
             ),
             Vec::new(),
-        )
+        ))
     } else {
-        resolve_execution_platform(
-            ctx,
-            target_node.as_ref(),
-            &resolved_configuration,
-            &gathered_deps,
-            &attr_cfg_ctx,
+        Some(
+            resolve_execution_platform(
+                ctx,
+                target_node.as_ref(),
+                &resolved_configuration,
+                &gathered_deps,
+                &attr_cfg_ctx,
+            )
+            .boxed()
+            .await?,
         )
-        .boxed()
-        .await?
     };
-    let execution_platform = execution_platform_resolution.cfg();
+
+    // Get the execution platform configuration - either from partial or use unspecified
+    let execution_platform_cfg = match &execution_platform_partial {
+        Some(partial) => partial.cfg(),
+        None => ConfigurationNoExec::unspecified_exec().dupe(),
+    };
 
     // We now need to replace the dummy exec config we used above with the real one
 
-    let execution_platform = &execution_platform;
+    let execution_platform_cfg = &execution_platform_cfg;
     let toolchain_deps = &gathered_deps.toolchain_deps;
     let exec_deps = &gathered_deps.exec_deps;
 
@@ -800,7 +810,7 @@ async fn compute_configured_target_node_no_transition(
                 |ctx, target: &TargetConfiguredTargetLabel| {
                     async move {
                         ctx.get_internal_configured_target_node(
-                            &target.with_exec_cfg(execution_platform.cfg().dupe()),
+                            &target.with_exec_cfg(execution_platform_cfg.cfg().dupe()),
                         )
                         .await
                     }
@@ -816,16 +826,15 @@ async fn compute_configured_target_node_no_transition(
         async move {
             ctx.compute_join(exec_deps, |ctx, (target, check_visibility)| {
                 async move {
-                    (
-                        ctx.get_internal_configured_target_node(
-                            &target
-                                .target()
-                                .unconfigured()
-                                .configure_pair(execution_platform.cfg_pair().dupe()),
-                        )
-                        .await,
-                        *check_visibility,
+                    // Apply modifiers to exec_dep before configuring
+                    let result = configure_exec_dep_with_modifiers(
+                        ctx,
+                        target.target().unconfigured(),
+                        execution_platform_cfg.cfg(),
                     )
+                    .await;
+
+                    (result, *check_visibility)
                 }
                 .boxed()
             })
@@ -856,6 +865,23 @@ async fn compute_configured_target_node_no_transition(
             &mut exec_deps,
         );
     }
+
+    // Build the exec_dep_cfgs mapping from exec_dep target labels to their actual cfgs.
+    // This is needed because modifiers may change the cfg of exec_deps, and we need to
+    // use the actual cfg when configuring exec_dep attributes during analysis.
+    let mut exec_dep_cfgs = OrderedMap::new();
+    for exec_dep in &exec_deps {
+        exec_dep_cfgs.insert(
+            exec_dep.label().unconfigured().dupe(),
+            exec_dep.label().cfg().dupe(),
+        );
+    }
+
+    // Finalize the execution platform resolution with exec_dep_cfgs
+    let execution_platform_resolution = match execution_platform_partial {
+        Some(partial) => partial.finalize(exec_dep_cfgs),
+        None => ExecutionPlatformResolution::unspecified(),
+    };
 
     if let Some(ret) = errors_and_incompats.finalize() {
         return ret;
@@ -943,10 +969,7 @@ async fn compute_configured_forward_target_node(
     )
     .await
     .with_buck_error_context(|| {
-        format!(
-            "Error resolving configuration deps of `{}`",
-            target_label_before_transition
-        )
+        format!("Error resolving configuration deps of `{target_label_before_transition}`")
     })?;
 
     let attrs = resolve_transition_attrs(
@@ -1045,6 +1068,10 @@ impl buck2_error::TypedContext for LookingUpConfiguredNodeContext {
             None => false,
         }
     }
+
+    fn display(&self) -> Option<String> {
+        Some(format!("{}", self))
+    }
 }
 
 impl LookingUpConfiguredNodeContext {
@@ -1141,7 +1168,11 @@ impl Key for ConfiguredTargetNodeKey {
     }
 }
 
-impl BuildSignalsNodeKeyImpl for ConfiguredTargetNodeKey {}
+impl BuildSignalsNodeKeyImpl for ConfiguredTargetNodeKey {
+    fn kind(&self) -> &'static str {
+        "configure_target"
+    }
+}
 
 #[async_trait]
 impl ConfiguredTargetNodeCalculationImpl for ConfiguredTargetNodeCalculationInstance {
@@ -1161,10 +1192,10 @@ impl ConfiguredTargetNodeCalculationImpl for ConfiguredTargetNodeCalculationInst
                     &IncompatiblePlatformReasonCause::Dependency(_)
                 ) {
                     if check_error_on_incompatible_dep(ctx, target.unconfigured_label()).await? {
-                        return Err(reason.to_err().into());
+                        return Err(reason.to_err());
                     }
                     soft_error!(
-                        "dep_only_incompatible_version_two", reason.to_soft_err().into(),
+                        "dep_only_incompatible_version_two", reason.to_soft_err(),
                         quiet: false,
                         // Log at least one sample per unique package.
                         low_cardinality_key_for_additional_logview_samples: Some(Box::new(target.unconfigured().pkg())),
@@ -1178,7 +1209,7 @@ impl ConfiguredTargetNodeCalculationImpl for ConfiguredTargetNodeCalculationInst
                         for custom_soft_error in custom_soft_errors {
                             soft_error!(
                                 &custom_soft_error,
-                                reason.to_soft_err().into(),
+                                reason.to_soft_err(),
                                 quiet: true,
                                 task: false,
                             )?;

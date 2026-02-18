@@ -1,16 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
+use buck2_client_ctx::common::profiling::BuckProfileMode;
 use buck2_client_ctx::path_arg::PathArg;
-
-use crate::commands::profile::BuckProfileMode;
-use crate::commands::profile::profile_mode_to_profile;
 
 /// Starlark profiling options
 #[derive(Debug, Clone, clap::Parser)]
@@ -31,6 +30,6 @@ pub(crate) struct QueryProfileOptions {
 
 impl QueryProfileOptions {
     pub(crate) fn profile_mode_proto(&self) -> Option<buck2_cli_proto::ProfileMode> {
-        self.profile_mode.map(profile_mode_to_profile)
+        self.profile_mode.map(|v| v.to_proto())
     }
 }

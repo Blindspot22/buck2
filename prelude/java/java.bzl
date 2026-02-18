@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:genrule.bzl", "genrule_attributes")
 load("@prelude//:validation_deps.bzl", "VALIDATION_DEPS_ATTR_NAME")
@@ -14,6 +15,7 @@ load("@prelude//decls:common.bzl", "buck")
 load("@prelude//decls:toolchains_common.bzl", "toolchains_common")
 load("@prelude//java/plugins:java_annotation_processor.bzl", "java_annotation_processor_impl")
 load("@prelude//java/plugins:java_plugin.bzl", "java_plugin_impl")
+load("@prelude//transitions:constraint_overrides.bzl", "constraint_overrides")
 load(":gwt_binary.bzl", "gwt_binary_impl")
 load(":jar_genrule.bzl", "jar_genrule_impl")
 load(":java_binary.bzl", "java_binary_impl")
@@ -62,9 +64,13 @@ extra_attributes = {
         "_exec_os_type": buck.exec_os_type_arg(),
         "_is_building_android_binary": is_building_android_binary_attr(),
         "_java_toolchain": toolchains_common.java(),
-    },
+    } | constraint_overrides.attributes,
     "java_library": {
         "abi_generation_mode": attrs.option(attrs.enum(AbiGenerationMode), default = None),
+        # Dependencies used only for inheriting class-to-source map info for debugging.
+        # This allows libraries that don't compile sources (e.g., java version wrappers
+        # that depend on prebuilt jars) to inherit classmap info from the source library.
+        "class_to_src_map_deps": attrs.list(attrs.dep(), default = []),
         "resources_root": attrs.option(attrs.string(), default = None),
         VALIDATION_DEPS_ATTR_NAME: attrs.set(attrs.dep(), sorted = True, default = []),
         "_build_only_native_code": attrs.default_only(attrs.bool(default = is_build_only_native_code())),

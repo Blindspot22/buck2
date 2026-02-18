@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//cxx:cxx_toolchain_types.bzl",
@@ -29,12 +30,15 @@ load("@prelude//cxx:cxx_utility.bzl", "cxx_toolchain_allow_cache_upload_args")
 load("@prelude//cxx:debug.bzl", "SplitDebugMode")
 load("@prelude//cxx:headers.bzl", "HeaderMode")
 load("@prelude//cxx:linker.bzl", "is_pdb_generated")
-load("@prelude//cxx:target_sdk_version.bzl", "get_toolchain_target_sdk_version")
 load(
     "@prelude//linking:link_info.bzl",
     "LinkStyle",
 )
 load("@prelude//linking:lto.bzl", "LtoMode")
+load(
+    "@prelude//linking:shared_libraries.bzl",
+    "SharedLibraryInfo",
+)
 load("@prelude//user:rule_spec.bzl", "RuleRegistrationSpec")
 load("@prelude//utils:pick.bzl", _pick = "pick", _pick_and_add = "pick_and_add", _pick_bin = "pick_bin", _pick_dep = "pick_dep", _pick_raw = "pick_raw")
 load("@prelude//utils:utils.bzl", "flatten", "map_val", "value_or")
@@ -51,6 +55,7 @@ def _cxx_toolchain_override(ctx):
             preprocessor = _pick_bin(ctx.attrs.as_compiler, base_as_info.preprocessor),
             preprocessor_type = base_as_info.preprocessor_type,
             preprocessor_flags = _pick(ctx.attrs.as_preprocessor_flags, base_as_info.preprocessor_flags),
+            supports_content_based_paths = base_as_info.supports_content_based_paths,
         )
     asm_info = base_toolchain.asm_compiler_info
     if asm_info != None:
@@ -61,6 +66,7 @@ def _cxx_toolchain_override(ctx):
             preprocessor = _pick_bin(ctx.attrs.asm_compiler, asm_info.preprocessor),
             preprocessor_type = asm_info.preprocessor_type,
             preprocessor_flags = _pick(ctx.attrs.asm_preprocessor_flags, asm_info.preprocessor_flags),
+            supports_content_based_paths = asm_info.supports_content_based_paths,
         )
     base_c_info = base_toolchain.c_compiler_info
     c_info = CCompilerInfo(
@@ -71,6 +77,7 @@ def _cxx_toolchain_override(ctx):
         preprocessor_type = base_c_info.preprocessor_type,
         preprocessor_flags = _pick(ctx.attrs.c_preprocessor_flags, base_c_info.preprocessor_flags),
         allow_cache_upload = _pick_raw(ctx.attrs.c_compiler_allow_cache_upload, base_c_info.allow_cache_upload),
+        supports_content_based_paths = base_c_info.supports_content_based_paths,
     )
     base_objc_info = base_toolchain.objc_compiler_info
     objc_info = ObjcCompilerInfo(
@@ -81,6 +88,7 @@ def _cxx_toolchain_override(ctx):
         preprocessor_type = base_c_info.preprocessor_type,
         preprocessor_flags = _pick(ctx.attrs.c_preprocessor_flags, base_c_info.preprocessor_flags),
         allow_cache_upload = _pick_raw(ctx.attrs.c_compiler_allow_cache_upload, base_c_info.allow_cache_upload),
+        supports_content_based_paths = base_c_info.supports_content_based_paths,
     )
     base_cxx_info = base_toolchain.cxx_compiler_info
     cxx_info = CxxCompilerInfo(
@@ -91,6 +99,7 @@ def _cxx_toolchain_override(ctx):
         preprocessor_type = base_cxx_info.preprocessor_type,
         preprocessor_flags = _pick(ctx.attrs.cxx_preprocessor_flags, base_cxx_info.preprocessor_flags),
         allow_cache_upload = _pick_raw(ctx.attrs.cxx_compiler_allow_cache_upload, base_cxx_info.allow_cache_upload),
+        supports_content_based_paths = base_cxx_info.supports_content_based_paths,
     )
     base_objcxx_info = base_toolchain.objcxx_compiler_info
     objcxx_info = ObjcxxCompilerInfo(
@@ -101,6 +110,7 @@ def _cxx_toolchain_override(ctx):
         preprocessor_type = base_cxx_info.preprocessor_type,
         preprocessor_flags = _pick(ctx.attrs.cxx_preprocessor_flags, base_cxx_info.preprocessor_flags),
         allow_cache_upload = _pick_raw(ctx.attrs.cxx_compiler_allow_cache_upload, base_cxx_info.allow_cache_upload),
+        supports_content_based_paths = base_cxx_info.supports_content_based_paths,
     )
     base_linker_info = base_toolchain.linker_info
     linker_type = LinkerType(ctx.attrs.linker_type) if ctx.attrs.linker_type != None else base_linker_info.type
@@ -154,6 +164,7 @@ def _cxx_toolchain_override(ctx):
         use_archiver_flags = value_or(ctx.attrs.use_archiver_flags, base_linker_info.use_archiver_flags),
         force_full_hybrid_if_capable = value_or(ctx.attrs.force_full_hybrid_if_capable, base_linker_info.force_full_hybrid_if_capable),
         is_pdb_generated = pdb_expected,
+        supports_content_based_paths_for_archiving = base_linker_info.supports_content_based_paths_for_archiving,
     )
 
     base_binary_utilities_info = base_toolchain.binary_utilities_info
@@ -180,7 +191,7 @@ def _cxx_toolchain_override(ctx):
     return [
         DefaultInfo(),
     ] + cxx_toolchain_infos(
-        internal_tools = ctx.attrs._internal_tools[CxxInternalTools],
+        internal_tools = ctx.attrs.internal_tools[CxxInternalTools],
         platform_name = ctx.attrs.platform_name if ctx.attrs.platform_name != None else ctx.attrs.base[CxxPlatformInfo].name,
         platform_deps_aliases = ctx.attrs.platform_deps_aliases if ctx.attrs.platform_deps_aliases != None else [],
         linker_info = linker_info,
@@ -192,6 +203,7 @@ def _cxx_toolchain_override(ctx):
         cxx_compiler_info = cxx_info,
         objc_compiler_info = objc_info,
         objcxx_compiler_info = objcxx_info,
+        libclang = value_or(ctx.attrs.libclang, base_toolchain.libclang),
         llvm_link = ctx.attrs.llvm_link[RunInfo] if ctx.attrs.llvm_link != None else base_toolchain.llvm_link,
         # the rest are used without overrides
         cuda_compiler_info = base_toolchain.cuda_compiler_info,
@@ -200,14 +212,14 @@ def _cxx_toolchain_override(ctx):
         headers_as_raw_headers_mode = base_toolchain.headers_as_raw_headers_mode,
         use_dep_files = base_toolchain.use_dep_files,
         clang_remarks = base_toolchain.clang_remarks,
+        clang_llvm_statistics = base_toolchain.clang_llvm_statistics,
         gcno_files = base_toolchain.gcno_files,
         clang_trace = base_toolchain.clang_trace,
         object_format = CxxObjectFormat(ctx.attrs.object_format) if ctx.attrs.object_format != None else base_toolchain.object_format,
-        conflicting_header_basename_allowlist = base_toolchain.conflicting_header_basename_allowlist,
         strip_flags_info = strip_flags_info,
         pic_behavior = PicBehavior(ctx.attrs.pic_behavior) if ctx.attrs.pic_behavior != None else base_toolchain.pic_behavior.value,
         split_debug_mode = SplitDebugMode(value_or(ctx.attrs.split_debug_mode, base_toolchain.split_debug_mode.value)),
-        target_sdk_version = value_or(get_toolchain_target_sdk_version(ctx), base_toolchain.target_sdk_version),
+        minimum_os_version = value_or(ctx.attrs.minimum_os_version, base_toolchain.minimum_os_version),
     )
 
 cxx_toolchain_override_registration_spec = RuleRegistrationSpec(
@@ -241,6 +253,8 @@ cxx_toolchain_override_registration_spec = RuleRegistrationSpec(
         "force_full_hybrid_if_capable": attrs.option(attrs.bool(), default = None),
         "generate_linker_maps": attrs.option(attrs.bool(), default = None),
         "header_mode": attrs.option(attrs.enum(HeaderMode.values()), default = None),
+        "internal_tools": attrs.exec_dep(providers = [CxxInternalTools], default = "prelude//cxx/tools:internal_tools"),
+        "libclang": attrs.option(attrs.exec_dep(providers = [SharedLibraryInfo]), default = None),
         "link_binaries_locally": attrs.option(attrs.bool(), default = None),
         "link_libraries_locally": attrs.option(attrs.bool(), default = None),
         "link_metadata_flag": attrs.option(attrs.string(), default = None),
@@ -252,7 +266,7 @@ cxx_toolchain_override_registration_spec = RuleRegistrationSpec(
         "lipo": attrs.option(attrs.exec_dep(providers = [RunInfo]), default = None),
         "llvm_link": attrs.option(attrs.exec_dep(providers = [RunInfo]), default = None),
         "lto_mode": attrs.option(attrs.enum(LtoMode.values()), default = None),
-        "min_sdk_version": attrs.option(attrs.string(), default = None),
+        "minimum_os_version": attrs.option(attrs.string(), default = None),
         "mk_shlib_intf": attrs.option(attrs.exec_dep(providers = [RunInfo]), default = None),
         "nm": attrs.option(attrs.exec_dep(providers = [RunInfo]), default = None),
         "objcopy": attrs.option(attrs.exec_dep(providers = [RunInfo]), default = None),
@@ -274,9 +288,7 @@ cxx_toolchain_override_registration_spec = RuleRegistrationSpec(
         "strip_all_flags": attrs.option(attrs.list(attrs.arg()), default = None),
         "strip_debug_flags": attrs.option(attrs.list(attrs.arg()), default = None),
         "strip_non_global_flags": attrs.option(attrs.list(attrs.arg()), default = None),
-        "target_sdk_version": attrs.option(attrs.string(), default = None),
         "use_archiver_flags": attrs.option(attrs.bool(), default = None),
-        "_internal_tools": attrs.default_only(attrs.exec_dep(providers = [CxxInternalTools], default = "prelude//cxx/tools:internal_tools")),
     } | cxx_toolchain_allow_cache_upload_args(),
     is_toolchain_rule = True,
 )

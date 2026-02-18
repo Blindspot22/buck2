@@ -1,16 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
 
-import com.facebook.buck.core.exceptions.HumanReadableException;
-import com.facebook.buck.util.string.AsciiBoxStringBuilder;
 import com.google.common.base.Throwables;
 import java.util.ArrayList;
 import java.util.List;
@@ -89,23 +88,27 @@ class TracingProcessorWrapper implements Processor {
     }
   }
 
-  private HumanReadableException wrapAnnotationProcessorCrashException(Throwable e) {
+  private RuntimeException wrapAnnotationProcessorCrashException(Throwable e) {
     List<String> filteredStackTraceLines = getStackTraceEndingAtAnnotationProcessor(e);
 
     int maxLineLength = filteredStackTraceLines.stream().mapToInt(String::length).max().orElse(75);
 
-    AsciiBoxStringBuilder messageBuilder =
-        new AsciiBoxStringBuilder(maxLineLength)
-            .writeLine("The annotation processor %s has crashed.\n", annotationProcessorName)
-            .writeLine(
+    StringBuilder messageBuilder =
+        new StringBuilder(maxLineLength)
+            .append(
+                String.format(
+                    "The annotation processor %s has crashed.\n\n", annotationProcessorName))
+            .append(
                 "This is likely a bug in the annotation processor itself, though there may be"
                     + " changes you can make to your code to work around it. Examine the exception"
                     + " stack trace below and consult the annotation processor's troubleshooting"
-                    + " guide.\n");
+                    + " guide.\n\n");
 
-    filteredStackTraceLines.forEach(messageBuilder::writeLine);
+    for (String line : filteredStackTraceLines) {
+      messageBuilder.append(line).append("\n");
+    }
 
-    return new HumanReadableException(e, "\n" + messageBuilder);
+    return new RuntimeException("\n" + messageBuilder, e);
   }
 
   private List<String> getStackTraceEndingAtAnnotationProcessor(Throwable e) {

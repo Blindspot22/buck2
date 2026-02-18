@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin;
@@ -13,7 +14,6 @@ import static com.facebook.buck.jvm.kotlin.CompilerPluginUtils.getKotlinCompiler
 
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.core.filesystems.RelPath;
-import com.facebook.buck.io.filesystem.CopySourceMode;
 import com.facebook.buck.jvm.cd.command.kotlin.KotlinExtraParams;
 import com.facebook.buck.jvm.cd.command.kotlin.LanguageVersion;
 import com.facebook.buck.jvm.core.BuildTargetValue;
@@ -23,7 +23,6 @@ import com.facebook.buck.jvm.java.CompilerParameters;
 import com.facebook.buck.jvm.kotlin.cd.analytics.KotlinCDAnalytics;
 import com.facebook.buck.jvm.kotlin.kotlinc.Kotlinc;
 import com.facebook.buck.step.isolatedsteps.IsolatedStep;
-import com.facebook.buck.step.isolatedsteps.common.CopyIsolatedStep;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSortedSet;
@@ -40,7 +39,6 @@ public class KotlinCStepsBuilder {
       ImmutableList.Builder<IsolatedStep> steps,
       ActionMetadata actionMetadata,
       KotlinExtraParams extraParams,
-      RelPath kotlinClassesDir,
       String friendPathsArg,
       String kotlinPluginGeneratedFullPath,
       String moduleName,
@@ -54,7 +52,6 @@ public class KotlinCStepsBuilder {
       KspStepsBuilder.KSPInvocationStatus kspInvocationStatus,
       ImmutableList<AbsPath> sourceOnlyAbiClasspath,
       ImmutableList.Builder<IsolatedStep> postKotlinCompilationFailureSteps,
-      RelPath outputDirectory,
       ImmutableList<AbsPath> classpathSnapshots,
       KotlinCDAnalytics kotlinCDAnalytics) {
     ImmutableList.Builder<String> extraArguments =
@@ -69,7 +66,7 @@ public class KotlinCStepsBuilder {
 
     LanguageVersion kotlincLanguageVersion = extraParams.getLanguageVersion();
 
-    if (invokingRule.isSourceOnlyAbi()) {
+    if (invokingRule.isSourceOnlyAbi() && !extraParams.getShouldKosabiJvmAbiGenUseK2()) {
       kotlincLanguageVersion = LanguageVersion.Companion.getK1();
     }
 
@@ -100,22 +97,19 @@ public class KotlinCStepsBuilder {
                 .create(
                     invokingRule.isSourceOnlyAbi(),
                     buildCellRootPath,
-                    outputDirectory.getParent().toAbsolutePath(),
+                    kotlinOutputDirectory.getParent().toAbsolutePath(),
                     parameters.getShouldTrackClassUsage(),
-                    CompilerOutputPaths.getKotlinDepFilePath(
+                    CompilerOutputPaths.getDepFilePath(
+                        parameters.getOutputPaths().getOutputJarDirPath()),
+                    CompilerOutputPaths.getUsedJarsFilePath(
                         parameters.getOutputPaths().getOutputJarDirPath()),
                     extraParams,
                     Optional.ofNullable(actionMetadata),
                     classpathSnapshots),
             kotlinCDAnalytics,
-            kotlincLanguageVersion);
+            kotlincLanguageVersion,
+            extraParams.getShouldKosabiJvmAbiGenUseK2() && kotlincLanguageVersion.getSupportsK2());
     steps.add(kotlincStep);
-
-    if (kotlinClassesDir != null) {
-      steps.add(
-          CopyIsolatedStep.forDirectory(
-              kotlinOutputDirectory, outputDirectory, CopySourceMode.DIRECTORY_CONTENTS_ONLY));
-    }
   }
 
   private static ImmutableList.Builder<String> getKotlincExtraArguments(

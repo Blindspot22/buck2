@@ -1,13 +1,15 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@fbcode//buck2/tests:buck_e2e.bzl", "buck2_e2e_test")
 load("@fbcode_macros//build_defs:native_rules.bzl", "buck_genrule")
 load("@fbsource//tools/build_defs/windows:powershell.bzl", "powershell_cmd_exe")
+load("@fbsource//tools/target_determinator/macros:ci.bzl", "ci")
 
 # This is meant to be Open-source friendly. In our e2e tests, we invoke a variant from
 # tools/build_defs/check_dependencies_test.bzl that passes additional arguments for meta specific allowlist.
@@ -19,6 +21,7 @@ def _check_dependencies_test(
         env,
         labels: list[str],
         deps,
+        compatible_with = None,
         **kwargs):
     buck2_e2e_test(
         contacts = contacts,
@@ -28,6 +31,7 @@ def _check_dependencies_test(
         labels = labels,
         test_with_compiled_buck2 = False,
         test_with_deployed_buck2 = True,
+        skip_deployed_buck2_version_dep = True,
         use_buck_api = False,
         # In order for target determinator to trigger this test when the `target` specified has changed, we need to introduce a dep on `target`.
         # However, we cannot introduce a configured dep, because the `target` may not be compatible with platform of dependencies test.
@@ -37,6 +41,7 @@ def _check_dependencies_test(
             "DEFAULT": [],
             "ovr_config//:none": [target],
         }),
+        compatible_with = compatible_with,
         **kwargs
     )
 
@@ -52,6 +57,7 @@ def check_dependencies_test(
         deps = None,
         extra_buck_args = [],
         labels = [],
+        target_deps = True,
         **kwargs):
     """
     Creates a test target from a buck2 bxl script. BXL script must use "test" as entry
@@ -100,12 +106,17 @@ def check_dependencies_test(
     if mode not in ("allowlist", "blocklist"):
         fail("mode must be one of: allowlist, blocklist")
 
+    modifiers = kwargs.pop("modifiers", None)
+    if modifiers:
+        for m in modifiers:
+            extra_buck_args = extra_buck_args + ["--modifier", m]
+
     extra_buck_args_target = "%s_extra_buck_args" % (name)
-    buck_args_str = " ".join(extra_buck_args)
+    buck_args_str = "\n".join(extra_buck_args)
     buck_genrule(
         name = extra_buck_args_target,
         out = "extra_buck_args",
-        bash = "echo %s > $OUT" % (buck_args_str),
+        bash = "echo '%s' > $OUT" % (buck_args_str),
         cmd_exe = powershell_cmd_exe([
             "Set-Content $OUT '%s'" % (buck_args_str),
         ]),
@@ -123,6 +134,7 @@ def check_dependencies_test(
             "EXTRA_BUCK_ARGS_FILE": "@$(location :%s)" % (extra_buck_args_target),
             "FLAVOR": "check_dependencies_test",
             "TARGET": target,
+            "TARGET_DEPS": str(target_deps).lower(),
             "VERIFICATION_MODE": mode,
         } | (env or {}),
         labels = ["check_dependencies_test"] + labels,
@@ -137,6 +149,7 @@ def assert_dependencies_test(
         expected_deps,
         expect_failure_msg = None,
         deps = None,
+        labels = [],
         **kwargs):
     """
     Creates a test target fromfbcode//buck2/tests/assert_dependencies_test.bxl:test bxl script.
@@ -158,7 +171,7 @@ def assert_dependencies_test(
             "FLAVOR": "assert_dependencies_test",
             "TARGET": target,
         },
-        labels = ["assert_dependencies_test"],
+        labels = labels + ["assert_dependencies_test"],
         deps = deps,
         **kwargs
     )
@@ -198,5 +211,81 @@ def audit_dependents_test(
         },
         labels = ["audit_dependents_test"],
         deps = deps,
+        **kwargs
+    )
+
+def check_mutually_exclusive_dependencies_test(
+        name,
+        target,
+        contacts,
+        mutually_exclusive_group,
+        expect_failure_msg = None,
+        deps = None,
+        labels = [],
+        target_deps = True,
+        build_mode = None,
+        **kwargs):
+    """
+    Creates a test target from a buck2 bxl script that checks for mutually exclusive dependencies.
+
+    This test verifies that the target does not depend on more than one dependency from the
+    mutually exclusive group. For example, if your group is:
+    [//third-party/volk:volk, //third-party/volk:volk-header, //third-party/toolchains:vulkan]
+
+    The test ensures at most one of these patterns has matches in the dependency tree.
+
+    Parameters:
+        name: Name of the test target.
+        contacts: List of oncalls for the test.
+        target: The target to check dependencies for
+        mutually_exclusive_group: List of dependency patterns where only one should be present.
+            Each pattern can be a specific target (e.g., "//foo/bar:baz") or a regex pattern
+            (e.g., "//foo/.*").
+            Example: ["//third-party/volk:volk", "//third-party/volk:volk-header"]
+        expect_failure_msg: Optional regex pattern for expected failure message
+        deps: Optional list of additional dependencies
+        labels: Optional list of labels for the test
+        target_deps: If True, only check target_deps() (default: True)
+        build_mode: Optional build mode flagfile for the BXL cquery. Use this to analyze
+            dependencies for a specific platform (e.g., Android) while running the test on Linux.
+            When specified, CI labels are automatically set to run the test only once on Linux.
+            Example: "fbsource//arvr/mode/android/linux/opt"
+    """
+
+    # Convert list to comma-separated string for BXL
+    group_str = ",".join(mutually_exclusive_group)
+
+    # Build mode flagfile is passed directly to buck2 as an argfile
+    # The flagfile contains --target-platforms and other config flags
+    build_mode_argfile = ""
+    ci_labels = []
+    if build_mode:
+        # Ensure the build mode has the @ prefix for argfile syntax
+        if build_mode.startswith("@"):
+            build_mode_argfile = build_mode
+        else:
+            build_mode_argfile = "@" + build_mode
+
+        # When build_mode is specified, the test will produce the same result
+        # regardless of which Linux CI mode runs it. Add CI labels to run only once.
+        ci_labels = [ci.overwrite(), ci.linux()]
+
+    _check_dependencies_test(
+        name = name,
+        target = target,
+        contacts = contacts,
+        env = {
+            "BUILD_MODE_ARGFILE": build_mode_argfile,
+            "BXL_MAIN": "fbcode//buck2/tests/check_mutually_exclusive_dependencies_test.bxl:test",
+            "EXPECT_FAILURE_MSG": expect_failure_msg or "",
+            "FLAVOR": "check_mutually_exclusive_dependencies_test",
+            "MUTUALLY_EXCLUSIVE_GROUP": group_str,
+            "TARGET": target,
+            "TARGET_DEPS": str(target_deps).lower(),
+        },
+        labels = ci_labels + labels + ["check_mutually_exclusive_dependencies_test"],
+        deps = deps,
+        # The test binary uses Python/pytest which doesn't work on platforms like android
+        compatible_with = ["ovr_config//os:linux", "ovr_config//os:macos", "ovr_config//os:windows"],
         **kwargs
     )

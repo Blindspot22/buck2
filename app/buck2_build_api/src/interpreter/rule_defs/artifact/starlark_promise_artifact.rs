@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -14,12 +15,12 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_artifact::artifact::artifact_type::Artifact;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
-use buck2_error::BuckErrorContext;
-use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
+use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use dupe::Dupe;
+use dupe::OptionDupedExt;
 use starlark::any::ProvidesStaticType;
 use starlark::codemap::FileSpan;
 use starlark::collections::StarlarkHasher;
@@ -27,7 +28,6 @@ use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsStatic;
 use starlark::values::Demand;
-use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
@@ -39,17 +39,19 @@ use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
 use crate::artifact_groups::ArtifactGroup;
+use crate::artifact_groups::PromiseArtifactWrapper;
 use crate::artifact_groups::promise::PromiseArtifact;
 use crate::interpreter::rule_defs::artifact::ArtifactError;
 use crate::interpreter::rule_defs::artifact::associated::AssociatedArtifacts;
-use crate::interpreter::rule_defs::artifact::methods::EitherStarlarkArtifact;
+use crate::interpreter::rule_defs::artifact::methods::EitherStarlarkInputArtifact;
 use crate::interpreter::rule_defs::artifact::methods::artifact_methods;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
-use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifactHelpers;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ArtifactFingerprint;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
 use crate::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
@@ -97,6 +99,7 @@ pub struct StarlarkPromiseArtifact {
     pub declaration_location: Option<FileSpan>,
     pub artifact: PromiseArtifact,
     pub short_path: Option<ForwardRelativePathBuf>,
+    pub has_content_based_path: bool,
 }
 
 starlark_simple_value!(StarlarkPromiseArtifact);
@@ -105,13 +108,13 @@ impl Display for StarlarkPromiseArtifact {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<promise artifact")?;
         if let Some(location) = &self.declaration_location {
-            write!(f, " declared at {}", location)?;
+            write!(f, " declared at {location}")?;
         }
         if let Some(short_path) = &self.short_path {
-            write!(f, " with short_path `{}`", short_path)?;
+            write!(f, " with short_path `{short_path}`")?;
         }
         if let Some(v) = self.artifact.get() {
-            write!(f, " resolved to {}", v)?;
+            write!(f, " resolved to {v}")?;
         }
         write!(f, ">")?;
         Ok(())
@@ -123,37 +126,81 @@ impl StarlarkPromiseArtifact {
         declaration_location: Option<FileSpan>,
         artifact: PromiseArtifact,
         short_path: Option<ForwardRelativePathBuf>,
+        has_content_based_path: bool,
     ) -> Self {
         Self {
             declaration_location,
             artifact,
             short_path,
+            has_content_based_path,
         }
     }
 
     pub fn as_artifact(&self) -> ArtifactGroup {
         match self.artifact.get() {
             Some(artifact) => ArtifactGroup::Artifact(artifact.dupe()),
-            None => ArtifactGroup::Promise(Arc::new(self.artifact.dupe())),
+            None => ArtifactGroup::Promise(Arc::new(PromiseArtifactWrapper::new(
+                self.artifact.dupe(),
+                self.has_content_based_path,
+            ))),
         }
     }
 
     fn short_path_err(&self) -> buck2_error::Result<&ForwardRelativePath> {
         self.short_path
             .as_deref()
-            .with_buck_error_context(|| PromiseArtifactError::NoShortPathPromised(self.clone()))
+            .ok_or_else(|| PromiseArtifactError::NoShortPathPromised(self.clone()).into())
     }
 
     fn file_name_err(&self) -> buck2_error::Result<&FileName> {
-        self.short_path_err()?
-            .file_name()
-            .with_buck_error_context(|| {
-                PromiseArtifactError::PromisedShortPathHasNoFileName(self.clone())
-            })
+        self.short_path_err()?.file_name().ok_or_else(|| {
+            PromiseArtifactError::PromisedShortPathHasNoFileName(self.clone()).into()
+        })
     }
 }
 
-impl StarlarkArtifactLike for StarlarkPromiseArtifact {
+impl<'v> StarlarkArtifactLike<'v> for StarlarkPromiseArtifact {
+    fn with_filename(
+        &self,
+        f: &dyn for<'b> Fn(&'b FileName) -> StringValue<'v>,
+    ) -> buck2_error::Result<StringValue<'v>> {
+        match self.artifact.get() {
+            Some(v) => v.get_path().with_filename(f),
+            None => Ok(f(self.file_name_err()?)),
+        }
+    }
+
+    fn is_source(&'v self) -> buck2_error::Result<bool> {
+        Ok(false)
+    }
+
+    fn owner(&'v self) -> buck2_error::Result<Option<BaseDeferredKey>> {
+        match self.artifact.get() {
+            Some(v) => Ok(v.owner().duped()),
+            None => Err(PromiseArtifactError::MethodUnsupported(self.clone(), "owner").into()),
+        }
+    }
+
+    fn with_short_path(
+        &self,
+        f: &dyn for<'b> Fn(&'b ForwardRelativePath) -> StringValue<'v>,
+    ) -> buck2_error::Result<StringValue<'v>> {
+        match self.artifact.get() {
+            Some(v) => Ok(v.get_path().with_short_path(f)),
+            None => Ok(f(self.short_path_err()?)),
+        }
+    }
+
+    fn fingerprint<'s>(&'s self) -> ArtifactFingerprint<'s>
+    where
+        'v: 's,
+    {
+        let id = self.artifact.id().dupe();
+        ArtifactFingerprint::Promise { id }
+    }
+}
+
+impl<'v> StarlarkInputArtifactLike<'v> for StarlarkPromiseArtifact {
     fn get_bound_artifact(&self) -> buck2_error::Result<Artifact> {
         match self.artifact.get() {
             Some(v) => Ok(v.dupe()),
@@ -170,15 +217,8 @@ impl StarlarkArtifactLike for StarlarkPromiseArtifact {
         None
     }
 
-    fn as_command_line_like(&self) -> &dyn CommandLineArgLike {
+    fn as_command_line_like(&self) -> &dyn CommandLineArgLike<'v> {
         self
-    }
-
-    fn fingerprint(&self) -> ArtifactFingerprint<'_> {
-        {
-            let id = self.artifact.id().dupe();
-            ArtifactFingerprint::Promise { id }
-        }
     }
 
     fn as_output_error(&self) -> buck2_error::Error {
@@ -192,71 +232,35 @@ impl StarlarkArtifactLike for StarlarkPromiseArtifact {
         Ok(self.as_artifact())
     }
 
-    fn basename<'v>(&'v self, heap: &'v Heap) -> buck2_error::Result<StringValue<'v>> {
-        match self.artifact.get() {
-            Some(v) => StarlarkArtifactHelpers::basename(v, heap),
-            None => Ok(heap.alloc_str(self.file_name_err()?.as_str())),
-        }
-    }
-
-    fn extension<'v>(&'v self, heap: &'v Heap) -> buck2_error::Result<StringValue<'v>> {
-        match self.artifact.get() {
-            Some(v) => StarlarkArtifactHelpers::extension(v, heap),
-            None => Ok(StarlarkArtifactHelpers::alloc_extension(
-                self.file_name_err()?.extension(),
-                heap,
-            )),
-        }
-    }
-
-    fn is_source<'v>(&'v self) -> buck2_error::Result<bool> {
-        Ok(false)
-    }
-
-    fn owner<'v>(&'v self) -> buck2_error::Result<Option<StarlarkConfiguredProvidersLabel>> {
-        match self.artifact.get() {
-            Some(v) => StarlarkArtifactHelpers::owner(v),
-            None => Err(PromiseArtifactError::MethodUnsupported(self.clone(), "owner").into()),
-        }
-    }
-
-    fn short_path<'v>(&'v self, heap: &'v Heap) -> buck2_error::Result<StringValue<'v>> {
-        match self.artifact.get() {
-            Some(v) => StarlarkArtifactHelpers::short_path(v, heap),
-            None => Ok(heap.alloc_str(self.short_path_err()?.as_str())),
-        }
-    }
-
-    fn as_output<'v>(
-        &'v self,
-        _this: Value<'v>,
-    ) -> buck2_error::Result<StarlarkOutputArtifact<'v>> {
+    fn as_output(&'v self, _this: Value<'v>) -> buck2_error::Result<StarlarkOutputArtifact<'v>> {
         Err(self.as_output_error())
     }
 
-    fn project<'v>(
+    fn project(
         &'v self,
         path: &ForwardRelativePath,
         hide_prefix: bool,
-    ) -> buck2_error::Result<EitherStarlarkArtifact> {
+    ) -> buck2_error::Result<EitherStarlarkInputArtifact<'v>> {
         let _ = (path, hide_prefix);
         Err(PromiseArtifactError::CannotProject(self.clone()).into())
     }
 
-    fn without_associated_artifacts<'v>(&'v self) -> buck2_error::Result<EitherStarlarkArtifact> {
-        Ok(EitherStarlarkArtifact::PromiseArtifact(self.clone()))
+    fn without_associated_artifacts(
+        &'v self,
+    ) -> buck2_error::Result<EitherStarlarkInputArtifact<'v>> {
+        Ok(EitherStarlarkInputArtifact::PromiseArtifact(self.clone()))
     }
 
-    fn with_associated_artifacts<'v>(
+    fn with_associated_artifacts(
         &'v self,
-        artifacts: UnpackList<ValueAsArtifactLike<'v>>,
-    ) -> buck2_error::Result<EitherStarlarkArtifact> {
+        artifacts: UnpackList<ValueAsInputArtifactLike<'v>>,
+    ) -> buck2_error::Result<EitherStarlarkInputArtifact<'v>> {
         let _unused = artifacts;
         Err(PromiseArtifactError::CannotAddAssociatedArtifacts.into())
     }
 }
 
-impl CommandLineArgLike for StarlarkPromiseArtifact {
+impl<'v> CommandLineArgLike<'v> for StarlarkPromiseArtifact {
     fn register_me(&self) {
         command_line_arg_like_impl!(StarlarkPromiseArtifact::starlark_type_repr());
     }
@@ -265,10 +269,11 @@ impl CommandLineArgLike for StarlarkPromiseArtifact {
         &self,
         cli: &mut dyn CommandLineBuilder,
         ctx: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         match self.artifact.get() {
             Some(v) => {
-                cli.push_location(ctx.resolve_artifact(v)?);
+                cli.push_location(ctx.resolve_artifact(v, artifact_path_mapping)?);
                 Ok(())
             }
             None => Err(PromiseArtifactError::UnresolvedAddedToCommandLine(self.clone()).into()),
@@ -277,9 +282,9 @@ impl CommandLineArgLike for StarlarkPromiseArtifact {
 
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
-        visitor.visit_input(self.as_artifact(), None);
+        visitor.visit_input(self.as_artifact(), vec![]);
         Ok(())
     }
 
@@ -290,6 +295,7 @@ impl CommandLineArgLike for StarlarkPromiseArtifact {
     fn visit_write_to_file_macros(
         &self,
         _visitor: &mut dyn WriteToFileMacroVisitor,
+        _artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         Ok(())
     }

@@ -1,10 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
+load("@prelude//:is_full_meta_repo.bzl", "is_full_meta_repo")
 load(
     "@prelude//java:class_to_srcs.bzl",
     "JavaClassToSourceMapInfo",  # @unused Used as a type
@@ -20,6 +22,15 @@ load(
 load("@prelude//java:java_toolchain.bzl", "AbiGenerationMode", "JavaToolchainInfo")
 load("@prelude//utils:expect.bzl", "expect")
 
+CustomJdkInfo = record(
+    # Used with -bootclasspath flag for JDK 8 and older release targets
+    # This is also added to the normal classpath when used with kotlinc or javac with JDK9+ release
+    bootclasspath = list[Artifact],
+    bootclasspath_jar_snapshots = list[Artifact],
+    # Used with --system flag for JDK 9+ release targets
+    system_image = Artifact,
+)
+
 def derive_javac(javac_attribute: [str, Dependency, Artifact]) -> [str, RunInfo, Artifact]:
     javac_attr_type = type(javac_attribute)
     if isinstance(javac_attribute, Dependency):
@@ -30,7 +41,7 @@ def derive_javac(javac_attribute: [str, Dependency, Artifact]) -> [str, RunInfo,
         expect(len(outputs) == 1, "Expect one default output from build dep of attr javac!")
         return outputs[0]
 
-    if javac_attr_type == "artifact":
+    if isinstance(javac_attribute, Artifact):
         return javac_attribute
 
     if javac_attr_type == type(""):
@@ -40,14 +51,18 @@ def derive_javac(javac_attribute: [str, Dependency, Artifact]) -> [str, RunInfo,
 
 def get_java_version_attributes(ctx: AnalysisContext) -> (int, int):
     java_toolchain = ctx.attrs._java_toolchain[JavaToolchainInfo]
+
+    # used for multi-release jars
+    # the attribute might not exist if function is being used in other macros, such as kotlin_library
+    min_release_version = ctx.attrs.min_release_version if hasattr(ctx.attrs, "min_release_version") else None
     java_version = ctx.attrs.java_version
     java_source = ctx.attrs.source
     java_target = ctx.attrs.target
 
-    if java_version:
+    if java_version or min_release_version:
         if java_source or java_target:
-            fail("No need to set 'source' and/or 'target' attributes when 'java_version' is present")
-        java_version = to_java_version(java_version)
+            fail("No need to set 'source' and/or 'target' attributes when 'java_version' or 'min_release_version' are present")
+        java_version = to_java_version(min_release_version) if min_release_version else to_java_version(java_version)
         return (java_version, java_version)
 
     source = java_source or java_toolchain.source_level
@@ -87,7 +102,7 @@ def get_default_info(
         outputs: [JavaCompileOutputs, None],
         packaging_info: JavaPackagingInfo,
         extra_sub_targets: dict = {}) -> DefaultInfo:
-    sub_targets = get_classpath_subtarget(actions, packaging_info)
+    sub_targets = get_classpath_subtargets(actions, packaging_info)
     default_info = DefaultInfo()
     if outputs:
         abis = [
@@ -118,7 +133,8 @@ def get_class_to_source_map_info(
         ctx: AnalysisContext,
         outputs: [JavaCompileOutputs, None],
         deps: list[Dependency],
-        generate_sources_jar: bool = False) -> (JavaClassToSourceMapInfo, Artifact | None, dict):
+        generate_sources_jar: bool = False,
+        class_to_src_map_deps: list[Dependency] = []) -> (JavaClassToSourceMapInfo, Artifact | None, dict):
     sub_targets = {}
     class_to_srcs = None
     class_to_srcs_debuginfo = None
@@ -143,31 +159,39 @@ def get_class_to_source_map_info(
         if sources_jar:
             sub_targets["sources.jar"] = [DefaultInfo(default_output = sources_jar)]
 
+    # Include class_to_src_map_deps for classmap collection. These are deps that
+    # only contribute to the class-to-source map (for debugging) but not to compilation.
+    all_classmap_deps = deps + class_to_src_map_deps
     class_to_src_map_info = create_class_to_source_map_info(
         ctx = ctx,
         mapping = class_to_srcs,
         mapping_debuginfo = class_to_srcs_debuginfo,
-        deps = deps,
+        deps = all_classmap_deps,
     )
     if outputs != None:
         sub_targets["debuginfo"] = [DefaultInfo(default_output = class_to_src_map_info.debuginfo)]
     return (class_to_src_map_info, sources_jar, sub_targets)
 
-def get_classpath_subtarget(actions: AnalysisActions, packaging_info: JavaPackagingInfo) -> dict[str, list[Provider]]:
+def get_classpath_subtargets(actions: AnalysisActions, packaging_info: JavaPackagingInfo) -> dict[str, list[Provider]]:
     proj = packaging_info.packaging_deps.project_as_args("full_jar_args")
     output = actions.write("classpath", proj)
-    return {"classpath": [DefaultInfo(output, other_outputs = [proj])]}
+
+    classpath_targets_proj = packaging_info.packaging_deps.project_as_args("full_jar_owner_args")
+    classpath_targets_output = actions.write("classpath_targets", classpath_targets_proj)
+
+    return {
+        "classpath": [DefaultInfo(output, other_outputs = [proj])],
+        "classpath_targets": [DefaultInfo(classpath_targets_output)],
+    }
 
 def build_bootclasspath(bootclasspath_entries: list[Artifact], source_level: int, java_toolchain: JavaToolchainInfo) -> list[Artifact]:
     bootclasspath_list = []
 
-    if source_level in [7, 8]:
-        # bootclasspath_7 is deprecated.
-        if bootclasspath_entries:
-            bootclasspath_list = bootclasspath_entries
-        elif source_level == 8:
-            if read_config("build", "is_oss", "false") == "true":
-                return bootclasspath_list
-            expect(java_toolchain.bootclasspath_8, "Must specify bootclasspath for source level 8")
-            bootclasspath_list = java_toolchain.bootclasspath_8
+    if bootclasspath_entries:
+        bootclasspath_list = bootclasspath_entries
+    elif source_level == 8:
+        if not is_full_meta_repo():
+            return bootclasspath_list
+        expect(java_toolchain.bootclasspath_8, "Must specify bootclasspath for source level 8")
+        bootclasspath_list = java_toolchain.bootclasspath_8
     return bootclasspath_list

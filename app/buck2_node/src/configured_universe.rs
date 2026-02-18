@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeMap;
@@ -147,9 +148,9 @@ impl CqueryUniverse {
         resolved_pattern: &ResolvedPattern<TargetPatternExtra>,
     ) -> TargetSet<ConfiguredTargetNode> {
         let mut targets = TargetSet::new();
-        for (package, spec) in &resolved_pattern.specs {
+        for (package_with_modifiers, spec) in &resolved_pattern.specs {
             targets.extend(
-                self.get_from_package(package.dupe(), spec)
+                self.get_from_package(package_with_modifiers.package, spec)
                     .map(|(node, TargetPatternExtra)| node.to_owned()),
             );
         }
@@ -185,7 +186,6 @@ impl CqueryUniverse {
             label.pkg(),
             &PackageSpec::Targets(vec![(label.name().to_owned(), TargetPatternExtra)]),
         )
-        .into_iter()
         .map(|(node, _extra)| node.label().dupe())
         .collect()
     }
@@ -201,16 +201,17 @@ impl CqueryUniverse {
         resolved_pattern: &ResolvedPattern<P>,
     ) -> Vec<ConfiguredProvidersLabel> {
         let mut targets = Vec::new();
-        for (package, spec) in &resolved_pattern.specs {
-            targets.extend(self.get_from_package(package.dupe(), spec).filter_map(
-                |(node, extra)| match node.rule_type() {
-                    RuleType::Forward => None,
-                    RuleType::Starlark(..) => Some(ConfiguredProvidersLabel::new(
-                        node.label().dupe(),
-                        extra.into_providers(),
-                    )),
-                },
-            ));
+        for (package_with_modifiers, spec) in &resolved_pattern.specs {
+            targets.extend(
+                self.get_from_package(package_with_modifiers.package, spec)
+                    .filter_map(|(node, extra)| match node.rule_type() {
+                        RuleType::Forward => None,
+                        RuleType::Starlark(..) => Some(ConfiguredProvidersLabel::new(
+                            node.label().dupe(),
+                            extra.into_providers(),
+                        )),
+                    }),
+            );
         }
         targets
     }
@@ -242,7 +243,7 @@ impl CqueryUniverse {
                             })
                     }))
                 }
-                PackageSpec::All => Either::Right(
+                PackageSpec::All() => Either::Right(
                     package_universe
                         .values()
                         .flatten()
@@ -251,7 +252,7 @@ impl CqueryUniverse {
             })
     }
 
-    pub fn owners(&self, path: &CellPath) -> Vec<ConfiguredTargetNode> {
+    pub fn owners(&self, path: &CellPath) -> buck2_error::Result<Vec<ConfiguredTargetNode>> {
         let mut nodes = Vec::new();
 
         // We lookup in all ancestors because we still have package boundary violations.
@@ -264,7 +265,7 @@ impl CqueryUniverse {
             // This does not leave this function, so we are probably fine.
             // We do it because the map is by `Package`,
             // and `BTreeMap` does not allow lookup by equivalent key.
-            let package = PackageLabel::from_cell_path(package);
+            let package = PackageLabel::from_cell_path(package)?;
             let package_data = match self.data.data().targets.get(&package) {
                 None => continue,
                 Some(package_data) => package_data,
@@ -275,7 +276,7 @@ impl CqueryUniverse {
                 }
             }
         }
-        nodes
+        Ok(nodes)
     }
 }
 
@@ -287,6 +288,8 @@ mod tests {
     use buck2_core::configuration::hash::ConfigurationHash;
     use buck2_core::execution_types::execution::ExecutionPlatformResolution;
     use buck2_core::package::PackageLabel;
+    use buck2_core::package::PackageLabelWithModifiers;
+    use buck2_core::pattern::pattern::Modifiers;
     use buck2_core::pattern::pattern::PackageSpec;
     use buck2_core::pattern::pattern_type::ConfigurationPredicate;
     use buck2_core::pattern::pattern_type::ConfiguredProvidersPatternExtra;
@@ -316,7 +319,10 @@ mod tests {
         ) -> ResolvedPattern<ConfiguredProvidersPatternExtra> {
             ResolvedPattern {
                 specs: IndexMap::from_iter([(
-                    PackageLabel::testing_parse("foo//bar"),
+                    PackageLabelWithModifiers {
+                        package: PackageLabel::testing_parse("foo//bar"),
+                        modifiers: Modifiers::new(None),
+                    },
                     PackageSpec::Targets(Vec::from_iter([(
                         TargetName::testing_new("baz"),
                         ConfiguredProvidersPatternExtra {

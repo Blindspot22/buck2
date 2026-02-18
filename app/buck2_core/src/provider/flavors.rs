@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::OnceLock;
@@ -14,6 +15,7 @@ use regex::RegexSet;
 use crate::provider::label::NonDefaultProvidersName;
 use crate::provider::label::ProviderName;
 use crate::provider::label::ProvidersName;
+use crate::soft_error;
 
 static PLATFORM_REGEX_SET: OnceLock<RegexSet> = OnceLock::new();
 
@@ -55,7 +57,7 @@ pub fn map_flavors(flavors: &str, full_target: &str) -> buck2_error::Result<Prov
             // rely on the wrapping span in order to find
             soft_error!(
                 "platform_flavor",
-                buck2_error::buck2_error!(buck2_error::ErrorTag::Input, "Platform flavor found in target: {}", full_target).into(),
+                buck2_error::buck2_error!(buck2_error::ErrorTag::Input, "Platform flavor found in target: {}", full_target),
                 deprecation: true,
                 quiet: true
             )?;
@@ -123,9 +125,6 @@ pub fn map_flavors(flavors: &str, full_target: &str) -> buck2_error::Result<Prov
                 ["android", "misc"] | ["android", "misc", "release"] => "misc".to_owned(),
                 ["android", "source_map"] | ["android", "release", "source_map"] => {
                     "source_map".to_owned()
-                }
-                ["android", "misc", "rambundle-indexed", "release"] => {
-                    "rambundle-indexed-misc".to_owned()
                 }
 
                 // This allows us to pass parsing for this thing.

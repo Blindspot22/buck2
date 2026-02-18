@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -19,8 +20,8 @@ use buck2_common::dice::data::HasIoProvider;
 use buck2_common::io::IoProvider;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::name::CellName;
-use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
+use buck2_error::internal_error;
 use buck2_interpreter::file_type::StarlarkFileType;
 use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
 use buck2_interpreter::paths::path::OwnedStarlarkPath;
@@ -98,7 +99,7 @@ impl Cache<'_> {
             .io
             .read_file_if_exists(proj_path)
             .await?
-            .with_buck_error_context(|| format!("File not found: `{path_str}`"))?;
+            .ok_or_else(|| internal_error!("File not found: `{path_str}`"))?;
 
         let mut dice = self.dice.clone();
         let interp = dice

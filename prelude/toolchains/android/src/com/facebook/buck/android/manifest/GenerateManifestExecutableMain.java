@@ -1,15 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.manifest;
 
-import com.android.common.utils.StdLogger;
+import com.android.utils.StdLogger;
 import com.facebook.buck.util.ThrowingPrintWriter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -47,6 +48,9 @@ public class GenerateManifestExecutableMain {
   @Option(name = "--merge-report", required = true)
   private String mergeReport;
 
+  @Option(name = "--preprocess-log", required = false)
+  private String preprocessLog;
+
   public static void main(String[] args) throws IOException {
     GenerateManifestExecutableMain main = new GenerateManifestExecutableMain();
     CmdLineParser parser = new CmdLineParser(main);
@@ -73,6 +77,7 @@ public class GenerateManifestExecutableMain {
             .collect(ImmutableMap.toImmutableMap(arr -> arr[0], arr -> arr[1]));
 
     Path outputPath = Paths.get(output);
+    Path preprocessLogPath = preprocessLog != null ? Paths.get(preprocessLog) : null;
 
     String xmlText =
         GenerateManifest.generateXml(
@@ -82,6 +87,7 @@ public class GenerateManifestExecutableMain {
             placeholderEntries,
             outputPath,
             Paths.get(mergeReport),
+            preprocessLogPath,
             new StdLogger(StdLogger.Level.ERROR));
 
     try (ThrowingPrintWriter writer =

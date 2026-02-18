@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -89,7 +90,7 @@ impl StarlarkSelectDict {
     fn get<'v>(
         &self,
         key: SelectDictKeyArg<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> buck2_error::Result<NoneOr<Value<'v>>> {
         match key {
             SelectDictKeyArg::Label(label) => {
@@ -138,15 +139,18 @@ fn key_to_starlark_type(key: &CoercedSelectorKeyRef) -> SelectDictKey {
 }
 
 /// In bxl, `Select = bxl.SelectDict | bxl.SelectConcat`. `bxl.SelectDict` is a dict-like object that represents a select.
-/// One example of this type is
+/// One example of this type is:
+///
 /// ```python
 /// select({
-//      "root//constraints:a": ["--foo"],
-//      "root//constraints:b": ["--bar"],
-//      "DEFAULT": ["baz"]
-//  })
+///      "root//constraints:a": ["--foo"],
+///      "root//constraints:b": ["--bar"],
+///      "DEFAULT": ["baz"]
+///  })
 /// ```
+///
 /// You can:
+///
 /// * Iterate over its keys (e.g., `for key in select_dict.select_keys():`).
 /// * Iterate over key-value pairs using select_dict.select_items() (e.g., `for key, value in select_dict.select_items():`).
 /// * Get the select entry with a string or a ProvidersLabel (e.g., `select_dict.get_select_entry("root//constraints:a")`).
@@ -165,7 +169,7 @@ fn select_dict_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn select_items<'v>(
         this: &'v StarlarkSelectDict,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<Vec<(SelectDictKey, Value<'v>)>> {
         let items: Vec<(SelectDictKey, Value)> = this
             .selector
@@ -178,16 +182,17 @@ fn select_dict_methods(builder: &mut MethodsBuilder) {
         Ok(items)
     }
 
-    // Return the keys of SelectDict. The key is either a string (for `DEFAULT`) or a `ProvidersLabel`.
-    //
-    // Sample usage:
-    // ```python
-    // def _impl_select_dict(ctx):
-    //     node = ctx.lazy.unconfigured_target_node("root//:select_dict").resolve()
-    //     attr = node.get_attr("select_attr")
-    //     for key in attr.select_keys():
-    //         ctx.output.print(key)
-    //```
+    /// Return the keys of SelectDict. The key is either a string (for `DEFAULT`) or a `ProvidersLabel`.
+    ///
+    /// Sample usage:
+    ///
+    /// ```python
+    /// def _impl_select_dict(ctx):
+    ///     node = ctx.lazy.unconfigured_target_node("root//:select_dict").resolve()
+    ///     attr = node.get_attr("select_attr")
+    ///     for key in attr.select_keys():
+    ///         ctx.output.print(key)
+    /// ```
     fn select_keys<'v>(this: &'v StarlarkSelectDict) -> starlark::Result<Vec<SelectDictKey>> {
         let keys = this
             .selector
@@ -212,7 +217,7 @@ fn select_dict_methods(builder: &mut MethodsBuilder) {
     fn get_select_entry<'v>(
         this: &'v StarlarkSelectDict,
         #[starlark(require = pos)] key: SelectDictKeyArg<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<NoneOr<Value<'v>>> {
         Ok(this.get(key, heap)?)
     }
@@ -269,19 +274,22 @@ impl<'v> StarlarkValue<'v> for StarlarkSelectConcat {
 
 /// In bxl, `Select = bxl.SelectDict | bxl.SelectConcat`. `bxl.SelectConcat` is a list-like object that represents a select.
 /// One example of this type is:
+///
 /// ```python
 /// ["--flags"] + select({
-//     "root//constraints:a": ["--foo"],
-//     "root//constraints:b": ["--bar"],
-//     "DEFAULT": ["baz"]
-// })
+///     "root//constraints:a": ["--foo"],
+///     "root//constraints:b": ["--bar"],
+///     "DEFAULT": ["baz"]
+/// })
 /// ```
+///
 /// You can:
+///
 /// * Iterate over the values of this object (e.g. `for item in select_concat.select_iter():`)
 /// * Get the length (e.g. `len(select_concat)`)
 /// * Check its type using `isinstance(select_concat, bxl.SelectConcat)`.
 ///
-/// Simple usage:
+/// Sample usage:
 /// ```python
 /// def _impl_select_concat(ctx):
 ///     node = ctx.lazy.unconfigured_target_node("root//:select_concat").resolve()
@@ -308,8 +316,8 @@ fn select_concat_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn select_iter<'v>(
         this: &'v StarlarkSelectConcat,
-        heap: &'v Heap,
-    ) -> anyhow::Result<Vec<Value<'v>>> {
+        heap: Heap<'v>,
+    ) -> starlark::Result<Vec<Value<'v>>> {
         let list = this
             .concat
             .iter()

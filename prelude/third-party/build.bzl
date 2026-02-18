@@ -13,12 +13,6 @@ load(
 )
 load(":providers.bzl", "ThirdPartyBuild", "ThirdPartyBuildInfo", "third_party_build_info")
 
-def project_from_label(label: Label) -> str:
-    """
-    Generate a unique third-party project name for the given label.
-    """
-    return str(label.raw_target())
-
 def prefix_from_label(label: Label, prefix: str = "/usr/local") -> str:
     """
     Generate a unique third-party prefix for the given label.
@@ -30,6 +24,13 @@ def _get_sh_ext(ctx: AnalysisContext) -> str | None:
     if toolchain_info:
         return toolchain_info.linker_info.shared_library_name_format.format("")
     return None
+
+def is_empty(cxx_headers: list[CPreprocessorInfo]):
+    for pps in cxx_headers:
+        for pp in pps.set.value:
+            for _ in pp.headers:
+                return False
+    return True
 
 def create_third_party_build_root(
         ctx: AnalysisContext,
@@ -67,7 +68,7 @@ def create_third_party_build_root(
         lines = []
         if shared_libs:
             for soname, shared_lib in shared_libs.items():
-                lines.append(cmd_args("--path", path_utils.join("lib", soname), shared_lib.lib.output))
+                lines.append(cmd_args("--file-follow", path_utils.join("lib", soname), shared_lib.lib.output))
 
                 # Linker link `-l<name>` dynamically (by default) by looking for `lib<name>.so`,
                 # so make sure this exists by creating it as a symlink (to the versioned name)
@@ -104,9 +105,8 @@ def create_third_party_build_info(
         cxx_headers: list[CPreprocessorInfo] = [],
         cxx_header_dirs: list[str] = [],
         paths: list[(str, Artifact)] = [],
+        children: list[ThirdPartyBuildInfo] = [],
         deps: list[Dependency] = []) -> ThirdPartyBuildInfo:
-    if project == None:
-        project = project_from_label(ctx.label)
     if prefix == None:
         prefix = prefix_from_label(ctx.label)
 
@@ -121,15 +121,22 @@ def create_third_party_build_info(
 
     sh_ext = _get_sh_ext(ctx)
 
+    include_paths = []
+    if not is_empty(cxx_headers):
+        include_paths.append("include")
+    include_paths.extend(cxx_header_dirs)
+
     # Build manifest.
     def gen_manifest(actions, output, shared_libs):
         manifest = {}
-        manifest["project"] = project
+        if project != None:
+            manifest["project"] = project
         manifest["prefix"] = prefix
-        if cxx_header_dirs:
-            manifest["c_include_paths"] = cxx_header_dirs
-            manifest["cxx_include_paths"] = cxx_header_dirs
+        manifest["bin_paths"] = []
+        manifest["c_include_paths"] = include_paths
+        manifest["cxx_include_paths"] = include_paths
         if shared_libs:
+            manifest["lib_paths"] = ["lib"]
             manifest["runtime_lib_paths"] = ["lib"]
             libs = []
             for soname in shared_libs:
@@ -137,6 +144,10 @@ def create_third_party_build_info(
                     lib = soname.split(sh_ext)[0].removeprefix("lib")
                     libs.append("-l{}".format(lib))
             manifest["libs"] = libs
+        else:
+            manifest["lib_paths"] = []
+            manifest["runtime_lib_paths"] = []
+            manifest["libs"] = []
         return actions.write_json(output.as_output(), manifest, pretty = True)
 
     manifest = gen_shared_libs_action(
@@ -155,4 +166,5 @@ def create_third_party_build_info(
             manifest = manifest,
         ),
         deps = deps,
+        children = children,
     )

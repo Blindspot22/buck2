@@ -68,7 +68,6 @@ following process:
 
 2. **Target Configuration**: With no additional configuration arguments, the
    default target platform is applied. This produces configured targets:
-
    - `A (cfg_b)`
    - `B (cfg_b)`
    - `C (cfg_b)`
@@ -139,8 +138,8 @@ universe = ctx.target_universe(["root//path/...", "X"])
 2. Lookup args in the universe
 
 ```python
-arg0 = universe.looup("root//path/...")
-arg1 = universe.looup("X")
+arg0 = universe.lookup("root//path/...")
+arg1 = universe.lookup("X")
 ```
 
 3. Run cquery

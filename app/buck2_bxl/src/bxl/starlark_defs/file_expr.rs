@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -13,16 +14,16 @@ use std::path::Path;
 
 use buck2_artifact::artifact::source_artifact::SourceArtifact;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
-use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::data::HasIoProvider;
 use buck2_core::cells::CellAliasResolver;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::instance::CellInstance;
 use buck2_core::cells::paths::CellRelativePath;
-use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::pattern::pattern::maybe_split_cell_alias_and_relative_path;
+use buck2_fs::paths::abs_path::AbsPath;
 use derive_more::Display;
 use dice::DiceComputations;
 use dupe::Dupe;
@@ -50,7 +51,7 @@ impl<'v> UnpackValue<'v> for SourceArtifactUnpack {
     type Error = Infallible;
 
     fn unpack_value_impl(value: Value<'v>) -> Result<Option<Self>, Self::Error> {
-        let Some(v) = ValueAsArtifactLike::unpack_value_opt(value) else {
+        let Some(v) = ValueAsInputArtifactLike::unpack_value_opt(value) else {
             return Ok(None);
         };
         let Some(bound_artifact) = v.0.get_bound_artifact().ok() else {
@@ -110,7 +111,7 @@ impl<'a> FileExpr<'a> {
                         } else {
                             Cow::Borrowed(<&ProjectRelativePath>::try_from(val)?)
                         };
-                        Ok(dice.get_cell_resolver().await?.get_cell_path(&rel)?)
+                        Ok(dice.get_cell_resolver().await?.get_cell_path(&rel))
                     }
                 }
             }

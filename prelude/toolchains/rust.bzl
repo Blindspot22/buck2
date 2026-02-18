@@ -1,34 +1,36 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//rust:rust_toolchain.bzl", "PanicRuntime", "RustToolchainInfo")
 
 _DEFAULT_TRIPLE = select({
-    "config//os:linux": select({
-        "config//cpu:arm64": "aarch64-unknown-linux-gnu",
-        "config//cpu:x86_64": "x86_64-unknown-linux-gnu",
+    "prelude//os:linux": select({
+        "prelude//cpu:arm64": "aarch64-unknown-linux-gnu",
+        "prelude//cpu:riscv64": "riscv64gc-unknown-linux-gnu",
+        "prelude//cpu:x86_64": "x86_64-unknown-linux-gnu",
     }),
-    "config//os:macos": select({
-        "config//cpu:arm64": "aarch64-apple-darwin",
-        "config//cpu:x86_64": "x86_64-apple-darwin",
+    "prelude//os:macos": select({
+        "prelude//cpu:arm64": "aarch64-apple-darwin",
+        "prelude//cpu:x86_64": "x86_64-apple-darwin",
     }),
-    "config//os:windows": select({
-        "config//cpu:arm64": select({
+    "prelude//os:windows": select({
+        "prelude//cpu:arm64": select({
             # Rustup's default ABI for the host on Windows is MSVC, not GNU.
             # When you do `rustup install stable` that's the one you get. It
             # makes you opt in to GNU by `rustup install stable-gnu`.
             "DEFAULT": "aarch64-pc-windows-msvc",
-            "config//abi:gnu": "aarch64-pc-windows-gnu",
-            "config//abi:msvc": "aarch64-pc-windows-msvc",
+            "prelude//abi:gnu": "aarch64-pc-windows-gnu",
+            "prelude//abi:msvc": "aarch64-pc-windows-msvc",
         }),
-        "config//cpu:x86_64": select({
+        "prelude//cpu:x86_64": select({
             "DEFAULT": "x86_64-pc-windows-msvc",
-            "config//abi:gnu": "x86_64-pc-windows-gnu",
-            "config//abi:msvc": "x86_64-pc-windows-msvc",
+            "prelude//abi:gnu": "x86_64-pc-windows-gnu",
+            "prelude//abi:msvc": "x86_64-pc-windows-msvc",
         }),
     }),
 })

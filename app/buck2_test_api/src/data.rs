@@ -1,15 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Core data objects used in the protocol
 
-mod convert;
+pub mod convert;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -21,8 +22,8 @@ use std::time::SystemTime;
 use allocative::Allocative;
 use buck2_core::cells::name::CellName;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 pub use buck2_test_proto::CasDigest;
 pub use buck2_test_proto::ExecutionDetails;
 use derivative::Derivative;
@@ -47,6 +48,8 @@ pub struct ConfiguredTarget {
     pub target: String,
     pub configuration: String,
     pub package_project_relative_path: ForwardRelativePathBuf,
+    pub test_config_unification_rollout: bool,
+    pub package_oncall: Option<String>,
 }
 
 /// Metadata about the execution to display
@@ -70,7 +73,7 @@ pub enum TestStage {
 impl fmt::Display for TestStage {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self {
-            TestStage::Listing { suite, .. } => write!(f, "Listing({})", suite),
+            TestStage::Listing { suite, .. } => write!(f, "Listing({suite})"),
             TestStage::Testing {
                 suite, testcases, ..
             } => {
@@ -131,6 +134,7 @@ pub enum TestStatus {
     OMITTED,
     FATAL,
     TIMEOUT,
+    INFRA_FAILURE,
     // There is something called unknown, adding it here for now,
     // we can change it later on.
     UNKNOWN,
@@ -177,9 +181,9 @@ pub enum ExternalRunnerSpecValue {
 impl std::fmt::Display for ExternalRunnerSpecValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Verbatim(s) => write!(f, "Verbatim({})", s),
-            Self::ArgHandle(h) => write!(f, "ArgHandle({})", h),
-            Self::EnvHandle(h) => write!(f, "EnvHandle({})", h),
+            Self::Verbatim(s) => write!(f, "Verbatim({s})"),
+            Self::ArgHandle(h) => write!(f, "ArgHandle({h})"),
+            Self::EnvHandle(h) => write!(f, "EnvHandle({h})"),
         }
     }
 }
@@ -190,7 +194,7 @@ impl std::fmt::Display for ExternalRunnerSpecValue {
 pub struct ArgHandle(pub usize);
 
 impl TryFrom<i64> for ArgHandle {
-    type Error = anyhow::Error;
+    type Error = buck2_error::Error;
 
     fn try_from(i: i64) -> Result<Self, Self::Error> {
         Ok(ArgHandle(i.try_into()?))
@@ -218,8 +222,8 @@ pub enum ArgValueContent {
 impl fmt::Display for ArgValueContent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ExternalRunnerSpecValue(v) => write!(f, "ExternalRunnerSpecValue({})", v),
-            Self::DeclaredOutput(o) => write!(f, "DeclaredOutput({})", o),
+            Self::ExternalRunnerSpecValue(v) => write!(f, "ExternalRunnerSpecValue({v})"),
+            Self::DeclaredOutput(o) => write!(f, "DeclaredOutput({o})"),
         }
     }
 }

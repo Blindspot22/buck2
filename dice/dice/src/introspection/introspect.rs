@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::hash_map::Entry;
@@ -26,27 +27,25 @@ pub fn serialize_graph(
 ) -> anyhow::Result<()> {
     let mut reg = NodeRegistry::new();
 
-    for engine in graph.introspectables() {
-        for (k, vs) in engine.edges() {
-            let k = reg.map(k);
+    for (k, vs) in graph.edges() {
+        let k = reg.map(k);
 
-            for v in vs.into_iter() {
-                let v = reg.map(v);
-                edges
-                    .write_all(format!("{}\t{}\n", k, v).as_bytes())
-                    .context("Failed to write edge")?;
-            }
+        for v in vs.into_iter() {
+            let v = reg.map(v);
+            edges
+                .write_all(format!("{k}\t{v}\n").as_bytes())
+                .context("Failed to write edge")?;
         }
+    }
 
-        for (k, v, s) in engine.keys_currently_running() {
-            let k_short_type_name = k.short_type_name();
-            let k_str = k.to_string();
-            let k_n = reg.map(k);
-            writeln!(
-                nodes_currently_running,
-                "{k_n}\t{v}\t{s:?}\t{k_short_type_name}\t{k_str}",
-            )?;
-        }
+    for (k, v, s) in graph.keys_currently_running() {
+        let k_short_type_name = k.short_type_name();
+        let k_str = k.to_string();
+        let k_n = reg.map(k);
+        writeln!(
+            nodes_currently_running,
+            "{k_n}\t{v}\t{s:?}\t{k_short_type_name}\t{k_str}",
+        )?;
     }
 
     reg.write(nodes)?;
@@ -60,16 +59,11 @@ where
 {
     let mut reg = HashMap::default();
 
-    let num_nodes = graph
-        .introspectables()
-        .map(|engine| engine.len_for_introspection())
-        .sum();
+    let num_nodes = graph.len_for_introspection();
 
     let mut seq = writer.serialize_seq(Some(num_nodes))?;
-    for engine in graph.introspectables() {
-        for node in engine.nodes(&mut reg) {
-            seq.serialize_element(&node)?;
-        }
+    for node in graph.nodes(&mut reg) {
+        seq.serialize_element(&node)?;
     }
     seq.end()
 }

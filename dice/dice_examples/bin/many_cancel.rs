@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Creates a computation that consists of a top-chain, a bottom-chain, and a dense middle.
@@ -54,7 +55,6 @@ use std::time::Instant;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use clap::Parser;
 use derive_more::Display;
 use dice::DetectCycles;
@@ -65,6 +65,7 @@ use dice::GlobalStats;
 use dice::InjectedKey;
 use dice::Key;
 use dice::UserComputationData;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use tokio::sync::Semaphore;
@@ -272,11 +273,7 @@ async fn main() {
 
     eprintln!("Using config {:?}", &config);
 
-    let builder = if config.modern {
-        Dice::modern()
-    } else {
-        Dice::builder()
-    };
+    let builder = Dice::builder();
     let dice = if config.detect_cycles {
         builder.build(DetectCycles::Enabled)
     } else {

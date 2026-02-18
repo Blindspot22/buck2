@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@fbsource//tools/build_defs:default_platform_defs.bzl", "DEVSERVER_PLATFORM_REGEX")
 load("@fbsource//xplat/executorch/build:runtime_wrapper.bzl", "runtime")
@@ -79,14 +80,12 @@ def define_libs():
                 ),
             ],
         }),
-        fbandroid_platform_deps = [
-            (
-                "^android-arm64.*$",
-                [
-                    "fbsource//third-party/sleef:sleef_arm",
-                ],
-            ),
-        ],
+        deps = select({
+            "DEFAULT": [],
+            "ovr_config//os:android-arm64": [
+                "fbsource//third-party/sleef:sleef_arm",
+            ],
+        }),
     )
 
     runtime.cxx_library(
@@ -119,22 +118,18 @@ def define_libs():
             "//executorch/...",
             "@EXECUTORCH_CLIENTS",
         ],
-        fbandroid_platform_preprocessor_flags = [
-            (
-                "^android-arm64.*$",
-                [
-                    "-DET_BUILD_WITH_BLAS",
-                ],
-            ),
-        ],
-        fbandroid_platform_deps = [
-            (
-                "^android-arm64.*$",
-                [
-                    "fbsource//third-party/openblas:openblas",
-                ],
-            ),
-        ],
+        preprocessor_flags = select({
+            "DEFAULT": [],
+            "ovr_config//os:android-arm64": [
+                "-DET_BUILD_WITH_BLAS",
+            ],
+        }),
+        deps = select({
+            "DEFAULT": [],
+            "ovr_config//os:android-arm64": [
+                "fbsource//third-party/openblas:openblas",
+            ],
+        }),
         fbobjc_exported_preprocessor_flags = [
             "-DET_BUILD_WITH_BLAS",
             "-DET_BUILD_FOR_APPLE",

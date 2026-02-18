@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
@@ -44,7 +45,7 @@ impl HttpErrorForRetry for HttpError {
                 crate::HttpError::SendRequest { .. } => true,
                 _ => false,
             },
-            Self::Transfer { source, .. } => !source.is_connect(),
+            Self::Transfer { .. } => true,
         }
     }
 }
@@ -53,14 +54,14 @@ pub trait HttpErrorForRetry {
     fn is_retryable(&self) -> bool;
 }
 
-pub trait AsBuck2Error {
-    fn as_buck2_error(self) -> buck2_error::Error;
+pub trait IntoBuck2Error {
+    fn into_buck2_error(self) -> buck2_error::Error;
 }
 
 pub async fn http_retry<Exec, F, T, E>(exec: Exec, mut intervals: Vec<Duration>) -> Result<T, E>
 where
     Exec: Fn() -> F,
-    E: AsBuck2Error + HttpErrorForRetry + std::fmt::Display + Send + Sync + 'static,
+    E: IntoBuck2Error + HttpErrorForRetry + std::fmt::Display + Send + Sync + 'static,
     F: Future<Output = Result<T, E>>,
 {
     intervals.insert(0, Duration::from_secs(0));
@@ -83,7 +84,7 @@ where
                     "Retrying a HTTP error after {} seconds: {:#}",
                     b.as_secs(),
                     // Print as a buck2_error to make sure we get the source
-                    err.as_buck2_error()
+                    err.into_buck2_error()
                 );
                 continue;
             }
@@ -139,8 +140,8 @@ mod tests {
         }
     }
 
-    impl AsBuck2Error for HttpTestError {
-        fn as_buck2_error(self) -> buck2_error::Error {
+    impl IntoBuck2Error for HttpTestError {
+        fn into_buck2_error(self) -> buck2_error::Error {
             buck2_error::Error::from(self)
         }
     }

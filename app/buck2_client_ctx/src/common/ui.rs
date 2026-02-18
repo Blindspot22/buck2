@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_core::buck2_env;
 use buck2_core::buck2_env_name;
 use buck2_core::soft_error;
-use buck2_error::conversion::from_any_with_tag;
 use buck2_event_observer::event_observer::NoopEventObserverExtra;
 use buck2_event_observer::verbosity::Verbosity;
 use buck2_health_check::report::DisplayReport;
@@ -27,6 +27,7 @@ use crate::subscribers::subscriber::EventSubscriber;
 use crate::subscribers::superconsole::BUCK_NO_INTERACTIVE_CONSOLE;
 use crate::subscribers::superconsole::StatefulSuperConsole;
 use crate::subscribers::superconsole::SuperConsoleConfig;
+use crate::subscribers::superconsole::timekeeper::Timekeeper;
 
 #[derive(
     Debug,
@@ -53,7 +54,7 @@ pub fn get_console_with_root(
     console_type: ConsoleType,
     verbosity: Verbosity,
     expect_spans: bool,
-    replay_speed: Option<f64>,
+    timekeeper: Timekeeper,
     command_name: &str,
     config: SuperConsoleConfig,
     health_check_display_reports_receiver: Option<Receiver<Vec<DisplayReport>>>,
@@ -86,48 +87,40 @@ pub fn get_console_with_root(
             command_name,
             verbosity,
             expect_spans,
-            replay_speed,
+            timekeeper,
             None,
             config,
             health_check_display_reports_receiver,
         )
         .map(|c| Box::new(c) as Box<dyn EventSubscriber>),
-        ConsoleType::Auto => {
-            match StatefulSuperConsole::console_builder()
-                .build()
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
-            {
-                Ok(Some(sc)) => StatefulSuperConsole::new(
-                    command_name,
+        ConsoleType::Auto => match StatefulSuperConsole::console_builder().build() {
+            Ok(Some(sc)) => StatefulSuperConsole::new(
+                command_name,
+                trace_id.dupe(),
+                sc,
+                verbosity,
+                expect_spans,
+                timekeeper,
+                config,
+                health_check_display_reports_receiver,
+            )
+            .map(|c| Box::new(c) as Box<dyn EventSubscriber>),
+            _ => Ok(Box::new(
+                SimpleConsole::<NoopEventObserverExtra>::autodetect(
                     trace_id.dupe(),
-                    sc,
                     verbosity,
                     expect_spans,
-                    replay_speed,
-                    config,
                     health_check_display_reports_receiver,
-                )
-                .map(|c| Box::new(c) as Box<dyn EventSubscriber>),
-                _ => Ok(Box::new(
-                    SimpleConsole::<NoopEventObserverExtra>::autodetect(
-                        trace_id.dupe(),
-                        verbosity,
-                        expect_spans,
-                        health_check_display_reports_receiver,
-                    ),
-                )),
-            }
-        }
+                ),
+            )),
+        },
         ConsoleType::None => Ok(Box::new(ErrorConsole)),
     };
 
     match result {
         Ok(result) => result,
         Err(e) => {
-            eprintln!(
-                "Falling back to simple console, super console initialization failed: {}",
-                e
-            );
+            eprintln!("Falling back to simple console, super console initialization failed: {e}");
             let _unused = soft_error!("console_init_failed", e);
             Box::new(SimpleConsole::<NoopEventObserverExtra>::autodetect(
                 trace_id,

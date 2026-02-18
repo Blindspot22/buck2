@@ -1,0 +1,16 @@
+[cells]
+  root = .
+  nano_prelude = nano_prelude
+
+[cell_aliases]
+  prelude = nano_prelude
+
+[external_cells]
+  nano_prelude = bundled
+
+[buildfile]
+  name = TARGETS.fixture
+
+[buck2]
+  create_unhashed_links = true
+  deconflict_content_based_paths_rollout = true

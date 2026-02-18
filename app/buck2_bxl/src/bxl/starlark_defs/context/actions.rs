@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Starlark Actions API for bxl functions
@@ -41,9 +42,9 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
-use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
+use starlark::values::FrozenHeap;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
@@ -54,9 +55,10 @@ use starlark::values::ValueTyped;
 use starlark::values::dict::AllocDict;
 use starlark::values::dict::DictType;
 use starlark::values::starlark_value;
+use starlark_map::ordered_map::OrderedMap;
 use strong_hash::StrongHash;
 
-use crate::bxl::starlark_defs::context::BxlContextNoDice;
+use crate::bxl::starlark_defs::context::BxlContext;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
@@ -118,6 +120,10 @@ pub(crate) async fn resolve_bxl_execution_platform(
         buck2_error::Ok(label)
     })?;
 
+    // Finalize the partial resolution with empty exec_dep_cfgs
+    // (BXL doesn't use modifiers for exec_deps)
+    let resolved_execution = resolved_execution.finalize(OrderedMap::new());
+
     Ok(BxlExecutionResolution {
         resolved_execution,
         exec_deps_configured,
@@ -154,7 +160,7 @@ impl BxlExecutionResolution {
 }
 
 pub(crate) fn validate_action_instantiation(
-    this: &BxlContextNoDice<'_>,
+    this: &BxlContext<'_>,
     bxl_execution_resolution: &BxlExecutionResolution,
 ) -> buck2_error::Result<()> {
     let mut registry = this.state.state.borrow_mut();
@@ -197,11 +203,12 @@ impl<'v> BxlActions<'v> {
         actions: ValueTyped<'v, AnalysisActions<'v>>,
         exec_deps: Vec<ConfiguredProvidersLabel>,
         toolchains: Vec<ConfiguredProvidersLabel>,
-        eval: &mut Evaluator<'v, '_, '_>,
+        heap: Heap<'v>,
+        frozen_heap: &FrozenHeap,
         ctx: &'c mut DiceComputations<'_>,
     ) -> buck2_error::Result<BxlActions<'v>> {
-        let exec_deps = alloc_deps(exec_deps, eval, ctx).await?;
-        let toolchains = alloc_deps(toolchains, eval, ctx).await?;
+        let exec_deps = alloc_deps(exec_deps, heap, frozen_heap, ctx).await?;
+        let toolchains = alloc_deps(toolchains, heap, frozen_heap, ctx).await?;
         Ok(Self {
             actions,
             exec_deps,
@@ -224,7 +231,8 @@ impl<'v> BxlActions<'v> {
 
 async fn alloc_deps<'v, 'c>(
     deps: Vec<ConfiguredProvidersLabel>,
-    eval: &mut Evaluator<'v, '_, '_>,
+    heap: Heap<'v>,
+    frozen_heap: &FrozenHeap,
     ctx: &'c mut DiceComputations<'_>,
 ) -> buck2_error::Result<ValueOfUnchecked<'v, DictType<StarlarkProvidersLabel, Dependency<'v>>>> {
     let analysis_results: Vec<_> = ctx
@@ -247,9 +255,9 @@ async fn alloc_deps<'v, 'c>(
 
             let starlark_label = StarlarkProvidersLabel::new(configured.unconfigured());
             let dependency = Dependency::new(
-                eval.heap(),
+                heap,
                 configured,
-                v.value().owned_frozen_value_typed(eval.frozen_heap()),
+                v.value().owned_frozen_value_typed(frozen_heap),
                 None,
             );
 
@@ -257,7 +265,7 @@ async fn alloc_deps<'v, 'c>(
         })
         .collect::<Result<_, _>>()?;
 
-    Ok(eval.heap().alloc_typed_unchecked(AllocDict(deps)).cast())
+    Ok(heap.alloc_typed_unchecked(AllocDict(deps)).cast())
 }
 
 #[starlark_value(type = "bxl.Actions", StarlarkTypeRepr, UnpackValue)]
@@ -269,7 +277,7 @@ impl<'v> StarlarkValue<'v> for BxlActions<'v> {
 }
 
 impl<'v> AllocValue<'v> for BxlActions<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }

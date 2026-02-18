@@ -1,13 +1,13 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use buck2_error::conversion::from_any_with_tag;
 use buck2_test_api::data::TestStatus;
 
 #[derive(Default)]
@@ -19,6 +19,7 @@ pub struct TestState {
     pub timeout: u64,
     pub skipped: u64,
     pub omitted: u64,
+    pub infra_failure: u64,
     pub retry: u64,
     pub unknown: u64,
     pub listing_success: u64,
@@ -27,8 +28,7 @@ pub struct TestState {
 
 impl TestState {
     pub(crate) fn update(&mut self, result: &buck2_data::TestResult) -> buck2_error::Result<()> {
-        let status = TestStatus::try_from(result.status)
-            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
+        let status = TestStatus::try_from(result.status)?;
         let counter = match status {
             TestStatus::PASS => &mut self.pass,
             TestStatus::FAIL => &mut self.fail,
@@ -36,6 +36,7 @@ impl TestState {
             TestStatus::SKIP => &mut self.skipped,
             TestStatus::OMITTED => &mut self.omitted,
             TestStatus::TIMEOUT => &mut self.timeout,
+            TestStatus::INFRA_FAILURE => &mut self.infra_failure,
             TestStatus::UNKNOWN => &mut self.unknown,
             TestStatus::RERUN => &mut self.retry,
             TestStatus::LISTING_SUCCESS => &mut self.listing_success,

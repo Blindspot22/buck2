@@ -1,5 +1,7 @@
 load("//:test_utils.bzl", "assert_output")
 
+oncall("build_infra")
+
 _SUPPORTED = not host_info().os.is_windows
 
 export_file(

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 DEBUG_CMD = "BuckDebuggerCommand"
 DEBUG_ARGS = "BuckDebuggerCommandArguments"
@@ -16,14 +17,10 @@ IMMEDIATE_BUCK_OPTIONS = "ImmediateBuckOptions"
 
 BY_MODES = "ByModes"
 
-CXXFLAGS = "cxxflags"
-CXXPPFLAGS = "cxxppflags"
-FLAGS_LOCATION = "flags_location"
-LDFLAGS = "ldflags"
 TOOLSET = "toolset"
 LANGUAGE_STANDARD = "language_standard"
 
-ANDROID = "android"
 CLANG = "clang"
+CLANG_WINDOWS = "clang_windows"
 VS2019 = "vs2019"
 VS2022 = "vs2022"

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Display;
@@ -12,6 +13,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 
 pub const BUCK_AUTH_TOKEN_HEADER: &str = "x-buck-auth-token";
 
@@ -34,15 +36,15 @@ impl Display for ConnectionType {
         // NOTE: `Display` must be compatible with `parse`.
         match self {
             ConnectionType::Uds { unix_socket } => write!(f, "uds:{}", unix_socket.display()),
-            ConnectionType::Tcp { port } => write!(f, "tcp:{}", port),
+            ConnectionType::Tcp { port } => write!(f, "tcp:{port}"),
         }
     }
 }
 
 impl ConnectionType {
     pub fn parse(endpoint: &str) -> buck2_error::Result<ConnectionType> {
-        let (protocol, endpoint) = endpoint.split_once(":").with_buck_error_context(|| {
-            format!("endpoint `{endpoint}` is not in the format `protocol:endpoint`")
+        let (protocol, endpoint) = endpoint.split_once(":").ok_or_else(|| {
+            internal_error!("endpoint `{endpoint}` is not in the format `protocol:endpoint`")
         })?;
         match protocol {
             "uds" => Ok(ConnectionType::Uds {
@@ -50,7 +52,7 @@ impl ConnectionType {
             }),
             "tcp" => Ok(ConnectionType::Tcp {
                 port: endpoint.parse().with_buck_error_context(|| {
-                    format!("port number is incorrect in `{}`", endpoint)
+                    format!("port number is incorrect in `{endpoint}`")
                 })?,
             }),
             _ => Err(ConnectionTypeError::ParseError(endpoint.to_owned()).into()),

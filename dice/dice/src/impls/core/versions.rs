@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -112,11 +113,9 @@ impl VersionTracker {
     /// check if the given version and epoch are "relevant", that is the current active version's
     /// epoch matches the given epoch
     pub(crate) fn is_relevant(&self, v: VersionNumber, epoch: VersionEpoch) -> bool {
-        v >= self.invalid_before
-            && self
-                .active_versions
-                .get(&v)
-                .is_some_and(|active| active.version_epoch == epoch)
+        self.active_versions
+            .get(&v)
+            .is_some_and(|active| active.version_epoch == epoch)
     }
 
     pub(crate) fn should_reject(&self, v: VersionNumber) -> bool {
@@ -151,7 +150,7 @@ impl VersionTracker {
 
     /// Requests the 'WriteVersion' that is intended to be used for updates to
     /// the incremental computations
-    pub(crate) fn write(&mut self) -> VersionForWrites {
+    pub(crate) fn write(&mut self) -> VersionForWrites<'_> {
         VersionForWrites { tracker: self }
     }
 

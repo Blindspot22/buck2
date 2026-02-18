@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_core::cells::CellAliasResolver;
@@ -78,6 +79,21 @@ fn parse_within_view(
 /// Globals for `PACKAGE` files and `bzl` files included from `PACKAGE` files.
 #[starlark_module]
 pub(crate) fn register_package_function(globals: &mut GlobalsBuilder) {
+    /// DO NOT USE THIS FUNCTION!
+    ///
+    /// It controls which test config to use in downstream systems. Mostly likely you don't want to specify it by yourself.
+    fn test_config_unification_rollout(
+        enabled: bool,
+        eval: &mut Evaluator,
+    ) -> starlark::Result<NoneType> {
+        let build_context = BuildContext::from_context(eval)?;
+        let package_file_eval_ctx = build_context.additional.require_package_file("package")?;
+        *package_file_eval_ctx
+            .test_config_unification_rollout
+            .borrow_mut() = Some(enabled);
+        Ok(NoneType)
+    }
+
     fn package(
         #[starlark(require=named, default=false)] inherit: bool,
         #[starlark(require=named, default=UnpackListOrTuple::default())]

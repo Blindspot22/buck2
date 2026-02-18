@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_artifact::artifact::source_artifact::SourceArtifact;
@@ -25,13 +26,16 @@ enum SourceLabelResolutionError {
 }
 
 pub(crate) trait SourceAttrTypeExt {
-    fn resolve_single_file<'v>(ctx: &dyn AttrResolutionContext<'v>, path: SourcePath) -> Value<'v> {
+    fn resolve_single_file<'v>(
+        ctx: &mut dyn AttrResolutionContext<'v>,
+        path: SourcePath,
+    ) -> Value<'v> {
         ctx.heap()
             .alloc(StarlarkArtifact::new(SourceArtifact::new(path).into()))
     }
 
     fn resolve_label<'v>(
-        ctx: &dyn AttrResolutionContext<'v>,
+        ctx: &mut dyn AttrResolutionContext<'v>,
         label: &ConfiguredProvidersLabel,
     ) -> buck2_error::Result<Vec<Value<'v>>> {
         let dep = ctx.get_dep(label)?;
@@ -44,7 +48,7 @@ pub(crate) trait SourceAttrTypeExt {
     }
 
     fn resolve_single_label<'v>(
-        ctx: &dyn AttrResolutionContext<'v>,
+        ctx: &mut dyn AttrResolutionContext<'v>,
         value: &ConfiguredProvidersLabel,
     ) -> buck2_error::Result<Value<'v>> {
         let mut resolved = Self::resolve_label(ctx, value)?;

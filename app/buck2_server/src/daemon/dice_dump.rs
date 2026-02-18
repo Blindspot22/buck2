@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fs::File;
@@ -17,6 +18,8 @@ use buck2_cli_proto::unstable_dice_dump_request::DiceDumpFormat;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
 use dice::Dice;
+use dice::introspection::serialize_dense_graph;
+use dice::introspection::serialize_graph;
 use dupe::Dupe;
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -53,12 +56,10 @@ pub(crate) fn tar_dice_dump(dice_dump_folder: &Path) -> buck2_error::Result<()> 
     let mut tar = tar::Builder::new(enc);
     let files = vec!["nodes.gz", "edges.gz", "nodes_currently_running.gz"];
     for file_name in files {
-        let mut file = File::open(dice_dump_folder.join(file_name)).buck_error_context(format!(
-            "Failed to open file `{}` for compressing",
-            file_name
-        ))?;
+        let mut file = File::open(dice_dump_folder.join(file_name))
+            .buck_error_context(format!("Failed to open file `{file_name}` for compressing"))?;
         tar.append_file(file_name, &mut file)
-            .buck_error_context(format!("Failed to write file `{}` to archive", file_name))?;
+            .buck_error_context(format!("Failed to write file `{file_name}` to archive"))?;
     }
 
     tar.finish()
@@ -97,9 +98,14 @@ fn dice_dump_tsv(dice: &Arc<Dice>, path: &Path) -> buck2_error::Result<()> {
         Compression::default(),
     );
 
-    dice.serialize_tsv(&mut nodes, &mut edges, &mut nodes_currently_running)
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
-        .buck_error_context("Failed to serialize")?;
+    serialize_graph(
+        &dice.to_introspectable(),
+        &mut nodes,
+        &mut edges,
+        &mut nodes_currently_running,
+    )
+    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
+    .buck_error_context("Failed to serialize")?;
 
     nodes
         .try_finish()
@@ -131,8 +137,9 @@ fn dice_dump_bincode(dice: &Arc<Dice>, path: &Path) -> buck2_error::Result<()> {
             .with_fixint_encoding()
             .allow_trailing_bytes(),
     );
-    dice.serialize_serde(&mut writer)
+    serialize_dense_graph(&dice.to_introspectable(), &mut writer)
         .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
+
     Ok(())
 }
 
@@ -145,6 +152,7 @@ fn dice_dump_json_pretty(dice: &Arc<Dice>, path: &Path) -> buck2_error::Result<(
     let out = GzEncoder::new(BufWriter::new(out), Compression::default());
 
     let mut writer = serde_json::Serializer::pretty(out);
-    dice.serialize_serde(&mut writer)?;
+
+    serialize_dense_graph(&dice.to_introspectable(), &mut writer)?;
     Ok(())
 }

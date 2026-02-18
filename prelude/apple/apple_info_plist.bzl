@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(":apple_bundle_destination.bzl", "AppleBundleDestination")
 load(":apple_bundle_part.bzl", "AppleBundlePart")
@@ -20,6 +21,10 @@ load(
 )
 load(":apple_target_sdk_version.bzl", "get_platform_name_for_sdk", "get_platform_version_for_sdk_version")
 load(":apple_toolchain_types.bzl", "AppleToolchainInfo", "AppleToolsInfo")
+
+UpdateOperations = enum("set", "insert")
+MergeOperations = enum("merge")
+RestrictedMergeOperations = enum("copy")
 
 def process_info_plist(ctx: AnalysisContext, override_input: Artifact | None) -> AppleBundlePart:
     input = _preprocess_info_plist(ctx)
@@ -62,6 +67,11 @@ def _preprocess_info_plist(ctx: AnalysisContext) -> Artifact:
     ])
     if substitutions_json != None:
         command.add(["--substitutions-json", substitutions_json])
+    if getattr(ctx.attrs, "enforce_minimum_os_plist_key", False):
+        sdk_name = get_apple_sdk_name(ctx)
+        sdk_metadata = get_apple_sdk_metadata_for_sdk_name(sdk_name)
+        command.add(["--enforce-minimum-os-plist-key", sdk_metadata.min_version_plist_info_key])
+
     ctx.actions.run(command, category = "apple_preprocess_info_plist", **_get_plist_run_options())
     return output
 
@@ -157,3 +167,49 @@ def _info_plist_override_keys(ctx: AnalysisContext) -> dict[str, typing.Any]:
     elif sdk_name not in [MacOSXCatalystSdkMetadata.name]:
         result["LSRequiresIPhoneOS"] = True
     return result
+
+def apple_info_plist_impl(ctx: AnalysisContext) -> list[Provider]:
+    """
+    Implementation for the apple_info_plist rule.
+
+    This rule takes a source plist file and processes it to create an output plist.
+    """
+    apple_tools = ctx.attrs._apple_tools[AppleToolsInfo]
+    processor = apple_tools.info_plist_processor
+
+    input_plist = ctx.attrs.src
+    output_plist = ctx.actions.declare_output("Info.plist")
+
+    # Basic plist processing command
+    command = cmd_args([
+        processor,
+        "process",
+        "--input",
+        input_plist,
+        "--output",
+        output_plist.as_output(),
+    ])
+
+    if ctx.attrs.xml:
+        command = cmd_args(command, ["--output-xml"])
+
+    # Add mutations if provided
+    if ctx.attrs.mutations:
+        mutations_file = ctx.actions.write_json("mutations.json", ctx.attrs.mutations)
+        command.add("--mutations")
+        command.add(mutations_file)
+        for mutation in ctx.attrs.mutations:
+            operation = mutation[0]
+            if operation in MergeOperations.values() or operation in RestrictedMergeOperations.values():
+                command.add(cmd_args(hidden = mutation[1]))
+
+    ctx.actions.run(
+        command,
+        category = "apple_info_plist",
+        identifier = input_plist.basename,
+        **_get_plist_run_options()
+    )
+
+    return [
+        DefaultInfo(default_output = output_plist),
+    ]

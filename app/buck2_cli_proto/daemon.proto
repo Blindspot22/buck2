@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 syntax = "proto3";
@@ -60,6 +61,7 @@ message KillResponse {}
 
 message StatusRequest {
   bool snapshot = 1;
+  bool include_tokio_runtime_metrics = 2;
 }
 
 message StatusResponse {
@@ -79,6 +81,13 @@ message StatusResponse {
   optional bool valid_working_directory = 14;
   optional bool valid_buck_out_mount = 15;
   optional string io_provider = 16;
+  optional TokioRuntimeMetrics tokio_runtime_metrics = 17;
+}
+
+message TokioRuntimeMetrics {
+  uint64 num_workers = 1;
+  uint64 num_alive_tasks = 2;
+  uint64 global_queue_depth = 3;
 }
 
 message PingRequest {
@@ -98,11 +107,12 @@ message TargetCfg {
 }
 
 message RepresentativeConfigFlag {
-  reserved 4;
   oneof source {
     string config_flag = 1;
     string config_file = 2;
     string mode_file = 3;
+    string modifier = 4;
+    string target_platforms = 5;
   }
 }
 
@@ -136,8 +146,6 @@ message ClientContext {
   HostArchOverride host_arch = 13;
   repeated string argfiles = 14;
   optional string host_xcode_version = 15;
-  /// Error out concurrent commands after there is a state change.
-  bool exit_when_different_state = 16;
   // The name of the command the client thinks it's running.
   string command_name = 17;
   // Any --client-metadata passed by the user.
@@ -159,6 +167,24 @@ message ClientContext {
   PreemptibleWhen preemptible = 22;
   // Used for logging purposes; gives the config flags needed to repro the run
   repeated RepresentativeConfigFlag representative_config_flags = 23;
+
+  enum ExitWhen {
+    /// Default
+    EXIT_NEVER = 0;
+    EXIT_DIFFERENT_STATE = 1;
+    EXIT_NOT_IDLE = 2;
+  }
+  /// Whether to proceed with or fail this invocation based on the daemon state.
+  ExitWhen exit_when = 24;
+
+  message ProfilePatternOptions {
+    repeated string profile_patterns = 1;
+    ProfileMode profile_mode = 2;
+    string profile_output = 3;
+  }
+  /// Options for starlark profiling via --profile-patterns and related
+  /// arguments.
+  optional ProfilePatternOptions profile_pattern_opts = 25;
 }
 
 message TargetsRequest {
@@ -242,10 +268,20 @@ message TargetsShowOutputsResponse {
 // `buck2 ctargets` command
 message ConfiguredTargetsRequest {
   reserved 2, 10;
+
+  enum OutputFormat {
+    TEXT = 0;
+    JSON = 1;
+    JSON_REPORT = 2;
+  }
+
   ClientContext context = 1;
   repeated string target_patterns = 12;
   TargetCfg target_cfg = 201;
   bool skip_missing_targets = 11;
+  OutputFormat output_format = 13;
+  repeated string output_attributes = 14;
+  bool keep_going = 15;
 }
 
 message ConfiguredTargetsResponse {
@@ -409,6 +445,9 @@ message CommonBuildOptions {
   bool unstable_include_failures_build_report = 4242004;
   bool unstable_include_package_project_relative_paths = 4242005;
   bool unstable_include_artifact_hash_information = 4242006;
+  string unstable_streaming_build_report_filename = 4242007;
+  bool unstable_exclude_action_error_diagnostics = 4242008;
+  bool unstable_truncate_error_content = 4242009;
 }
 
 message BuildRequest {
@@ -434,9 +473,9 @@ message BuildRequest {
   BuildProviders build_providers = 3;
 
   message ResponseOptions {
+    reserved 2;
     // Include target outputs? [default: false]
     bool return_outputs = 1;
-    bool return_default_other_outputs = 2;
     // TODO(rafaelc): bool return_targets_without_data
     // TODO(rafaelc): bool return_run_args
   }
@@ -465,6 +504,9 @@ message BuildRequest {
   // quickly as possible and drop in-flight builds. The exit code will be a
   // user failure.
   optional google.protobuf.Duration timeout = 12;
+
+  // Set by `buck2 run` when extra args are passed without `--` separator.
+  bool run_args_missing_separator = 13;
 }
 
 message TestSessionOptions {
@@ -512,6 +554,14 @@ message TestRequest {
 
   // Should you add tests that are on the `tests` attribute of the target.
   bool ignore_tests_attribute = 13;
+
+  // Whether `DefaultInfo` providers for targets matching `target_patterns`
+  // should be built instead of only `ExternalTestInfo` providers.
+  bool build_default_info = 15;
+
+  // Whether `RunInfo` providers for targets matching `target_patterns`
+  // should be built instead of only `ExternalTestInfo` providers.
+  bool build_run_info = 16;
 }
 
 message BxlRequest {
@@ -605,6 +655,8 @@ message TestResponse {
     CounterWithExamples listing_success = 14;
     CounterWithExamples listing_failed = 15;
     uint64 build_errors = 16;
+    CounterWithExamples infra_failure = 17;
+    CounterWithExamples omitted = 18;
   }
   TestStatuses test_statuses = 3;
   string executor_stdout = 4;

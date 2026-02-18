@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -18,10 +19,11 @@ use std::sync::OnceLock;
 
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_common::dice::data::HasIoProvider;
-use buck2_common::dice::file_ops::delegate::FileOpsDelegate;
-use buck2_common::file_ops::FileDigestConfig;
-use buck2_common::file_ops::RawDirEntry;
-use buck2_common::file_ops::RawPathMetadata;
+use buck2_common::file_ops::delegate::FileOpsDelegate;
+use buck2_common::file_ops::dice::ReadFileProxy;
+use buck2_common::file_ops::metadata::FileDigestConfig;
+use buck2_common::file_ops::metadata::RawDirEntry;
+use buck2_common::file_ops::metadata::RawPathMetadata;
 use buck2_common::io::IoProvider;
 use buck2_common::io::fs::FsIoProvider;
 use buck2_core::cells::cell_path::CellPath;
@@ -30,9 +32,6 @@ use buck2_core::cells::external::GitCellSetup;
 use buck2_core::cells::name::CellName;
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::fs::buck_out_path::BuckOutPathResolver;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::directory::Directory;
@@ -45,8 +44,12 @@ use buck2_execute::entry::build_entry_from_disk;
 use buck2_execute::execute::blocking::HasBlockingExecutor;
 use buck2_execute::execute::blocking::IoRequest;
 use buck2_execute::execute::clean_output_paths::CleanOutputPaths;
+use buck2_execute::materialize::materializer::DeclareArtifactPayload;
 use buck2_execute::materialize::materializer::HasMaterializer;
 use buck2_execute::materialize::materializer::Materializer;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_util::process::background_command;
 use cmp_any::PartialEqAny;
 use dice::CancellationContext;
@@ -105,7 +108,13 @@ impl IoRequest for GitFetchIoRequest {
         }
 
         run_git(&path, |c| {
-            c.arg("init");
+            match &self.setup.object_format {
+                None => c.arg("init"),
+                Some(object_format) => c
+                    .arg("init")
+                    .arg("--object-format")
+                    .arg(object_format.to_string()),
+            };
         })?;
 
         run_git(&path, |c| {
@@ -182,7 +191,11 @@ async fn download_impl(
     });
 
     materializer
-        .declare_existing(vec![(path.to_owned(), ArtifactValue::new(entry, None))])
+        .declare_existing(vec![DeclareArtifactPayload {
+            path: path.to_owned(),
+            artifact: ArtifactValue::new(entry, None),
+            persist_full_directory_structure: false,
+        }])
         .await?;
 
     Ok(())
@@ -284,32 +297,39 @@ impl GitFileOpsDelegate {
 impl FileOpsDelegate for GitFileOpsDelegate {
     async fn read_file_if_exists(
         &self,
+        _ctx: &mut DiceComputations<'_>,
         path: &'async_trait CellRelativePath,
-    ) -> buck2_error::Result<Option<String>> {
-        let project_path = self.resolve(path);
-        (&self.io as &dyn IoProvider)
-            .read_file_if_exists(project_path)
-            .await
+    ) -> buck2_error::Result<ReadFileProxy> {
+        Ok(ReadFileProxy::new_with_captures(
+            (self.resolve(path), self.io.dupe()),
+            |(project_path, io)| async move {
+                (&io as &dyn IoProvider)
+                    .read_file_if_exists(project_path)
+                    .await
+            },
+        ))
     }
 
     async fn read_dir(
         &self,
+        _ctx: &mut DiceComputations<'_>,
         path: &'async_trait CellRelativePath,
-    ) -> buck2_error::Result<Vec<RawDirEntry>> {
+    ) -> buck2_error::Result<Arc<[RawDirEntry]>> {
         let project_path = self.resolve(path);
         let mut entries = (&self.io as &dyn IoProvider)
             .read_dir(project_path)
             .await
-            .with_buck_error_context(|| format!("Error listing dir `{}`", path))?;
+            .with_buck_error_context(|| format!("Error listing dir `{path}`"))?;
 
         // Make sure entries are deterministic, since read_dir isn't.
         entries.sort_by(|a, b| a.file_name.cmp(&b.file_name));
 
-        Ok(entries)
+        Ok(entries.into())
     }
 
     async fn read_path_metadata_if_exists(
         &self,
+        _ctx: &mut DiceComputations<'_>,
         path: &'async_trait CellRelativePath,
     ) -> buck2_error::Result<Option<RawPathMetadata>> {
         let project_path = self.resolve(path);
@@ -317,7 +337,7 @@ impl FileOpsDelegate for GitFileOpsDelegate {
         let Some(metadata) = (&self.io as &dyn IoProvider)
             .read_path_metadata_if_exists(project_path)
             .await
-            .with_buck_error_context(|| format!("Error accessing metadata for path `{}`", path))?
+            .with_buck_error_context(|| format!("Error accessing metadata for path `{path}`"))?
         else {
             return Ok(None);
         };
@@ -333,7 +353,7 @@ impl FileOpsDelegate for GitFileOpsDelegate {
         )?))
     }
 
-    fn eq_token(&self) -> PartialEqAny {
+    fn eq_token(&self) -> PartialEqAny<'_> {
         PartialEqAny::always_false()
     }
 }

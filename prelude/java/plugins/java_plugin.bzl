@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//java:java_providers.bzl", "JavaPackagingDepTSet")
 load(
@@ -12,14 +13,14 @@ load(
     "JavaProcessorsType",
     "derive_transitive_deps",
 )
-load("@prelude//utils:type_defs.bzl", "is_tuple")
+load("@prelude//utils:type_defs.bzl", "is_list", "is_tuple")
 
 PluginParams = record(
     processors = field(list[(str, cmd_args)]),
     deps = field([JavaPackagingDepTSet, None]),
 )
 
-def create_plugin_params(ctx: AnalysisContext, plugins: list[[Dependency, (Dependency, list[str])]]) -> [PluginParams, None]:
+def create_plugin_params(ctx: AnalysisContext, plugins: list[[Dependency, (Dependency, list[str] | cmd_args)]]) -> [PluginParams, None]:
     processors = []
     plugin_deps = []
 
@@ -28,10 +29,10 @@ def create_plugin_params(ctx: AnalysisContext, plugins: list[[Dependency, (Depen
         # Each plugin can be either a tuple of (target, arguments) or just the target
         if is_tuple(item):
             plugin = item[0]
-            arguments = item[1]
+            arguments = cmd_args(item[1]) if is_list(item[1]) else item[1]
         else:
             plugin = item
-            arguments = None
+            arguments = cmd_args()
 
         processors_info = plugin.get(JavaProcessorsInfo)
         if processors_info != None and processors_info.type == JavaProcessorsType("plugin"):
@@ -41,7 +42,7 @@ def create_plugin_params(ctx: AnalysisContext, plugins: list[[Dependency, (Depen
             if processors_info.deps:
                 plugin_deps.append(processors_info.deps)
 
-            processors.append((processor, cmd_args(arguments) if arguments != None else cmd_args()))
+            processors.append((processor, arguments))
 
     if not processors:
         return None

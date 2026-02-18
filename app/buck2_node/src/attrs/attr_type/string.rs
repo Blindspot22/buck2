@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -13,25 +14,18 @@ use std::ops::Deref;
 use allocative::Allocative;
 use buck2_util::arc_str::ArcStr;
 use dupe::Dupe;
+use pagable::Pagable;
 use serde::Serialize;
+use strong_hash::StrongHash;
 
 use crate::attrs::display::AttrDisplayWithContext;
 use crate::attrs::fmt_context::AttrFmtContext;
 
-#[derive(Debug, Eq, PartialEq, Hash, Allocative, Clone, Copy, Dupe)]
+#[derive(Debug, Pagable, Eq, PartialEq, Hash, Allocative, Clone, Copy, Dupe)]
 pub struct StringAttrType;
 
 #[derive(
-    Default,
-    Debug,
-    Eq,
-    PartialEq,
-    Hash,
-    Clone,
-    Dupe,
-    Allocative,
-    Serialize,
-    strong_hash::StrongHash
+    Default, Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative, Serialize, Pagable, StrongHash
 )]
 #[serde(transparent)]
 pub struct StringLiteral(pub ArcStr);

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # A test of various types of attribute
 
@@ -13,7 +14,7 @@ def _mirror_impl(ctx: AnalysisContext) -> list[Provider]:
     return [DefaultInfo(), MirrorInfo(info = ctx.attrs)]
 
 _mirror_arg = rule(impl = _mirror_impl, attrs = {
-    "arg": attrs.arg(default = "foo"),
+    "arg_attr": attrs.arg(default = "foo"),
 })
 
 def _default_arg_fails(ctx: AnalysisContext) -> Promise:

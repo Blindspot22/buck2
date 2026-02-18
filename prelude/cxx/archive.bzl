@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_toolchain_types.bzl", "LinkerInfo", "LinkerType")
 load("@prelude//linking:link_info.bzl", "Archive", "ArchiveContentsType")
@@ -59,9 +60,11 @@ def _archive(
         args: cmd_args,
         thin: bool,
         prefer_local: bool,
-        allow_cache_upload: bool) -> Artifact:
-    archive_output = ctx.actions.declare_output(name)
+        allow_cache_upload: bool,
+        force_disable_content_based_path: bool = False) -> Artifact:
     toolchain = get_cxx_toolchain_info(ctx)
+    has_content_based_path = (toolchain.linker_info.supports_content_based_paths_for_archiving == True) and not force_disable_content_based_path
+    archive_output = ctx.actions.declare_output(name, has_content_based_path = has_content_based_path)
     command = cmd_args(toolchain.linker_info.archiver)
     archiver_type = toolchain.linker_info.archiver_type
     command.add(_archive_flags(
@@ -88,6 +91,7 @@ def _archive(
             name = name + ".cxx_archive_argsfile",
             args = shell_quoted_args,
             allow_args = True,
+            has_content_based_path = has_content_based_path,
         ))
     else:
         command.add(args)
@@ -127,13 +131,14 @@ def make_archive(
         ctx: AnalysisContext,
         name: str,
         objects: list[Artifact],
-        hidden: list[Artifact] = []) -> Archive:
+        hidden: list[Artifact] = [],
+        force_disable_content_based_path: bool = False) -> Archive:
     if len(objects) == 0:
         fail("no objects to archive")
 
     linker_info = get_cxx_toolchain_info(ctx).linker_info
     thin = linker_info.archive_contents == "thin"
-    object_args = cmd_args(objects, ignore_artifacts = not linker_info.archiver_reads_inputs)
+    object_args = cmd_args(objects)
     args = cmd_args(object_args, hidden = hidden)
     archive = _archive(
         ctx,
@@ -142,6 +147,7 @@ def make_archive(
         thin = thin,
         prefer_local = _archive_locally(ctx, linker_info),
         allow_cache_upload = _archive_allow_cache_upload(ctx),
+        force_disable_content_based_path = force_disable_content_based_path,
     )
 
     # TODO(T110378125): use argsfiles for GNU archiver for long lists of objects.

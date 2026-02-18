@@ -1,16 +1,17 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.helper.utils import filter_events
@@ -82,7 +83,7 @@ class FileWatcherEvent:
 #
 async def get_file_watcher_events(
     buck: Buck, target_pattern: str = "root//:", rel_cwd: Optional[Path] = None
-) -> Tuple[bool, list[FileWatcherEvent]]:
+) -> tuple[bool, list[FileWatcherEvent]]:
     await buck.targets(target_pattern, rel_cwd=rel_cwd)
     filtered_events = await filter_events(
         buck,

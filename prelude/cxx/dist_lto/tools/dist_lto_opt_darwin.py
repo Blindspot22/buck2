@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """
 Python wrapper around Clang intended to optimize and codegen bitcode files
@@ -16,7 +17,6 @@ import argparse
 import os
 import subprocess
 import sys
-
 from typing import List
 
 EXIT_SUCCESS, EXIT_FAILURE = 0, 1
@@ -28,16 +28,34 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--input", help="The input bitcode object file.")
     parser.add_argument("--index", help="The thinlto index file.")
     parser.add_argument(
-        "--args", help="The argsfile containing unfiltered and unprocessed flags."
+        "--shared-args",
+        help="The argsfile containing unfiltered and unprocessed flags, common to all opt actions in this link.",
     )
-    parser.add_argument("opt_args", nargs=argparse.REMAINDER)
+    parser.add_argument(
+        "--extra-outputs-args",
+        help="The argsfile containing unfiltered and unprocessed flags, specifying extra outputs produced by this opt action.",
+    )
+    parser.add_argument("--compiler", help="The path to the Clang compiler binary.")
+    parser.add_argument(
+        "--print-command",
+        action="store_true",
+        help="Print the clang invocation and exit.",
+    )
+    parser.add_argument(
+        "--generate-cgdata",
+        help="Save cgdata to special section in produced object file",
+        action="store_true",
+    )
+    parser.add_argument("--read-cgdata", help="Read cgdata from the provided file")
+    parser.add_argument("additional_opt_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv[1:])
 
-    with open(args.args, "r") as argsfile:
-        clang_opt_flags = argsfile.read().splitlines()
-
-    clang_opt_flags.extend(
+    clang_invocation = (
         [
+            args.compiler,
+            f"@{args.shared_args}",
+        ]
+        + [
             "-o",
             args.out,
             "-x",
@@ -50,12 +68,31 @@ def main(argv: List[str]) -> int:
             "-fno-lto",
             "-Werror=unused-command-line-argument",
         ]
+        + args.additional_opt_args[1:]
     )
 
-    subprocess.check_call(clang_opt_flags)
+    if args.generate_cgdata:
+        clang_invocation.extend(["-mllvm", "-codegen-data-generate"])
+
+    if args.read_cgdata:
+        clang_invocation.append(f"-fcodegen-data-use={args.read_cgdata}")
+
+    if args.print_command:
+        print(" ".join(clang_invocation))
+        return EXIT_SUCCESS
+
+    result = subprocess.run(
+        clang_invocation,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        print(result.stderr, file=sys.stderr)
+        return result.returncode
+
     # Work around Clang bug where it fails silently: T187767815
     if os.stat(args.out).st_size == 0:
-        print("error: opt produced empty file")
+        print("error: clang produced empty file", file=sys.stderr)
         return EXIT_FAILURE
     return EXIT_SUCCESS
 

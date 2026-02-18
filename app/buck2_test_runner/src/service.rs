@@ -1,13 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use anyhow::Context;
+use buck2_error::BuckErrorContext;
 use buck2_grpc::DuplexChannel;
 use buck2_test_api::grpc::TestOrchestratorClient;
 use buck2_test_api::grpc::spawn_executor_server;
@@ -21,7 +22,7 @@ pub async fn run<OC, ER, EW>(
     orchestrator_channel: OC,
     executor_channel: DuplexChannel<ER, EW>,
     args: Vec<String>,
-) -> anyhow::Result<()>
+) -> buck2_error::Result<()>
 where
     OC: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
     ER: AsyncRead + Send + Unpin + 'static,
@@ -34,7 +35,7 @@ where
 
     let orchestrator_client = TestOrchestratorClient::new(orchestrator_channel)
         .await
-        .context("Failed to TestOrchestratorClient")?;
+        .buck_error_context("Failed to TestOrchestratorClient")?;
 
     let runner = Buck2TestRunner::new(orchestrator_client, spec_receiver, args)?;
 
@@ -43,7 +44,7 @@ where
     executor_server
         .shutdown()
         .await
-        .context("Failed to shutdown server")?;
+        .buck_error_context("Failed to shutdown server")?;
 
     Ok(())
 }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::marker::PhantomData;
@@ -50,15 +51,15 @@ mod tests {
 
     use allocative::Allocative;
     use async_trait::async_trait;
-    use buck2_futures::cancellation::CancellationContext;
     use derive_more::Display;
+    use dice_futures::cancellation::CancellationContext;
 
+    use crate::Dice;
     use crate::DiceComputations;
     use crate::HashSet;
     use crate::api::data::DiceData;
     use crate::api::key::Key;
     use crate::impls::deps::testing::RecordingDepsTrackersExt;
-    use crate::impls::dice::DiceModern;
     use crate::impls::key::DiceKey;
     use crate::impls::opaque::OpaqueValueModern;
     use crate::impls::value::DiceKeyValue;
@@ -88,9 +89,9 @@ mod tests {
 
     #[tokio::test]
     async fn opaque_records_deps_when_used() {
-        let dice = DiceModern::new(DiceData::new());
+        let dice = Dice::new(DiceData::new());
 
-        let mut ctx = dice.updater().commit().await;
+        let mut ctx = dice.updater().commit().await.0.0;
 
         let opaque = OpaqueValueModern::<K>::new(
             DiceKey { index: 0 },

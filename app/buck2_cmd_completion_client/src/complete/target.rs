@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -28,17 +29,16 @@ use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::streaming::StreamingCommand;
 use buck2_common::invocation_roots::InvocationRoots;
 use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
-use buck2_core::fs::working_dir::AbsWorkingDir;
+use buck2_fs::working_dir::AbsWorkingDir;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 
 use super::path_sanitizer::PathSanitizer;
 use super::results::CompletionResults;
-
-type CompleteCallback = fn(CommandOutcome<Vec<String>>) -> ExitResult;
+use crate::complete::print_completions;
 
 pub(crate) trait TargetResolver: Send {
-    fn resolve(&mut self, partial_target: String) -> BoxFuture<CommandOutcome<Vec<String>>>;
+    fn resolve(&mut self, partial_target: String) -> BoxFuture<'_, CommandOutcome<Vec<String>>>;
 }
 
 pub(crate) struct CompleteTargetCommand {
@@ -47,24 +47,16 @@ pub(crate) struct CompleteTargetCommand {
     cwd: AbsWorkingDir,
     package: String,
     partial_target: String,
-
-    callback: CompleteCallback,
 }
 
 impl CompleteTargetCommand {
-    pub(crate) fn new(
-        cwd: &AbsWorkingDir,
-        package: String,
-        partial_target: String,
-        callback: CompleteCallback,
-    ) -> Self {
+    pub(crate) fn new(cwd: &AbsWorkingDir, package: String, partial_target: String) -> Self {
         let target_cfg = TargetCfgOptions::default();
         Self {
             target_cfg,
             cwd: cwd.to_owned(),
             package,
             partial_target,
-            callback,
         }
     }
 }
@@ -96,7 +88,7 @@ impl StreamingCommand for CompleteTargetCommand {
 
         match task.await {
             CommandOutcome::Success(completions) => {
-                (self.callback)(CommandOutcome::Success(completions))
+                print_completions(CommandOutcome::Success(completions))
             }
             CommandOutcome::Failure(err) => err,
         }
@@ -111,7 +103,7 @@ impl StreamingCommand for CompleteTargetCommand {
     }
 
     fn build_config_opts(&self) -> &CommonBuildConfigurationOptions {
-        CommonBuildConfigurationOptions::reuse_current_config_ref()
+        CommonBuildConfigurationOptions::reuse_current_config_and_preemptible_ref()
     }
 
     fn starlark_opts(&self) -> &CommonStarlarkOptions {
@@ -120,6 +112,7 @@ impl StreamingCommand for CompleteTargetCommand {
 }
 pub(crate) struct TargetCompleter<'a> {
     cwd: AbsWorkingDir,
+    roots: &'a InvocationRoots,
     cell_configs: Arc<BuckConfigBasedCells>,
     target_resolver: &'a mut dyn TargetResolver,
     results: CompletionResults<'a>,
@@ -135,6 +128,7 @@ impl<'a> TargetCompleter<'a> {
             Arc::new(BuckConfigBasedCells::parse_with_config_args(&roots.project_root, &[]).await?);
         Ok(Self {
             cwd: cwd.to_owned(),
+            roots,
             cell_configs: cell_configs.clone(),
             target_resolver,
             results: CompletionResults::new(roots, cell_configs.clone()),
@@ -150,7 +144,7 @@ impl<'a> TargetCompleter<'a> {
         given_package: &str,
         partial_target: &str,
     ) -> CommandOutcome<Vec<String>> {
-        let sanitizer = PathSanitizer::new(&self.cell_configs, &self.cwd).await?;
+        let sanitizer = PathSanitizer::new(&self.cell_configs, &self.cwd, &self.roots).await?;
         let path = sanitizer.sanitize(given_package)?;
         let completions = self
             .target_resolver
@@ -176,7 +170,7 @@ struct DaemonTargetResolver<'a> {
 }
 
 impl TargetResolver for DaemonTargetResolver<'_> {
-    fn resolve(&mut self, partial_target: String) -> BoxFuture<CommandOutcome<Vec<String>>> {
+    fn resolve(&mut self, partial_target: String) -> BoxFuture<'_, CommandOutcome<Vec<String>>> {
         let request = NewGenericRequest::Complete(CompleteRequest {
             target_cfg: self.target_cfg.target_cfg(),
             partial_target,

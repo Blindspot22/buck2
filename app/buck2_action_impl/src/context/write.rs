@@ -1,12 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
+use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_build_api::actions::impls::json::JsonUnpack;
 use buck2_build_api::artifact_groups::ArtifactGroup;
@@ -14,6 +16,7 @@ use buck2_build_api::interpreter::rule_defs::artifact::associated::AssociatedArt
 use buck2_build_api::interpreter::rule_defs::artifact::output_artifact_like::OutputArtifactArg;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_declared_artifact::StarlarkDeclaredArtifact;
 use buck2_build_api::interpreter::rule_defs::artifact_tagging::ArtifactTag;
+use buck2_build_api::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineContext;
@@ -26,7 +29,7 @@ use buck2_build_api::interpreter::rule_defs::resolved_macro::ResolvedMacro;
 use buck2_execute::execute::request::OutputType;
 use dupe::Dupe;
 use either::Either;
-use indexmap::IndexSet;
+use fxhash::FxHashMap;
 use indexmap::indexset;
 use relative_path::RelativePathBuf;
 use sha1::Digest;
@@ -38,6 +41,7 @@ use starlark::values::AllocValue;
 use starlark::values::UnpackValue;
 use starlark::values::ValueOf;
 use starlark::values::ValueTyped;
+use starlark::values::none::NoneOr;
 use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark_map::small_set::SmallSet;
 
@@ -58,6 +62,49 @@ enum WriteActionError {
 enum WriteContentArg<'v> {
     CommandLineArg(CommandLineArg<'v>),
     StarlarkCommandLineValueUnpack(StarlarkCommandLineValueUnpack<'v>),
+}
+
+/// We don't need to run this visitor in order to provide the inputs to the write actions,
+/// because that is done lazily when we run the action.
+/// However, we do need to always run this visitor, because it verifies that any content-based
+/// inputs are bound. It will also collect "associated artifacts", if requested.
+struct CommandLineInputVisitor {
+    associated_artifacts: SmallSet<ArtifactGroup>,
+    with_associated_artifacts: bool,
+}
+
+impl CommandLineInputVisitor {
+    fn new(with_associated_artifacts: bool) -> Self {
+        Self {
+            associated_artifacts: Default::default(),
+            with_associated_artifacts,
+        }
+    }
+}
+
+impl<'v> CommandLineArtifactVisitor<'v> for CommandLineInputVisitor {
+    fn visit_input(&mut self, input: ArtifactGroup, _tags: Vec<&ArtifactTag>) {
+        if self.with_associated_artifacts {
+            self.associated_artifacts.insert(input.dupe());
+        }
+    }
+
+    fn visit_declared_output(&mut self, _artifact: OutputArtifact<'v>, _tags: Vec<&ArtifactTag>) {}
+
+    fn visit_frozen_output(&mut self, _artifact: Artifact, _tags: Vec<&ArtifactTag>) {}
+
+    fn visit_declared_artifact(
+        &mut self,
+        declared_artifact: buck2_artifact::artifact::artifact_type::DeclaredArtifact<'v>,
+        tags: Vec<&ArtifactTag>,
+    ) -> buck2_error::Result<()> {
+        if self.with_associated_artifacts || declared_artifact.has_content_based_path() {
+            let artifact = declared_artifact.ensure_bound()?.into_artifact();
+            self.visit_input(ArtifactGroup::Artifact(artifact), tags);
+        }
+
+        Ok(())
+    }
 }
 
 #[starlark_module]
@@ -85,21 +132,36 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] with_inputs: bool,
         #[starlark(require = named, default = false)] pretty: bool,
         #[starlark(require = named, default = false)] absolute: bool,
+        #[starlark(require = named, default = NoneOr::None)] has_content_based_path: NoneOr<bool>,
+        #[starlark(require = named, default = false)]
+        use_dep_files_placeholder_for_content_based_paths: bool,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<impl AllocValue<'v>> {
+    ) -> starlark::Result<impl AllocValue<'v> + use<'v>> {
         let mut this = this.state()?;
-        let (declaration, output_artifact) =
-            this.get_or_declare_output(eval, output, OutputType::File)?;
+        let (declaration, output_artifact) = this.get_or_declare_output(
+            eval,
+            output,
+            OutputType::File,
+            has_content_based_path.into_option(),
+        )?;
+
+        let value = declaration.into_declared_artifact(AssociatedArtifacts::new());
+        let cli = UnregisteredWriteJsonAction::cli(value.to_value(), content.value)?;
+
+        let mut visitor = CommandLineInputVisitor::new(false);
+        cli.visit_contents(&mut visitor)?;
 
         this.register_action(
-            IndexSet::new(),
             indexset![output_artifact],
-            UnregisteredWriteJsonAction::new(pretty, absolute),
+            UnregisteredWriteJsonAction::new(
+                pretty,
+                absolute,
+                use_dep_files_placeholder_for_content_based_paths,
+            ),
             Some(content.value),
             None,
         )?;
 
-        let value = declaration.into_declared_artifact(AssociatedArtifacts::new());
         // TODO(cjhopman): The with_inputs thing can go away once we have artifact dependencies (we'll still
         // need the UnregisteredWriteJsonAction::cli() to represent the dependency though).
         if with_inputs {
@@ -141,13 +203,16 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
         // If set, add artifacts in content as associated artifacts of the output. This will only work for bound artifacts.
         #[starlark(require = named, default = false)] with_inputs: bool,
         #[starlark(require = named, default = false)] absolute: bool,
+        #[starlark(require = named, default = NoneOr::None)] has_content_based_path: NoneOr<bool>,
+        #[starlark(require = named, default = false)]
+        use_dep_files_placeholder_for_content_based_paths: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<
         Either<
-            ValueTyped<'v, StarlarkDeclaredArtifact>,
+            ValueTyped<'v, StarlarkDeclaredArtifact<'v>>,
             (
-                ValueTyped<'v, StarlarkDeclaredArtifact>,
-                Vec<StarlarkDeclaredArtifact>,
+                ValueTyped<'v, StarlarkDeclaredArtifact<'v>>,
+                Vec<StarlarkDeclaredArtifact<'v>>,
             ),
         >,
     > {
@@ -167,6 +232,7 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
                 fn visit_write_to_file_macro(
                     &mut self,
                     _m: &ResolvedMacro,
+                    _artifact_path_mapping: &dyn ArtifactPathMapper,
                 ) -> buck2_error::Result<()> {
                     self.count += 1;
                     Ok(())
@@ -184,7 +250,8 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
             }
 
             let mut counter = WriteToFileMacrosCounter { count: 0 };
-            cli.visit_write_to_file_macros(&mut counter)?;
+            // At this point the mapping doesn't matter because we're only doing a count
+            cli.visit_write_to_file_macros(&mut counter, &FxHashMap::default())?;
             Ok(counter.count)
         }
 
@@ -192,49 +259,39 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
             with_inputs: bool,
             cli: &dyn CommandLineArgLike,
         ) -> buck2_error::Result<SmallSet<ArtifactGroup>> {
-            if !with_inputs {
-                return Ok(Default::default());
-            }
-
-            #[derive(Default)]
-            struct CommandLineInputVisitor {
-                inputs: SmallSet<ArtifactGroup>,
-            }
-            impl CommandLineArtifactVisitor for CommandLineInputVisitor {
-                fn visit_input(&mut self, input: ArtifactGroup, _tag: Option<&ArtifactTag>) {
-                    self.inputs.insert(input);
-                }
-
-                fn visit_output(&mut self, _artifact: OutputArtifact, _tag: Option<&ArtifactTag>) {}
-            }
-
-            let mut visitor = CommandLineInputVisitor::default();
+            let mut visitor = CommandLineInputVisitor::new(with_inputs);
             cli.visit_artifacts(&mut visitor)?;
-            Ok(visitor.inputs)
+            Ok(visitor.associated_artifacts)
         }
 
         let mut this = this.state()?;
-        let (declaration, output_artifact) =
-            this.get_or_declare_output(eval, output, OutputType::File)?;
+        let (declaration, output_artifact) = this.get_or_declare_output(
+            eval,
+            output,
+            OutputType::File,
+            has_content_based_path.into_option(),
+        )?;
 
         let (content_cli, written_macro_count, mut associated_artifacts) = match content {
             WriteContentArg::CommandLineArg(content) => {
                 let content_arg = content.as_command_line_arg();
                 let count = count_write_to_file_macros(allow_args, content_arg)?;
-                let cli_inputs = get_cli_inputs(with_inputs, content_arg)?;
-                (content, count, cli_inputs)
+                let associated_artifacts = get_cli_inputs(with_inputs, content_arg)?;
+                (content, count, associated_artifacts)
             }
             WriteContentArg::StarlarkCommandLineValueUnpack(content) => {
                 let cli = StarlarkCmdArgs::try_from_value_typed(content)?;
                 let count = count_write_to_file_macros(allow_args, &cli)?;
-                let cli_inputs = get_cli_inputs(with_inputs, &cli)?;
+                let associated_artifacts = get_cli_inputs(with_inputs, &cli)?;
                 (
                     CommandLineArg::from_cmd_args(eval.heap().alloc_typed(cli)),
                     count,
-                    cli_inputs,
+                    associated_artifacts,
                 )
             }
         };
+
+        let path_resolution_method = output_artifact.path_resolution_method();
 
         let written_macro_files = if written_macro_count > 0 {
             let macro_directory_path = {
@@ -243,7 +300,7 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
                     .get_path()
                     .with_full_path(|path| Sha1::digest(path.as_str().as_bytes()));
                 let sha = hex::encode(digest);
-                format!("__macros/{}", sha)
+                format!("__macros/{sha}")
             };
 
             let mut written_macro_files = indexset![];
@@ -253,6 +310,8 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
                     &format!("{}/{}.macro", &macro_directory_path, i),
                     OutputType::File,
                     eval.call_stack_top_location(),
+                    path_resolution_method,
+                    eval.heap(),
                 )?;
                 written_macro_files.insert(macro_file);
             }
@@ -262,9 +321,9 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
                 output_artifact
                     .get_path()
                     .with_short_path(|p| p.to_string()),
+                use_dep_files_placeholder_for_content_based_paths,
             );
             state.register_action(
-                indexset![],
                 written_macro_files.iter().map(|a| a.as_output()).collect(),
                 action,
                 Some(content_cli.to_value()),
@@ -280,7 +339,8 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
             let maybe_macro_files = if allow_args {
                 let mut macro_files = indexset![];
                 for a in &written_macro_files {
-                    macro_files.insert(a.dupe().ensure_bound()?.into_artifact());
+                    let artifact = a.dupe().ensure_bound()?.into_artifact();
+                    macro_files.insert(artifact.dupe());
                 }
                 Some(macro_files)
             } else {
@@ -290,10 +350,10 @@ pub(crate) fn analysis_actions_methods_write(methods: &mut MethodsBuilder) {
                 is_executable,
                 macro_files: maybe_macro_files,
                 absolute,
+                use_dep_files_placeholder_for_content_based_paths,
             }
         };
         this.register_action(
-            indexset![],
             indexset![output_artifact],
             action,
             Some(content_cli.to_value()),

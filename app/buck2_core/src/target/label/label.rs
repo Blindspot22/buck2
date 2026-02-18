@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cmp::Ordering;
@@ -17,9 +18,11 @@ use std::str;
 
 use allocative::Allocative;
 use buck2_data::ToProtoMessage;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_util::hash::BuckHasher;
 use dupe::Dupe;
 use lock_free_hashtable::atomic_value::AtomicValue;
+use pagable::Pagable;
 use ref_cast::RefCastCustom;
 use ref_cast::ref_cast_custom;
 use serde::Serialize;
@@ -42,7 +45,7 @@ use crate::target::configured_target_label::ConfiguredTargetLabel;
 use crate::target::label::triomphe_thin_arc_borrow::ThinArcBorrow;
 use crate::target::name::TargetNameRef;
 
-#[derive(Eq, PartialEq, Allocative, StrongHash)]
+#[derive(Debug, Eq, PartialEq, Allocative, Pagable)]
 struct TargetLabelHeader {
     /// Hash of target label (not package, not name).
     /// Place hash first to make equality check faster.
@@ -55,7 +58,15 @@ struct TargetLabelHeader {
 /// It contains a 'Package' which is the 'Package' defined by the build fine
 /// that contains this 'target', and a 'name' which is a 'TargetName'
 /// representing the target name given to the particular target.
-#[derive(Clone, derive_more::Display, Eq, PartialEq, Allocative, RefCastCustom)]
+#[derive(
+    Clone,
+    derive_more::Display,
+    Eq,
+    PartialEq,
+    Allocative,
+    RefCastCustom,
+    Pagable
+)]
 #[display("{}", self.as_ref())]
 #[repr(transparent)]
 pub struct TargetLabel(
@@ -167,7 +178,7 @@ impl TargetLabel {
     }
 
     #[inline]
-    pub fn as_ref(&self) -> TargetLabelRef {
+    pub fn as_ref(&self) -> TargetLabelRef<'_> {
         TargetLabelRef::new(self.pkg(), self.name())
     }
 
@@ -198,10 +209,10 @@ impl TargetLabel {
     }
 
     unsafe fn from_raw(raw: *const ()) -> Self {
-        TargetLabel(ThinArc::from_raw(raw as *const _))
+        TargetLabel(unsafe { ThinArc::from_raw(raw as *const _) })
     }
 
-    pub(crate) fn arc_borrow(&self) -> TargetLabelBorrow {
+    pub(crate) fn arc_borrow(&self) -> TargetLabelBorrow<'_> {
         TargetLabelBorrow {
             borrow: ThinArcBorrow::borrow(&self.0),
         }
@@ -222,8 +233,12 @@ impl TargetLabel {
         TargetLabel::new(
             PackageLabel::new(
                 cell_name,
-                CellRelativePath::new(pattern_data.package_path()),
-            ),
+                CellRelativePath::new(
+                    <&ForwardRelativePath>::try_from(pattern_data.package_path())
+                        .expect("must be valid path"),
+                ),
+            )
+            .unwrap(),
             target_name,
         )
     }
@@ -292,7 +307,7 @@ impl TargetLabelBorrow<'_> {
 
     pub(crate) unsafe fn from_raw(raw: *const ()) -> Self {
         TargetLabelBorrow {
-            borrow: ThinArcBorrow::from_raw(raw),
+            borrow: unsafe { ThinArcBorrow::from_raw(raw) },
         }
     }
 }
@@ -329,10 +344,10 @@ impl AtomicValue for TargetLabel {
     }
 
     unsafe fn from_raw(raw: Self::Raw) -> Self {
-        TargetLabel::from_raw(raw)
+        unsafe { TargetLabel::from_raw(raw) }
     }
 
     unsafe fn deref<'a>(raw: Self::Raw) -> Self::Ref<'a> {
-        TargetLabelBorrow::from_raw(raw)
+        unsafe { TargetLabelBorrow::from_raw(raw) }
     }
 }

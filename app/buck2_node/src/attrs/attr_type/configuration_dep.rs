@@ -1,21 +1,23 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
 use buck2_core::provider::label::ProvidersLabel;
 use dupe::Dupe;
+use pagable::Pagable;
 
 use crate::attrs::configuration_context::AttrConfigurationContext;
 use crate::attrs::configured_attr::ConfiguredAttr;
 
 /// Describes where a configuration dep appears
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Allocative, Dupe)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Pagable, Allocative, Dupe)]
 pub enum ConfigurationDepKind {
     SelectKey,
     CompatibilityAttribute,
@@ -35,7 +37,7 @@ pub enum ConfigurationDepKind {
 ///
 /// They resolve to just the string form of the target and so aren't particularly useful to UDR
 /// directly (they are used by the framework).
-#[derive(Debug, Eq, PartialEq, Hash, Allocative, Clone, Copy, Dupe)]
+#[derive(Debug, Eq, PartialEq, Hash, Pagable, Allocative, Clone, Copy, Dupe)]
 pub struct ConfigurationDepAttrType(pub ConfigurationDepKind);
 
 impl ConfigurationDepAttrType {

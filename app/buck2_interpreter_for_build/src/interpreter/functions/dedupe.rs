@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -21,7 +22,7 @@ pub(crate) fn register_dedupe(builder: &mut GlobalsBuilder) {
     /// rather than by equality. In many cases you should use a transitive set instead.
     fn dedupe<'v>(
         #[starlark(require = pos)] val: Value<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<Value<'v>> {
         let mut seen = HashSet::new();
         let mut res = Vec::new();

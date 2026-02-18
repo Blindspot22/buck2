@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
@@ -42,6 +43,7 @@ load(
     "get_linkable_graph_node_map_func",
     get_link_info_for_node = "get_link_info",
 )
+load("@prelude//linking:shared_libraries.bzl", "SharedLibraryInfo")
 load(
     "@prelude//python:manifest.bzl",
     "ManifestInfo",
@@ -49,6 +51,7 @@ load(
     "create_manifest_for_shared_libs",
 )
 load("@prelude//python:python.bzl", "PythonLibraryInfo")
+load("@prelude//python:python_wheel_toolchain.bzl", "PythonWheelToolchainInfo")
 load("@prelude//python:toolchain.bzl", "PythonToolchainInfo")
 load("@prelude//transitions:constraint_overrides.bzl", "constraint_overrides")
 load("@prelude//utils:expect.bzl", "expect")
@@ -74,11 +77,32 @@ def _link_deps(
 
     return depth_first_traversal_by(link_infos, deps, find_deps)
 
+def _python_version_from_tag(tag):
+    """Extract Python version from a wheel tag: "py3.12" -> "3.12", "cp312" -> "3.12"."""
+    version = tag
+    for prefix in ("cp", "py"):
+        if tag.startswith(prefix):
+            version = tag[len(prefix):]
+            break
+    if "." in version:
+        return version
+    if len(version) >= 2:
+        return version[0] + "." + version[1:]
+    return version
+
+def _cpython_tag(python_version):
+    """Convert Python version to CPython tag: "3.12" -> "cp312"."""
+    return "cp" + python_version.replace(".", "")
+
 def _whl_cmd(
         ctx: AnalysisContext,
         output: Artifact,
+        platform: str,
+        abi: str,
+        python: str,
         manifests: list[ManifestInfo] = [],
-        srcs: dict[str, Artifact] = {}) -> cmd_args:
+        srcs: dict[str, Artifact] = {},
+        computed_metadata: dict[str, str] = {}) -> cmd_args:
     cmd = []
 
     cmd.append(ctx.attrs._wheel[RunInfo])
@@ -87,6 +111,9 @@ def _whl_cmd(
     cmd.append(output.as_output())
     cmd.append("--name={}".format(ctx.attrs.dist or ctx.attrs.name))
     cmd.append("--version={}".format(ctx.attrs.version))
+    cmd.append("--python-tag={}".format(python))
+    cmd.append("--abi-tag={}".format(abi))
+    cmd.append("--platform-tag={}".format(platform))
 
     if ctx.attrs.entry_points:
         cmd.append("--entry-points={}".format(json.encode(ctx.attrs.entry_points)))
@@ -94,8 +121,8 @@ def _whl_cmd(
     for key, val in ctx.attrs.extra_metadata.items():
         cmd.extend(["--metadata", key, val])
 
-    version_matcher = ">=" if ctx.attrs.support_future_python_versions else "=="
-    cmd.extend(["--metadata", "Requires-Python", "{}{}.*".format(version_matcher, ctx.attrs.python[2:])])
+    for key, val in computed_metadata.items():
+        cmd.extend(["--metadata", key, val])
 
     for requires in ctx.attrs.requires:
         cmd.extend(["--metadata", "Requires-Dist", requires])
@@ -115,7 +142,7 @@ def _whl_cmd(
 
     return cmd_args(cmd, hidden = hidden)
 
-def _rpath(dst, rpath):
+def _rpath(rpath, origin):
     """
     Relative the given `rpath` to `dst`, via `$ORIGIN`.
     If `rpath` is absolute, return it as-is.
@@ -123,12 +150,11 @@ def _rpath(dst, rpath):
     if paths.is_absolute(rpath):
         return rpath
 
-    expect(not paths.is_absolute(dst))
+    expect(not paths.is_absolute(origin))
 
     base = "$ORIGIN"
-    dirpath = paths.dirname(dst)
-    if dirpath:
-        base = paths.join(base, *[".." for _ in dirpath.split("/")])
+    if origin:
+        base = paths.join(base, *[".." for _ in origin.split("/")])
     return paths.join(base, rpath)
 
 def _impl(ctx: AnalysisContext) -> list[Provider]:
@@ -169,15 +195,17 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
             ctx.attrs._patchelf[RunInfo],
             "--output",
             out.as_output(),
-            cmd_args([_rpath(dst, p) for p in rpaths], format = "--rpath={}"),
+            cmd_args([_rpath(p, origin = paths.dirname(dst)) for p in rpaths], format = "--rpath={}"),
             src,
         )
         ctx.actions.run(cmd, category = "patchelf", identifier = dst)
         return out
 
     srcs = []
+    native_srcs = []
     extensions = {}
     shared_libs = []
+    native_deps = {}
     for dep in libraries.values():
         manifests = dep[PythonLibraryInfo].manifests.value
         if manifests.srcs != None:
@@ -187,14 +215,22 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
             srcs.append(manifests.default_resources[0])
         if manifests.extensions != None:
             ((extension, _),) = manifests.extensions.items()
+            if extension in extensions:
+                fail("Duplicate extension entry for {}. Did your library_query forget to filter by `target_deps()`?".format(extension))
             extensions[extension] = dep
+
+        # These are non-extension native deps that may be dlopen'ed at
+        # runtime and should be included in the search space for omnibus roots.
+        for native_dep in dep[PythonLibraryInfo].native_deps.value.native_deps.values():
+            if SharedLibraryInfo in native_dep:
+                native_deps[native_dep.label] = native_dep
 
     # We support two modes of linking:
     # - omnibus: All native deps of all extensions are linked into a shared DSO
     # - static-everything: Each extension statically links all its deps (note
     #       this can mean each extension gets its own copy of common deps).
     if ctx.attrs.omnibus:
-        deps = extensions.values()
+        deps = (extensions | native_deps).values()
         linkable_graph = create_linkable_graph(
             ctx = ctx,
             deps = deps,
@@ -205,21 +241,34 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
             excluded = {},
         )
 
+        extension_labels = {dep.label: None for dep in extensions.values()}
+
         # Link omnibus libraries.
         omnibus_libs = create_omnibus_libraries(
-            ctx,
-            omnibus_graph,
-            extra_ldflags = python_toolchain.wheel_linker_flags,
+            ctx = ctx,
+            graph = omnibus_graph,
+            omnibus_lib_name = "omnibus-{}".format(dist),
+            extra_ldflags = python_toolchain.wheel_linker_flags + ctx.attrs.linker_flags,
             extra_root_ldflags = {
                 dep.label: (
                     python_toolchain.extension_linker_flags +
+                    python_toolchain.wheel_extension_linker_flags +
                     [
-                        "-Wl,-rpath,{}".format(_rpath(extension, rpath))
+                        "-Wl,-rpath,{}".format(_rpath(rpath, origin = paths.dirname(extension)))
                         for rpath in rpaths
                     ]
                 )
                 for extension, dep in extensions.items()
+            } | {
+                # For non-extension roots, set rpaths relative the lib dir.
+                root: [
+                    "-Wl,-rpath,{}".format(_rpath(rpath, origin = lib_dir))
+                    for rpath in rpaths
+                ]
+                for root in omnibus_graph.roots.keys()
+                if root not in extension_labels
             },
+            anonymous = ctx.attrs.anonymous_link,
         )
 
         # Extract re-linked extensions.
@@ -270,9 +319,10 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
                         LinkArgs(flags = python_toolchain.extension_linker_flags),
                         LinkArgs(flags = python_toolchain.wheel_linker_flags),
                         LinkArgs(flags = [
-                            "-Wl,-rpath,{}".format(_rpath(extension, rpath))
+                            "-Wl,-rpath,{}".format(_rpath(rpath, origin = paths.dirname(extension)))
                             for rpath in rpaths
                         ]),
+                        LinkArgs(flags = ctx.attrs.linker_flags),
                         LinkArgs(infos = inputs),
                     ],
                     category_suffix = "native_extension",
@@ -291,10 +341,23 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
             },
         ),
     ]
+    sub_targets["native-libs"] = [
+        DefaultInfo(
+            sub_targets = {
+                shlib.soname.ensure_str(): [DefaultInfo(default_output = shlib.lib.output)]
+                for shlib in shared_libs
+                if shlib.soname.is_str
+            },
+        ),
+    ]
 
     # Add shlibs manifest.
     if shared_libs:
-        srcs.append(
+        # NOTE(agallaher): We copy shared libs/roots, rather than symlink, as
+        # some DSO loading frameworks `realpath` the DSO before opening them,
+        # causing the `$ORIGIN` in them to no longer be valid, e.g.
+        # https://github.com/pytorch/pytorch/blob/main/torch/_utils_internal.py#L62
+        native_srcs.append(
             create_manifest_for_shared_libs(
                 actions = ctx.actions,
                 name = "shared_libs.txt",
@@ -328,26 +391,94 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
             ),
         )
 
+    # Resolve platform: use attr if set, otherwise fall back to toolchain default
+    wheel_toolchain = ctx.attrs._python_wheel_toolchain[PythonWheelToolchainInfo]
+    python = value_or(ctx.attrs.python, wheel_toolchain.python)
+    platform = ctx.attrs.platform or wheel_toolchain.platform
+    if not platform:
+        fail("platform must be set either on python_wheel target or in python_wheel_toolchain")
+
+    # Resolve ABI tag: explicit attr > toolchain default
+    abi = value_or(ctx.attrs.abi, wheel_toolchain.abi)
+
+    # Auto-detect CPython tags for wheels with native extensions (PEP 427).
+    # When native extensions are present and no explicit ABI override is set,
+    # switch from py*-none to cpXXX-cpXXX tags.
+    python_version = _python_version_from_tag(python)
+
+    # Normalize python tag to PEP 425 format: "py3.12" -> "py312"
+    if "." in python:
+        python = python.replace(".", "")
+
+    if extensions and abi == "none":
+        cp_tag = _cpython_tag(python_version)
+        python = cp_tag
+        abi = cp_tag
+
+    # Computed metadata for WHEEL/METADATA files
+    computed_metadata = {"Requires-Python": "==" + python_version + ".*"}
+
+    def normalize_name(name):
+        # Normalize name part of the *.whl file per:
+        #  * https://packaging.python.org/en/latest/specifications/recording-installed-packages/#the-dist-info-directory
+        #  * https://packaging.python.org/en/latest/specifications/name-normalization/
+        #
+        # Equivalent to fbcode/buck2/prelude/python/tools/wheel.py#normalize_name()
+        # but need to do it here since we need to set output path
+
+        # PEP503 name normalization
+        #   1. Convert to lowercase
+        pep503_normalized = name.lower()
+
+        #   2. Replace all dots and underscores with hyphens
+        pep503_normalized = pep503_normalized.replace(".", "-")
+        pep503_normalized = pep503_normalized.replace("_", "-")
+
+        #   3. Collapse multiple consecutive hyphens into single hyphen
+        #      Since we don't have regex, we'll do multiple passes
+        for _ in range(pep503_normalized.count("--")):
+            pep503_normalized = pep503_normalized.replace("--", "-")
+
+        # Finally replace hyphens with underscores
+        return pep503_normalized.replace("-", "_")
+
     name_parts = [
-        dist,
+        # only normalize `dist` in the *.whl filename (NOT the dist name in dist-info/METADATA)
+        normalize_name(dist),
         ctx.attrs.version,
-        ctx.attrs.python,
-        ctx.attrs.abi,
-        ctx.attrs.platform,
+        python,
+        abi,
+        platform,
     ]
 
     # Action to create wheel.
     wheel = ctx.actions.declare_output("{}.whl".format("-".join(name_parts)))
-    whl_cmd = _whl_cmd(ctx = ctx, output = wheel, manifests = srcs)
+    whl_cmd = _whl_cmd(
+        ctx = ctx,
+        output = wheel,
+        platform = platform,
+        abi = abi,
+        python = python,
+        manifests = srcs + native_srcs,
+        computed_metadata = computed_metadata,
+    )
     ctx.actions.run(whl_cmd, category = "wheel")
 
     # Create symlink tree for inplace module layout.
     manifest_args = []
     manifest_srcs = []
     for manifest in srcs:
-        manifest_args.append(cmd_args(manifest.manifest, format = "--manifest={}"))
+        manifest_args.append(cmd_args(manifest.manifest, format = "--link-manifest={}"))
         for a, _ in manifest.artifacts:
             manifest_srcs.append(a)
+    for manifest in native_srcs:
+        manifest_args.append(
+            cmd_args(
+                manifest.manifest,
+                format = "--copy-manifest={}",
+                hidden = [a for (a, _) in manifest.artifacts],
+            ),
+        )
     link_tree = ctx.actions.declare_output("__editable__/tree.d", dir = True)
     link_tree_cmd = cmd_args(
         ctx.attrs._create_link_tree[RunInfo],
@@ -374,7 +505,15 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
 
     # Action to create editable wheel.
     ewheel = ctx.actions.declare_output("__editable__/{}.whl".format("-".join(name_parts)))
-    ewhl_cmd = _whl_cmd(ctx = ctx, output = ewheel, srcs = {"{}.pth".format(dist): pth})
+    ewhl_cmd = _whl_cmd(
+        ctx = ctx,
+        output = ewheel,
+        platform = platform,
+        abi = abi,
+        python = python,
+        srcs = {"{}.pth".format(dist): pth},
+        computed_metadata = computed_metadata,
+    )
     ctx.actions.run(ewhl_cmd, category = "editable_wheel")
     sub_targets["editable"] = [
         DefaultInfo(
@@ -390,23 +529,14 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
 
     return providers
 
-_default_python = select({
-    "ovr_config//third-party/python/constraints:3.10": "py3.10",
-    "ovr_config//third-party/python/constraints:3.11": "py3.11",
-    "ovr_config//third-party/python/constraints:3.12": "py3.12",
-    "ovr_config//third-party/python/constraints:3.8": "py3.8",
-    "ovr_config//third-party/python/constraints:3.9": "py3.9",
-})
-
 python_wheel = rule(
     impl = _impl,
     cfg = constraint_overrides.transition,
     attrs = dict(
         dist = attrs.option(attrs.string(), default = None),
         version = attrs.string(default = "1.0.0"),
-        python = attrs.string(
-            # @oss-disable[end= ]: default = _default_python,
-        ),
+        python = attrs.option(attrs.string(), default = None),
+        abi = attrs.option(attrs.string(), default = None),
         entry_points = attrs.dict(
             key = attrs.string(),
             value = attrs.dict(
@@ -421,13 +551,10 @@ python_wheel = rule(
             value = attrs.string(),
             default = {},
         ),
-        abi = attrs.string(default = "none"),
-        platform = attrs.string(
-            default = select({
-                "DEFAULT": "any",
-                # @oss-disable[end= ]: "ovr_config//os:linux-arm64": "linux_aarch64",
-                # @oss-disable[end= ]: "ovr_config//os:linux-x86_64": "linux_x86_64",
-            }),
+        platform = attrs.option(
+            attrs.string(),
+            default = None,
+            doc = "Platform tag for the wheel. If not set, uses the toolchain default.",
         ),
         omnibus = attrs.bool(default = False),
         libraries = attrs.list(attrs.dep(providers = [PythonLibraryInfo]), default = []),
@@ -437,11 +564,13 @@ python_wheel = rule(
         resources = attrs.dict(key = attrs.string(), value = attrs.source(), default = {}),
         rpaths = attrs.list(attrs.string(), default = []),
         lib_dir = attrs.option(attrs.string(), default = None),
-        support_future_python_versions = attrs.bool(default = False),
         labels = attrs.list(attrs.string(), default = []),
+        linker_flags = attrs.list(attrs.arg(anon_target_compatible = True), default = []),
+        anonymous_link = attrs.bool(default = True),
         link_execution_preference = link_execution_preference_attr(),
         _wheel = attrs.default_only(attrs.exec_dep(default = "prelude//python/tools:wheel")),
         _patchelf = attrs.default_only(attrs.exec_dep(default = "prelude//python/tools:patchelf")),
+        _python_wheel_toolchain = toolchains_common.python_wheel(),
         _create_link_tree = attrs.default_only(attrs.exec_dep(default = "prelude//python/tools:create_link_tree")),
         _cxx_toolchain = toolchains_common.cxx(),
         _python_toolchain = toolchains_common.python(),

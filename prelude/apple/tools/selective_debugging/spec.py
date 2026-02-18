@@ -1,16 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 import json
 import re
 from dataclasses import dataclass, field
-from typing import List
 
 
 @dataclass
@@ -45,17 +45,17 @@ class BuildTargetPatternOutputPathMatcher:
 @dataclass
 class Spec:
     spec_path: str
-    include_build_target_patterns: List[BuildTargetPatternOutputPathMatcher] = field(
+    include_build_target_patterns: list[BuildTargetPatternOutputPathMatcher] = field(
         init=False
     )
-    include_regular_expressions: List[re.Pattern[str]] = field(init=False)
-    exclude_build_target_patterns: List[BuildTargetPatternOutputPathMatcher] = field(
+    include_regular_expressions: list[re.Pattern[str]] = field(init=False)
+    exclude_build_target_patterns: list[BuildTargetPatternOutputPathMatcher] = field(
         init=False
     )
-    exclude_regular_expressions: List[re.Pattern[str]] = field(init=False)
+    exclude_regular_expressions: list[re.Pattern[str]] = field(init=False)
 
     def __post_init__(self) -> None:
-        with open(self.spec_path, "r") as f:
+        with open(self.spec_path) as f:
             data = json.load(f)
 
         self.include_build_target_patterns = [
@@ -63,14 +63,16 @@ class Spec:
             for entry in data["include_build_target_patterns"]
         ]
         self.include_regular_expressions = [
-            re.compile(entry) for entry in data["include_regular_expressions"]
+            re.compile(_sanitize_regex_pattern(entry))
+            for entry in data["include_regular_expressions"]
         ]
         self.exclude_build_target_patterns = [
             BuildTargetPatternOutputPathMatcher(entry)
             for entry in data["exclude_build_target_patterns"]
         ]
         self.exclude_regular_expressions = [
-            re.compile(entry) for entry in data["exclude_regular_expressions"]
+            re.compile(_sanitize_regex_pattern(entry))
+            for entry in data["exclude_regular_expressions"]
         ]
 
     def scrub_debug_file_path(self, debug_file_path: str) -> bool:
@@ -94,10 +96,15 @@ class Spec:
         )
 
 
+def _sanitize_regex_pattern(pattern: str) -> str:
+    double_slash_index = pattern.find("//")
+    return pattern[double_slash_index + 1 :] if double_slash_index != -1 else pattern
+
+
 def _path_matches_pattern_or_expression(
     debug_file_path: str,
-    patterns: List[BuildTargetPatternOutputPathMatcher],
-    expressions: List[re.Pattern[str]],
+    patterns: list[BuildTargetPatternOutputPathMatcher],
+    expressions: list[re.Pattern[str]],
 ) -> bool:
     for pattern in patterns:
         if pattern.match_path(debug_file_path):

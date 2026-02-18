@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use dupe::Dupe;
@@ -147,11 +148,21 @@ pub struct DigestWithStatus {
 }
 
 #[derive(Clone, Default)]
+pub struct CacheFunnelStats {
+    pub digests_served_from_memory: i64,
+    pub digests_served_from_fs: i64,
+    pub _dot_dot_default: (),
+}
+
+#[derive(Clone, Default)]
 pub struct TLocalCacheStats {
+    pub total_cache_lookup_attempts: i64,
     pub hits_files: i64,
     pub hits_bytes: i64,
     pub misses_files: i64,
     pub misses_bytes: i64,
+    pub cache_lookup_latency_microseconds: i64,
+    pub cache_funnel_stats: CacheFunnelStats,
     // Compatibility with the Thrift structs
     pub _dot_dot_default: (),
 }
@@ -210,6 +221,7 @@ pub struct ExecutedActionMemoryStats {
 #[derive(Clone, Default)]
 pub struct TaskInfo {
     pub estimated_queue_time_ms: i64,
+    pub new_estimated_queue_time_ms: i64,
     pub state: TaskState,
 }
 
@@ -222,6 +234,7 @@ pub enum TaskState {
     cancelled(CancelledTaskState),
     over_quota(OverQuotaTaskState),
     acquiring_dependencies(AcquiringDependenciesTaskState),
+    waiting_for_gang_allocation(WaitingForGangAllocationTaskState),
     UnknownField(i32),
 }
 
@@ -248,6 +261,9 @@ pub struct WaitingOnReservationTaskState {}
 
 #[derive(Clone, Default)]
 pub struct AcquiringDependenciesTaskState {}
+
+#[derive(Clone, Default)]
+pub struct WaitingForGangAllocationTaskState {}
 
 #[derive(Clone, Default)]
 pub struct OperationMetadata {

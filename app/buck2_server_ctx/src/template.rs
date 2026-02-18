@@ -1,13 +1,12 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
-
-use std::time::Instant;
 
 use async_trait::async_trait;
 use buck2_core::logging::log_file::TracingLogFile;
@@ -44,11 +43,6 @@ pub trait ServerCommandTemplate: Send + Sync {
         Self::EndEvent::default()
     }
 
-    /// Set `buck2_data::CommandEnd::is_success` to
-    /// * `command` returns `Ok`
-    /// * and this function returns `true`
-    fn is_success(&self, response: &Self::Response) -> bool;
-
     /// Used to report (successful) builds since rebase, only for commands that return a `BuildResult` (build, install, test).
     /// If the command succeeded in building the target specified, `BuildResult.build_completed` should be true,
     /// even if the command failed for another reason.
@@ -76,12 +70,9 @@ pub async fn run_server_command<T: ServerCommandTemplate>(
     server_ctx: &dyn ServerCommandContextTrait,
     partial_result_dispatcher: PartialResultDispatcher<<T as ServerCommandTemplate>::PartialResult>,
 ) -> buck2_error::Result<T::Response> {
-    let start_event = buck2_data::CommandStart {
-        metadata: server_ctx.request_metadata().await?,
-        data: Some(command.start_event().into()),
-    };
-
-    let command_start = Instant::now();
+    let start_event = server_ctx
+        .command_start_event(command.start_event().into())
+        .await?;
     // refresh our tracing log per command
     TracingLogFile::refresh()?;
 
@@ -96,17 +87,12 @@ pub async fn run_server_command<T: ServerCommandTemplate>(
                     command.command(server_ctx, partial_result_dispatcher, ctx)
                 },
                 command.exclusive_command_name(),
-                Some(command_start),
             )
-            .await
-            .map_err(Into::into);
-        let end_event = command_end_ext(
-            &result,
-            command.end_event(&result),
-            |result| command.is_success(result),
-            |result| command.build_result(result),
-        );
-        (result.map_err(Into::into), end_event)
+            .await;
+        let end_event = command_end_ext(&result, command.end_event(&result), |result| {
+            command.build_result(result)
+        });
+        (result, end_event)
     })
     .await
 }

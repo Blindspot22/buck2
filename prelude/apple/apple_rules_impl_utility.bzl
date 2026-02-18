@@ -1,14 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:attrs_validators.bzl", "validation_common")
 load("@prelude//apple:apple_bundle_types.bzl", "AppleBundleResourceInfo", "AppleBundleTypeAttributeType")
 load("@prelude//apple:apple_code_signing_types.bzl", "CodeSignConfiguration", "CodeSignType")
 load("@prelude//apple:apple_common.bzl", "apple_common")
+load("@prelude//apple:apple_test_device_types.bzl", "AppleTestDeviceType")
 load("@prelude//apple:apple_toolchain_types.bzl", "AppleToolchainInfo")
 load("@prelude//apple:resource_groups.bzl", "RESOURCE_GROUP_MAP_ATTR")
 load("@prelude//apple/swift:swift_incremental_support.bzl", "SwiftCompilationMode")
@@ -18,36 +20,27 @@ load("@prelude//cxx:headers.bzl", "CPrecompiledHeaderInfo")
 load("@prelude//ide_integrations/xcode:scheme_settings.bzl", "XCODE_SCHEME_SETTINGS_ATTR_NAME", "XCODE_SCHEME_SETTINGS_ATTR_TYPE")
 load("@prelude//linking:execution_preference.bzl", "link_execution_preference_attr")
 load("@prelude//linking:link_info.bzl", "LinkOrdering")
+load("@prelude//utils:buckconfig.bzl", "read_bool")
 load("@prelude//utils:clear_platform.bzl", "clear_platform_transition")
 
 AppleFrameworkBundleModuleMapType = ["auto"]
 
-def get_apple_toolchain_attr():
-    # FIXME: prelude// should be standalone (not refer to fbcode//)
-    return attrs.toolchain_dep(default = "fbcode//buck2/platform/toolchain:apple-default", providers = [AppleToolchainInfo])
-
 def get_apple_bundle_toolchain_attr():
-    # FIXME: prelude// should be standalone (not refer to fbcode//)
-    return attrs.toolchain_dep(default = "fbcode//buck2/platform/toolchain:apple-bundle", providers = [AppleToolchainInfo])
+    return attrs.toolchain_dep(default = "toolchains//:apple-bundle", providers = [AppleToolchainInfo])
+
+def get_apple_resources_toolchain_attr():
+    return attrs.toolchain_dep(default = "toolchains//:apple-resources", providers = [AppleToolchainInfo])
 
 def get_apple_xctoolchain_attr():
-    # FIXME: prelude// should be standalone (not refer to fbcode//)
-    return attrs.toolchain_dep(default = "fbcode//buck2/platform/toolchain:apple-xctoolchain")
+    return attrs.toolchain_dep(default = "toolchains//:apple-xctoolchain")
 
 def get_apple_xctoolchain_bundle_id_attr():
-    # FIXME: prelude// should be standalone (not refer to fbcode//)
-    return attrs.toolchain_dep(default = "fbcode//buck2/platform/toolchain:apple-xctoolchain-bundle-id")
+    return attrs.toolchain_dep(default = "toolchains//:apple-xctoolchain-bundle-id")
 
 def get_enable_library_evolution():
     return attrs.bool(default = select({
         "DEFAULT": False,
         "config//features/apple:swift_library_evolution_enabled": True,
-    }))
-
-def _get_enable_dsym_uses_parallel_linker():
-    return attrs.bool(default = select({
-        "DEFAULT": False,
-        "config//features/apple:dsym_uses_parallel_linker_enabled": True,
     }))
 
 def _strict_provisioning_profile_search_default_attr():
@@ -88,17 +81,35 @@ APPLE_EMBED_PROVISIONING_PROFILE_WHEN_ADHOC_CODE_SIGNING_ATTR_NAME = "embed_prov
 APPLE_VALIDATION_DEPS_ATTR_NAME = "validation_deps"
 APPLE_VALIDATION_DEPS_ATTR_TYPE = attrs.set(attrs.dep(), sorted = True, default = [])
 
-def apple_dsymutil_attrs():
-    return {
-        "dsym_uses_parallel_linker": _get_enable_dsym_uses_parallel_linker(),
-        "_dsymutil_extra_flags": attrs.list(attrs.string()),
-        "_dsymutil_verify_dwarf": attrs.string(),
-    }
-
 def get_apple_info_plist_build_system_identification_attrs():
     return {
         "info_plist_identify_build_system": attrs.option(attrs.bool(), default = None),
         "_info_plist_identify_build_system_default": attrs.bool(default = False),
+    }
+
+def get_skip_swift_incremental_outputs_attrs():
+    return {
+        "_skip_swift_incremental_outputs": attrs.bool(default = read_bool("apple", "skip_swift_incremental_outputs", False, False, True)),
+    }
+
+def get_swift_incremental_file_hashing_attrs():
+    return {
+        "swift_incremental_file_hashing": attrs.bool(default = read_bool("apple", "swift_incremental_file_hashing", False, False, True)),
+    }
+
+def get_swift_incremental_remote_outputs_attrs():
+    return {
+        "incremental_remote_outputs": attrs.bool(default = read_bool("apple", "incremental_remote_outputs", False, False, True)),
+    }
+
+def get_swift_incremental_logging_attrs():
+    return {
+        "swift_incremental_logging": attrs.bool(default = read_bool("apple", "swift_incremental_logging_enabled", False, False, True)),
+    }
+
+def get_incremental_split_actions_attrs():
+    return {
+        "_swift_incremental_split_actions": attrs.bool(default = read_bool("apple", "swift_incremental_split_actions", False, False, True)),
     }
 
 def _apple_bundle_like_common_attrs():
@@ -107,6 +118,11 @@ def _apple_bundle_like_common_attrs():
         # Target-level attribute always takes precedence over buckconfigs.
         "code_signing_configuration": attrs.option(attrs.enum(CodeSignConfiguration.values()), default = None),
         "codesign_type": attrs.option(attrs.enum(CodeSignType.values()), default = None),
+        "entitlements_verification_check_enabled": attrs.bool(default = select({
+            "DEFAULT": read_bool("apple", "entitlements_verification_check_enabled", default = False, root_cell = True),
+            "config//features/apple:entitlements_verification_check_disabled": False,
+            "config//features/apple:entitlements_verification_check_enabled": True,
+        })),
         "fast_adhoc_signing_enabled": attrs.option(attrs.bool(), default = None),
         "provisioning_profile_filter": attrs.option(attrs.string(), default = None),
         "skip_adhoc_resigning_scrubbed_frameworks": attrs.option(attrs.bool(), default = None),
@@ -118,6 +134,7 @@ def _apple_bundle_like_common_attrs():
         "_bundling_log_file_enabled": attrs.bool(default = False),
         "_bundling_log_file_level": attrs.option(attrs.string(), default = None),
         "_code_signing_configuration": attrs.option(attrs.enum(CodeSignConfiguration.values()), default = None),
+        "_codesign_command_override": attrs.option(attrs.exec_dep(providers = [RunInfo]), default = None),
         "_codesign_identities_command_override": attrs.option(attrs.exec_dep(providers = [RunInfo]), default = None),
         "_codesign_type": attrs.option(attrs.enum(CodeSignType.values()), default = None),
         "_compile_resources_locally_override": attrs.option(attrs.bool(), default = None),
@@ -139,8 +156,8 @@ def _apple_bundle_like_common_attrs():
         XCODE_SCHEME_SETTINGS_ATTR_NAME: XCODE_SCHEME_SETTINGS_ATTR_TYPE,
     }
     attribs.update(get_apple_info_plist_build_system_identification_attrs())
-    attribs.update(apple_dsymutil_attrs())
     attribs.update(apple_common.apple_tools_arg())
+    attribs.update(apple_common.enforce_minimum_os_plist_key())
     return attribs
 
 def apple_test_extra_attrs():
@@ -153,11 +170,10 @@ def apple_test_extra_attrs():
         "enable_library_evolution": attrs.option(attrs.bool(), default = None),
         # The resulting test bundle should have .xctest extension.
         "extension": attrs.string(),
-        "extra_xcode_sources": attrs.list(attrs.source(allow_directory = True), default = []),
         "link_execution_preference": link_execution_preference_attr(),
         "link_ordering": attrs.option(attrs.enum(LinkOrdering.values()), default = None),
+        "minimum_os_version": attrs.option(attrs.string(), default = None),
         "precompiled_header": attrs.option(attrs.dep(providers = [CPrecompiledHeaderInfo]), default = None),
-        "propagated_target_sdk_version": attrs.option(attrs.string(), default = None),
         # Expected by `apple_bundle`, for `apple_test` this field is always None.
         "resource_group": attrs.option(attrs.string(), default = None),
         # Expected by `apple_bundle`, for `apple_test` this field is always None.
@@ -166,6 +182,8 @@ def apple_test_extra_attrs():
         "stripped": attrs.bool(default = False),
         "swift_compilation_mode": attrs.enum(SwiftCompilationMode.values(), default = "wmo"),
         "swift_package_name": attrs.option(attrs.string(), default = None),
+        "swift_testing": attrs.bool(default = False),
+        "test_device_type": attrs.enum(AppleTestDeviceType.values(), default = "default"),
         "test_re_capabilities": attrs.option(attrs.dict(key = attrs.string(), value = attrs.string(), sorted = False), default = None, doc = """
             An optional dictionary with the RE capabilities for the test execution.
             Overrides a default selection mechanism.
@@ -174,13 +192,19 @@ def apple_test_extra_attrs():
             An optional name of the RE use case for the test execution.
             Overrides a default selection mechanism.
         """),
-        "_apple_toolchain": get_apple_toolchain_attr(),
         "_enable_library_evolution": get_enable_library_evolution(),
-        "_ios_booted_simulator": attrs.transition_dep(cfg = clear_platform_transition, default = "fbsource//xplat/buck2/platform/apple:ios_booted_simulator", providers = [LocalResourceInfo]),
-        "_ios_unbooted_simulator": attrs.transition_dep(cfg = clear_platform_transition, default = "fbsource//xplat/buck2/platform/apple:ios_unbooted_simulator", providers = [LocalResourceInfo]),
+        "_ipad_simulator": attrs.transition_dep(cfg = clear_platform_transition, default = "fbsource//xplat/buck2/platform/apple:ipad_simulator", providers = [LocalResourceInfo]),
+        "_iphone_booted_simulator": attrs.transition_dep(cfg = clear_platform_transition, default = "fbsource//xplat/buck2/platform/apple:iphone_booted_simulator", providers = [LocalResourceInfo]),
+        "_iphone_unbooted_simulator": attrs.transition_dep(cfg = clear_platform_transition, default = "fbsource//xplat/buck2/platform/apple:iphone_unbooted_simulator", providers = [LocalResourceInfo]),
         "_swift_enable_testing": attrs.default_only(attrs.bool(default = True)),
+        "_watch_simulator": attrs.transition_dep(cfg = clear_platform_transition, default = "fbsource//xplat/buck2/platform/apple:watch_simulator", providers = [LocalResourceInfo]),
     } | validation_common.attrs_validators_arg()
+    attribs.update(apple_common.apple_toolchain_arg())
     attribs.update(_apple_bundle_like_common_attrs())
+    attribs.update(get_swift_incremental_file_hashing_attrs())
+    attribs.update(get_swift_incremental_logging_attrs())
+    attribs.update(get_skip_swift_incremental_outputs_attrs())
+    attribs.update(get_incremental_split_actions_attrs())
     return attribs
 
 def apple_xcuitest_extra_attrs():
@@ -194,15 +218,13 @@ def apple_xcuitest_extra_attrs():
         "incremental_bundling_enabled": attrs.bool(default = False),
         "info_plist": attrs.source(),
         "info_plist_substitutions": attrs.dict(key = attrs.string(), value = attrs.string(), sorted = False, default = {}),
-        "target_sdk_version": attrs.option(attrs.string(), default = None),
         # The test bundle to package in the UI test runner app.
         "test_bundle": attrs.dep(),
-        "_apple_toolchain": get_apple_toolchain_attr(),
         "_enable_library_evolution": get_enable_library_evolution(),
     }
+    attribs.update(apple_common.target_sdk_version())
+    attribs.update(apple_common.apple_toolchain_arg())
     attribs.update(_apple_bundle_like_common_attrs())
-    attribs.pop("_dsymutil_extra_flags", None)
-    attribs.pop("_dsymutil_verify_dwarf", None)
 
     return attribs
 
@@ -220,8 +242,8 @@ def apple_bundle_extra_attrs():
         "bundle_type": attrs.option(attrs.enum(AppleBundleTypeAttributeType.values()), default = None),
         "copy_public_framework_headers": attrs.option(attrs.bool(), default = None),
         "embed_xctest_frameworks": attrs.bool(default = _embed_xctest_frameworks_default_value()),
+        "minimum_os_version": attrs.option(attrs.string(), default = None),
         "module_map": attrs.option(attrs.one_of(attrs.enum(AppleFrameworkBundleModuleMapType), attrs.source()), default = None),
-        "propagated_target_sdk_version": attrs.option(attrs.string(), default = None),
         "resource_group_map": RESOURCE_GROUP_MAP_ATTR,
         "selective_debugging": attrs.option(attrs.dep(providers = [AppleSelectiveDebuggingInfo]), default = None),
         "split_arch_dsym": attrs.bool(default = False),

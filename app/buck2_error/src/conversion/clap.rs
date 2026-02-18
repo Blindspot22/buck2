@@ -1,11 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
+
+use std::marker::PhantomData;
 
 use clap::error::ErrorKind;
 
@@ -22,4 +25,39 @@ impl From<clap::error::Error> for crate::Error {
             _ => from_any_with_tag(value, crate::ErrorTag::Input),
         }
     }
+}
+
+#[derive(Clone)]
+struct BuckErrorClapParser<F, T>(F, PhantomData<T>);
+
+impl<F, T> clap::builder::TypedValueParser for BuckErrorClapParser<F, T>
+where
+    F: Fn(&str) -> crate::Result<T> + Send + Sync + Clone + 'static,
+    T: Send + Sync + Clone + 'static,
+{
+    type Value = T;
+
+    fn parse_ref(
+        &self,
+        _cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let value = value.to_str().ok_or_else(|| {
+            clap::Error::raw(clap::error::ErrorKind::InvalidUtf8, "Utf8 expected")
+        })?;
+        // Note: We don't really have any shot of trying to preserve error structure here, so this
+        // is the best we can do
+        (self.0)(value).map_err(|e| {
+            clap::Error::raw(clap::error::ErrorKind::ValueValidation, format!("{}", e))
+        })
+    }
+}
+
+pub fn buck_error_clap_parser<F, T>(f: F) -> impl clap::builder::TypedValueParser<Value = T>
+where
+    F: Fn(&str) -> crate::Result<T> + Send + Sync + Clone + 'static,
+    T: Clone + Send + Sync + 'static,
+{
+    BuckErrorClapParser(f, PhantomData)
 }

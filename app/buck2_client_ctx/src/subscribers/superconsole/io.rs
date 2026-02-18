@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_core::io_counters::IoCounterKey;
@@ -25,7 +26,9 @@ pub(crate) struct IoHeader<'s> {
 }
 
 impl Component for IoHeader<'_> {
-    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = buck2_error::Error;
+
+    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> buck2_error::Result<Lines> {
         render(
             self.two_snapshots,
             mode,
@@ -94,7 +97,7 @@ fn do_render(
     two_snapshots: &TwoSnapshots,
     snapshot: &buck2_data::Snapshot,
     width: usize,
-) -> anyhow::Result<Lines> {
+) -> buck2_error::Result<Lines> {
     let mut lines = Vec::new();
     let mut parts = Vec::new();
     if let Some(buck2_rss) = snapshot.buck2_rss {
@@ -120,14 +123,23 @@ fn do_render(
     if user_cpu_percents.is_some() || system_cpu_percents.is_some() {
         let mut cpu_str_parts = vec!["buckd CPU".to_owned()];
         if let Some(p) = user_cpu_percents {
-            cpu_str_parts.push(format!("user = {}%", p));
+            cpu_str_parts.push(format!("user = {p}%"));
         }
         if let Some(p) = system_cpu_percents {
-            cpu_str_parts.push(format!("system = {}%", p));
+            cpu_str_parts.push(format!("system = {p}%"));
         }
         let cpu_str = cpu_str_parts.join("  ");
         parts.push(cpu_str);
     }
+
+    // Show Tokio IO metrics in compact format: busy/total+queue
+    parts.push(format!(
+        "Tokio IO = {}/{}+{}",
+        snapshot.tokio_num_blocking_threads - snapshot.tokio_num_idle_blocking_threads,
+        snapshot.tokio_num_blocking_threads,
+        snapshot.tokio_blocking_queue_depth
+    ));
+
     if snapshot.deferred_materializer_queue_size > 0 {
         parts.push(format!(
             "DM Queue = {}",
@@ -148,7 +160,7 @@ fn do_render(
 
     let mut counters = Vec::new();
     for (key, value) in io_in_flight_non_zero_counters(snapshot) {
-        counters.push(format!("{:?} = {}", key, value));
+        counters.push(format!("{key:?} = {value}"));
     }
     lines.extend(words_to_lines(counters, width).into_try_map(|s| Line::unstyled(&s))?);
 
@@ -160,7 +172,7 @@ fn render(
     draw_mode: DrawMode,
     width: usize,
     enabled: bool,
-) -> anyhow::Result<Lines> {
+) -> buck2_error::Result<Lines> {
     if !enabled {
         return Ok(Lines::new());
     }

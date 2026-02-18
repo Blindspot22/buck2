@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::path::Path;
@@ -15,10 +16,9 @@ use buck2_cli_proto::ProfileRequest;
 use buck2_cli_proto::ProfileResponse;
 use buck2_cli_proto::profile_request::ProfileOpts;
 use buck2_common::dice::cells::HasCellResolver;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_error::internal_error;
+use buck2_fs::paths::abs_path::AbsPath;
 use buck2_interpreter::starlark_profiler::config::GetStarlarkProfilerInstrumentation;
 use buck2_interpreter::starlark_profiler::mode::StarlarkProfileMode;
 use buck2_profile::get_profile_response;
@@ -88,8 +88,24 @@ impl ServerCommandTemplate for BxlProfileServerCommand {
         let bxl_label =
             parse_bxl_label_from_cli(cwd, &opts.bxl_label, &cell_resolver, &cell_alias_resolver)?;
 
-        let BxlResolvedCliArgs::Resolved(bxl_args) =
-            get_bxl_cli_args(cwd, &mut ctx, &bxl_label, &opts.bxl_args, &cell_resolver).await?
+        let global_cfg_options = global_cfg_options_from_client_context(
+            opts.target_cfg
+                .as_ref()
+                .ok_or_else(|| internal_error!("target_cfg must be set"))?,
+            server_ctx,
+            &mut ctx,
+        )
+        .await?;
+
+        let BxlResolvedCliArgs::Resolved(bxl_args) = get_bxl_cli_args(
+            cwd,
+            &mut ctx,
+            &bxl_label,
+            &opts.bxl_args,
+            &cell_resolver,
+            &global_cfg_options,
+        )
+        .await?
         else {
             return Err(buck2_error!(
                 buck2_error::ErrorTag::Input,
@@ -97,15 +113,6 @@ impl ServerCommandTemplate for BxlProfileServerCommand {
             ));
         };
         let bxl_args = Arc::new(bxl_args);
-
-        let global_cfg_options = global_cfg_options_from_client_context(
-            opts.target_cfg
-                .as_ref()
-                .internal_error("target_cfg must be set")?,
-            server_ctx,
-            &mut ctx,
-        )
-        .await?;
 
         let bxl_key = BxlKey::new(
             bxl_label.clone(),
@@ -127,9 +134,9 @@ impl ServerCommandTemplate for BxlProfileServerCommand {
                 async move {
                     buck2_error::Ok(
                         eval(&mut ctx, bxl_key, observer)
-                            .await?
+                            .await
+                            .map_err(|e| e.error)?
                             .1
-                            .map(Arc::new)
                             .expect("No bxl profile data found"),
                     )
                 }
@@ -142,10 +149,5 @@ impl ServerCommandTemplate for BxlProfileServerCommand {
             &[bxl_label.to_string()],
             output,
         )?)
-    }
-
-    fn is_success(&self, _response: &Self::Response) -> bool {
-        // No response if we failed.
-        true
     }
 }

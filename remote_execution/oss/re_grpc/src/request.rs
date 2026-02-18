@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 pub use crate::digest::*;
@@ -86,6 +87,36 @@ pub struct ExecuteRequest {
     pub action_digest: TDigest,
     pub skip_cache_lookup: bool,
     pub execution_policy: Option<TExecutionPolicy>,
+    pub host_runtime_requirements: THostRuntimeRequirements,
+    pub gang: Option<GangSpecification>,
+    pub _dot_dot: (),
+}
+
+#[derive(Clone)]
+pub struct GangSpecification {
+    pub workers_spec: GangWorkersSpec,
+    pub _dot_dot: (),
+}
+
+#[derive(Clone)]
+pub enum GangWorkersSpec {
+    EnumeratedSpec(EnumeratedGangSpec),
+}
+
+impl GangWorkersSpec {
+    pub fn enumerated_spec(spec: EnumeratedGangSpec) -> Self {
+        GangWorkersSpec::EnumeratedSpec(spec)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct EnumeratedGangSpec {
+    pub workers: Vec<GangMember>,
+    pub _dot_dot: (),
+}
+
+#[derive(Clone, Default)]
+pub struct GangMember {
     pub host_runtime_requirements: THostRuntimeRequirements,
     pub _dot_dot: (),
 }

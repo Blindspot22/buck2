@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """
 Wrapper for a rustdoc-generated doctest binary, to relocate the executable into
@@ -24,12 +25,12 @@ import argparse
 import os
 import shutil
 from pathlib import Path
-from typing import List, NamedTuple
+from typing import NamedTuple
 
 
 class Args(NamedTuple):
     resources: Path
-    test: List[str]
+    test: list[str]
 
 
 def arg_parse() -> Args:

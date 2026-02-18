@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Implementation of the `genrule` build rule.
 
@@ -22,6 +23,7 @@ GENRULE_OUT_DIR = "out"
 # Currently, some rules require running from the project root, so provide an
 # opt-in list for those here.  Longer-term, these should be ported to actual
 # rule implementations in v2, rather then using `genrule`s.
+# TODO: Roll out root based genrules everywhere and flip the default to get rid of this logic.
 _BUILD_ROOT_LABELS = set([
     # The buck2 test suite
     "buck2_test_build_root",
@@ -64,6 +66,8 @@ def _requires_build_root(ctx: AnalysisContext) -> bool:
     for label in ctx.attrs.labels:
         if label in _BUILD_ROOT_LABELS:
             return True
+    if ctx.attrs.repo_relative_root:
+        return True
     return False
 
 def _requires_local(ctx: AnalysisContext) -> bool:
@@ -84,11 +88,17 @@ _USE_CACHE_MODE = is_full_meta_repo()
 # Extra attributes required by every genrule based on genrule_impl
 def genrule_attributes() -> dict[str, Attr]:
     attributes = {
+        "allow_offline_output_cache": attrs.bool(default = False),
         "always_print_stderr": attrs.bool(default = False),
         "metadata_env_var": attrs.option(attrs.string(), default = None),
         "metadata_path": attrs.option(attrs.string(), default = None),
         "no_outputs_cleanup": attrs.bool(default = False),
         "remote_execution_dependencies": attrs.list(attrs.dict(key = attrs.string(), value = attrs.string()), default = []),
+        "repo_relative_root": attrs.bool(default = False, doc = """
+            If true, the genrule will be executed from the project root, instead of in the genrule location in buck-out.
+            Helps with long paths issues on windows with deeply nested directories, which will usually have long relative paths as inputs.
+            Should eventually default to true.
+        """),
         "_build_only_native_code": attrs.default_only(attrs.bool(default = is_build_only_native_code())),
         "_genrule_toolchain": attrs.default_only(attrs.toolchain_dep(default = "toolchains//:genrule", providers = [GenruleToolchainInfo])),
     }
@@ -114,13 +124,13 @@ def genrule_impl(ctx: AnalysisContext) -> list[Provider]:
     # Buck2 clears the output directory before execution, and thus src/sh too.
     return process_genrule(ctx, ctx.attrs.out, ctx.attrs.outs)
 
-def _declare_output(ctx: AnalysisContext, path: str) -> Artifact:
+def _declare_output(ctx: AnalysisContext, path: str, content_based: bool) -> Artifact:
     if path == ".":
-        return ctx.actions.declare_output(GENRULE_OUT_DIR, dir = True)
+        return ctx.actions.declare_output(GENRULE_OUT_DIR, dir = True, has_content_based_path = content_based)
     elif path.endswith("/"):
-        return ctx.actions.declare_output(GENRULE_OUT_DIR, path[:-1], dir = True)
+        return ctx.actions.declare_output(GENRULE_OUT_DIR, path[:-1], dir = True, has_content_based_path = content_based)
     else:
-        return ctx.actions.declare_output(GENRULE_OUT_DIR, path)
+        return ctx.actions.declare_output(GENRULE_OUT_DIR, path, has_content_based_path = content_based)
 
 def _project_output(out: Artifact, path: str) -> Artifact:
     if path == ".":
@@ -130,13 +140,35 @@ def _project_output(out: Artifact, path: str) -> Artifact:
     else:
         return out.project(path, hide_prefix = True)
 
+def _generate_error_handler(category: str, stderr_errorformats: list[str] | None, stdout_errorformats: list[str] | None) -> typing.Callable[[ActionErrorCtx], list[ActionSubError]]:
+    def handler(ctx: ActionErrorCtx) -> list[ActionSubError]:
+        structured_errors = []
+        if stderr_errorformats != None:
+            structured_errors = ctx.parse_with_errorformat(
+                category = category,
+                error = ctx.stderr,
+                errorformats = stderr_errorformats,
+            )
+
+        if stdout_errorformats != None:
+            errors = ctx.parse_with_errorformat(
+                category = category,
+                error = ctx.stdout,
+                errorformats = stdout_errorformats,
+            )
+            structured_errors += errors
+        return structured_errors
+
+    return handler
+
 def process_genrule(
         ctx: AnalysisContext,
         out_attr: [str, None],
         outs_attr: [dict, None],
         extra_env_vars: dict = {},
         identifier: [str, None] = None,
-        other_outputs: list[Artifact] = []) -> list[Provider]:
+        other_outputs: list[Artifact] = [],
+        genrule_error_handler: [typing.Callable[[ActionErrorCtx], list[ActionSubError]], None] = None) -> list[Provider]:
     if (out_attr != None) and (outs_attr != None):
         fail("Only one of `out` and `outs` should be set. Got out=`%s`, outs=`%s`" % (repr(out_attr), repr(outs_attr)))
 
@@ -150,14 +182,16 @@ def process_genrule(
 
     executable_outs = getattr(ctx.attrs, "executable_outs", None)
 
+    content_based = getattr(ctx.attrs, "has_content_based_path", False)
+
     # TODO(cjhopman): verify output paths are ".", "./", or forward-relative.
     if out_attr != None:
-        out_artifact = _declare_output(ctx, out_attr)
+        out_artifact = _declare_output(ctx, out_attr, content_based)
         named_outputs = {}
         default_outputs = [out_artifact]
         expect(executable_outs == None, "`executable_outs` should not be set when `out` is set")
     elif outs_attr != None:
-        out_artifact = ctx.actions.declare_output(GENRULE_OUT_DIR, dir = True)
+        out_artifact = ctx.actions.declare_output(GENRULE_OUT_DIR, dir = True, has_content_based_path = content_based)
 
         named_outputs = {
             name: [_project_output(out_artifact, path) for path in outputs]
@@ -220,7 +254,11 @@ def process_genrule(
                     fail(msg)
     else:
         symlinks = ctx.attrs.srcs
-    srcs_artifact = ctx.actions.symlinked_dir("srcs" if not identifier else "{}-srcs".format(identifier), symlinks)
+    srcs_artifact = ctx.actions.symlinked_dir(
+        "srcs" if not identifier else "{}-srcs".format(identifier),
+        symlinks,
+        has_content_based_path = content_based,
+    )
 
     if ctx.attrs.environment_expansion_separator:
         delimiter = ctx.attrs.environment_expansion_separator
@@ -264,15 +302,20 @@ def process_genrule(
 
     # Create required directories.
     if is_windows:
+        out = ".\\{}\\..\\..\\output_artifacts\\out" if content_based else ".\\{}\\..\\out"
         script = [
-            cmd_args(srcs_artifact, format = "if not exist .\\{}\\..\\out mkdir .\\{}\\..\\out"),
+            cmd_args(
+                srcs_artifact,
+                format = "if not exist {0} mkdir {0}".format(out),
+            ),
             cmd_args("if NOT \"%TEMP%\" == \"\" set \"TMP=%TEMP%\""),
         ]
         script_extension = "bat"
     else:
+        out = "./{}/../../output_artifacts/out" if content_based else "./{}/../out"
         script = [
             # Use a somewhat unique exit code so this can get retried on RE (T99656531).
-            cmd_args(srcs_artifact, format = "mkdir -p ./{}/../out || exit 99"),
+            cmd_args(srcs_artifact, format = "mkdir -p {} || exit 99".format(out)),
             cmd_args("export TMP=${TMPDIR:-/tmp}"),
         ]
         script_extension = "sh"
@@ -295,7 +338,7 @@ def process_genrule(
             ] + script + [
                 cmd_args('cd "$ORIGINAL_DIR_FOR_ZIP_SCRUBBING"'),
             ] + [
-                cmd_args(zip_scrubber, output, delimiter = " ", quote = "shell")
+                cmd_args(zip_scrubber, output.as_output(), delimiter = " ", quote = "shell")
                 for output in zip_outputs
             ]
 
@@ -346,6 +389,7 @@ def process_genrule(
         script,
         is_executable = True,
         allow_args = True,
+        has_content_based_path = content_based,
     )
     if is_windows:
         script_args = ["cmd.exe", "/v:off", "/c", sh_script]
@@ -361,6 +405,17 @@ def process_genrule(
     if ctx.attrs.remote_execution_dependencies:
         metadata_args["remote_execution_dependencies"] = ctx.attrs.remote_execution_dependencies
 
+    if genrule_error_handler == None:
+        error_handler_category = getattr(ctx.attrs, "error_handler_category", None)
+        error_handler_stderr_errorformats = getattr(ctx.attrs, "error_handler_stderr_errorformats", None)
+        error_handler_stdout_errorformats = getattr(ctx.attrs, "error_handler_stdout_errorformats", None)
+        if error_handler_category != None and (error_handler_stderr_errorformats != None or error_handler_stdout_errorformats != None):
+            genrule_error_handler = _generate_error_handler(
+                error_handler_category,
+                error_handler_stderr_errorformats,
+                error_handler_stdout_errorformats,
+            )
+
     category = "genrule"
     if ctx.attrs.type != None:
         # As of 09/2021, all genrule types were legal snake case if their dashes and periods were replaced with underscores.
@@ -372,10 +427,12 @@ def process_genrule(
         prefer_local = prefer_local,
         weight = value_or(ctx.attrs.weight, 1),
         allow_cache_upload = cacheable,
+        allow_offline_output_cache = ctx.attrs.allow_offline_output_cache,
         category = category,
         identifier = identifier,
         no_outputs_cleanup = ctx.attrs.no_outputs_cleanup,
         always_print_stderr = ctx.attrs.always_print_stderr,
+        error_handler = genrule_error_handler,
         **metadata_args
     )
 

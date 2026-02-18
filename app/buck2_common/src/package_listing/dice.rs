@@ -1,14 +1,12 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
-
-use std::time::Duration;
-use std::time::Instant;
 
 use allocative::Allocative;
 use async_trait::async_trait;
@@ -16,9 +14,10 @@ use buck2_core::cells::cell_path::CellPathRef;
 use buck2_core::package::PackageLabel;
 use buck2_events::dispatch::async_record_root_spans;
 use buck2_events::span::SpanId;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_util::time_span::TimeSpan;
 use dice::DiceComputations;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use smallvec::SmallVec;
 
@@ -39,7 +38,7 @@ use crate::package_listing::resolver::PackageListingResolver;
 pub struct PackageListingKey(pub PackageLabel);
 
 pub struct PackageListingKeyActivationData {
-    pub duration: Duration,
+    pub time_span: TimeSpan,
     pub spans: SmallVec<[SpanId; 1]>,
 }
 
@@ -51,7 +50,7 @@ impl Key for PackageListingKey {
         ctx: &mut DiceComputations,
         _cancellations: &CancellationContext,
     ) -> Self::Value {
-        let now = Instant::now();
+        let now = TimeSpan::start_now();
 
         let (result, spans) = async_record_root_spans(
             InterpreterPackageListingResolver::new(ctx).resolve(self.0.dupe()),
@@ -59,7 +58,7 @@ impl Key for PackageListingKey {
         .await;
 
         ctx.store_evaluation_data(PackageListingKeyActivationData {
-            duration: now.elapsed(),
+            time_span: now.end_now(),
             spans,
         })?;
 
@@ -107,8 +106,6 @@ impl DicePackageListingResolver<'_, '_> {
         &mut self,
         package: PackageLabel,
     ) -> buck2_error::Result<PackageListing> {
-        self.resolve(package)
-            .await
-            .map_err(buck2_error::Error::from)
+        self.resolve(package).await
     }
 }

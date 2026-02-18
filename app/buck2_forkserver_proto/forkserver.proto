@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 syntax = "proto3";
@@ -15,7 +16,7 @@ import "data.proto";
 package buck.forkserver;
 
 message CommandRequest {
-  reserved 3, 4, 7, 13;
+  reserved 3, 4, 7, 10, 11, 13, 15, 16;
   // The executable that should be run.
   bytes exe = 1;
   // The arguments to give the executable.
@@ -30,8 +31,9 @@ message CommandRequest {
   bool enable_miniperf = 9;
 
   message StdRedirectPaths {
-    bytes stdout = 10;
-    bytes stderr = 11;
+    // reserved 10, 11
+    string stdout = 1;
+    string stderr = 2;
   }
   // Used to optionally redirect stdout and stderr to files.
   // If set, stdout and stderr events will not be streamed.
@@ -40,9 +42,8 @@ message CommandRequest {
   // before sending SIGKILL.
   // Should only be needed for daemonized processes (workers).
   optional uint32 graceful_shutdown_timeout_s = 14;
-  // Action digest is used when run actions through systemd,
-  // as we use it to create an unique cgroup name for action
-  optional string action_digest = 15;
+  // The cgroup that the command should be spawned into. Must already exist.
+  optional string command_cgroup = 17;
 }
 
 message WorkingDirectory {
@@ -72,6 +73,7 @@ message EnvDirective {
 }
 
 message CommandEvent {
+  reserved 8;
   oneof data {
     ExitEvent exit = 1;
     TimeoutEvent timeout = 2;
@@ -82,9 +84,18 @@ message CommandEvent {
   }
 }
 
+// Like `buck.data.CommandExecutionStats`, but without memory information
+message CollectedExecutionStats {
+  optional uint64 cpu_instructions_user = 1;
+  optional uint64 cpu_instructions_kernel = 2;
+  optional buck.data.CpuCounter userspace_events = 3;
+  optional buck.data.CpuCounter kernel_events = 4;
+}
+
 message ExitEvent {
+  reserved 2;
   int32 exit_code = 1;
-  optional buck.data.CommandExecutionStats execution_stats = 2;
+  optional CollectedExecutionStats execution_stats = 3;
 }
 
 message TimeoutEvent {
@@ -103,10 +114,20 @@ message SpawnFailedEvent {
   string reason = 1;
 }
 
+message Cgroup {
+  string path = 1;
+}
+
+message FreezeRequest {}
+
+message UnfreezeRequest {}
+
 message RequestEvent {
   oneof data {
     CommandRequest command_request = 1;
     CancelRequest cancel_request = 2;
+    FreezeRequest freeze_request = 3;
+    UnfreezeRequest unfreeze_request = 4;
   }
 }
 

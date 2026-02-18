@@ -1,15 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::num::NonZeroU32;
 
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use dupe::Dupe;
 
 /// Process id.
@@ -22,7 +24,7 @@ pub struct Pid {
 impl Pid {
     pub fn from_u32(pid: u32) -> buck2_error::Result<Self> {
         Ok(Pid {
-            pid: NonZeroU32::new(pid).buck_error_context("pid must be non-zero")?,
+            pid: NonZeroU32::new(pid).ok_or_else(|| internal_error!("pid must be non-zero"))?,
         })
     }
 

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//linking:shared_libraries.bzl",
@@ -50,7 +51,7 @@ def build_jll_shlibs_mapping(ctx: AnalysisContext, json_info_file: Artifact):
         ctx.actions,
         None,
         filter(None, [d.shared_library_info for d in deps]),
-    ))
+    ), transformation_provider = None)
 
     shared_libs_symlink_tree = create_shlib_symlink_tree(
         actions = ctx.actions,

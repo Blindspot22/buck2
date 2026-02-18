@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::hash_map::DefaultHasher;
@@ -13,6 +14,8 @@ use std::hash::Hasher;
 use std::sync::Arc;
 
 use allocative::Allocative;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use derive_more::Display;
 use dupe::Dupe;
 use itertools::Itertools;
@@ -20,16 +23,37 @@ use itertools::Itertools;
 use crate::category::CategoryRef;
 use crate::cells::external::ExternalCellOrigin;
 use crate::cells::paths::CellRelativePath;
+use crate::configuration::data::DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT;
+use crate::content_hash::ContentBasedPathHash;
 use crate::deferred::base_deferred_key::BaseDeferredKey;
 use crate::deferred::key::DeferredHolderKey;
 use crate::fs::dynamic_actions_action_key::DynamicActionsActionKey;
-use crate::fs::paths::forward_rel_path::ForwardRelativePath;
-use crate::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use crate::fs::project_rel_path::ProjectRelativePath;
 use crate::fs::project_rel_path::ProjectRelativePathBuf;
 use crate::provider::label::ConfiguredProvidersLabel;
 use crate::provider::label::NonDefaultProvidersName;
 use crate::provider::label::ProvidersName;
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Display,
+    Allocative,
+    Hash,
+    Eq,
+    PartialEq,
+    strong_hash::StrongHash
+)]
+#[derive(Default)]
+pub enum BuckOutPathKind {
+    /// A path that contains the configuration of the owning target.
+    #[default]
+    Configuration,
+
+    /// A path that contains the content hash of the artifact stored at the path.
+    ContentHash,
+}
 
 #[derive(
     Clone,
@@ -47,6 +71,8 @@ struct BuildArtifactPathData {
     owner: DeferredHolderKey,
     /// The path relative to that target.
     path: Box<ForwardRelativePath>,
+    /// How the path is resolved
+    path_resolution_method: BuckOutPathKind,
 }
 
 /// Represents a resolvable path corresponding to outputs of rules that are part
@@ -70,17 +96,27 @@ struct BuildArtifactPathData {
 pub struct BuildArtifactPath(Arc<BuildArtifactPathData>);
 
 impl BuildArtifactPath {
-    pub fn new(owner: BaseDeferredKey, path: ForwardRelativePathBuf) -> Self {
-        Self::with_dynamic_actions_action_key(DeferredHolderKey::Base(owner), path)
+    pub fn new(
+        owner: BaseDeferredKey,
+        path: ForwardRelativePathBuf,
+        path_resolution_method: BuckOutPathKind,
+    ) -> Self {
+        Self::with_dynamic_actions_action_key(
+            DeferredHolderKey::Base(owner),
+            path,
+            path_resolution_method,
+        )
     }
 
     pub fn with_dynamic_actions_action_key(
         owner: DeferredHolderKey,
         path: ForwardRelativePathBuf,
+        path_resolution_method: BuckOutPathKind,
     ) -> Self {
         BuildArtifactPath(Arc::new(BuildArtifactPathData {
             owner,
             path: path.into_box(),
+            path_resolution_method,
         }))
     }
 
@@ -95,6 +131,18 @@ impl BuildArtifactPath {
     pub fn path(&self) -> &ForwardRelativePath {
         &self.0.path
     }
+
+    pub fn path_resolution_method(&self) -> BuckOutPathKind {
+        self.0.path_resolution_method
+    }
+
+    pub fn is_content_based_path(&self) -> bool {
+        self.0.path_resolution_method == BuckOutPathKind::ContentHash
+    }
+
+    pub fn is_configuration_based_path(&self) -> bool {
+        self.0.path_resolution_method == BuckOutPathKind::Configuration
+    }
 }
 
 #[derive(Clone, Debug, Display, Eq, PartialEq)]
@@ -106,6 +154,8 @@ pub struct BuckOutScratchPath {
     path: ForwardRelativePathBuf,
     /// The unique identifier for this action
     action_key: ForwardRelativePathBuf,
+    /// Uses content hash
+    uses_content_hash: bool,
 }
 
 impl BuckOutScratchPath {
@@ -116,6 +166,7 @@ impl BuckOutScratchPath {
         category: CategoryRef,
         identifier: Option<&str>,
         action_key: ForwardRelativePathBuf,
+        uses_content_hash: bool,
     ) -> buck2_error::Result<Self> {
         const MAKE_SENSIBLE_PREFIX: &str = "_buck_";
         // Windows has MAX_PATH limit (260 chars).
@@ -166,7 +217,12 @@ impl BuckOutScratchPath {
             owner,
             path,
             action_key,
+            uses_content_hash,
         })
+    }
+
+    pub fn uses_content_hash(&self) -> bool {
+        self.uses_content_hash
     }
 }
 
@@ -212,15 +268,57 @@ impl BuckOutPathResolver {
     pub fn resolve_gen(
         &self,
         path: &BuildArtifactPath,
+        content_hash: Option<&ContentBasedPathHash>,
     ) -> buck2_error::Result<ProjectRelativePathBuf> {
         self.prefixed_path_for_owner(
-            ForwardRelativePath::unchecked_new("gen"),
+            ForwardRelativePath::unchecked_new(
+                // we hit the uninitialized path in the unit tests
+                if *DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT
+                    .get()
+                    .unwrap_or(&false)
+                {
+                    "art"
+                } else {
+                    "gen"
+                },
+            ),
             path.owner().owner(),
             path.dynamic_actions_action_key()
                 .as_ref()
                 .map(|x| x.as_str()),
             path.path(),
             false,
+            path.path_resolution_method(),
+            content_hash,
+        )
+    }
+
+    /// Same as `resolve_gen`, except it also uses BuckOutPathKind::Configuration
+    /// as the path_resolution_method.
+    pub fn resolve_gen_configuration_hash_path(
+        &self,
+        path: &BuildArtifactPath,
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
+        self.prefixed_path_for_owner(
+            ForwardRelativePath::unchecked_new(
+                // we hit the uninitialized path in the unit tests
+                if *DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT
+                    .get()
+                    .unwrap_or(&false)
+                {
+                    "art"
+                } else {
+                    "gen"
+                },
+            ),
+            path.owner().owner(),
+            path.dynamic_actions_action_key()
+                .as_ref()
+                .map(|x| x.as_str()),
+            path.path(),
+            false,
+            BuckOutPathKind::Configuration,
+            None,
         )
     }
 
@@ -236,6 +334,9 @@ impl BuckOutPathResolver {
                 .map(|x| x.as_str()),
             path.path(),
             false,
+            // We always resolve the offline cache to a path that uses the configuration hash.
+            BuckOutPathKind::Configuration,
+            None,
         )
     }
 
@@ -270,10 +371,16 @@ impl BuckOutPathResolver {
         self.prefixed_path_for_owner(
             ForwardRelativePath::unchecked_new("tmp"),
             &path.owner,
-            Some(&path.action_key.as_str()),
+            Some(path.action_key.as_str()),
             &path.path,
             // Fully hash scratch path as it can be very long and cause path too long issue on Windows.
             true,
+            if path.uses_content_hash {
+                BuckOutPathKind::ContentHash
+            } else {
+                BuckOutPathKind::Configuration
+            },
+            Some(&ContentBasedPathHash::Scratch),
         )
     }
 
@@ -292,6 +399,14 @@ impl BuckOutPathResolver {
         &self,
         label: &ConfiguredProvidersLabel,
     ) -> buck2_error::Result<ProjectRelativePathBuf> {
+        self.resolve_test_path(&ForwardRelativePath::unchecked_new("test_discovery"), label)
+    }
+
+    fn resolve_test_path(
+        &self,
+        prefix: &ForwardRelativePath,
+        label: &ConfiguredProvidersLabel,
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         let path = match label.name() {
             ProvidersName::Default => "default".into(),
             ProvidersName::NonDefault(nd) => match nd.as_ref() {
@@ -306,11 +421,13 @@ impl BuckOutPathResolver {
         };
         let path = ForwardRelativePath::unchecked_new(&path);
         self.prefixed_path_for_owner(
-            ForwardRelativePath::unchecked_new("test_discovery"),
+            prefix,
             &BaseDeferredKey::TargetLabel(label.target().dupe()),
             None,
-            &path,
+            path,
             true,
+            BuckOutPathKind::Configuration,
+            None,
         )
     }
 
@@ -321,8 +438,18 @@ impl BuckOutPathResolver {
         action_key: Option<&str>,
         path: &ForwardRelativePath,
         fully_hash_path: bool,
+        path_resolution_method: BuckOutPathKind,
+        content_hash: Option<&ContentBasedPathHash>,
     ) -> buck2_error::Result<ProjectRelativePathBuf> {
-        owner.make_hashed_path(&self.buck_out_v2, prefix, action_key, path, fully_hash_path)
+        owner.make_hashed_path(
+            &self.buck_out_v2,
+            prefix,
+            action_key,
+            path,
+            fully_hash_path,
+            path_resolution_method,
+            content_hash,
+        )
     }
 
     /// This function returns the exact location of the symlink of a given target.
@@ -333,7 +460,7 @@ impl BuckOutPathResolver {
             ForwardRelativePathBuf::concat([
                 self.buck_out_v2.as_ref(),
                 ForwardRelativePath::unchecked_new("gen"),
-                &path.0.owner.owner().make_unhashed_path()?,
+                &*path.0.owner.owner().make_unhashed_path()?,
                 path.path(),
             ]),
         ))
@@ -346,6 +473,8 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
+    use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
     use dupe::Dupe;
     use regex::Regex;
 
@@ -355,16 +484,16 @@ mod tests {
     use crate::cells::name::CellName;
     use crate::cells::paths::CellRelativePath;
     use crate::configuration::data::ConfigurationData;
+    use crate::content_hash::ContentBasedPathHash;
     use crate::deferred::base_deferred_key::BaseDeferredKey;
     use crate::deferred::dynamic::DynamicLambdaIndex;
     use crate::deferred::dynamic::DynamicLambdaResultsKey;
     use crate::deferred::key::DeferredHolderKey;
     use crate::fs::artifact_path_resolver::ArtifactFs;
+    use crate::fs::buck_out_path::BuckOutPathKind;
     use crate::fs::buck_out_path::BuckOutPathResolver;
     use crate::fs::buck_out_path::BuckOutScratchPath;
     use crate::fs::buck_out_path::BuildArtifactPath;
-    use crate::fs::paths::abs_norm_path::AbsNormPathBuf;
-    use crate::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     use crate::fs::project::ProjectRoot;
     use crate::fs::project_rel_path::ProjectRelativePathBuf;
     use crate::package::PackageLabel;
@@ -408,11 +537,10 @@ mod tests {
             resolved
         );
 
-        assert_eq!(
+        assert!(
             artifact_fs
                 .resolve_source(SourcePath::testing_new("none_existent//baz", "fazx").as_ref())
-                .is_err(),
-            true
+                .is_err()
         );
 
         Ok(())
@@ -427,24 +555,43 @@ mod tests {
         let pkg = PackageLabel::new(
             CellName::testing_new("foo"),
             CellRelativePath::unchecked_new("baz-package"),
-        );
+        )?;
         let target = TargetLabel::new(pkg, TargetNameRef::unchecked_new("target-name"));
         let cfg_target = target.configure(ConfigurationData::testing_new());
         let owner = BaseDeferredKey::TargetLabel(cfg_target);
 
-        let resolved_gen_path = path_resolver.resolve_gen(&BuildArtifactPath::new(
-            owner.dupe(),
-            ForwardRelativePathBuf::unchecked_new("faz.file".into()),
-        ))?;
+        let resolved_gen_path = path_resolver.resolve_gen(
+            &BuildArtifactPath::new(
+                owner.dupe(),
+                ForwardRelativePathBuf::unchecked_new("faz.file".into()),
+                BuckOutPathKind::Configuration,
+            ),
+            None,
+        )?;
 
         let expected_gen_path = Regex::new(
             "base/buck-out/v2/gen/foo/[0-9a-f]{16}/baz-package/__target-name__/faz.file",
         )?;
         assert!(
             expected_gen_path.is_match(resolved_gen_path.as_str()),
-            "{}.is_match({})",
-            expected_gen_path,
-            resolved_gen_path
+            "{expected_gen_path}.is_match({resolved_gen_path})"
+        );
+
+        let resolved_gen_content_based_path = path_resolver.resolve_gen(
+            &BuildArtifactPath::new(
+                owner.dupe(),
+                ForwardRelativePathBuf::unchecked_new("faz.file".into()),
+                BuckOutPathKind::ContentHash,
+            ),
+            Some(&ContentBasedPathHash::new(&[0; 8])?),
+        )?;
+
+        let expected_gen_content_based_path = Regex::new(
+            "base/buck-out/v2/gen/foo/baz-package/__target-name__/0000000000000000/faz.file",
+        )?;
+        assert!(
+            expected_gen_content_based_path.is_match(resolved_gen_content_based_path.as_str()),
+            "{expected_gen_content_based_path}.is_match({resolved_gen_content_based_path})"
         );
 
         let resolved_scratch_path = path_resolver.resolve_scratch(
@@ -453,6 +600,7 @@ mod tests {
                 CategoryRef::new("category").unwrap(),
                 Some(&String::from("blah.file")),
                 ForwardRelativePathBuf::new("1_2".to_owned()).unwrap(),
+                false,
             )
             .unwrap(),
         )?;
@@ -461,9 +609,7 @@ mod tests {
             Regex::new("base/buck-out/v2/tmp/foo/[0-9a-f]{16}/category/blah.file")?;
         assert!(
             expected_scratch_path.is_match(resolved_scratch_path.as_str()),
-            "{}.is_match({})",
-            expected_scratch_path,
-            resolved_scratch_path
+            "{expected_scratch_path}.is_match({resolved_scratch_path})"
         );
         Ok(())
     }
@@ -476,23 +622,25 @@ mod tests {
         let pkg = PackageLabel::new(
             CellName::testing_new("foo"),
             CellRelativePath::unchecked_new("baz-package"),
-        );
+        )?;
         let target = TargetLabel::new(pkg, TargetNameRef::unchecked_new("target-name"));
         let cfg_target = target.configure(ConfigurationData::testing_new());
         let owner = BaseDeferredKey::TargetLabel(cfg_target);
 
-        let resolved_gen_path = path_resolver.resolve_gen(&BuildArtifactPath::new(
-            owner.dupe(),
-            ForwardRelativePathBuf::unchecked_new("quux".to_owned()),
-        ))?;
+        let resolved_gen_path = path_resolver.resolve_gen(
+            &BuildArtifactPath::new(
+                owner.dupe(),
+                ForwardRelativePathBuf::unchecked_new("quux".to_owned()),
+                BuckOutPathKind::Configuration,
+            ),
+            None,
+        )?;
 
         let expected_gen_path: Regex =
             Regex::new("buck-out/gen/foo/[0-9a-f]{16}/baz-package/__target-name__/quux")?;
         assert!(
             expected_gen_path.is_match(resolved_gen_path.as_str()),
-            "{}.is_match({})",
-            expected_gen_path,
-            resolved_gen_path
+            "{expected_gen_path}.is_match({resolved_gen_path})"
         );
 
         let path = BuildArtifactPath::with_dynamic_actions_action_key(
@@ -501,17 +649,37 @@ mod tests {
                 DynamicLambdaIndex::new(17),
             ))),
             ForwardRelativePathBuf::unchecked_new("quux".to_owned()),
+            BuckOutPathKind::Configuration,
         );
-        let resolved_gen_path = path_resolver.resolve_gen(&path)?;
+        let resolved_gen_path = path_resolver.resolve_gen(&path, None)?;
 
         let expected_gen_path = Regex::new(
             "buck-out/gen/foo/[0-9a-f]{16}/baz-package/__target-name__/__action___17__/quux",
         )?;
         assert!(
             expected_gen_path.is_match(resolved_gen_path.as_str()),
-            "{}.is_match({})",
-            expected_gen_path,
-            resolved_gen_path
+            "{expected_gen_path}.is_match({resolved_gen_path})"
+        );
+
+        let content_based_path = BuildArtifactPath::with_dynamic_actions_action_key(
+            DeferredHolderKey::DynamicLambda(Arc::new(DynamicLambdaResultsKey::new(
+                DeferredHolderKey::Base(owner.dupe()),
+                DynamicLambdaIndex::new(17),
+            ))),
+            ForwardRelativePathBuf::unchecked_new("quux".to_owned()),
+            BuckOutPathKind::ContentHash,
+        );
+        let resolved_gen_content_based_path = path_resolver.resolve_gen(
+            &content_based_path,
+            Some(&ContentBasedPathHash::new(&[0; 8])?),
+        )?;
+
+        let expected_gen_content_based_path = Regex::new(
+            "buck-out/gen/foo/baz-package/__target-name__/__action___17__/0000000000000000/quux",
+        )?;
+        assert!(
+            expected_gen_content_based_path.is_match(resolved_gen_content_based_path.as_str()),
+            "{expected_gen_content_based_path}.is_match({resolved_gen_content_based_path})"
         );
 
         let resolved_scratch_path = path_resolver.resolve_scratch(
@@ -525,6 +693,7 @@ mod tests {
                     "xxx_some_long_action_key_but_it_doesnt_matter_xxx".to_owned(),
                 )
                 .unwrap(),
+                false,
             )
             .unwrap(),
         )?;
@@ -533,9 +702,7 @@ mod tests {
             Regex::new("buck-out/tmp/foo/[0-9a-f]{16}/category/_buck_[0-9a-f]{16}")?;
         assert!(
             expected_scratch_path.is_match(resolved_scratch_path.as_str()),
-            "{}.is_match({})",
-            expected_scratch_path,
-            resolved_scratch_path
+            "{expected_scratch_path}.is_match({resolved_scratch_path})"
         );
 
         Ok(())
@@ -546,7 +713,8 @@ mod tests {
         let pkg = PackageLabel::new(
             CellName::testing_new("foo"),
             CellRelativePath::unchecked_new("baz-package"),
-        );
+        )
+        .unwrap();
         let target = TargetLabel::new(pkg, TargetNameRef::unchecked_new("target-name"));
         let cfg_target = target.configure(ConfigurationData::testing_new());
         let category = CategoryRef::new("category").unwrap();
@@ -557,6 +725,7 @@ mod tests {
             category,
             None,
             ForwardRelativePathBuf::new("1_2".to_owned()).unwrap(),
+            false,
         )
         .unwrap();
 
@@ -566,6 +735,7 @@ mod tests {
                 category,
                 Some(s),
                 ForwardRelativePathBuf::new("3_4".to_owned()).unwrap(),
+                false,
             )
             .unwrap()
             .path
@@ -597,7 +767,8 @@ mod tests {
         let pkg = PackageLabel::new(
             CellName::testing_new("foo"),
             CellRelativePath::unchecked_new("baz-package"),
-        );
+        )
+        .unwrap();
         let target = TargetLabel::new(pkg, TargetNameRef::unchecked_new("target-name"));
         let cfg_target = target.configure(ConfigurationData::testing_new());
 
@@ -609,6 +780,7 @@ mod tests {
                         CategoryRef::new("category").unwrap(),
                         Some(id),
                         ForwardRelativePathBuf::new(s.to_owned()).unwrap(),
+                        false,
                     )
                     .unwrap(),
                 )
@@ -642,7 +814,7 @@ mod tests {
         let pkg = PackageLabel::new(
             CellName::testing_new("foo"),
             CellRelativePath::unchecked_new("baz-package"),
-        );
+        )?;
         let target = TargetLabel::new(pkg, TargetNameRef::unchecked_new("target-name"));
         let cfg_target = target.configure(ConfigurationData::testing_new());
         let providers = ProvidersName::Default.push(ProviderName::new_unchecked("bar/baz".into()));

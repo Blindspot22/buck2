@@ -1,20 +1,21 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! The main worker thread for the dice task
 
 use std::sync::Arc;
 
-use buck2_futures::cancellation::CriticalSectionGuard;
-use buck2_futures::cancellation::DisableCancellationGuard;
 use dice_error::result::CancellableResult;
 use dice_error::result::CancellationReason;
+use dice_futures::cancellation::CriticalSectionGuard;
+use dice_futures::cancellation::DisableCancellationGuard;
 use dupe::Dupe;
 use itertools::Either;
 

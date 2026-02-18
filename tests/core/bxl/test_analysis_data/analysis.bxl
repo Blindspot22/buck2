@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(":defs.bzl", "FooInfo")
 
@@ -17,24 +18,6 @@ def _providers_test_impl(ctx):
 
 providers_test = bxl_main(
     impl = _providers_test_impl,
-    cli_args = {},
-)
-
-def _incompatible_targets_single(ctx):
-    result = ctx.analysis("root//:incompatible_target")
-    ctx.output.print(result)
-
-incompatible_targets_single = bxl_main(
-    impl = _incompatible_targets_single,
-    cli_args = {},
-)
-
-def _incompatible_targets(ctx):
-    result = ctx.analysis(["root//:incompatible_target"])
-    ctx.output.print(result)
-
-incompatible_targets = bxl_main(
-    impl = _incompatible_targets,
     cli_args = {},
 )
 
@@ -56,5 +39,14 @@ def _missing_subtarget_test(ctx):
 
 missing_subtarget_test = bxl_main(
     impl = _missing_subtarget_test,
+    cli_args = {},
+)
+
+def _unconfigured_target_error_test(ctx):
+    result = ctx.analysis("root//:stub")
+    ctx.output.print(result)
+
+unconfigured_target_error_test = bxl_main(
+    impl = _unconfigured_target_error_test,
     cli_args = {},
 )

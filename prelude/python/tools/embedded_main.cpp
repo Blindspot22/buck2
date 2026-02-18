@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #include <Python.h>
@@ -17,33 +18,12 @@
 
 namespace {
 
-// Scopeguard helper.
-class ScopeGuard {
- public:
-  ScopeGuard(std::function<void(void)>&& func) : func(std::move(func)) {}
-  ScopeGuard& operator=(ScopeGuard&& other) = default;
-
-  ~ScopeGuard() {
-    if (func)
-      func();
-  }
-
-  template <typename Func>
-  static ScopeGuard create(Func&& func) {
-    return ScopeGuard(std::move(func));
-  }
-
- private:
-  std::function<void(void)> func;
-};
-
 std::optional<int> MaybeGetExitCode(PyStatus* status, PyConfig* config) {
   if (PyStatus_IsExit(*status)) {
     return status->exitcode;
   }
   PyConfig_Clear(config);
   Py_ExitStatusException(*status);
-  return std::nullopt;
 }
 
 } // namespace
@@ -63,8 +43,7 @@ int main(int argc, char* argv[]) {
       return *exit_code;
     }
   }
-
-#if PY_MINOR_VERSION >= 10
+#if PY_VERSION_HEX >= 0x030a0000 // 3.10
   status = PyConfig_SetBytesArgv(&config, argc, argv);
 #else
   // Read all configuration at once.
@@ -76,7 +55,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
-#if PY_MINOR_VERSION >= 10
+#if PY_VERSION_HEX >= 0x030a0000 // 3.10
   // Read all configuration at once.
   status = PyConfig_Read(&config);
 #else
@@ -124,7 +103,7 @@ int main(int argc, char* argv[]) {
     return exit_code;
   }
 
-  if (std::getenv("NP_DEBUG_BINARY")) {
+  if (std::getenv("FB_NATIVE_PYTHON_DEBUG")) {
     fprintf(
         stderr,
         "Pausing for debugger, pid=%d. Press <return> to continue.\n",
@@ -138,33 +117,6 @@ int main(int argc, char* argv[]) {
     if (auto exit_code = MaybeGetExitCode(&status, &config)) {
       return *exit_code;
     }
-  }
-
-  {
-    auto sysPathGuard = ScopeGuard::create([=]() {});
-
-    // For fastzip, the `static_extensions_finder` module is found in the PAR,
-    // and we're too early in the process to have the fastzip PAR auto-added to
-    // the path (I think this happens in `Py_RunMain` below), so we need to get
-    // it added for this block.
-    const auto par = std::getenv("FB_PAR_FILENAME");
-    if (par != nullptr) {
-      PyObject* sysPath = PySys_GetObject((char*)"path");
-      auto result = PyList_Insert(sysPath, 0, PyUnicode_FromString((char*)par));
-      if (result == -1) {
-        PyErr_Print();
-        abort();
-      }
-      sysPathGuard = ScopeGuard::create([=]() {
-        auto result =
-            PyObject_CallMethod(sysPath, "pop", "O", PyLong_FromLong(0));
-        if (result == nullptr) {
-          PyErr_Print();
-          abort();
-        }
-        Py_DECREF(result);
-      });
-    };
   }
 
   PyConfig_Clear(&config);

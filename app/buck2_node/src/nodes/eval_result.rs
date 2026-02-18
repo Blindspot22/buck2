@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeMap;
@@ -23,21 +24,39 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_core::target::name::TargetName;
 use buck2_core::target::name::TargetNameRef;
 use dupe::Dupe;
-use dupe::IterDupedExt;
 use gazebo::prelude::*;
 use itertools::Itertools;
 
+use crate::attrs::coerced_attr::CoercedAttr;
+use crate::attrs::inspect_options::AttrInspectOptions;
 use crate::nodes::targets_map::TargetsMap;
 use crate::nodes::unconfigured::TargetNode;
 use crate::nodes::unconfigured::TargetNodeRef;
 use crate::super_package::SuperPackage;
+
+/// Heuristic to determine if a target is generated or not, used for UI things.
+///
+/// FIXME(JakobDegen): This is kind of a hack, we shouldn't really be inspecting
+/// attribute we know nothing about. It's also pretty difficult to fix this right now
+/// though.
+pub fn is_generated_target(node: TargetNodeRef) -> bool {
+    if let Some(labels) = node.attr_or_none("labels", AttrInspectOptions::All) {
+        if let CoercedAttr::List(labels) = labels.value {
+            return labels.iter().any(|label| match label {
+                CoercedAttr::String(label) => ***label == *"generated",
+                _ => false,
+            });
+        }
+    }
+    false
+}
 
 #[derive(Debug, buck2_error::Error)]
 // WARN: CI uses this message to filter targets
 // If you change this message, please also update https://fburl.com/code/z0azzcc3
 #[error(
     "Unknown target `{target}` from package `{package}`.\n\
-Did you mean one of the {num_targets} targets in {buildfile_path}?{similar_targets}"
+Did you mean one of the {num_targets} targets in {buildfile_path}?{similar_targets}{all_targets}"
 )]
 #[buck2(tag = MissingTarget)]
 pub struct MissingTargetError {
@@ -46,7 +65,105 @@ pub struct MissingTargetError {
     num_targets: usize,
     buildfile_path: Arc<BuildFilePath>,
     similar_targets: SuggestedSimilarTargets,
+    all_targets: AllTargetsDisplay,
 }
+
+#[derive(Debug)]
+struct AllTargetsDisplay {
+    package: PackageLabel,
+    targets: Vec<TargetName>,
+    total_count: usize,
+}
+
+impl AllTargetsDisplay {
+    fn new<'a>(
+        target: &TargetNameRef,
+        package: PackageLabel,
+        available_targets: impl IntoIterator<Item = TargetNodeRef<'a>>,
+    ) -> Self {
+        const MAX_TARGETS_TO_SHOW: usize = 25;
+
+        let mut all_targets: Vec<(TargetName, usize, bool, bool)> = available_targets
+            .into_iter()
+            .map(|node| {
+                let t = node.label().name();
+                let distance = strsim::levenshtein(target.as_str(), t.as_str());
+                let has_prefix_match = target.as_str().starts_with(t.as_str())
+                    || t.as_str().starts_with(target.as_str());
+                let is_generated = is_generated_target(node);
+                (t.to_owned(), distance, has_prefix_match, is_generated)
+            })
+            .collect();
+
+        let total_count = all_targets.len();
+
+        // Sort by relevance: non-generated first, then prefix matches, then by Levenshtein distance, then alphabetically
+        all_targets.sort_by(
+            |(name1, dist1, prefix1, is_gen1), (name2, dist2, prefix2, is_gen2)| {
+                // Non-generated targets should come first (false < true)
+                is_gen1
+                    .cmp(is_gen2)
+                    .then_with(|| prefix2.cmp(prefix1)) // Prefix matches first (reversed)
+                    .then_with(|| dist1.cmp(dist2)) // Shorter distance first
+                    .then_with(|| name1.as_str().cmp(name2.as_str())) // Alphabetically
+            },
+        );
+
+        let mut targets: Vec<TargetName> = all_targets
+            .into_iter()
+            .take(MAX_TARGETS_TO_SHOW)
+            .map(|(name, _, _, _)| name)
+            .collect();
+
+        // Sort alphabetically for display
+        targets.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        Self {
+            package,
+            targets,
+            total_count,
+        }
+    }
+}
+
+impl Display for AllTargetsDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.targets.is_empty() {
+            return Ok(());
+        }
+
+        let targets: Vec<String> = self
+            .targets
+            .iter()
+            .map(|target| format!("  {}:{}", self.package, target))
+            .collect();
+
+        write!(f, "\n\nAvailable targets")?;
+        if self.total_count > self.targets.len() {
+            writeln!(
+                f,
+                " (showing {} of {}):",
+                self.targets.len(),
+                self.total_count
+            )?;
+        } else {
+            writeln!(f, ":")?;
+        }
+        write!(f, "{}", targets.join("\n"))?;
+
+        if self.total_count > self.targets.len() {
+            writeln!(
+                f,
+                "\n\nTo see all {} targets, run:\n  buck2 uquery --reuse-current-config {}:\n",
+                self.total_count, self.package
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+impl MissingTargetError {}
 
 #[derive(Debug)]
 pub struct MissingTargets {
@@ -54,7 +171,7 @@ pub struct MissingTargets {
     package: PackageLabel,
     num_targets: usize,
     buildfile_path: Arc<BuildFilePath>,
-    all_target_labels: Vec<TargetLabel>,
+    all_target_nodes: Vec<TargetNode>,
 }
 
 impl MissingTargets {
@@ -67,18 +184,29 @@ impl MissingTargets {
 
     /// Returns an iterator over all the errors.
     pub fn into_all_errors(self) -> impl Iterator<Item = MissingTargetError> {
+        let package = self.package;
+        let num_targets = self.num_targets;
+        let buildfile_path = self.buildfile_path;
+        let all_target_nodes = self.all_target_nodes;
+
         self.missing_targets.into_iter().map(move |target| {
             let similar_targets = SuggestedSimilarTargets::suggest(
                 target.name(),
-                self.package.dupe(),
-                self.all_target_labels.iter().map(|x| x.name()),
+                package.dupe(),
+                all_target_nodes.iter().map(|node| node.label().name()),
+            );
+            let all_targets = AllTargetsDisplay::new(
+                target.name(),
+                package.dupe(),
+                all_target_nodes.iter().map(|node| node.as_ref()),
             );
             MissingTargetError {
                 target: target.name().to_owned(),
-                package: self.package.dupe(),
-                num_targets: self.num_targets,
-                buildfile_path: self.buildfile_path.dupe(),
+                package: package.dupe(),
+                num_targets,
+                buildfile_path: buildfile_path.dupe(),
                 similar_targets,
+                all_targets,
             }
         })
     }
@@ -101,13 +229,13 @@ impl MissingTargets {
         )
         .unwrap();
         for target in head {
-            writeln!(message, "  {}", target).unwrap();
+            writeln!(message, "  {target}").unwrap();
         }
         if !middle.is_empty() {
-            writeln!(message, "  {}", middle).unwrap();
+            writeln!(message, "  {middle}").unwrap();
         }
         for target in tail {
-            writeln!(message, "  {}", target).unwrap();
+            writeln!(message, "  {target}").unwrap();
         }
         message
     }
@@ -177,16 +305,19 @@ impl EvaluationResult {
         path: &TargetNameRef,
     ) -> buck2_error::Result<TargetNodeRef<'a>> {
         self.get_target(path).ok_or_else(|| {
+            let similar_targets =
+                SuggestedSimilarTargets::suggest(path, self.package().dupe(), self.targets.keys());
             MissingTargetError {
                 target: path.to_owned(),
                 package: self.package().dupe(),
                 num_targets: self.targets.len(),
                 buildfile_path: self.buildfile_path.dupe(),
-                similar_targets: SuggestedSimilarTargets::suggest(
+                all_targets: AllTargetsDisplay::new(
                     path,
                     self.package().dupe(),
-                    self.targets.keys(),
+                    self.targets.values(),
                 ),
+                similar_targets,
             }
             .into()
         })
@@ -200,7 +331,7 @@ impl EvaluationResult {
         Option<MissingTargets>,
     ) {
         match spec {
-            PackageSpec::All => {
+            PackageSpec::All() => {
                 let mut label_to_node = BTreeMap::new();
                 for target_info in self.targets().values() {
                     label_to_node.insert(
@@ -231,7 +362,11 @@ impl EvaluationResult {
                         package: self.package(),
                         num_targets: self.targets.len(),
                         buildfile_path: self.buildfile_path().dupe(),
-                        all_target_labels: self.targets.key_target_labels().duped().collect(),
+                        all_target_nodes: self
+                            .targets
+                            .values()
+                            .map(|node| node.to_owned())
+                            .collect(),
                     })
                 };
                 (label_to_node, missing_targets)

@@ -1,18 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 mod buck;
 mod cli;
 mod diagnostics;
-mod json_project;
 mod path;
 mod progress;
+mod project_json;
 mod scuba;
 mod sysroot;
 mod target;
@@ -31,9 +32,10 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 
+use crate::buck::Buck;
 use crate::cli::ProjectKind;
-use crate::json_project::Crate;
-use crate::json_project::Dep;
+use crate::project_json::Crate;
+use crate::project_json::Dep;
 
 #[derive(Parser, Debug, PartialEq)]
 struct Opt {
@@ -100,6 +102,13 @@ enum Command {
         #[clap(long)]
         check_cycles: bool,
 
+        /// Command used to run `buck2`. Defaults to `"buck2"`.
+        #[clap(long)]
+        buck2_command: Option<String>,
+
+        #[clap(long, default_value = "50", env = "RUST_PROJECT_EXTRA_TARGETS")]
+        max_extra_targets: Option<usize>,
+
         /// The name of the client invoking rust-project, such as 'vscode'.
         #[clap(long)]
         client: Option<String>,
@@ -130,6 +139,17 @@ enum Command {
         #[clap(long)]
         client: Option<String>,
 
+        /// Optional argument specifying build mode.
+        #[clap(short = 'm', long)]
+        mode: Option<String>,
+
+        /// Command used to run `buck2`. Defaults to `"buck2"`.
+        #[clap(long)]
+        buck2_command: Option<String>,
+
+        #[clap(long, default_value = "50", env = "RUST_PROJECT_EXTRA_TARGETS")]
+        max_extra_targets: Option<usize>,
+
         args: JsonArguments,
     },
     /// Build the saved file's owning target. This is meant to be used by IDEs to provide diagnostics on save.
@@ -144,6 +164,10 @@ enum Command {
         /// The name of the client invoking rust-project, such as 'vscode'.
         #[clap(long)]
         client: Option<String>,
+
+        /// Command used to run `buck2`. Defaults to `"buck2"`.
+        #[clap(long)]
+        buck2_command: Option<String>,
 
         /// The file saved by the user. `rust-project` will infer the owning target(s) of the saved file and build them.
         saved_file: PathBuf,
@@ -190,8 +214,11 @@ impl FromStr for SysrootMode {
 #[derive(PartialEq, Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum JsonArguments {
+    /// Path to a Rust source file.
     Path(PathBuf),
+    /// Path to BUCK file.
     Buildfile(PathBuf),
+    /// A named buck target.
     Label(String),
 }
 
@@ -199,10 +226,10 @@ impl FromStr for JsonArguments {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(s).map_err(|_| {
+        serde_json::from_str(s).map_err(|e| {
             anyhow::anyhow!(
-                "Expected a JSON object with a key of `path`, `buildfile`, or `label`. Got: {}",
-                s
+                "Expected a JSON object with a key of `path`, `buildfile`, or `label`. Got serde error: {}",
+                e,
             )
         })
     }
@@ -287,12 +314,15 @@ fn main() -> Result<(), anyhow::Error> {
             mode,
             use_clippy,
             saved_file,
+            buck2_command,
             ..
         } => {
             let subscriber = tracing_subscriber::registry().with(fmt.with_filter(filter));
             tracing::subscriber::set_global_default(subscriber)?;
 
-            cli::Check::new(mode, use_clippy, saved_file.clone())
+            let buck = Buck::new(buck2_command, mode);
+
+            cli::Check::new(buck, use_clippy, saved_file.clone())
                 .run()
                 .inspect_err(|e| crate::scuba::log_check_error(&e, &saved_file, use_clippy))
         }
@@ -367,15 +397,18 @@ fn test_parse_use_clippy() {
     ));
 }
 
+#[cfg(fbcode_build)]
 #[test]
-#[ignore]
 fn json_args_pass() {
     let args = JsonArguments::Path(PathBuf::from("buck2/integrations/rust-project/src/main.rs"));
     let expected = Opt {
         command: Some(Command::DevelopJson {
             args,
-            sysroot_mode: SysrootMode::Rustc,
+            sysroot_mode: SysrootMode::BuckConfig,
             client: None,
+            buck2_command: None,
+            max_extra_targets: Some(50),
+            mode: None,
         }),
         version: false,
     };
@@ -391,8 +424,11 @@ fn json_args_pass() {
     let expected = Opt {
         command: Some(Command::DevelopJson {
             args,
-            sysroot_mode: SysrootMode::Rustc,
+            sysroot_mode: SysrootMode::BuckConfig,
             client: None,
+            buck2_command: None,
+            max_extra_targets: Some(50),
+            mode: None,
         }),
         version: false,
     };
@@ -408,8 +444,11 @@ fn json_args_pass() {
     let expected = Opt {
         command: Some(Command::DevelopJson {
             args,
-            sysroot_mode: SysrootMode::Rustc,
+            sysroot_mode: SysrootMode::BuckConfig,
             client: None,
+            buck2_command: None,
+            max_extra_targets: Some(50),
+            mode: None,
         }),
         version: false,
     };

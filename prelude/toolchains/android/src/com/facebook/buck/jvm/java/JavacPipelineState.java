@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
@@ -15,7 +16,6 @@ import com.facebook.buck.core.filesystems.RelPath;
 import com.facebook.buck.core.util.log.Logger;
 import com.facebook.buck.jvm.core.BuildTargetValue;
 import com.facebook.buck.util.CapturingPrintStream;
-import com.facebook.buck.util.ProcessExecutor;
 import com.facebook.buck.util.Verbosity;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
@@ -41,7 +41,6 @@ public class JavacPipelineState implements AutoCloseable {
   private final ResolvedJavacOptions resolvedJavacOptions;
   private final BuildTargetValue invokingRule;
   private final ResolvedJavac resolvedJavac;
-  private final ClasspathChecker classpathChecker;
   @Nullable private final JarParameters abiJarParameters;
   @Nullable private final JarParameters libraryJarParameters;
 
@@ -55,34 +54,15 @@ public class JavacPipelineState implements AutoCloseable {
       ResolvedJavac resolvedJavac,
       ResolvedJavacOptions resolvedJavacOptions,
       BuildTargetValue invokingRule,
-      ClasspathChecker classpathChecker,
       CompilerParameters compilerParameters,
       @Nullable JarParameters abiJarParameters,
       @Nullable JarParameters libraryJarParameters) {
     this.resolvedJavac = resolvedJavac;
     this.invokingRule = invokingRule;
-    this.classpathChecker = classpathChecker;
     this.compilerParameters = compilerParameters;
     this.abiJarParameters = abiJarParameters;
     this.libraryJarParameters = libraryJarParameters;
     this.resolvedJavacOptions = resolvedJavacOptions;
-  }
-
-  public JavacPipelineState(
-      ResolvedJavac resolvedJavac,
-      ResolvedJavacOptions resolvedJavacOptions,
-      BuildTargetValue invokingRule,
-      CompilerParameters compilerParameters,
-      @Nullable JarParameters abiJarParameters,
-      @Nullable JarParameters libraryJarParameters) {
-    this(
-        resolvedJavac,
-        resolvedJavacOptions,
-        invokingRule,
-        new ClasspathChecker(),
-        compilerParameters,
-        abiJarParameters,
-        libraryJarParameters);
   }
 
   public boolean isRunning() {
@@ -96,8 +76,6 @@ public class JavacPipelineState implements AutoCloseable {
       RelPath configuredBuckOut)
       throws IOException {
     if (invocation == null) {
-      resolvedJavacOptions.validateClasspath(classpathChecker::validateClasspath);
-
       stdout = new CapturingPrintStream();
       closeables.add(stdout);
       stderr = new CapturingPrintStream();
@@ -110,16 +88,12 @@ public class JavacPipelineState implements AutoCloseable {
           context.createSubContext(stdout, stderr, Optional.of(verbosity));
       closeables.add(firstOrderContext);
 
-      ProcessExecutor processExecutor = firstOrderContext.getProcessExecutor();
-
       JavacExecutionContext javacExecutionContext =
           new JavacExecutionContext(
               stderr,
               firstOrderContext.getClassLoaderCache(),
               verbosity,
               context.getRuleCellRoot(),
-              firstOrderContext.getEnvironment(),
-              processExecutor,
               configuredBuckOut);
 
       CompilerOutputPaths outputPaths = compilerParameters.getOutputPaths();
@@ -230,6 +204,9 @@ public class JavacPipelineState implements AutoCloseable {
         },
         resolvedJavacOptions,
         ruleCellRoot);
+    Optional<String> bootclasspath =
+        ResolvedJavacOptions.Companion.getBootclasspathString(
+            resolvedJavacOptions.getBootclasspathList());
 
     // verbose flag, if appropriate.
     if (context.getVerbosity().shouldUseVerbosityFlagIfAvailable()) {
@@ -243,15 +220,29 @@ public class JavacPipelineState implements AutoCloseable {
       builder.add("-s").add(ruleCellRoot.resolve(generatedCodeDirectory).toString());
     }
 
+    List<String> classpathEntries = new ArrayList<>();
+    int targetRelease = resolvedJavacOptions.getLanguageLevelOptions().getTargetLevelValue();
+    if (targetRelease > 8) {
+      String systemImage = resolvedJavacOptions.getSystemImage();
+      if (systemImage != null) {
+        classpathEntries.add(bootclasspath.get());
+
+        builder.add("--system");
+        builder.add(systemImage);
+      }
+    }
+    // else, bootclasspath is already handled by the OptionsConsumer above
+
+    classpathEntries.addAll(
+        buildClasspathEntries.stream()
+            .map(ruleCellRoot::resolve)
+            .map(AbsPath::normalize)
+            .map(AbsPath::toString)
+            .toList());
+
     // Build up and set the classpath.
-    if (!buildClasspathEntries.isEmpty()) {
-      String classpath =
-          Joiner.on(File.pathSeparator)
-              .join(
-                  buildClasspathEntries.stream()
-                      .map(ruleCellRoot::resolve)
-                      .map(AbsPath::normalize)
-                      .iterator());
+    if (!classpathEntries.isEmpty()) {
+      String classpath = Joiner.on(File.pathSeparator).join(classpathEntries);
       builder.add("-classpath", classpath);
     } else {
       builder.add("-classpath", "''");

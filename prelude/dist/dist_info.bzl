@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//linking:shared_libraries.bzl", "SharedLibrariesTSet")
 load("@prelude//utils:arglike.bzl", "ArgLike")
@@ -45,6 +46,15 @@ DistInfo = provider(fields = {
     # from which each of these artifacts originates. This is just the projected
     # set of all the files for materialization purposes.
     "nondebug_runtime_files": provider_field(list[ArgLike]),
+
+    # The artifact is a directory pointed to by the relocatable_resource_json file,
+    # which contains symlinks to the resources used by the binary.
+    "relocatable_resources_contents": provider_field(Artifact | None, default = None),
+
+    # A JSON file containing a mapping of resources used in the binary to their path
+    # relative to the binary in question (all paths are within
+    # `relocatable_resource_contents`).
+    "relocatable_resources_json": provider_field(Artifact | None, default = None),
 
     # Transitive shared library dependencies.
     "shared_libs": provider_field(SharedLibrariesTSet | None, default = None),

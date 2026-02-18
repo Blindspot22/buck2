@@ -1,4 +1,6 @@
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
+
+oncall("rust_foundation")
 
 rust_library(
     name = "a",
@@ -25,4 +27,11 @@ rust_library(
     name = "f",
     srcs = ["lib_f.rs"],
     crate_root = "lib_f.rs",
+)
+
+rust_library(
+    name = "g_with_compatibility",
+    srcs = ["lib_g.rs"],
+    crate_root = "lib_g.rs",
+    target_compatible_with = ["ovr_config//cpu/constraints:riscv64"],
 )

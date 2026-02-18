@@ -1,0 +1,14 @@
+[buildfile]
+    name = TARGETS.fixture
+
+[repositories]
+    root = .
+    prelude = .
+
+[buck2_resource_control]
+    status = required
+    enable_suspension = true
+    memory_max_actions = 200000000
+
+[build]
+    threads = 5

@@ -1,49 +1,33 @@
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
 
 oncall("build_infra")
 
 rust_library(
     name = "buck2_server",
     srcs = glob(["src/**/*.rs"]),
-    os_deps = [
-        (
-            "linux",
-            [
-                "fbsource//third-party/rust:psutil",
-            ],
-        ),
-        (
-            "macos",
-            [
-                "fbsource//third-party/rust:psutil",
-            ],
-        ),
-    ],
     test_deps = [
         "fbsource//third-party/rust:assert_matches",
         "fbsource//third-party/rust:indoc",
         "//buck2/app/buck2_util:buck2_util",
     ],
     deps = [
-        "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:async-recursion",
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:bincode",
         "fbsource//third-party/rust:chrono",
         "fbsource//third-party/rust:constant_time_eq",
         "fbsource//third-party/rust:crossbeam-channel",
-        "fbsource//third-party/rust:dashmap",
         "fbsource//third-party/rust:flate2",
         "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:inferno",
+        "fbsource//third-party/rust:itertools",
         "fbsource//third-party/rust:lsp-server",
         "fbsource//third-party/rust:lsp-types",
-        "fbsource//third-party/rust:num_cpus",
         "fbsource//third-party/rust:once_cell",
         "fbsource//third-party/rust:parking_lot",
         "fbsource//third-party/rust:pin-project",
-        "fbsource//third-party/rust:prost",
-        "fbsource//third-party/rust:prost-types",
+        "fbsource//third-party/rust:prost-0-13-4",
+        "fbsource//third-party/rust:prost-types-0-13-4",
         "fbsource//third-party/rust:rand",
         "fbsource//third-party/rust:serde_json",
         "fbsource//third-party/rust:shlex",
@@ -51,7 +35,7 @@ rust_library(
         "fbsource//third-party/rust:tar",
         "fbsource//third-party/rust:tokio",
         "fbsource//third-party/rust:tokio-stream",
-        "fbsource//third-party/rust:tonic",
+        "fbsource//third-party/rust:tonic-0-12-3",
         "fbsource//third-party/rust:tracing",
         # @oss-disable[end= ]: "//blake3:blake3-constants-rust-nothrift",
         "//buck2/allocative/allocative:allocative",
@@ -64,6 +48,7 @@ rust_library(
         "//buck2/app/buck2_configured:buck2_configured",
         "//buck2/app/buck2_core:buck2_core",
         "//buck2/app/buck2_data:buck2_data",
+        "//buck2/app/buck2_directory:buck2_directory",
         # @oss-disable[end= ]: "//buck2/app/buck2_eden:buck2_eden",
         "//buck2/app/buck2_error:buck2_error",
         "//buck2/app/buck2_event_observer:buck2_event_observer",
@@ -71,14 +56,14 @@ rust_library(
         "//buck2/app/buck2_execute:buck2_execute",
         "//buck2/app/buck2_execute_impl:buck2_execute_impl",
         "//buck2/app/buck2_file_watcher:buck2_file_watcher",
-        "//buck2/app/buck2_forkserver:buck2_forkserver",
-        "//buck2/app/buck2_futures:buck2_futures",
+        "//buck2/app/buck2_fs:buck2_fs",
         "//buck2/app/buck2_http:buck2_http",
         "//buck2/app/buck2_interpreter:buck2_interpreter",
         "//buck2/app/buck2_interpreter_for_build:buck2_interpreter_for_build",
         "//buck2/app/buck2_node:buck2_node",
         "//buck2/app/buck2_profile:buck2_profile",
         "//buck2/app/buck2_re_configuration:buck2_re_configuration",
+        "//buck2/app/buck2_resource_control:buck2_resource_control",
         "//buck2/app/buck2_server_ctx:buck2_server_ctx",
         "//buck2/app/buck2_server_starlark_debug:buck2_server_starlark_debug",
         "//buck2/app/buck2_subscription_proto:buck2_subscription_proto",
@@ -87,6 +72,7 @@ rust_library(
         "//buck2/app/buck2_validation:buck2_validation",
         "//buck2/app/buck2_wrapper_common:buck2_wrapper_common",
         "//buck2/dice/dice:dice",
+        "//buck2/dice/dice_futures:dice_futures",
         "//buck2/gazebo/dupe:dupe",
         "//buck2/gazebo/gazebo:gazebo",
         "//buck2/host_sharing:host_sharing",
@@ -94,5 +80,15 @@ rust_library(
         "//buck2/starlark-rust/starlark_lsp:starlark_lsp",
         # @oss-disable[end= ]: "//common/rust/shed/detect_eden:detect_eden",
         "//common/rust/shed/fbinit:fbinit",
-    ],
+    ] + select({
+        "DEFAULT": [],
+        "ovr_config//os:linux": [
+            "fbsource//third-party/rust:psutil",
+            "//buck2/app/buck2_forkserver:buck2_forkserver",
+        ],
+        "ovr_config//os:macos": [
+            "fbsource//third-party/rust:psutil",
+            "//buck2/app/buck2_forkserver:buck2_forkserver",
+        ],
+    }),
 )

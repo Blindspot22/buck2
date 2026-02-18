@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
 
-use crate::cells::cell_path::CellPathRef;
 use crate::cells::cell_root_path::CellRootPath;
 use crate::cells::name::CellName;
 use crate::cells::paths::CellRelativePath;
@@ -54,10 +54,7 @@ impl NestedCells {
     ) -> NestedCells {
         Self::from_cell_paths_relative_to_this_cell(all_cells.iter().filter_map(
             |(cell_name, cell_root_path)| {
-                let Some(path_relative_to_this_cell) = cell_root_path.strip_prefix_opt(this_cell)
-                else {
-                    return None;
-                };
+                let path_relative_to_this_cell = cell_root_path.strip_prefix_opt(this_cell)?;
 
                 Some((
                     CellRelativePath::new(path_relative_to_this_cell),
@@ -81,19 +78,6 @@ impl NestedCells {
             }
         }
         None
-    }
-
-    pub(crate) fn matches_checked<'a, 'b>(
-        &'a self,
-        path: &'b CellRelativePath,
-    ) -> Option<(&'a CellRelativePath, CellPathRef<'b>)> {
-        self.matches(UncheckedCellRelativePath::new(path))
-            .map(|(cell_path, cell_name, rem)| {
-                (
-                    cell_path,
-                    CellPathRef::new(cell_name, CellRelativePath::unchecked_new(rem.as_str())),
-                )
-            })
     }
 
     pub(crate) fn check_empty(&self) -> Option<CellName> {

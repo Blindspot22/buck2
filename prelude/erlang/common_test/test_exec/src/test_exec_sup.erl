@@ -5,13 +5,13 @@
 %% License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 %% of this source tree.
 
-%% % @format
-
-%% @doc Supervisor that starts two genserver sequentially: the epmd_manager, that will
-%% starts the epmd daemon, and the ct_runner, that will launch the test.
-%% If one of them stops it entails termination of the whole tree.
+%% @format
 -module(test_exec_sup).
-
+-moduledoc """
+Supervisor that starts two genserver sequentially: the epmd_manager, that will
+starts the epmd daemon, and the ct_runner, that will launch the test.
+If one of them stops it entails termination of the whole tree.
+""".
 -compile([warn_missing_spec_all]).
 
 -behavior(supervisor).
@@ -20,9 +20,12 @@
 
 -include_lib("common/include/buck_ct_records.hrl").
 
--spec start_link(#test_env{}) -> {ok, pid()} | 'ignore' | {error, term()}.
+-spec start_link(#test_env{}) -> {'ok', pid()} | {'error', supervisor:startlink_err()}.
 start_link(#test_env{} = TestEnv) ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, [TestEnv]).
+    case supervisor:start_link({local, ?MODULE}, ?MODULE, [TestEnv]) of
+        Ok = {ok, _} -> Ok;
+        Error = {error, _} -> Error
+    end.
 
 -spec init(Args :: term()) ->
     {ok, {SupFlags :: supervisor:sup_flags(), [ChildSpec :: supervisor:child_spec()]}} | ignore.

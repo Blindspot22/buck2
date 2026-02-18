@@ -1,4 +1,4 @@
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
 
 oncall("build_infra")
 
@@ -11,5 +11,6 @@ rust_library(
         "fbsource//third-party/rust:dashmap",
         "fbsource//third-party/rust:futures-intrusive",
         "//buck2/allocative/allocative:allocative",
+        "//buck2/starlark-rust/starlark_map:starlark_map",
     ],
 )

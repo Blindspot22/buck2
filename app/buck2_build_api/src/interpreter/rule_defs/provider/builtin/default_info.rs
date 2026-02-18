@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -16,6 +17,7 @@ use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_build_api_derive::internal_provider;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
@@ -24,7 +26,6 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
-use starlark::values::FreezeResult;
 use starlark::values::FrozenHeap;
 use starlark::values::FrozenRef;
 use starlark::values::FrozenValue;
@@ -54,7 +55,8 @@ use starlark::values::none::NoneOr;
 use crate as buck2_build_api;
 use crate::artifact_groups::ArtifactGroup;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueIsInputArtifactAnnotation;
 use crate::interpreter::rule_defs::artifact_tagging::ArtifactTag;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
@@ -70,36 +72,39 @@ use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectio
 /// ```python
 /// # //foo_binary.bzl
 /// def impl(ctx):
-///     ctx.action.run([ctx.attrs._cc[RunInfo], "-o", ctx.attrs.out.as_output()] + ctx.attrs.srcs)
-///     ctx.action.run([
+///     out = ctx.actions.declare_output("out")
+///     ctx.actions.run([ctx.attrs._cc[RunInfo], "-o", out.as_output()] + ctx.attrs.srcs)
+///     stripped_out = ctx.actions.declare_output("stripped")
+///     debug_symbols_out = ctx.actions.declare_output("debug_info")
+///     ctx.actions.run([
 ///         ctx.attrs._strip[RunInfo],
 ///         "--binary",
-///         ctx.attrs.out,
+///         out,
 ///         "--stripped-out",
-///         ctx.attrs.stripped.as_output(),
+///         stripped_out.as_output(),
 ///         "--debug-symbols-out",
-///         ctx.attrs.debug_info.as_output(),
+///         debug_symbols_out.as_output(),
 ///     ])
 ///     return [
 ///         DefaultInfo(
 ///             sub_targets = {
 ///                 "stripped": [
-///                     DefaultInfo(default_outputs = [ctx.attrs.stripped, ctx.attrs.debug_info]),
+///                     DefaultInfo(default_outputs = [stripped_out, debug_symbols_out]),
 ///                 ],
 ///             },
-///             default_output = ctx.attrs.out,
+///             default_output = out,
+///         ),
 ///     ]
 ///
 /// foo_binary = rule(
-///     impl=impl,
-///     attrs={
+///     impl = impl,
+///     attrs = {
 ///         "srcs": attrs.list(attrs.source()),
-///         "out": attrs.output(),
-///         "stripped": attrs.output(),
-///         "debug_info": attrs.output(),
-///         "_cc": attrs.dep(default="//tools:cc", providers=[RunInfo]),
-///         "_strip_script": attrs.dep(default="//tools:strip", providers=[RunInfo])
+///         "_cc": attrs.dep(default = "//tools:cc", providers = [RunInfo]),
+///         "_strip_script": attrs.dep(default = "//tools:strip", providers = [RunInfo]),
+///     },
 /// )
+///
 ///
 /// def foo_binary_wrapper(name, srcs):
 ///     foo_binary(
@@ -140,7 +145,7 @@ pub struct DefaultInfoGen<V: ValueLifetimeless> {
     /// A list of `Artifact`s that are built by default if this rule is requested
     /// explicitly (via CLI or `$(location)` etc), or depended on as as a "source"
     /// (i.e., `attrs.source()`).
-    default_outputs: ValueOfUncheckedGeneric<V, ListType<ValueAsArtifactLike<'static>>>,
+    default_outputs: ValueOfUncheckedGeneric<V, ListType<ValueIsInputArtifactAnnotation>>,
     /// A list of `ArtifactTraversable`. The underlying `Artifact`s they define will
     /// be built by default if this rule is requested (via CLI or `$(location)` etc),
     /// but _not_ when it's depended on as as a "source" (i.e., `attrs.source()`).
@@ -174,7 +179,7 @@ fn validate_default_info(info: &FrozenDefaultInfo) -> buck2_error::Result<()> {
 }
 
 impl<'v> DefaultInfo<'v> {
-    pub fn empty(heap: &'v Heap) -> Self {
+    pub fn empty(heap: Heap<'v>) -> Self {
         let sub_targets = ValueOfUnchecked::<DictType<_, _>>::new(heap.alloc(AllocDict::EMPTY));
         let default_outputs = ValueOfUnchecked::<ListType<_>>::new(heap.alloc(AllocList::EMPTY));
         let other_outputs = ValueOfUnchecked::<ListType<_>>::new(heap.alloc(AllocList::EMPTY));
@@ -210,7 +215,7 @@ impl FrozenDefaultInfo {
         name: &str,
     ) -> buck2_error::Result<Option<FrozenValueTyped<'static, FrozenProviderCollection>>> {
         FrozenDictRef::from_frozen_value(self.sub_targets.get())
-            .buck_error_context("sub_targets should be a dict-like object")?
+            .ok_or_else(|| internal_error!("sub_targets should be a dict-like object"))?
             .get_str(name)
             .map(|v| {
                 FrozenValueTyped::new_err(v).buck_error_context(
@@ -231,18 +236,21 @@ impl FrozenDefaultInfo {
         &self,
     ) -> buck2_error::Result<impl Iterator<Item = buck2_error::Result<StarlarkArtifact>> + '_> {
         let list = ListRef::from_frozen_value(self.default_outputs.get())
-            .buck_error_context("Should be list of artifacts")?;
+            .ok_or_else(|| internal_error!("Should be list of artifacts"))?;
 
         Ok(list.iter().map(|v| {
-            let frozen_value = v.unpack_frozen().buck_error_context("should be frozen")?;
+            let frozen_value = v
+                .unpack_frozen()
+                .ok_or_else(|| internal_error!("should be frozen"))?;
 
             Ok(
                 if let Some(starlark_artifact) = frozen_value.downcast_ref::<StarlarkArtifact>() {
                     starlark_artifact.dupe()
                 } else {
                     // This code path is for StarlarkPromiseArtifact. We have to create a `StarlarkArtifact` object here.
-                    let artifact_like = ValueAsArtifactLike::unpack_value(frozen_value.to_value())?
-                        .buck_error_context("Should be list of artifacts")?;
+                    let artifact_like =
+                        ValueAsInputArtifactLike::unpack_value(frozen_value.to_value())?
+                            .ok_or_else(|| internal_error!("Should be list of artifacts"))?;
                     artifact_like.0.get_bound_starlark_artifact()?
                 },
             )
@@ -267,17 +275,17 @@ impl FrozenDefaultInfo {
         + '_,
     > {
         let sub_targets = FrozenDictRef::from_frozen_value(self.sub_targets.get())
-            .buck_error_context("sub_targets should be a dict-like object")?;
+            .ok_or_else(|| internal_error!("sub_targets should be a dict-like object"))?;
 
         Ok(sub_targets.iter().map(|(k, v)| {
             buck2_error::Ok((
                 k.to_value()
                     .unpack_str()
-                    .buck_error_context("sub_targets should have string keys")?,
+                    .ok_or_else(|| internal_error!("sub_targets should have string keys"))?,
                 v.downcast_frozen_ref::<FrozenProviderCollection>()
-                    .buck_error_context(
+                    .ok_or_else(|| internal_error!(
                         "Values inside of a frozen provider should be frozen provider collection",
-                    )?,
+                    ))?,
             ))
         }))
     }
@@ -299,7 +307,7 @@ impl FrozenDefaultInfo {
     ) -> buck2_error::Result<()> {
         self.for_each_in_list(self.default_outputs.get(), |value| {
             processor(
-                ValueAsArtifactLike::unpack_value_err(value)?
+                ValueAsInputArtifactLike::unpack_value_err(value)?
                     .0
                     .get_bound_artifact()?,
             );
@@ -312,7 +320,7 @@ impl FrozenDefaultInfo {
         processor: &mut dyn FnMut(ArtifactGroup),
     ) -> buck2_error::Result<()> {
         self.for_each_in_list(self.default_outputs.get(), |value| {
-            let others = ValueAsArtifactLike::unpack_value_err(value)?
+            let others = ValueAsInputArtifactLike::unpack_value_err(value)?
                 .0
                 .get_associated_artifacts();
             others
@@ -329,12 +337,19 @@ impl FrozenDefaultInfo {
     ) -> buck2_error::Result<()> {
         struct Visitor<'x>(&'x mut dyn FnMut(ArtifactGroup));
 
-        impl CommandLineArtifactVisitor for Visitor<'_> {
-            fn visit_input(&mut self, input: ArtifactGroup, _: Option<&ArtifactTag>) {
+        impl<'v> CommandLineArtifactVisitor<'v> for Visitor<'_> {
+            fn visit_input(&mut self, input: ArtifactGroup, _: Vec<&ArtifactTag>) {
                 (self.0)(input);
             }
 
-            fn visit_output(&mut self, _artifact: OutputArtifact, _tag: Option<&ArtifactTag>) {}
+            fn visit_declared_output(
+                &mut self,
+                _artifact: OutputArtifact<'v>,
+                _tags: Vec<&ArtifactTag>,
+            ) {
+            }
+
+            fn visit_frozen_output(&mut self, _artifact: Artifact, _tags: Vec<&ArtifactTag>) {}
         }
 
         self.for_each_in_list(self.other_outputs.get(), |value| {
@@ -359,7 +374,7 @@ impl FrozenDefaultInfo {
         mut processor: impl FnMut(Value) -> buck2_error::Result<()>,
     ) -> buck2_error::Result<()> {
         let outputs_list = ListRef::from_frozen_value(value)
-            .unwrap_or_else(|| panic!("expected list, got `{:?}` from info `{:?}`", value, self));
+            .unwrap_or_else(|| panic!("expected list, got `{value:?}` from info `{self:?}`"));
 
         for value in outputs_list.iter() {
             processor(value)?;
@@ -389,10 +404,10 @@ fn default_info_creator(builder: &mut GlobalsBuilder) {
     fn DefaultInfo<'v>(
         // TODO(nga): parameters must be named only.
         #[starlark(default = NoneOr::None)] default_output: NoneOr<
-            ValueOf<'v, ValueAsArtifactLike<'v>>,
+            ValueOf<'v, ValueIsInputArtifactAnnotation>,
         >,
         #[starlark(default = NoneOr::None)] default_outputs: NoneOr<
-            ValueOf<'v, UnpackList<UnpackAndDiscard<ValueAsArtifactLike<'v>>>>,
+            ValueOf<'v, UnpackList<UnpackAndDiscard<ValueIsInputArtifactAnnotation>>>,
         >,
         #[starlark(default = ValueOf { value: FrozenValue::new_empty_list().to_value(), typed: UnpackList::default()})]
         other_outputs: ValueOf<
@@ -408,7 +423,7 @@ fn default_info_creator(builder: &mut GlobalsBuilder) {
         let heap = eval.heap();
 
         // support both list and singular options for now until we migrate all the rules.
-        let valid_default_outputs: ValueOfUnchecked<ListType<ValueAsArtifactLike>> =
+        let valid_default_outputs: ValueOfUnchecked<ListType<ValueIsInputArtifactAnnotation>> =
             match (default_outputs.into_option(), default_output.into_option()) {
                 (Some(list), None) => list.as_unchecked().cast(),
                 (None, Some(default_output)) => {

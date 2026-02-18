@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use crate::dice_state::DiceState;
@@ -50,7 +51,6 @@ pub fn estimate_completion_percentage<T: SpanTrackable>(roots: &Roots<T>, dice: 
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Instant;
     use std::time::UNIX_EPOCH;
 
     use buck2_data::SpanStartEvent;
@@ -63,7 +63,6 @@ mod tests {
     use crate::span_tracker::BuckEventSpanTracker;
 
     fn setup_roots(tracker: &mut BuckEventSpanTracker) {
-        let t0 = Instant::now();
         let span = Arc::new(BuckEvent::new(
             UNIX_EPOCH,
             TraceId::new(),
@@ -99,7 +98,7 @@ mod tests {
             }
             .into(),
         ));
-        tracker.start_at(&span, t0).unwrap();
+        tracker.start_at(&span).unwrap();
     }
 
     fn setup_dice_state(dice_state: &mut DiceState, finished: u32, total: u32) {

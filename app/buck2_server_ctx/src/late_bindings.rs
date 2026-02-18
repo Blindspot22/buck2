@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use async_trait::async_trait;
@@ -36,42 +37,6 @@ pub trait OtherServerCommands: Send + Sync + 'static {
         partial_result_dispatcher: PartialResultDispatcher<NoPartialResult>,
         req: buck2_cli_proto::InstallRequest,
     ) -> buck2_error::Result<buck2_cli_proto::InstallResponse>;
-    async fn uquery(
-        &self,
-        ctx: &dyn ServerCommandContextTrait,
-        partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
-        req: buck2_cli_proto::UqueryRequest,
-    ) -> buck2_error::Result<buck2_cli_proto::UqueryResponse>;
-    async fn cquery(
-        &self,
-        ctx: &dyn ServerCommandContextTrait,
-        partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
-        req: buck2_cli_proto::CqueryRequest,
-    ) -> buck2_error::Result<buck2_cli_proto::CqueryResponse>;
-    async fn aquery(
-        &self,
-        ctx: &dyn ServerCommandContextTrait,
-        partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
-        req: buck2_cli_proto::AqueryRequest,
-    ) -> buck2_error::Result<buck2_cli_proto::AqueryResponse>;
-    async fn targets(
-        &self,
-        ctx: &dyn ServerCommandContextTrait,
-        partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
-        req: buck2_cli_proto::TargetsRequest,
-    ) -> buck2_error::Result<buck2_cli_proto::TargetsResponse>;
-    async fn targets_show_outputs(
-        &self,
-        ctx: &dyn ServerCommandContextTrait,
-        partial_result_dispatcher: PartialResultDispatcher<NoPartialResult>,
-        req: buck2_cli_proto::TargetsRequest,
-    ) -> buck2_error::Result<buck2_cli_proto::TargetsShowOutputsResponse>;
-    async fn ctargets(
-        &self,
-        ctx: &dyn ServerCommandContextTrait,
-        partial_result_dispatcher: PartialResultDispatcher<NoPartialResult>,
-        req: buck2_cli_proto::ConfiguredTargetsRequest,
-    ) -> buck2_error::Result<buck2_cli_proto::ConfiguredTargetsResponse>;
     async fn complete(
         &self,
         ctx: &dyn ServerCommandContextTrait,
@@ -99,6 +64,56 @@ pub trait OtherServerCommands: Send + Sync + 'static {
 
 pub static OTHER_SERVER_COMMANDS: LateBinding<&'static dyn OtherServerCommands> =
     LateBinding::new("OTHER_SERVER_COMMANDS");
+
+#[async_trait]
+pub trait TargetsServerCommands: Send + Sync + 'static {
+    async fn targets(
+        &self,
+        ctx: &dyn ServerCommandContextTrait,
+        partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
+        req: buck2_cli_proto::TargetsRequest,
+    ) -> buck2_error::Result<buck2_cli_proto::TargetsResponse>;
+    async fn targets_show_outputs(
+        &self,
+        ctx: &dyn ServerCommandContextTrait,
+        partial_result_dispatcher: PartialResultDispatcher<NoPartialResult>,
+        req: buck2_cli_proto::TargetsRequest,
+    ) -> buck2_error::Result<buck2_cli_proto::TargetsShowOutputsResponse>;
+    async fn ctargets(
+        &self,
+        ctx: &dyn ServerCommandContextTrait,
+        partial_result_dispatcher: PartialResultDispatcher<NoPartialResult>,
+        req: buck2_cli_proto::ConfiguredTargetsRequest,
+    ) -> buck2_error::Result<buck2_cli_proto::ConfiguredTargetsResponse>;
+}
+
+pub static TARGETS_SERVER_COMMANDS: LateBinding<&'static dyn TargetsServerCommands> =
+    LateBinding::new("TARGETS_SERVER_COMMANDS");
+
+#[async_trait]
+pub trait QueryServerCommands: Send + Sync + 'static {
+    async fn uquery(
+        &self,
+        ctx: &dyn ServerCommandContextTrait,
+        partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
+        req: buck2_cli_proto::UqueryRequest,
+    ) -> buck2_error::Result<buck2_cli_proto::UqueryResponse>;
+    async fn cquery(
+        &self,
+        ctx: &dyn ServerCommandContextTrait,
+        partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
+        req: buck2_cli_proto::CqueryRequest,
+    ) -> buck2_error::Result<buck2_cli_proto::CqueryResponse>;
+    async fn aquery(
+        &self,
+        ctx: &dyn ServerCommandContextTrait,
+        partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
+        req: buck2_cli_proto::AqueryRequest,
+    ) -> buck2_error::Result<buck2_cli_proto::AqueryResponse>;
+}
+
+pub static QUERY_SERVER_COMMANDS: LateBinding<&'static dyn QueryServerCommands> =
+    LateBinding::new("QUERY_SERVER_COMMANDS");
 
 #[async_trait]
 pub trait DocsServerCommand: Send + Sync + 'static {

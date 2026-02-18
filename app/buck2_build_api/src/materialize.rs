@@ -1,16 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 
 use buck2_artifact::artifact::artifact_type::BaseArtifactKind;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_signals::env::WaitingCategory;
+use buck2_build_signals::env::WaitingData;
 use buck2_cli_proto::build_request::Materializations;
 use buck2_cli_proto::build_request::Uploads;
 use buck2_common::legacy_configs::dice::HasLegacyConfigs;
@@ -20,81 +23,208 @@ use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_error::BuckErrorContext;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
+use buck2_execute::artifact_utils::ArtifactValueBuilder;
+use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest_config::HasDigestConfig;
 use buck2_execute::directory::ActionDirectoryBuilder;
 use buck2_execute::execute::blobs::ActionBlobs;
 use buck2_execute::materialize::materializer::HasMaterializer;
 use dashmap::DashSet;
 use dice::DiceComputations;
+use dice::DiceComputationsData;
 use dice::UserComputationData;
+use dice_futures::spawn::spawn_dropcancel;
 use dupe::Dupe;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 
 use crate::actions::artifact::get_artifact_fs::GetArtifactFs;
 use crate::actions::artifact::materializer::ArtifactMaterializer;
 use crate::actions::execute::dice_data::GetReClient;
+use crate::actions::impls::run_action_knobs::HasRunActionKnobs;
 use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::ArtifactGroupValues;
 use crate::artifact_groups::calculation::ArtifactGroupCalculation;
 
+/// Configuration for experimental faster materialization mode.
+#[derive(Clone, Copy)]
+pub struct MaterializerFastRolloutConfig {
+    /// If true, spawn materialization futures early rather than running inline.
+    pub spawn: bool,
+    /// If true, use `tokio::task::unconstrained` when polling materialization futures.
+    pub unconstrained: bool,
+}
+
+pub trait HasMaterializerFastRolloutConfig {
+    fn set_materializer_fast_rollout_config(&mut self, config: MaterializerFastRolloutConfig);
+
+    fn get_materializer_fast_rollout_config(&self) -> MaterializerFastRolloutConfig;
+}
+
+impl HasMaterializerFastRolloutConfig for UserComputationData {
+    fn set_materializer_fast_rollout_config(&mut self, config: MaterializerFastRolloutConfig) {
+        self.data.set(config);
+    }
+
+    fn get_materializer_fast_rollout_config(&self) -> MaterializerFastRolloutConfig {
+        const DEFAULT: MaterializerFastRolloutConfig = MaterializerFastRolloutConfig {
+            spawn: false,
+            unconstrained: false,
+        };
+        *self
+            .data
+            .get::<MaterializerFastRolloutConfig>()
+            .unwrap_or(&DEFAULT)
+    }
+}
+
+fn maybe_spawned<T: Send + 'static>(
+    data: &DiceComputationsData,
+    should_spawn: bool,
+    f: BoxFuture<'static, T>,
+) -> impl Future<Output = T> {
+    if should_spawn {
+        spawn_dropcancel(
+            move |_cancellations| f,
+            &*data.per_transaction_data().spawner,
+            data.per_transaction_data(),
+        )
+        .left_future()
+    } else {
+        f.right_future()
+    }
+}
+
 pub async fn materialize_and_upload_artifact_group(
     ctx: &mut DiceComputations<'_>,
     artifact_group: &ArtifactGroup,
-    contexts: &MaterializationAndUploadContext,
+    contexts: MaterializationAndUploadContext,
+    queue_tracker: &Arc<DashSet<BuildArtifact>>,
 ) -> buck2_error::Result<ArtifactGroupValues> {
-    let (values, _) = ctx
-        .try_compute2(
+    let config = ctx
+        .per_transaction_data()
+        .get_materializer_fast_rollout_config();
+    let (values, _) = {
+        let fut = ctx.try_compute2(
             |mut ctx| {
                 let group = &artifact_group;
-                async move { materialize_artifact_group(&mut ctx, group, &contexts.0).await }
-                    .boxed()
+                async move {
+                    materialize_artifact_group(
+                        &mut ctx,
+                        config.spawn,
+                        group,
+                        contexts.0,
+                        queue_tracker,
+                    )
+                    .await
+                }
+                .boxed()
             },
             |mut ctx| {
                 let group = &artifact_group;
                 async move {
                     match contexts.1 {
                         UploadContext::Skip => Ok(()),
-                        UploadContext::Upload => ensure_uploaded(&mut ctx, group).await,
+                        UploadContext::Upload => ensure_uploaded(&mut ctx, group.clone()).await,
                     }
                 }
                 .boxed()
             },
-        )
-        .await?;
+        );
+
+        if config.unconstrained {
+            tokio::task::unconstrained(fut).await?
+        } else {
+            fut.await?
+        }
+    };
+
     Ok(values)
 }
 
 async fn materialize_artifact_group(
     ctx: &mut DiceComputations<'_>,
+    should_spawn: bool,
     artifact_group: &ArtifactGroup,
-    materialization_context: &MaterializationContext,
+    materialization_context: MaterializationContext,
+    queue_tracker: &Arc<DashSet<BuildArtifact>>,
 ) -> buck2_error::Result<ArtifactGroupValues> {
     let values = ctx.ensure_artifact_group(artifact_group).await?;
 
+    let mut waiting_data = WaitingData::new();
+
     if let MaterializationContext::Materialize { force } = materialization_context {
-        let queue_tracker = ctx
-            .per_transaction_data()
-            .get_materialization_queue_tracker();
-        let mut artifacts_to_materialize = Vec::new();
-        for (artifact, _value) in values.iter() {
+        waiting_data.start_waiting_category_now(WaitingCategory::MaterializerPrepare);
+        let artifact_fs = ctx.get_artifact_fs().await?;
+        let digest_config = ctx.global_data().get_digest_config();
+
+        let data = ctx.data();
+        let shared_data = Arc::new((
+            data.dupe(),
+            artifact_fs.clone(),
+            ctx.per_transaction_data().get_materializer(),
+        ));
+
+        let mut materialize_futs = Vec::new();
+
+        for (artifact, value) in values.iter() {
             if let BaseArtifactKind::Build(artifact) = artifact.as_parts().0 {
                 if !queue_tracker.insert(artifact.dupe()) {
                     // We've already requested this artifact, no use requesting it again.
                     continue;
                 }
-                artifacts_to_materialize.push(artifact);
+
+                let fut = {
+                    let waiting_data = waiting_data.clone();
+                    let artifact = artifact.dupe();
+                    let value = value.dupe();
+                    let shared_data = shared_data.dupe();
+
+                    async move {
+                        let (data, artifact_fs, materializer) = &*shared_data;
+
+                        let configuration_hash_path = artifact_fs
+                            .resolve_build_configuration_hash_path(artifact.get_path())?;
+
+                        if artifact.get_path().is_content_based_path() {
+                            let content_based_path = artifact_fs.resolve_build(
+                                artifact.get_path(),
+                                Some(&value.content_based_path_hash()),
+                            )?;
+                            let mut builder =
+                                ArtifactValueBuilder::new(artifact_fs.fs(), digest_config);
+                            builder.add_symlinked(
+                                // The materializer doesn't care about the `src_value`.
+                                &ArtifactValue::dir(digest_config.empty_directory()),
+                                content_based_path,
+                                &configuration_hash_path,
+                            )?;
+                            let symlink_value = builder.build(&configuration_hash_path)?;
+
+                            materializer
+                            .declare_copy(configuration_hash_path.clone(), symlink_value, Vec::new())
+                            .await
+                            .buck_error_context(
+                                "Failed to declare configuration path to content-based path symlinks",
+                            )?;
+                        }
+
+                        data.try_materialize_requested_artifact(
+                            &artifact,
+                            waiting_data,
+                            force,
+                            configuration_hash_path,
+                        )
+                        .await
+                        .buck_error_context("Failed to materialize artifacts")?;
+                        buck2_error::Ok(())
+                    }
+                };
+                materialize_futs.push(maybe_spawned(&data, should_spawn, fut.boxed()));
             }
         }
 
-        ctx.try_compute_join(artifacts_to_materialize, |ctx, artifact| {
-            async move {
-                ctx.try_materialize_requested_artifact(artifact, *force)
-                    .await
-            }
-            .boxed()
-        })
-        .await
-        .buck_error_context("Failed to materialize artifacts")?;
+        buck2_util::future::try_join_all(materialize_futs).await?;
     }
 
     Ok(values)
@@ -107,10 +237,18 @@ async fn ensure_uploaded(
     let digest_config = ctx.global_data().get_digest_config();
     let artifact_fs = ctx.get_artifact_fs().await?;
     let mut dir = ActionDirectoryBuilder::empty();
-    let values = ctx.ensure_artifact_group(&artifact_group).await?;
+    let values = ctx.ensure_artifact_group(artifact_group).await?;
     for (artifact, value) in values.iter() {
-        let path = artifact.resolve_path(&artifact_fs)?;
-        buck2_execute::directory::insert_artifact(&mut dir, &path, &value)?;
+        let path = artifact.resolve_path(
+            &artifact_fs,
+            if artifact.path_resolution_requires_artifact_value() {
+                Some(value.content_based_path_hash())
+            } else {
+                None
+            }
+            .as_ref(),
+        )?;
+        buck2_execute::directory::insert_artifact(&mut dir, path, value)?;
     }
     let dir = dir.fingerprint(digest_config.as_directory_serializer());
     let re_use_case = ctx
@@ -137,13 +275,16 @@ async fn ensure_uploaded(
             &dir,
             None,
             digest_config,
+            ctx.per_transaction_data()
+                .get_run_action_knobs()
+                .deduplicate_get_digests_ttl_calls,
         )
         .await?;
 
     Ok(())
 }
 
-#[derive(Clone, Dupe)]
+#[derive(Clone, Dupe, Copy)]
 enum MaterializationContext {
     Skip,
     Materialize {
@@ -162,7 +303,7 @@ impl From<Materializations> for MaterializationContext {
     }
 }
 
-#[derive(Clone, Dupe)]
+#[derive(Clone, Dupe, Copy)]
 enum UploadContext {
     Skip,
     Upload,
@@ -176,6 +317,7 @@ impl From<Uploads> for UploadContext {
     }
 }
 
+#[derive(Clone, Dupe, Copy)]
 pub struct MaterializationAndUploadContext(MaterializationContext, UploadContext);
 impl MaterializationAndUploadContext {
     pub fn skip() -> Self {

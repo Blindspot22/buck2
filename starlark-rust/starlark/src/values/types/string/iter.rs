@@ -27,7 +27,6 @@ use starlark_derive::starlark_value;
 use crate as starlark;
 use crate::any::ProvidesStaticType;
 use crate::coerce::Coerce;
-use crate::values::FreezeResult;
 use crate::values::Heap;
 use crate::values::StarlarkValue;
 use crate::values::StringValue;
@@ -57,7 +56,7 @@ struct StringIterableGen<'v, V: ValueLike<'v>> {
 
 pub(crate) fn iterate_chars<'v>(
     string: StringValue<'v>,
-    heap: &'v Heap,
+    heap: Heap<'v>,
 ) -> ValueOfUnchecked<'v, StarlarkIter<String>> {
     ValueOfUnchecked::new(heap.alloc_complex(StringIterableGen::<'v, Value<'v>> {
         string,
@@ -67,7 +66,7 @@ pub(crate) fn iterate_chars<'v>(
 
 pub(crate) fn iterate_codepoints<'v>(
     string: StringValue<'v>,
-    heap: &'v Heap,
+    heap: Heap<'v>,
 ) -> ValueOfUnchecked<'v, StarlarkIter<String>> {
     ValueOfUnchecked::new(heap.alloc_complex(StringIterableGen::<'v, Value<'v>> {
         string,
@@ -80,7 +79,7 @@ impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StringIterableGen<'v, V>
 where
     Self: ProvidesStaticType<'v>,
 {
-    unsafe fn iterate(&self, _me: Value<'v>, heap: &'v Heap) -> crate::Result<Value<'v>> {
+    unsafe fn iterate(&self, _me: Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         // Lazy implementation: we allocate a tuple and then iterate over it.
         let iter = if self.produce_char {
             heap.alloc_tuple_iter(self.string.as_str().chars().map(|c| heap.alloc(c)))

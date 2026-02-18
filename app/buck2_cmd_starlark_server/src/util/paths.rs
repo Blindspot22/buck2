@@ -1,27 +1,28 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ops::Deref;
 
 use async_recursion::async_recursion;
 use buck2_client_ctx::path_arg::PathArg;
-use buck2_common::dice::file_ops::DiceFileComputations;
-use buck2_common::file_ops::FileType;
-use buck2_common::file_ops::RawPathMetadata;
+use buck2_common::file_ops::dice::DiceFileComputations;
+use buck2_common::file_ops::metadata::FileType;
+use buck2_common::file_ops::metadata::RawPathMetadata;
 use buck2_common::io::IoProvider;
 use buck2_core::build_file_path::BuildFilePath;
 use buck2_core::bxl::BxlFilePath;
 use buck2_core::bzl::ImportPath;
 use buck2_core::cells::CellResolver;
-use buck2_core::fs::paths::file_name::FileName;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::package::PackageLabel;
+use buck2_fs::paths::file_name::FileName;
 use buck2_interpreter::paths::package::PackageFilePath;
 use buck2_interpreter::paths::path::OwnedStarlarkPath;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
@@ -48,7 +49,7 @@ async fn starlark_file(
     io: &dyn IoProvider,
     files: &mut Vec<OwnedStarlarkPath>,
 ) -> buck2_error::Result<()> {
-    let cell_path = cell_resolver.get_cell_path(&proj_path)?;
+    let cell_path = cell_resolver.get_cell_path(&proj_path);
     if recursive.is_some()
         && DiceFileComputations::is_ignored(ctx, cell_path.as_ref())
             .await?
@@ -99,7 +100,7 @@ async fn starlark_file(
 
             if is_buildfile {
                 files.push(OwnedStarlarkPath::BuildFile(BuildFilePath::new(
-                    PackageLabel::from_cell_path(cell_path.parent().unwrap()),
+                    PackageLabel::from_cell_path(cell_path.parent().unwrap())?,
                     proj_path.file_name().unwrap().to_owned(),
                 )));
             } else if proj_path.as_str().ends_with(".bxl") {

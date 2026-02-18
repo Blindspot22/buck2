@@ -1,19 +1,27 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
+use std::env;
 use std::io;
 
 fn main() -> io::Result<()> {
     let proto_files = &["data.proto", "error.proto"];
 
-    buck2_protoc_dev::configure()
-        .setup_protoc()
+    let includes = if let Ok(path) = env::var("BUCK_PROTO_SRCS") {
+        vec![path]
+    } else {
+        vec![".".to_owned(), "../buck2_host_sharing_proto".to_owned()]
+    };
+
+    let builder = buck2_protoc_dev::configure();
+    unsafe { builder.setup_protoc() }
         .type_attribute(
             "buck.data.BuckEvent.data",
             "#[allow(clippy::large_enum_variant)]",
@@ -83,6 +91,14 @@ fn main() -> io::Result<()> {
             "buck.data.ActionError.error",
             "#[derive(::derive_more::From, ::gazebo::variants::VariantName)]",
         )
+        .field_attribute(
+            "buck.data.CommandExecutionDetails.cmd_stderr",
+            "#[serde(rename = \"stderr\")]",
+        )
+        .field_attribute(
+            "buck.data.CommandExecutionDetails.cmd_stdout",
+            "#[serde(rename = \"stdout\")]",
+        )
         .type_attribute(
             "buck.data.CommandExecutionDetails.command",
             "#[derive(::derive_more::From, ::gazebo::variants::VariantName)]",
@@ -120,14 +136,34 @@ fn main() -> io::Result<()> {
             "buck.data.MaterializationMethod",
             "#[derive(::gazebo::variants::VariantName)]",
         )
-        .type_attribute("buck.data.CpuCounter", "#[derive(Copy, dupe::Dupe)]")
-        .type_attribute("buck.data.CommandExecutionStats", "#[derive(Copy, dupe::Dupe)]")
+        .type_attribute("buck.data.CpuCounter", "#[derive(dupe::Dupe)]")
+        .type_attribute("buck.data.CommandExecutionStats", "#[derive(dupe::Dupe)]")
         .type_attribute(".", "#[derive(::serde::Serialize, ::serde::Deserialize)]")
         .type_attribute(".", "#[derive(::allocative::Allocative)]")
         .type_attribute("buck.data.SoftError", "#[derive(Eq, Hash)]")
         .field_attribute(
             "timestamp",
             "#[serde(with = \"crate::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "start_time",
+            "#[serde(default, with = \"crate::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "event_time",
+            "#[serde(default, with = \"crate::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "time_event_generated",
+            "#[serde(default, with = \"crate::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "time_collected",
+            "#[serde(default, with = \"crate::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "suspend_duration",
+            "#[serde(default, with = \"crate::serialize_duration_as_micros\")]",
         )
         .field_attribute(
             "duration",
@@ -195,6 +231,10 @@ fn main() -> io::Result<()> {
             "CriticalPathEntry2.queue_duration",
             "#[serde(rename = \"queue_duration_us\", with = \"crate::serialize_duration_as_micros\")]",
         )
+        .field_attribute(
+            "CriticalPathEntry2.non_critical_path_duration",
+            "#[serde(rename = \"non_critical_path_duration_us\", with = \"crate::serialize_duration_as_micros\")]",
+        )
         .type_attribute(
             "buck.data.CriticalPathEntry2.entry",
             "#[derive(::derive_more::From, ::gazebo::variants::VariantName)]",
@@ -232,16 +272,16 @@ fn main() -> io::Result<()> {
             "#[derive(::derive_more::From, ::gazebo::variants::VariantName)]",
         )
         .field_attribute(
+            "buck.data.Invocation.expanded_command_line_args",
+            "#[serde(default)]",
+        )
+        .field_attribute(
             "buck.data.CommandExecutionMetadata.wall_time",
             "#[serde(rename = \"wall_time_us\", with = \"crate::serialize_duration_as_micros\")]",
         )
         .field_attribute(
             "buck.data.CommandExecutionMetadata.execution_time",
             "#[serde(rename = \"execution_time_us\", with = \"crate::serialize_duration_as_micros\")]",
-        )
-        .field_attribute(
-            "buck.data.CommandExecutionMetadata.start_time",
-            "#[serde(with = \"crate::serialize_timestamp\")]",
         )
         .field_attribute(
             "buck.data.CommandExecutionMetadata.input_materialization_duration",
@@ -259,5 +299,6 @@ fn main() -> io::Result<()> {
         .boxed("SpanEndEvent.data.action_execution")
         .boxed("SpanEndEvent.data.cache_upload")
         .boxed("InstantEvent.data.snapshot")
-        .compile(proto_files, &["."])
+        .extern_path(".buck.host_sharing", "::buck2_host_sharing_proto")
+        .compile(proto_files, &includes)
 }

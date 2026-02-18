@@ -1,18 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java.lang.model;
 
-import com.facebook.buck.jvm.java.version.utils.JavaVersionUtils;
 import com.facebook.buck.util.liteinfersupport.Nullable;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -38,52 +36,25 @@ import javax.lang.model.util.Elements;
  */
 public final class MoreElements {
 
-  private static Method getAllPackageElementsMethod;
-
-  static {
-    try {
-      if (JavaVersionUtils.getMajorVersion() >= 9) {
-        getAllPackageElementsMethod =
-            Elements.class.getMethod("getAllPackageElements", CharSequence.class);
-      }
-    } catch (NoSuchMethodException e) {
-      throw new RuntimeException(e);
-    }
-  }
-
   private MoreElements() {}
 
   /** Get a package by name, even if it has no members. */
   @Nullable
   public static PackageElement getPackageElementEvenIfEmpty(
       Elements elements, CharSequence packageName) {
-    if (JavaVersionUtils.getMajorVersion() <= 8) {
-      // In Java 8 and earlier, {@link
-      // javax.lang.model.util.Elements#getPackageElement(CharSequence)} returns
-      // packages even if they have no members.
-      return elements.getPackageElement(packageName);
-    } else {
-      try {
-        // In Java 9 and later, only the new {@link
-        // javax.lang.model.util.Elements#getPackageElement(ModuleElement, CharSequence)},
-        // which {@link javax.lang.mode.util.Elements#getAllPackageElements} calls, returns empty
-        // packages.
-        @SuppressWarnings("unchecked")
-        Set<? extends PackageElement> packages =
-            (Set<? extends PackageElement>)
-                getAllPackageElementsMethod.invoke(elements, packageName);
-        if (packages.isEmpty()) {
-          return null;
-        }
-        if (packages.size() > 1) {
-          // TODO(jtorkkola): Add proper Java 9+ module support.
-          throw new IllegalStateException("Found more than one package matching " + packageName);
-        }
-        return packages.iterator().next();
-      } catch (IllegalAccessException | InvocationTargetException e) {
-        throw new RuntimeException(e);
-      }
+    // In Java 9 and later, only the new {@link
+    // javax.lang.model.util.Elements#getPackageElement(ModuleElement, CharSequence)},
+    // which {@link javax.lang.mode.util.Elements#getAllPackageElements} calls, returns empty
+    // packages.
+    Set<? extends PackageElement> packages = elements.getAllPackageElements(packageName);
+    if (packages.isEmpty()) {
+      return null;
     }
+    if (packages.size() > 1) {
+      // TODO(jtorkkola): Add proper Java 9+ module support.
+      throw new IllegalStateException("Found more than one package matching " + packageName);
+    }
+    return packages.iterator().next();
   }
 
   @Nullable

@@ -1,17 +1,19 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-unsafe
 
 import os
 import re
 import typing
-
 from pathlib import Path
+
+GOLDEN_DIRECTORY = "fixtures/"
 
 
 def _prepend_header(content: str) -> str:
@@ -181,6 +183,74 @@ def sanitize_stderr(s: str) -> str:
     s = re.sub(r"Cache hits: .+", "Cache hits: <CACHE_STATS>", s)
     # Remove "Network" line
     s = re.sub(r"Network: .+", "Network: <NETWORK_STATS>", s)
-    # Remove path from "panicked at" line
-    s = re.sub(r"panicked at .+", "panicked at <PATH>", s)
+    # Remove thread ID & path from "panicked at" line
+    s = re.sub(r"\([0-9]+\) panicked at .+", "(<THREAD_ID>) panicked at <PATH>", s)
     return sanitize_hashes(s)
+
+
+def sanitize_stacktrace(s: str) -> str:
+    s = sanitize_stderr(s)
+    return "\n".join(
+        filter(
+            lambda x: re.match(r"\[<TIMESTAMP>\]((\s+\d+:)|(\s+at )).*", x) is None,
+            s.splitlines(),
+        )
+    )
+
+
+# Build report errors can change based on minor test changes such as
+# 1. Adding a target in TARGETS.fixture
+# 2. Line number changing due to code moving around
+# Sanitize so that we only check the important bits of the error message
+def sanitize_build_report_error(s: str) -> str:
+    # Simplify analysis error message (Can change due to line number changes)
+    s = re.sub(
+        r"Error running analysis for.*\"", 'Error running analysis for <IRRELEVANT>"', s
+    )
+    # Simplify the Unknown target error (Can change due to number of targets in TARGETS.fixture)
+    s = re.sub(
+        r"Unknown target `.*` from package .*\"",
+        'Unknown target `<TARGET>` from package <IRRELEVANT>"',
+        s,
+    )
+
+    return sanitize_hashes(s)
+
+
+def sanitize_build_report(report: dict) -> None:
+    del report["trace_id"]
+    del report["project_root"]
+
+    # String cache keys can vary due to differences in platform hashes within the message
+    if "strings" in report:
+        # Sort by sanitized values
+        strings = dict(
+            sorted(
+                report["strings"].items(),
+                key=lambda item: sanitize_hashes(item[1]),
+            )
+        )
+        # Create a new dict where the keys are 1 + a large number
+        # in order for it to still be in the format of a string hash
+        updated_strings = {}
+        start = 10000000000000000
+        for i, v in enumerate(strings.values()):
+            updated_strings[i + start] = v
+
+        report["strings"] = updated_strings
+
+
+def sanitize_python(s: str, project_dir: Path) -> str:
+    # Strip absolute project dir prefix
+    s = s.replace(f"{project_dir}/", "")
+    # Match python38 error formatting (can be removed when python38 is removed everywhere)
+    s = re.sub(r" *\^+", "", s)
+    s = s.replace("SyntaxError: invalid syntax", "IndentationError: unexpected indent")
+    s = s.replace("[syntax] Syntax error!", "[indentation] Indentation error!")
+    s = re.sub(r"(\\n)+", r"\\n", s)
+    return s
+
+
+def strip_waiting_on(s: str) -> str:
+    # Strip "Waiting on" lines
+    return "\n".join(filter(lambda x: "Waiting on" not in x, s.splitlines()))

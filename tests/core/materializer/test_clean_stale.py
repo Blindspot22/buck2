@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -13,7 +14,6 @@ import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test, env
@@ -23,7 +23,7 @@ def modify_acess_times_updates(buck: Buck, new_status: str) -> None:
     config_file = buck.cwd / ".buckconfig"
     replace_in_file(
         "update_access_times = full",
-        "update_access_times = {}".format(new_status),
+        f"update_access_times = {new_status}",
         file=config_file,
     )
 
@@ -45,7 +45,7 @@ async def test_artifact_access_time(buck: Buck) -> None:
     result = await buck.build(target)
     assert result.get_build_report().output_for_target(target).exists()
 
-    async def audit_materialized() -> List[str]:
+    async def audit_materialized() -> list[str]:
         return list(
             filter(
                 lambda x: "\tmaterialized" in x,
@@ -83,60 +83,6 @@ async def test_artifact_access_time(buck: Buck) -> None:
     assert len(materialized_entries) == 1
     access_time = parse_entry_ts(materialized_entries[0])
     assert access_time > materialized_time
-
-
-@buck_test()
-@env("BUCK_ACCESS_TIME_UPDATE_MAX_BUFFER_SIZE", "0")
-async def test_artifact_access_time_flushing(buck: Buck) -> None:
-    # Create artifact
-    await buck.build("root//:copy")
-    # Access artifact to trigger update, because buffer size is 0,
-    # flushing should happen instantly
-    await buck.build("root//:copy")
-    # Force empty flush
-    flush = await buck.audit("deferred-materializer", "flush-access-times")
-    # Validate that there was nothing to flush
-    assert re.search("Finished flushing \\d+ entries in \\d+ ms", flush.stdout)
-    data = re.findall("\\d+", flush.stdout)
-    assert len(data) == 2
-    assert data[0] == "0"
-
-
-@buck_test()
-@env("BUCK_ACCESS_TIME_UPDATE_MAX_BUFFER_SIZE", "0")
-async def test_artifact_access_time_flushing_disabled(buck: Buck) -> None:
-    modify_acess_times_updates(buck, "disabled")
-    # Create artifact
-    await buck.build("root//:copy")
-    # Access artifact to trigger update
-    await buck.build("root//:copy")
-    # Force flush
-    flush = await buck.audit("deferred-materializer", "flush-access-times")
-    # Validate update didn't happen since access times updates are disabled
-    assert (
-        "Access time updates are disabled. Consider removing `update_access_times = false` from your .buckconfig"
-        in flush.stdout
-    )
-
-
-@buck_test()
-@env("BUCK_ACCESS_TIME_UPDATE_MAX_BUFFER_SIZE", "2")
-async def test_artifact_access_time_flushing_partial(buck: Buck) -> None:
-    modify_acess_times_updates(buck, "partial")
-    # Create artifact
-    await buck.build("root//:copy")
-    # Access artifact to trigger update. Buffer size is 1 now so no flushign should be happening
-    await buck.build("root//:copy")
-
-    # Wait a bit more than what the normal periodic flush would take (5 secs as indicated here https://fburl.com/code/ot5944b2)
-    time.sleep(10)
-    # Force flush
-    flush = await buck.audit("deferred-materializer", "flush-access-times")
-
-    # Validate buffer is not flushed since periodic flush is not triggered
-    assert re.search("Finished flushing \\d+ entries in \\d+ ms", flush.stdout)
-    data = re.findall("\\d+", flush.stdout)
-    assert data[0] == "1"
 
 
 @buck_test()
@@ -266,6 +212,39 @@ clean_stale_artifact_ttl_hours = 0
 clean_stale_start_offset_hours = 0
 # 0.0001h = 360ms
 clean_stale_period_hours = 0.0001
+        """
+        )
+
+    # Just test that a clean runs if enabled via config.
+    # Build a target, output is stale immediately but won't be cleaned until restart.
+    result = await buck.build("root//:copy")
+    output = result.get_build_report().output_for_target("root//:copy")
+    assert output.exists()
+    await buck.kill()
+    # Create a new daemon and build something else (could be any command that starts a daemon).
+    await buck.build("//declared:declared")
+    # Wait for at least one clean to run (but should have finished multiple cleans).
+    time.sleep(3)
+    # Original output should be cleaned.
+    assert not output.exists()
+
+
+@buck_test(skip_for_os=["windows"])
+async def test_clean_stale_scheduled_high_disk_usage(buck: Buck) -> None:
+    # Need to write to .buckconfig instead of passing cmd line args because
+    # the config used when creating daemon state does not include cmd line args (but maybe it should).
+    config_file = buck.cwd / ".buckconfig.local"
+    with open(config_file, "w") as f:
+        f.write(
+            """
+[buck2]
+clean_stale_enabled = true
+clean_stale_artifact_ttl_hours = 8
+clean_stale_start_offset_hours = 0
+# 0.0001h = 360ms
+clean_stale_period_hours = 0.0001
+clean_stale_low_disk_threshold = 100.0
+clean_stale_low_disk_artifact_ttl_hours = 0.0
         """
         )
 

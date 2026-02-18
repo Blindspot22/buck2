@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fs::File;
 use std::fs::create_dir_all;
-use std::mem;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,12 +18,13 @@ use buck2_cli_proto::new_generic::NewGenericRequest;
 use buck2_cli_proto::new_generic::NewGenericResponse;
 use buck2_cli_proto::*;
 use buck2_common::daemon_dir::DaemonDir;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::file_name::FileName;
 use buck2_data::error::ErrorTag;
 use buck2_error::BuckErrorContext;
 use buck2_event_log::stream_value::StreamValue;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::file_name::FileName;
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -38,10 +39,10 @@ use tonic::transport::Channel;
 use crate::command_outcome::CommandOutcome;
 use crate::console_interaction_stream::ConsoleInteractionStream;
 use crate::daemon::client::connect::BuckAddAuthTokenInterceptor;
+use crate::events_ctx::DaemonEventsCtx;
 use crate::events_ctx::EventsCtx;
 use crate::events_ctx::PartialResultCtx;
 use crate::events_ctx::PartialResultHandler;
-use crate::file_tailers::tailers::FileTailers;
 
 pub mod connect;
 pub mod kill;
@@ -62,7 +63,7 @@ pub struct BuckdClientConnector {
 }
 
 impl BuckdClientConnector {
-    pub fn with_flushing(&mut self) -> FlushingBuckdClient {
+    pub fn with_flushing(&mut self) -> FlushingBuckdClient<'_> {
         FlushingBuckdClient {
             inner: &mut self.client,
         }
@@ -78,6 +79,14 @@ pub struct BuckdLifecycleLock {
     lock_file: File,
 }
 
+#[derive(Debug, buck2_error::Error)]
+#[buck2(tag = BuckdLifecycleLock)]
+#[error("Error locking buckd.lifecycle: {error:#}")]
+pub struct LifecycleLockError {
+    #[source]
+    error: buck2_error::Error,
+}
+
 impl BuckdLifecycleLock {
     const BUCKD_LIFECYCLE: &'static str = "buckd.lifecycle";
     const BUCKD_PREV_DIR: &'static str = "prev";
@@ -85,24 +94,36 @@ impl BuckdLifecycleLock {
     pub async fn lock_with_timeout(
         daemon_dir: DaemonDir,
         deadline: StartupDeadline,
-    ) -> buck2_error::Result<BuckdLifecycleLock> {
-        create_dir_all(&daemon_dir.path)?;
-        let lifecycle_path = daemon_dir.path.as_path().join(Self::BUCKD_LIFECYCLE);
-        let file = File::create(lifecycle_path)?;
-        let fileref = &file;
-        deadline
-            .retrying(
-                "locking buckd lifecycle",
-                Duration::from_millis(5),
-                Duration::from_millis(100),
-                || async { Ok(fs4::fs_std::FileExt::try_lock_exclusive(fileref)?) },
-            )
-            .await?;
+    ) -> Result<BuckdLifecycleLock, LifecycleLockError> {
+        async fn lock_inner(
+            daemon_dir: DaemonDir,
+            deadline: StartupDeadline,
+        ) -> buck2_error::Result<BuckdLifecycleLock> {
+            create_dir_all(&daemon_dir.path)?;
+            let lifecycle_path = daemon_dir
+                .path
+                .as_path()
+                .join(BuckdLifecycleLock::BUCKD_LIFECYCLE);
+            let file = File::create(lifecycle_path)?;
+            let fileref = &file;
+            deadline
+                .retrying(
+                    "locking buckd lifecycle",
+                    Duration::from_millis(5),
+                    Duration::from_millis(100),
+                    || async { Ok(fs4::fs_std::FileExt::try_lock_exclusive(fileref)?) },
+                )
+                .await?;
 
-        Ok(BuckdLifecycleLock {
-            lock_file: file,
-            daemon_dir,
-        })
+            Ok(BuckdLifecycleLock {
+                lock_file: file,
+                daemon_dir,
+            })
+        }
+
+        lock_inner(daemon_dir, deadline)
+            .await
+            .map_err(|e| LifecycleLockError { error: e })
     }
 
     /// Remove everything except `buckd.lifecycle` file which is the lock file.
@@ -114,13 +135,13 @@ impl BuckdLifecycleLock {
             .join(FileName::new(Self::BUCKD_PREV_DIR).unwrap());
         if keep_prev {
             if prev_daemon_dir.is_dir() {
-                fs_util::remove_dir_all(&prev_daemon_dir)?;
+                fs_util::remove_dir_all(&prev_daemon_dir).categorize_internal()?;
             }
             fs_util::create_dir_all(&prev_daemon_dir)?;
         }
 
         let mut seen_lifecycle = false;
-        for p in fs_util::read_dir(&self.daemon_dir.path)? {
+        for p in fs_util::read_dir(&self.daemon_dir.path).categorize_internal()? {
             let p = p?;
             if p.file_name() == Self::BUCKD_LIFECYCLE {
                 seen_lifecycle = true;
@@ -130,10 +151,11 @@ impl BuckdLifecycleLock {
                 if p.file_name() != Self::BUCKD_PREV_DIR {
                     let file_name = p.file_name();
                     let file_name = FileName::from_os_string(&file_name)?;
-                    fs_util::rename(p.path(), prev_daemon_dir.join(file_name))?;
+                    fs_util::rename(p.path(), prev_daemon_dir.join(file_name))
+                        .categorize_internal()?;
                 }
             } else {
-                fs_util::remove_all(p.path())?;
+                fs_util::remove_all(p.path()).categorize_internal()?;
             }
         }
         if !seen_lifecycle {
@@ -162,9 +184,7 @@ impl Drop for BuckdLifecycleLock {
 pub struct BuckdClient {
     client: DaemonApiClient<InterceptedService<Channel, BuckAddAuthTokenInterceptor>>,
     constraints: buck2_cli_proto::DaemonConstraints,
-    daemon_dir: DaemonDir,
-    // TODO(brasselsprouts): events_ctx should own tailers
-    tailers: Option<FileTailers>,
+    pub(crate) daemon_dir: DaemonDir,
 }
 
 #[derive(Debug, buck2_error::Error)]
@@ -232,20 +252,13 @@ fn grpc_to_stream(
 }
 
 impl BuckdClient {
-    fn open_tailers(&mut self) -> buck2_error::Result<()> {
-        let tailers = FileTailers::new(&self.daemon_dir)?;
-        self.tailers = Some(tailers);
-
-        Ok(())
-    }
-
     /// Some commands stream events back from the server.
     /// For these commands, we want to be able to manipulate CLI state.
-    async fn stream<'i, T, Res, Handler, Command>(
+    async fn stream<'i, 'j, T, Res, Handler, Command>(
         &mut self,
         command: Command,
         request: T,
-        events_ctx: &mut EventsCtx,
+        events_ctx: &mut DaemonEventsCtx<'j>,
         partial_result_handler: &mut Handler,
         console_interaction: Option<ConsoleInteractionStream<'i>>,
     ) -> buck2_error::Result<CommandOutcome<Res>>
@@ -269,25 +282,22 @@ impl BuckdClient {
         let stream = grpc_to_stream(response);
         pin_mut!(stream);
         events_ctx
-            .unpack_stream(
-                partial_result_handler,
-                stream,
-                self.tailers.take(),
-                console_interaction,
-            )
+            .unpack_stream(partial_result_handler, stream, console_interaction)
             .await
     }
 
-    pub async fn status(
+    pub async fn status<'a>(
         &mut self,
-        events_ctx: &mut EventsCtx,
+        events_ctx: &mut DaemonEventsCtx<'a>,
         snapshot: bool,
+        include_tokio_runtime_metrics: bool,
     ) -> buck2_error::Result<StatusResponse> {
         let outcome = events_ctx
             // Safe to unwrap tailers here because they are instantiated prior to a command being called.
-            .unpack_oneshot(mem::take(&mut self.tailers), {
-                self.client.status(Request::new(StatusRequest { snapshot }))
-            })
+            .unpack_oneshot(self.client.status(Request::new(StatusRequest {
+                snapshot,
+                include_tokio_runtime_metrics,
+            })))
             .await;
         // TODO(nmj): We have a number of things that wish to use status() and return an buck2_error::Result,
         // for now we'll just turn a "CommandMessage" into a error, but that's really not what we
@@ -301,9 +311,9 @@ impl BuckdClient {
         }
     }
 
-    pub async fn set_log_filter(
+    pub async fn set_log_filter<'a>(
         &mut self,
-        _events_ctx: &mut EventsCtx,
+        _events_ctx: &mut DaemonEventsCtx<'a>,
         req: SetLogFilterRequest,
     ) -> buck2_error::Result<()> {
         self.client.set_log_filter(Request::new(req)).await?;
@@ -314,19 +324,6 @@ impl BuckdClient {
 
 pub struct FlushingBuckdClient<'a> {
     inner: &'a mut BuckdClient,
-}
-
-impl FlushingBuckdClient<'_> {
-    fn enter(&mut self) -> buck2_error::Result<()> {
-        self.inner.open_tailers()?;
-        Ok(())
-    }
-
-    async fn exit(&mut self, events_ctx: &mut EventsCtx) -> buck2_error::Result<()> {
-        events_ctx.flush(mem::take(&mut self.inner.tailers)).await?;
-
-        Ok(())
-    }
 }
 
 pub enum NoPartialResult {}
@@ -384,13 +381,13 @@ macro_rules! stream_method {
             console_interaction: Option<ConsoleInteractionStream<'j>>,
             handler: &mut impl PartialResultHandler<PartialResult = $message>,
         ) -> buck2_error::Result<CommandOutcome<$res>> {
-            self.enter()?;
+            let mut events_ctx = DaemonEventsCtx::new(self.inner, events_ctx)?;
             let res = self
                 .inner
                 .stream(
                     |d, r| Box::pin(DaemonApiClient::$grpc_method(d, r)),
                     req,
-                    events_ctx,
+                    &mut events_ctx,
                     // For now we only support handlers that can be constructed like so, and we
                     // don't let anything go out. Eventually if we wanted to stream structured
                     // data, that could change.
@@ -398,7 +395,7 @@ macro_rules! stream_method {
                     console_interaction,
                 )
                 .await;
-            self.exit(events_ctx).await?;
+            events_ctx.flush().await?;
             res
         }
     };
@@ -418,19 +415,19 @@ macro_rules! bidirectional_stream_method {
             events_ctx: &mut EventsCtx,
             handler: &mut impl PartialResultHandler<PartialResult = $message>,
         ) -> buck2_error::Result<CommandOutcome<$res>> {
-            self.enter()?;
+            let mut events_ctx = DaemonEventsCtx::new(self.inner, events_ctx)?;
             let req = create_client_stream(context, requests);
             let res = self
                 .inner
                 .stream(
                     |d, r| Box::pin(DaemonApiClient::$method(d, r)),
                     req,
-                    events_ctx,
+                    &mut events_ctx,
                     handler,
                     None,
                 )
                 .await;
-            self.exit(events_ctx).await?;
+            events_ctx.flush().await?;
             res
         }
     };
@@ -448,13 +445,11 @@ macro_rules! oneshot_method {
             req: $req,
             events_ctx: &mut EventsCtx,
         ) -> buck2_error::Result<CommandOutcome<$res>> {
-            self.enter()?;
+            let mut events_ctx = DaemonEventsCtx::new(self.inner, events_ctx)?;
             let res = events_ctx
-                .unpack_oneshot(mem::take(&mut self.inner.tailers), {
-                    self.inner.client.$method(Request::new(req))
-                })
+                .unpack_oneshot({ self.inner.client.$method(Request::new(req)) })
                 .await;
-            self.exit(events_ctx).await?;
+            events_ctx.flush().await?;
             res
         }
     };
@@ -472,9 +467,9 @@ macro_rules! debug_method {
             req: $req,
             events_ctx: &mut EventsCtx,
         ) -> buck2_error::Result<$res> {
-            self.enter()?;
+            let mut events_ctx = DaemonEventsCtx::new(self.inner, events_ctx)?;
             let out = self.inner.client.$method(Request::new(req)).await;
-            self.exit(events_ctx).await?;
+            events_ctx.flush().await?;
             Ok(out?.into_inner())
         }
     };
@@ -482,17 +477,17 @@ macro_rules! debug_method {
 
 /// Wrap a method that exists on the BuckdClient, with flushing.
 macro_rules! wrap_method {
-     ($method: ident ($($param: ident : $param_type: ty),*), $res: ty) => {
-         pub async fn $method(&mut self, events_ctx: &mut EventsCtx, $($param: $param_type)*) -> buck2_error::Result<$res> {
-             self.enter()?;
-             let out = self
-                 .inner
-                 .$method(events_ctx, $($param)*)
-                 .await;
-             self.exit(events_ctx).await?;
-             out
-         }
-     };
+    ($method: ident ($($param: ident : $param_type: ty),*), $res: ty) => {
+        pub async fn $method(&mut self, events_ctx: &mut EventsCtx, $($param: $param_type)*) -> buck2_error::Result<$res> {
+            let mut events_ctx = DaemonEventsCtx::new(self.inner, events_ctx)?;
+            let out = self
+                .inner
+                .$method(&mut events_ctx, $($param)*)
+                .await;
+            events_ctx.flush().await?;
+            out
+        }
+    };
  }
 
 impl FlushingBuckdClient<'_> {
@@ -608,7 +603,21 @@ impl FlushingBuckdClient<'_> {
         UnstableDiceDumpResponse
     );
 
-    wrap_method!(status(snapshot: bool), StatusResponse);
+    pub async fn status(
+        &mut self,
+        events_ctx: &mut EventsCtx,
+        snapshot: bool,
+        include_tokio_runtime_metrics: bool,
+    ) -> buck2_error::Result<StatusResponse> {
+        let mut events_ctx = DaemonEventsCtx::new(self.inner, events_ctx)?;
+        let out = self
+            .inner
+            .status(&mut events_ctx, snapshot, include_tokio_runtime_metrics)
+            .await;
+        events_ctx.flush().await?;
+        out
+    }
+
     wrap_method!(set_log_filter(log_filter: SetLogFilterRequest), ());
     stream_method!(trace_io, TraceIoRequest, TraceIoResponse, NoPartialResult);
 

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load(
@@ -19,63 +20,38 @@ load(
     ":erlang_info.bzl",
     "ErlangAppInfo",
     "ErlangReleaseInfo",
-    "ErlangToolchainInfo",
 )
 load(
     ":erlang_toolchain.bzl",
     "Toolchain",  # @unused Used as type
-    "get_primary",
-    "select_toolchains",
+    "get_toolchain",
 )
-load(":erlang_utils.bzl", "action_identifier")
 
 # Erlang Releases according to https://www.erlang.org/doc/design_principles/release_structure.html
 
 def erlang_release_impl(ctx: AnalysisContext) -> list[Provider]:
-    all_apps = flatten_dependencies(ctx, _dependencies(ctx))
+    apps = flatten_dependencies(_dependencies(ctx))
 
-    if ctx.attrs.multi_toolchain != None:
-        return _build_multi_toolchain_releases(ctx, all_apps, ctx.attrs.multi_toolchain)
-    else:
-        return _build_primary_release(ctx, all_apps)
-
-def _build_multi_toolchain_releases(
-        ctx: AnalysisContext,
-        apps: ErlAppDependencies,
-        configured_toolchains: list[Dependency]) -> list[Provider]:
-    """build the release for all toolchains with the structure being releases/<toolchain>/<relname>"""
-    all_toolchains = select_toolchains(ctx)
-    toolchains = _get_configured_toolchains(all_toolchains, configured_toolchains)
-    outputs = {}
-    for toolchain in toolchains.values():
-        outputs[toolchain.name] = _build_release(ctx, toolchain, apps)
-    releases_dir = _symlink_multi_toolchain_output(ctx, outputs)
-    return [DefaultInfo(default_output = releases_dir), ErlangReleaseInfo(name = _relname(ctx))]
-
-def _get_configured_toolchains(
-        toolchains: dict[str, Toolchain],
-        configured_toolchains: list[Dependency]) -> dict[str, Toolchain]:
-    retval = {}
-    for dep in configured_toolchains:
-        if not dep[ErlangToolchainInfo]:
-            fail("{} is not a valid toolchain target".format(dep))
-
-        toolchain_info = dep[ErlangToolchainInfo]
-        retval[toolchain_info.name] = toolchains[toolchain_info.name]
-    return retval
-
-def _build_primary_release(ctx: AnalysisContext, apps: ErlAppDependencies) -> list[Provider]:
-    """build the release only with the primary toolchain with the release folder on the top-level"""
-    toolchains = select_toolchains(ctx)
-    primary_toolchain = toolchains[get_primary(ctx)]
-    all_outputs = _build_release(ctx, primary_toolchain, apps)
+    all_outputs = _build_release(ctx, apps)
     release_dir = _symlink_primary_toolchain_output(ctx, all_outputs)
     return [DefaultInfo(default_output = release_dir), ErlangReleaseInfo(name = _relname(ctx))]
 
-def _build_release(ctx: AnalysisContext, toolchain: Toolchain, apps: ErlAppDependencies) -> dict[str, Artifact]:
+def _build_release(ctx: AnalysisContext, apps: ErlAppDependencies) -> dict[str, Artifact]:
+    toolchain = get_toolchain(ctx)
+
+    # Validate include_erts configuration
+    _validate_include_erts(ctx, toolchain)
+
     # OTP base structure
-    lib_dir = build_lib_dir(ctx, toolchain, apps)
-    boot_scripts = _build_boot_script(ctx, toolchain, lib_dir["lib"])
+    lib_dir = build_lib_dir(ctx, apps)
+
+    # erts
+    maybe_erts = _build_erts(ctx, toolchain)
+
+    maybe_boot_scripts = _build_boot_script(ctx, toolchain, lib_dir["lib"])
+
+    # start_erl.data for releases with bundled ERTS
+    maybe_start_erl_data = _build_start_erl_data(ctx, toolchain)
 
     # release specific variables in bin/release_variables
     release_variables = _build_release_variables(ctx, toolchain)
@@ -83,14 +59,12 @@ def _build_release(ctx: AnalysisContext, toolchain: Toolchain, apps: ErlAppDepen
     # Overlays
     overlays = _build_overlays(ctx)
 
-    # erts
-    maybe_erts = _build_erts(ctx, toolchain)
-
     # link output
     all_outputs = {}
     for outputs in [
         lib_dir,
-        boot_scripts,
+        maybe_boot_scripts,
+        maybe_start_erl_data,
         overlays,
         release_variables,
         maybe_erts,
@@ -101,22 +75,24 @@ def _build_release(ctx: AnalysisContext, toolchain: Toolchain, apps: ErlAppDepen
 
 def build_lib_dir(
         ctx: AnalysisContext,
-        toolchain: Toolchain,
         all_apps: ErlAppDependencies) -> dict[str, Artifact]:
     """Build lib dir according to OTP specifications.
 
     .. seealso:: `OTP Design Principles Release Structure <https://www.erlang.org/doc/design_principles/release_structure.html>`_
     """
-    build_dir = erlang_build.utils.build_dir(toolchain)
+    include_erts = False
+    if "include_erts" in dir(ctx.attrs):
+        include_erts = ctx.attrs.include_erts
 
     link_spec = {
-        _app_folder(toolchain, dep): dep[ErlangAppInfo].app_folders[toolchain.name]
+        (dep[ErlangAppInfo].name + "-" + dep[ErlangAppInfo].version): dep[ErlangAppInfo].app_folder
         for dep in all_apps.values()
-        if ErlangAppInfo in dep and not dep[ErlangAppInfo].virtual
+        if ErlangAppInfo in dep and
+           (include_erts or not dep[ErlangAppInfo].virtual)
     }
 
     lib_dir = ctx.actions.symlinked_dir(
-        paths.join(build_dir, "lib"),
+        paths.join(erlang_build.utils.BUILD_DIR, "lib"),
         link_spec,
     )
     return {"lib": lib_dir}
@@ -125,9 +101,14 @@ def _build_boot_script(
         ctx: AnalysisContext,
         toolchain: Toolchain,
         lib_dir: Artifact) -> dict[str, Artifact]:
-    """Build Name.rel, start.script, and start.boot in the release folder."""
+    """Build Name.rel, start.script, and start.boot in the release folder.
+
+    Boot scripts are always generated regardless of include_erts setting.
+    When include_erts=False (default), OTP applications use runtime version discovery.
+    When include_erts=True, explicit versions from the toolchain are used and additional
+    no_dot_erlang boot scripts are generated for the self-contained release.
+    """
     release_name = _relname(ctx)
-    build_dir = erlang_build.utils.build_dir(toolchain)
 
     start_type_mapping = _dependencies_with_start_types(ctx)
     root_apps = _dependencies(ctx)
@@ -137,7 +118,7 @@ def _build_boot_script(
         (app, start_type_mapping[_app_name(app)])
         for app in root_apps
     ]
-    start_dependencies = build_apps_start_dependencies(ctx, toolchain, root_apps_with_start_type)
+    start_dependencies = build_apps_start_dependencies(ctx, root_apps_with_start_type)
 
     root_set = ctx.actions.tset(
         StartDependencySet,
@@ -172,42 +153,45 @@ def _build_boot_script(
             root_apps_spec[spec.name] = app_spec
         else:
             release_applications.append(app_spec)
-    release_applications = [root_apps_spec[app_name] for app_name in root_apps_names] + release_applications
+    for app_name in root_apps_names[::-1]:
+        release_applications.append(root_apps_spec[app_name])
 
     data = {
-        "apps": release_applications,
+        "apps": release_applications[::-1],
         "lib_dir": lib_dir,
         "name": release_name,
         "version": ctx.attrs.version,
     }
 
-    spec_file = ctx.actions.write_json(paths.join(build_dir, "boot_script_spec.json"), data, with_inputs = True)
+    spec_file = ctx.actions.write_json(paths.join(erlang_build.utils.BUILD_DIR, "boot_script_spec.json"), data, with_inputs = True)
 
-    scripts_dir = ctx.actions.declare_output(build_dir, "scripts", dir = True)
-
-    script = toolchain.boot_script_builder
-    boot_script_build_cmd = cmd_args(
-        toolchain.otp_binaries.escript,
-        script,
-        spec_file,
-        scripts_dir.as_output(),
-    )
+    scripts_dir = ctx.actions.declare_output(erlang_build.utils.BUILD_DIR, "scripts", dir = True)
 
     erlang_build.utils.run_with_env(
         ctx,
         toolchain,
-        boot_script_build_cmd,
+        cmd_args(toolchain.boot_script_builder, spec_file, scripts_dir.as_output()),
         category = "build_boot_script",
-        identifier = action_identifier(toolchain, release_name),
+        identifier = release_name,
     )
+
+    # Always include the standard boot scripts
+    boot_files = [
+        "{}.rel".format(release_name),
+        "start.script",
+        "start.boot",
+    ]
+
+    # Only include no_dot_erlang boot scripts for self-contained releases with bundled ERTS
+    if ctx.attrs.include_erts:
+        boot_files.extend([
+            "no_dot_erlang.script",
+            "no_dot_erlang.boot",
+        ])
 
     return {
         paths.join("releases", ctx.attrs.version, file): scripts_dir.project(file)
-        for file in [
-            "{}.rel".format(release_name),
-            "start.script",
-            "start.boot",
-        ]
+        for file in boot_files
     }
 
 def _build_overlays(ctx: AnalysisContext) -> dict[str, Artifact]:
@@ -224,78 +208,74 @@ def _build_overlays(ctx: AnalysisContext) -> dict[str, Artifact]:
 def _build_release_variables(ctx: AnalysisContext, toolchain: Toolchain) -> dict[str, Artifact]:
     release_name = _relname(ctx)
 
-    short_path = paths.join("bin", "release_variables")
+    short_path = "bin/release_variables"
     release_variables = ctx.actions.declare_output(
-        erlang_build.utils.build_dir(toolchain),
+        erlang_build.utils.BUILD_DIR,
         "release_variables",
     )
 
     spec_file = ctx.actions.write_json(
-        paths.join(erlang_build.utils.build_dir(toolchain), "relvars.json"),
+        paths.join(erlang_build.utils.BUILD_DIR, "relvars.json"),
         {
             "REL_NAME": release_name,
             "REL_VSN": ctx.attrs.version,
         },
     )
 
-    release_variables_build_cmd = cmd_args(
-        toolchain.otp_binaries.escript,
-        toolchain.release_variables_builder,
-        spec_file,
-        release_variables.as_output(),
-    )
-
     erlang_build.utils.run_with_env(
         ctx,
         toolchain,
-        release_variables_build_cmd,
+        cmd_args(toolchain.release_variables_builder, spec_file, release_variables.as_output()),
         category = "build_release_variables",
-        identifier = action_identifier(toolchain, release_name),
+        identifier = release_name,
     )
     return {short_path: release_variables}
 
-def _build_erts(ctx: AnalysisContext, toolchain: Toolchain) -> dict[str, Artifact]:
+def _build_erts(
+        ctx: AnalysisContext,
+        toolchain: Toolchain) -> dict[str, Artifact]:
     if not ctx.attrs.include_erts:
         return {}
 
     release_name = _relname(ctx)
 
-    short_path = "erts"
-
-    erts_dir = paths.join(
-        erlang_build.utils.build_dir(toolchain),
-        release_name,
-        short_path,
-    )
-
-    output_artifact = ctx.actions.declare_output(erts_dir)
-    ctx.actions.run(
-        cmd_args(
-            toolchain.otp_binaries.escript,
-            toolchain.include_erts,
-            output_artifact.as_output(),
+    erts_dir = ctx.actions.symlink_file(
+        paths.join(
+            erlang_build.utils.BUILD_DIR,
+            release_name,
+            "erts-{}".format(toolchain.erts_toolchain_info.erts_version),
         ),
-        category = "include_erts",
-        identifier = action_identifier(toolchain, release_name),
+        toolchain.erts_toolchain_info.output,
     )
 
-    return {short_path: output_artifact}
+    return {"erts-{}".format(toolchain.erts_toolchain_info.erts_version): erts_dir}
 
-def _symlink_multi_toolchain_output(ctx: AnalysisContext, toolchain_artifacts: dict[str, dict[str, Artifact]]) -> Artifact:
-    link_spec = {}
-    relname = _relname(ctx)
+def _build_start_erl_data(
+        ctx: AnalysisContext,
+        toolchain: Toolchain) -> dict[str, Artifact]:
+    """Generate start_erl.data file for releases with bundled ERTS.
 
-    for toolchain_name, artifacts in toolchain_artifacts.items():
-        prefix = paths.join(toolchain_name, relname)
-        link_spec.update({
-            paths.join(prefix, path): artifact
-            for path, artifact in artifacts.items()
-        })
+    This file contains the ERTS version and release version,
+    used by the release boot scripts to determine which ERTS and
+    release to start.
 
-    return ctx.actions.symlinked_dir(
-        "releases",
-        link_spec,
+    Format: <ERTS_VERSION> <RELEASE_VERSION>
+    Example: 15.1 1.0.0
+    """
+    if not ctx.attrs.include_erts:
+        return {}
+
+    content = "{} {}\n".format(
+        toolchain.erts_toolchain_info.erts_version,
+        ctx.attrs.version,
     )
+
+    start_erl_data = ctx.actions.write(
+        paths.join(erlang_build.utils.BUILD_DIR, "start_erl.data"),
+        content,
+    )
+
+    return {"releases/start_erl.data": start_erl_data}
 
 def _symlink_primary_toolchain_output(ctx: AnalysisContext, artifacts: dict[str, Artifact]) -> Artifact:
     return ctx.actions.symlinked_dir(
@@ -305,10 +285,6 @@ def _symlink_primary_toolchain_output(ctx: AnalysisContext, artifacts: dict[str,
 
 def _relname(ctx: AnalysisContext) -> str:
     return ctx.attrs.release_name if ctx.attrs.release_name else ctx.attrs.name
-
-def _app_folder(toolchain: Toolchain, dep: Dependency) -> str:
-    """Build folder names (i.e., name-version) from an Erlang Application dependency."""
-    return "%s-%s" % (dep[ErlangAppInfo].name, dep[ErlangAppInfo].version[toolchain.name])
 
 def _dependencies(ctx: AnalysisContext) -> list[Dependency]:
     """Extract dependencies from `applications` field, order preserving"""
@@ -333,3 +309,59 @@ def _dependencies_with_start_types(ctx: AnalysisContext) -> dict[str, StartType]
 def _app_name(app: Dependency) -> str:
     """Helper to unwrap the name for an erlang application dependency"""
     return app[ErlangAppInfo].name
+
+def _validate_include_erts(ctx: AnalysisContext, toolchain: Toolchain) -> None:
+    """Validate that include_erts is properly configured with required version information"""
+    if not ctx.attrs.include_erts:
+        return
+
+    # Check if applications list is empty (dynamic mode)
+    if not toolchain.erts_toolchain_info.applications:
+        fail("""
+ERROR: include_erts=True requires explicit OTP application versions in your erlang_toolchain.
+
+Currently, your erlang_toolchain does not have the 'applications' attribute configured,
+which is required for creating self-contained releases with bundled ERTS.
+
+To fix this:
+
+1. Generate OTP version information from your Erlang installation:
+
+   $ python3 buck2/prelude/erlang/toolchain/generate_otp_versions.py my_otp_versions.bzl
+
+2. Commit the generated file and load it in your BUCK file:
+
+   load(":my_otp_versions.bzl", "get_otp_applications", "get_erts_version")
+
+3. Configure your erlang_toolchain with the application versions:
+
+   erlang_toolchain(
+       name = "my-toolchain",
+       applications = get_otp_applications(),
+       erts_version = get_erts_version(),
+       otp_binaries = "...",
+       # ... other configuration
+   )
+
+Alternatively, if you don't need a self-contained release with bundled ERTS,
+set include_erts=False (or remove it, as False is the default).
+
+Documentation: https://buck2.build/docs/prelude/erlang/
+Target: {target}
+""".format(target = str(ctx.label)))
+
+    # Check if erts_version is still dynamic
+    if toolchain.erts_toolchain_info.erts_version == "dynamic":
+        fail("""
+ERROR: include_erts=True requires an explicit erts_version in your erlang_toolchain.
+
+Current erts_version is 'dynamic' which only works when include_erts=False.
+
+Please ensure you've configured your erlang_toolchain with:
+  - applications = get_otp_applications()  # from generated .bzl file
+  - erts_version = get_erts_version()      # from generated .bzl file
+
+See the error message above for how to generate the version configuration.
+
+Target: {target}
+""".format(target = str(ctx.label)))

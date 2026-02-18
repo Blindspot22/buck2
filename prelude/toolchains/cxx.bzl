@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//cxx:cxx_toolchain_types.bzl",
@@ -14,6 +15,7 @@ load(
     "CxxInternalTools",
     "CxxPlatformInfo",
     "CxxToolchainInfo",
+    "DepTrackingMode",
     "LinkerInfo",
     "LinkerType",
     "PicBehavior",
@@ -128,10 +130,19 @@ def _cxx_toolchain_from_cxx_tools_info(ctx: AnalysisContext, cxx_tools_info: Cxx
     if hasattr(ctx.attrs, "supports_two_phase_compilation"):
         supports_two_phase_compilation = ctx.attrs.supports_two_phase_compilation
 
+    if cxx_tools_info.compiler_type == "clang" or cxx_tools_info.compiler_type == "clang_cl" or cxx_tools_info.compiler_type == "clang_windows":
+        cpp_dep_tracking_mode = DepTrackingMode("show_headers")
+    elif cxx_tools_info.compiler_type == "windows":
+        cpp_dep_tracking_mode = DepTrackingMode("show_includes")
+    elif cxx_tools_info.compiler_type == "gcc":
+        cpp_dep_tracking_mode = DepTrackingMode("makefile")
+    else:
+        cpp_dep_tracking_mode = DepTrackingMode("none")
+
     return [
         DefaultInfo(),
         CxxToolchainInfo(
-            internal_tools = ctx.attrs._internal_tools[CxxInternalTools],
+            internal_tools = ctx.attrs.internal_tools[CxxInternalTools],
             linker_info = LinkerInfo(
                 linker = _run_info(cxx_tools_info.linker),
                 linker_flags = additional_linker_flags + ctx.attrs.link_flags,
@@ -179,12 +190,14 @@ def _cxx_toolchain_from_cxx_tools_info(ctx: AnalysisContext, cxx_tools_info: Cxx
                 compiler_flags = ctx.attrs.cxx_flags,
                 compiler_type = cxx_tools_info.compiler_type,
                 supports_two_phase_compilation = supports_two_phase_compilation,
+                supports_content_based_paths = ctx.attrs.supports_content_based_paths,
             ),
             c_compiler_info = CCompilerInfo(
                 compiler = _run_info(cxx_tools_info.compiler),
                 preprocessor_flags = [],
                 compiler_flags = ctx.attrs.c_flags,
                 compiler_type = cxx_tools_info.compiler_type,
+                supports_content_based_paths = ctx.attrs.supports_content_based_paths,
             ),
             as_compiler_info = CCompilerInfo(
                 compiler = _run_info(cxx_tools_info.compiler),
@@ -207,9 +220,10 @@ def _cxx_toolchain_from_cxx_tools_info(ctx: AnalysisContext, cxx_tools_info: Cxx
                 compiler_type = cxx_tools_info.compiler_type,
             ),
             header_mode = HeaderMode("symlink_tree_only"),
-            cpp_dep_tracking_mode = ctx.attrs.cpp_dep_tracking_mode,
+            cpp_dep_tracking_mode = cpp_dep_tracking_mode,
             pic_behavior = pic_behavior,
             llvm_link = llvm_link,
+            use_dep_files = True,
         ),
         CxxPlatformInfo(name = target_name),
     ]
@@ -229,6 +243,7 @@ system_cxx_toolchain = rule(
         "cvtres_flags": attrs.list(attrs.arg(), default = []),
         "cxx_compiler": attrs.option(attrs.string(), default = None),
         "cxx_flags": attrs.list(attrs.arg(), default = []),
+        "internal_tools": attrs.default_only(attrs.exec_dep(providers = [CxxInternalTools], default = "prelude//cxx/tools:internal_tools")),
         "link_flags": attrs.list(attrs.arg(), default = []),
         "link_ordering": attrs.option(attrs.enum(LinkOrdering.values()), default = None),
         "link_style": attrs.string(default = "shared"),
@@ -236,8 +251,8 @@ system_cxx_toolchain = rule(
         "post_link_flags": attrs.list(attrs.arg(), default = []),
         "rc_compiler": attrs.option(attrs.string(), default = None),
         "rc_flags": attrs.list(attrs.arg(), default = []),
+        "supports_content_based_paths": attrs.bool(default = False),
         "_cxx_tools_info": attrs.exec_dep(providers = [CxxToolsInfo], default = "prelude//toolchains/msvc:msvc_tools" if host_info().os.is_windows else "prelude//toolchains/cxx/clang:path_clang_tools"),
-        "_internal_tools": attrs.default_only(attrs.exec_dep(providers = [CxxInternalTools], default = "prelude//cxx/tools:internal_tools")),
         "_target_os_type": buck.target_os_type_arg(),
     },
     is_toolchain_rule = True,
@@ -254,6 +269,7 @@ cxx_tools_info_toolchain = rule(
             "DEFAULT": "prelude//toolchains/cxx/clang:path_clang_tools",
             "config//os:windows": "prelude//toolchains/msvc:msvc_tools",
         })),
+        "internal_tools": attrs.exec_dep(providers = [CxxInternalTools], default = "prelude//cxx/tools:internal_tools"),
         "link_flags": attrs.list(attrs.arg(), default = []),
         "link_ordering": attrs.option(attrs.enum(LinkOrdering.values()), default = None),
         "link_style": attrs.enum(
@@ -265,7 +281,7 @@ cxx_tools_info_toolchain = rule(
         ),
         "post_link_flags": attrs.list(attrs.arg(), default = []),
         "rc_flags": attrs.list(attrs.arg(), default = []),
-        "_internal_tools": attrs.default_only(attrs.exec_dep(providers = [CxxInternalTools], default = "prelude//cxx/tools:internal_tools")),
+        "supports_content_based_paths": attrs.bool(default = False),
         "_target_os_type": buck.target_os_type_arg(),
     },
     is_toolchain_rule = True,

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_providers.bzl", "AndroidApkInfo", "AndroidInstrumentationApkInfo")
 load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
@@ -56,7 +57,7 @@ def android_instrumentation_test_impl(ctx: AnalysisContext):
         cxx_library_symlink_tree = create_shlib_symlink_tree(
             actions = ctx.actions,
             out = "cxx_library_symlink_tree",
-            shared_libs = traverse_shared_library_info(shared_library_info),
+            shared_libs = traverse_shared_library_info(shared_library_info, transformation_provider = None),
         )
 
         env["BUCK_LD_SYMLINK_TREE"] = cxx_library_symlink_tree
@@ -140,11 +141,15 @@ def android_instrumentation_test_impl(ctx: AnalysisContext):
         ],
     )
 
+    labels = ctx.attrs.labels
+    if read_root_config("test", "use_tpx_standard_output") == "true":
+        labels.append("tpx:supports-test-result-output-spec")
+
     test_info = ExternalRunnerTestInfo(
         type = "android_instrumentation",
         command = cmd,
         env = env,
-        labels = ctx.attrs.labels,
+        labels = labels,
         contacts = ctx.attrs.contacts,
         run_from_project_root = True,
         use_project_relative_paths = True,

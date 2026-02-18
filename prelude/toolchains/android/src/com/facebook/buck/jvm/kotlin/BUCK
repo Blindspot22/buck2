@@ -1,5 +1,4 @@
 load("@prelude//toolchains/android/tools:build_rules.bzl", "buck_kotlin_library")
-load("@prelude//toolchains/android/tools/build_rules:oss_utils.bzl", "is_oss_build")
 load("@prelude//utils:source_listing.bzl", "source_listing")
 
 oncall("android_devxx")
@@ -8,18 +7,17 @@ source_listing()
 
 buck_kotlin_library(
     name = "steps",
-    srcs = glob(["*.java"]),
+    srcs = glob([
+        "*.java",
+        "**/*.kt",
+    ]),
     tests = [
         "prelude//toolchains/android/test/com/facebook/buck/jvm/kotlin:kotlin",
     ],
     visibility = ["PUBLIC"],
-    runtime_deps = (
-        ["prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/abtesting/noop:noop"] if is_oss_build() else ["fbsource//xplat/toolchains/android/sdk/src/com/facebook/buck/jvm/kotlin/abtesting:abtesting"]
-    ),
     deps = [
         "prelude//toolchains/android/src/com/facebook/buck/cd/resources/proto:javacd-model",
         "prelude//toolchains/android/src/com/facebook/buck/cd/resources/proto:kotlincd-model",
-        "prelude//toolchains/android/src/com/facebook/buck/core/exceptions:exceptions",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/core:core",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/cd/serialization:serialization",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/cd/serialization/java:java",
@@ -27,7 +25,6 @@ buck_kotlin_library(
         "prelude//toolchains/android/src/com/facebook/buck/jvm/java:steps",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/java:support",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/java/javax:javax",
-        "prelude//toolchains/android/src/com/facebook/buck/jvm/java/version:version",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/cd/command/kotlin:command",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/buildtools:buildtools",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/cd/analytics:analytics",
@@ -46,5 +43,7 @@ buck_kotlin_library(
         "prelude//toolchains/android/src/com/facebook/buck/jvm/cd/command/kotlin:language-version",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/abtesting:abtesting",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/abtesting/ksic:ksic",
+        "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/ksp/incremental:incremental",
+        "prelude//toolchains/android/src/com/facebook/buck/core/filesystems:filesystems",
     ],
 )

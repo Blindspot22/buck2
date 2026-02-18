@@ -1,20 +1,21 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use relative_path::Component;
 use relative_path::RelativePath;
 use relative_path::RelativePathBuf;
 
 use crate::cells::cell_path::CellPath;
 use crate::cells::paths::CellRelativePathBuf;
-use crate::fs::paths::forward_rel_path::ForwardRelativePath;
 
 #[derive(buck2_error::Error, Debug)]
 #[buck2(input)]
@@ -29,7 +30,7 @@ enum RelativeImportParseError {
     InvalidCurrentPathWhenFileRelativeImport(String),
 }
 
-#[derive(Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Allocative)]
+#[derive(Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Allocative, Clone)]
 pub struct CellPathWithAllowedRelativeDir {
     current_dir: CellPath,
     allowed_relative_dir: Option<CellPath>,
@@ -40,15 +41,20 @@ impl CellPathWithAllowedRelativeDir {
         if let Some(ref allowed_relative_dir_value) = allowed_relative_dir {
             assert!(
                 current_dir.starts_with(allowed_relative_dir_value.as_ref()),
-                "current_dir: `{}` must be a subpath of allowed_relative_dir: `{}`",
-                current_dir,
-                allowed_relative_dir_value,
+                "current_dir: `{current_dir}` must be a subpath of allowed_relative_dir: `{allowed_relative_dir_value}`",
             );
         }
 
         Self {
             current_dir,
             allowed_relative_dir,
+        }
+    }
+
+    pub fn backwards_relative_not_supported(current_dir: CellPath) -> Self {
+        Self {
+            current_dir,
+            allowed_relative_dir: None,
         }
     }
 
@@ -113,10 +119,19 @@ impl CellPathWithAllowedRelativeDir {
     pub fn join<P: AsRef<ForwardRelativePath>>(&self, path: P) -> CellPath {
         self.current_dir.join(path)
     }
+
+    pub fn current_dir(&self) -> &CellPath {
+        &self.current_dir
+    }
+
+    pub fn has_allowed_relative_dir(&self) -> bool {
+        self.allowed_relative_dir.is_some()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use buck2_fs::paths::file_name::FileName;
     use relative_path::RelativePath;
 
     use crate::cells::cell_path::CellPath;
@@ -124,7 +139,6 @@ mod tests {
     use crate::cells::cell_path_with_allowed_relative_dir::RelativeImportParseError;
     use crate::cells::name::CellName;
     use crate::cells::paths::CellRelativePath;
-    use crate::fs::paths::file_name::FileName;
 
     fn path(cell: &str, dir: &str, filename: &str) -> CellPath {
         CellPath::new(

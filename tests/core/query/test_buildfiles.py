@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -40,7 +41,7 @@ async def test_allbuildfiles(buck: Buck) -> None:
     out4.sort()
 
     # verify loads
-    expected1 = ["load/TARGETS.fixture", "load/a.bzl"]
+    expected1 = ["load/TARGETS.fixture", "load/a.bzl", "load/a.json"]
     assert out1 == expected1
 
     # verify transitive loads
@@ -48,6 +49,7 @@ async def test_allbuildfiles(buck: Buck) -> None:
         "transitive_load/TARGETS.fixture",
         "transitive_load/b.bzl",
         "transitive_load/c.bzl",
+        "transitive_load/c.json",
     ]
     assert out2 == expected2
     assert out3 == expected2

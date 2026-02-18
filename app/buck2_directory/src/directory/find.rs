@@ -1,13 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use buck2_core::fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileName;
 
 use crate::directory::directory_ref::DirectoryRef;
 use crate::directory::entry::DirectoryEntry;
@@ -43,7 +44,7 @@ impl<T> FindConflict<T> for PathAccumulator {
 #[cfg(test)]
 struct PrefixLookupContainer<T> {
     leaf: T,
-    path: buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf,
+    path: buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf,
 }
 
 #[cfg(test)]
@@ -83,7 +84,7 @@ pub(crate) fn find_prefix<'a, 'b, D: DirectoryRef<'a>>(
     Option<(
         DirectoryEntry<D, &'a D::Leaf>,
         // Remaining path.
-        buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf,
+        buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf,
     )>,
     DirectoryFindError,
 > {
@@ -94,7 +95,7 @@ pub(crate) fn find_prefix<'a, 'b, D: DirectoryRef<'a>>(
         None => {
             return Ok(Some((
                 DirectoryEntry::Dir(dir),
-                buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf::default(),
+                buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf::default(),
             )));
         }
     };
@@ -103,7 +104,7 @@ pub(crate) fn find_prefix<'a, 'b, D: DirectoryRef<'a>>(
         Ok(maybe_leaf) => Ok(maybe_leaf.map(|l| {
             (
                 l,
-                buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf::default(),
+                buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf::default(),
             )
         })),
         Err(PrefixLookupContainer { leaf, path }) => Ok(Some((DirectoryEntry::Leaf(leaf), path))),
@@ -132,5 +133,77 @@ where
         DirectoryEntry::Dir(dir) => find_inner::<_, A>(dir, next_path_needle, path_rest)
             .map_err(|acc| acc.with(path_needle)),
         DirectoryEntry::Leaf(leaf) => Err(A::new(next_path_needle, path_rest, leaf)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert_matches::assert_matches;
+
+    use crate::directory::directory::Directory;
+    use crate::directory::entry::DirectoryEntry;
+    use crate::directory::find::find;
+    use crate::directory::find::find_prefix;
+    use crate::directory::test::NopEntry;
+    use crate::directory::test::TestDirectoryBuilder;
+    use crate::directory::test::path;
+
+    #[test]
+    fn test_find() -> buck2_error::Result<()> {
+        let mut a = TestDirectoryBuilder::empty();
+        a.insert(path("a/b/c"), DirectoryEntry::Leaf(NopEntry))?;
+
+        assert_matches!(
+            find(a.as_ref(), path("a/b/c")),
+            Ok(Some(DirectoryEntry::Leaf(..)))
+        );
+
+        assert_matches!(
+            find(a.as_ref(), path("a/b")),
+            Ok(Some(DirectoryEntry::Dir(..)))
+        );
+
+        assert_matches!(
+            find(a.as_ref(), path("")),
+            Ok(Some(DirectoryEntry::Dir(..)))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_prefix() -> buck2_error::Result<()> {
+        let mut a = TestDirectoryBuilder::empty();
+        a.insert(path("a/b/c"), DirectoryEntry::Leaf(NopEntry))?;
+
+        assert_matches!(
+            find_prefix(a.as_ref(), path("a/b/c")),
+            Ok(Some((
+                DirectoryEntry::Leaf(..),
+                path
+            ))) if path.is_empty()
+        );
+        assert_matches!(
+            find_prefix(a.as_ref(), path("a/b")),
+            Ok(Some((
+                DirectoryEntry::Dir(..),
+                path
+            ))) if path.is_empty()
+        );
+
+        assert_matches!(
+            find_prefix(a.as_ref(), path("a/b/c/d")),
+            Ok(Some((DirectoryEntry::Leaf(..), rest))) => {
+                assert_eq!(rest, path("d"));
+            }
+        );
+        assert_matches!(
+            find_prefix(a.as_ref(), path("a/b/c/d/e")),
+            Ok(Some((DirectoryEntry::Leaf(..), rest))) => {
+                assert_eq!(rest, path("d/e"));
+            }
+        );
+
+        Ok(())
     }
 }

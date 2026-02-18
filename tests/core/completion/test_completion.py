@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -138,12 +139,30 @@ completion_test(
     name="test_completes_simple_partial_directory",
     input="build d",
     expected=["dir1/", "dir1:", "dir2/"],
+    shells=["zsh", "fish"],
+)
+
+completion_test(
+    name="test_completes_simple_partial_directory",
+    input="build d",
+    # On bash & mac, there's no way to disable sorting
+    expected=["dir1/", "dir1:", "dir2/"] if IS_LINUX else ["dir1:", "dir1/", "dir2/"],
+    shells=["bash"],
 )
 
 completion_test(
     name="test_completes_simple_directory",
     input="build dir",
     expected=["dir1/", "dir1:", "dir2/"],
+    shells=["zsh", "fish"],
+)
+
+completion_test(
+    name="test_completes_simple_directory",
+    input="build dir",
+    # On bash & mac, there's no way to disable sorting
+    expected=["dir1/", "dir1:", "dir2/"] if IS_LINUX else ["dir1:", "dir1/", "dir2/"],
+    shells=["bash"],
 )
 
 completion_test(

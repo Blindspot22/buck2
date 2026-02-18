@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.util.zip;
@@ -21,7 +22,6 @@ import javax.annotation.Nullable;
 /** Provides all entries of a given zip or jar file, so they can be added to another jar. */
 class ZipFileJarEntryContainer implements JarEntryContainer {
 
-  private final String owner;
   private final Path jarFilePath;
   private final boolean readOnly;
   @Nullable private JarFile jar;
@@ -32,7 +32,6 @@ class ZipFileJarEntryContainer implements JarEntryContainer {
 
   public ZipFileJarEntryContainer(Path jarFilePath, boolean readOnly) {
     this.jarFilePath = jarFilePath;
-    this.owner = jarFilePath.toString();
     this.readOnly = readOnly;
   }
 
@@ -48,10 +47,7 @@ class ZipFileJarEntryContainer implements JarEntryContainer {
         .map(
             entry ->
                 new JarEntrySupplier(
-                    makeCustomEntry(entry),
-                    owner,
-                    readOnly,
-                    () -> getJarFile().getInputStream(entry)));
+                    makeCustomEntry(entry), readOnly, () -> getJarFile().getInputStream(entry)));
   }
 
   @Override
@@ -68,7 +64,7 @@ class ZipFileJarEntryContainer implements JarEntryContainer {
         File jarFile = jarFilePath.toFile();
         jar = new JarFile(jarFile);
       } catch (IOException e) {
-        throw new IOException("Failed to process ZipFile " + owner, e);
+        throw new IOException("Failed to process ZipFile " + jarFilePath, e);
       }
     }
 

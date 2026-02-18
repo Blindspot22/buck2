@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -38,7 +39,7 @@ pub struct OpaqueMetadata;
 impl<'v> StarlarkValue<'v> for OpaqueMetadata {}
 
 impl<'v> AllocValue<'v> for OpaqueMetadata {
-    fn alloc_value(self, _heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, _heap: Heap<'v>) -> Value<'v> {
         static INSTANCE: AllocStaticSimple<OpaqueMetadata> =
             AllocStaticSimple::alloc(OpaqueMetadata);
         INSTANCE.to_frozen_value().to_value()

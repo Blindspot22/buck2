@@ -1,4 +1,4 @@
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
 
 oncall("build_infra")
 
@@ -7,30 +7,16 @@ rust_library(
     srcs = glob(
         ["src/**/*.rs"],
     ),
-    os_deps = [
-        (
-            "windows",
-            ["fbsource//third-party/rust:winver"],
-        ),
-        (
-            "linux",
-            ["fbsource//third-party/rust:sys-info"],
-        ),
-        (
-            "macos",
-            ["fbsource//third-party/rust:sys-info"],
-        ),
-    ],
     test_deps = ["fbsource//third-party/rust:tokio"],
     deps = [
+        "fbsource//third-party/rust:console",
         "fbsource//third-party/rust:crossbeam-channel",
         "fbsource//third-party/rust:derive_more",
         "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:hostname",
         "fbsource//third-party/rust:is_proc_translated",
-        "fbsource//third-party/rust:once_cell",
         "fbsource//third-party/rust:pin-project",
-        # @oss-disable[end= ]: "fbsource//third-party/rust:prost",
+        # @oss-disable[end= ]: "fbsource//third-party/rust:prost-0-13-4",
         "fbsource//third-party/rust:serde",
         # @oss-disable[end= ]: "fbsource//third-party/rust:serde_json",
         "fbsource//third-party/rust:smallvec",
@@ -49,8 +35,20 @@ rust_library(
         # @oss-disable[end= ]: "//buck2/shed/scribe_client:scribe_client",
         # @oss-disable[end= ]: "//common/rust/devserver_fingerprint/devserver_fingerprint:devserver_fingerprint",
         "//common/rust/shed/fbinit:fbinit",
+        # @oss-disable[end= ]: "//common/rust/shed/hostcaps:hostcaps",
         # @oss-disable[end= ]: "//common/rust/user:user",
         # @oss-disable[end= ]: "//devx_www/cross_env_session_id:cross_env_session_id",
         # @oss-disable[end= ]: "//devx_www/devx_session_id_rust:devx_session_id",
-    ],
+    ] + select({
+        "DEFAULT": [],
+        "ovr_config//os:linux": [
+            "fbsource//third-party/rust:sys-info",
+        ],
+        "ovr_config//os:macos": [
+            "fbsource//third-party/rust:sys-info",
+        ],
+        "ovr_config//os:windows": [
+            "fbsource//third-party/rust:winver",
+        ],
+    }),
 )

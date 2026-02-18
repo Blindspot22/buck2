@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -12,7 +13,12 @@ use std::iter;
 use std::sync::Arc;
 
 use allocative::Allocative;
+use buck2_artifact::artifact::artifact_type::Artifact;
+use buck2_artifact::artifact::artifact_type::OutputArtifact;
+use buck2_core::configuration::data::ConfigurationData;
+use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use display_container::display_pair;
 use display_container::fmt_container;
 use display_container::iter_display_chain;
@@ -28,6 +34,7 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
+use starlark::type_matcher;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
@@ -52,10 +59,14 @@ use crate::actions::impls::json::validate_json;
 use crate::actions::impls::json::visit_json_artifacts;
 use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::TransitiveSetProjectionKey;
+use crate::artifact_groups::TransitiveSetProjectionWrapper;
 use crate::artifact_groups::deferred::TransitiveSetKey;
+use crate::interpreter::rule_defs::artifact_tagging::ArtifactTag;
+use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::SimpleCommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::transitive_set::BfsTransitiveSetIteratorGen;
+use crate::interpreter::rule_defs::transitive_set::DfsTransitiveSetIteratorGen;
 use crate::interpreter::rule_defs::transitive_set::FrozenTransitiveSetDefinition;
 use crate::interpreter::rule_defs::transitive_set::PostorderTransitiveSetIteratorGen;
 use crate::interpreter::rule_defs::transitive_set::PreorderTransitiveSetIteratorGen;
@@ -75,6 +86,7 @@ pub(crate) struct TransitiveSetMatcher {
     pub(crate) type_instance_id: TypeInstanceId,
 }
 
+#[type_matcher]
 impl TypeMatcher for TransitiveSetMatcher {
     fn matches(&self, value: Value) -> bool {
         let Some(tset) = ValueTypedComplex::<TransitiveSet>::new(value) else {
@@ -113,6 +125,12 @@ pub struct TransitiveSetGen<V: ValueLifetimeless> {
 
     /// Pre-computed reductions. Those are arbitrary values based on the set's definition.
     pub(crate) reductions: Box<[V]>,
+
+    /// For each projection, whether it uses content based paths or not.
+    pub(crate) projection_path_resolution_may_require_artifact_value: Box<[bool]>,
+
+    /// For each projection, whether it uses configuration based paths or not.
+    pub(crate) projection_is_eligible_for_dedupe: Box<[bool]>,
 
     /// Further transitive sets.
     pub children: Box<[V]>,
@@ -194,7 +212,7 @@ impl<'v, V: ValueLike<'v>> TransitiveSetGen<V> {
             .operations()
             .projections
             .get_index(projection)
-            .buck_error_context("Invalid projection id")?
+            .ok_or_else(|| internal_error!("Invalid projection id"))?
             .0
             .as_str())
     }
@@ -206,7 +224,7 @@ impl<'v, V: ValueLike<'v>> TransitiveSetGen<V> {
                 *node
                     .projections
                     .get(projection)
-                    .buck_error_context("Invalid projection id")?,
+                    .ok_or_else(|| internal_error!("Invalid projection id"))?,
             )),
         }
     }
@@ -222,12 +240,12 @@ impl<'v, V: ValueLike<'v>> TransitiveSetGen<V> {
         &self,
     ) -> buck2_error::Result<ValueTypedComplex<'v, TransitiveSetDefinition<'v>>> {
         ValueTypedComplex::unpack_value_err(self.definition.to_value())
-            .internal_error("Must be a TransitiveSetDefinition")
+            .buck_error_context("Must be a TransitiveSetDefinition")
     }
 }
 
 impl FrozenTransitiveSet {
-    pub fn visit_projection_direct_inputs<V: CommandLineArtifactVisitor>(
+    pub fn visit_projection_direct_inputs<'v, V: CommandLineArtifactVisitor<'v>>(
         &self,
         projection: usize,
         visitor: &mut V,
@@ -254,13 +272,17 @@ impl FrozenTransitiveSet {
 
         // Reuse the same projection for children sets.
         for v in self.children.iter() {
-            let v =
-                TransitiveSet::from_value(v.to_value()).buck_error_context("Invalid deferred")?;
+            let v = TransitiveSet::from_value(v.to_value())
+                .ok_or_else(|| internal_error!("Invalid deferred"))?;
             sub_inputs.push(ArtifactGroup::TransitiveSetProjection(Arc::new(
-                TransitiveSetProjectionKey {
-                    key: v.key().dupe(),
-                    projection,
-                },
+                TransitiveSetProjectionWrapper::new(
+                    TransitiveSetProjectionKey {
+                        key: v.key().dupe(),
+                        projection,
+                    },
+                    v.projection_path_resolution_may_require_artifact_value[projection],
+                    v.projection_is_eligible_for_dedupe[projection],
+                ),
             )));
         }
         Ok(sub_inputs)
@@ -290,6 +312,7 @@ where
                 Box::new(TopologicalTransitiveSetIteratorGen::new(self))
             }
             TransitiveSetOrdering::Bfs => Box::new(BfsTransitiveSetIteratorGen::new(self)),
+            TransitiveSetOrdering::Dfs => Box::new(DfsTransitiveSetIteratorGen::new(self)),
         }
     }
 
@@ -322,7 +345,7 @@ where
         if let Some(v) = iter.peek() {
             v.projections
                 .get(projection)
-                .buck_error_context("Invalid projection")?;
+                .ok_or_else(|| internal_error!("Invalid projection"))?;
         }
 
         Ok(Box::new(iter.map(move |node| {
@@ -371,17 +394,23 @@ impl<'v> Freeze for TransitiveSet<'v> {
             definition,
             node,
             reductions,
+            projection_path_resolution_may_require_artifact_value,
+            projection_is_eligible_for_dedupe,
             children,
         } = self;
         let definition = definition.freeze(freezer)?;
         let node = node.try_map(|node| node.freeze(freezer))?;
         let children = children.freeze(freezer)?;
         let reductions = reductions.freeze(freezer)?;
+        let projection_path_resolution_may_require_artifact_value =
+            projection_path_resolution_may_require_artifact_value.freeze(freezer)?;
         Ok(TransitiveSetGen {
             key,
             definition,
             node,
             reductions,
+            projection_path_resolution_may_require_artifact_value,
+            projection_is_eligible_for_dedupe,
             children,
         })
     }
@@ -451,9 +480,10 @@ impl<'v> TransitiveSet<'v> {
             .enumerate()
             .map(|(idx, (name, reduce))| {
                 let children_values = children_sets.try_map(|c| {
-                    c.reductions.get(idx).copied().with_buck_error_context(|| {
-                        format!("Child {} is missing reduction {}", c, idx)
-                    })
+                    c.reductions
+                        .get(idx)
+                        .copied()
+                        .ok_or_else(|| internal_error!("Child {c} is missing reduction {idx}"))
                 })?;
                 let children_values = eval.heap().alloc(AllocList(children_values));
 
@@ -470,13 +500,153 @@ impl<'v> TransitiveSet<'v> {
             })
             .collect::<Result<Box<[_]>, _>>()?;
 
+        struct InputVisitor {
+            target_platform: Option<ConfigurationData>,
+            path_resolution_may_require_artifact_value: bool,
+            is_eligible_for_dedupe: bool,
+        }
+
+        impl InputVisitor {
+            fn new(target_platform: Option<ConfigurationData>) -> Self {
+                Self {
+                    target_platform,
+                    path_resolution_may_require_artifact_value: false,
+                    is_eligible_for_dedupe: true,
+                }
+            }
+        }
+
+        impl<'v> CommandLineArtifactVisitor<'v> for InputVisitor {
+            fn visit_input(&mut self, input: ArtifactGroup, _tags: Vec<&ArtifactTag>) {
+                if input.path_resolution_may_require_artifact_value() {
+                    self.path_resolution_may_require_artifact_value = true;
+                }
+
+                if self.is_eligible_for_dedupe {
+                    self.is_eligible_for_dedupe =
+                        input.is_eligible_for_dedupe(self.target_platform.as_ref());
+                }
+            }
+
+            fn visit_declared_output(
+                &mut self,
+                _artifact: OutputArtifact<'v>,
+                _tags: Vec<&ArtifactTag>,
+            ) {
+            }
+
+            fn visit_frozen_output(&mut self, _artifact: Artifact, _tags: Vec<&ArtifactTag>) {}
+        }
+
+        let owner = key.holder_key().owner();
+        let target_platform = if let BaseDeferredKey::TargetLabel(configured_label) = owner {
+            Some(configured_label.cfg().dupe())
+        } else {
+            None
+        };
+
+        let (
+            projection_path_resolution_may_require_artifact_value,
+            projection_is_eligible_for_dedupe_iter,
+        ): (Vec<bool>, Vec<bool>) = def
+            .operations()
+            .projections
+            .iter()
+            .enumerate()
+            .map(|(idx, (_name, spec))| {
+                let mut path_resolution_may_require_artifact_value = false;
+                let mut is_eligible_for_dedupe = true;
+
+                if let Some(node) = &node {
+                    let projection = node
+                        .projections
+                        .get(idx)
+                        .ok_or_else(|| internal_error!("Invalid projection id"))?;
+
+                    let mut visitor = InputVisitor::new(target_platform.dupe());
+                    match spec.kind {
+                        TransitiveSetProjectionKind::Args => {
+                            TransitiveSetArgsProjection::as_command_line(*projection)?
+                                .visit_artifacts(&mut visitor)?;
+                        }
+                        TransitiveSetProjectionKind::Json => {
+                            visit_json_artifacts(*projection, &mut visitor)?
+                        }
+                    }
+                    if visitor.path_resolution_may_require_artifact_value {
+                        path_resolution_may_require_artifact_value = true;
+                    }
+                    if !visitor.is_eligible_for_dedupe {
+                        is_eligible_for_dedupe = false;
+                    }
+                }
+
+                for child in children_sets.iter() {
+                    if *child
+                        .projection_path_resolution_may_require_artifact_value
+                        .get(idx)
+                        .ok_or_else(|| internal_error!("Invalid projection id"))?
+                    {
+                        path_resolution_may_require_artifact_value = true;
+                    }
+
+                    if is_eligible_for_dedupe
+                        && !*child
+                            .projection_is_eligible_for_dedupe
+                            .get(idx)
+                            .ok_or_else(|| internal_error!("Invalid projection id"))?
+                    {
+                        let target_platform_ref = match target_platform {
+                            Some(ref target_platform) => target_platform,
+                            None => {
+                                is_eligible_for_dedupe = false;
+                                continue;
+                            }
+                        };
+                        let is_child_eligible_for_dedupe = child
+                            .key
+                            .holder_key()
+                            .owner()
+                            .configured_label()
+                            .is_some_and(|l| l.cfg() != target_platform_ref);
+                        if !is_child_eligible_for_dedupe {
+                            is_eligible_for_dedupe = false;
+                        }
+                    }
+                }
+
+                Ok::<(bool, bool), buck2_error::Error>((
+                    path_resolution_may_require_artifact_value,
+                    is_eligible_for_dedupe,
+                ))
+            })
+            .collect::<Result<Vec<(bool, bool)>, _>>()?
+            .into_iter()
+            .unzip();
+
+        let (
+            projection_path_resolution_may_require_artifact_value,
+            projection_is_eligible_for_dedupe,
+        ) = (
+            projection_path_resolution_may_require_artifact_value.into_boxed_slice(),
+            projection_is_eligible_for_dedupe_iter.into_boxed_slice(),
+        );
+
+        // Cast lifetime from 'v to 'static
+        let definition =
+            FrozenValueTyped::<FrozenTransitiveSetDefinition>::new(FrozenValueTyped::<
+                FrozenTransitiveSetDefinition,
+            >::to_frozen_value(
+                definition
+            ))
+            .ok_or_else(|| internal_error!("internal error"))?;
         Ok(Self {
             key,
-            definition:
-            // Cast lifetime from 'v to 'static
-            FrozenValueTyped::<FrozenTransitiveSetDefinition>::new(FrozenValueTyped::<FrozenTransitiveSetDefinition>::to_frozen_value(definition)).buck_error_context("internal error")?,
+            definition,
             node,
             reductions,
+            projection_path_resolution_may_require_artifact_value,
+            projection_is_eligible_for_dedupe,
             children,
         })
     }
@@ -565,7 +735,7 @@ fn transitive_set_methods(builder: &mut MethodsBuilder) {
             .reductions
             .get(index)
             .copied()
-            .with_buck_error_context(|| format!("Missing reduction {}", index))?)
+            .ok_or_else(|| internal_error!("Missing reduction {index}"))?)
     }
 
     fn traverse<'v>(

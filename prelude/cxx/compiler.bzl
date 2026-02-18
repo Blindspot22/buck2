@@ -1,16 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
+load(
+    "@prelude//utils:utils.bzl",
+    "as_output",
+)
 load(":cxx_toolchain_types.bzl", "DepTrackingMode")
 
 # TODO(T110378132): Added here for compat with v1, but this might make more
 # sense on the toolchain definition.
-def get_flags_for_reproducible_build(ctx: AnalysisContext, compiler_type: str) -> list[[str, cmd_args]]:
+def get_flags_for_reproducible_build(target_label: Label, compiler_type: str) -> list[[str, cmd_args]]:
     """
     Return flags needed to make compilations reproducible (e.g. avoiding
     embedding the working directory into debug info.
@@ -22,7 +27,7 @@ def get_flags_for_reproducible_build(ctx: AnalysisContext, compiler_type: str) -
         flags.extend(["/Brepro", "/d2threads1"])
 
     if compiler_type in ["clang", "clang_windows", "clang_cl"]:
-        flags.extend(["-Xclang", "-fdebug-compilation-dir", "-Xclang", cmd_args(ctx.label.project_root)])
+        flags.extend(["-Xclang", "-fdebug-compilation-dir", "-Xclang", cmd_args(target_label.project_root)])
 
     if compiler_type == "clang_windows":
         flags.append("-mno-incremental-linker-compatible")
@@ -50,6 +55,7 @@ def get_flags_for_colorful_output(compiler_type: str) -> list[str]:
 def cc_dep_files(actions: AnalysisActions, filename_base: str, _input_file: Artifact) -> (cmd_args, cmd_args):
     intermediary_dep_file = actions.declare_output(
         paths.join("__dep_files_intermediaries__", filename_base),
+        has_content_based_path = True,
     ).as_output()
 
     return (cmd_args(intermediary_dep_file), cmd_args(["-MD", "-MF", intermediary_dep_file]))
@@ -80,14 +86,8 @@ def get_headers_dep_files_flags_factory(dep_tracking_mode: DepTrackingMode) -> [
 
     return None
 
-def get_pic_flags(compiler_type: str) -> list[str]:
-    if compiler_type in ["clang", "gcc"]:
-        return ["-fPIC"]
-    else:
-        return []
-
-def get_output_flags(compiler_type: str, output: Artifact) -> list[typing.Any]:
+def get_output_flags(compiler_type: str, output: Artifact | OutputArtifact) -> list[typing.Any]:
     if compiler_type in ["windows", "clang_cl", "windows_ml64"]:
-        return [cmd_args(output.as_output(), format = "/Fo{}")]
+        return [cmd_args(as_output(output), format = "/Fo{}")]
     else:
-        return ["-o", output.as_output()]
+        return ["-o", as_output(output)]

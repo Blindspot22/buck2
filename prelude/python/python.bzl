@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//linking:link_info.bzl", "LinkedObject")
 load("@prelude//linking:shared_libraries.bzl", "SharedLibraryInfo")
@@ -11,6 +12,12 @@ load("@prelude//utils:arglike.bzl", "ArgLike")
 load(":compile.bzl", "PycInvalidationMode")
 load(":interface.bzl", "PythonLibraryManifestsInterface")
 load(":manifest.bzl", "ManifestInfo")
+
+NativeDepsInfoTSet = transitive_set()
+
+NativeDepsInfo = record(
+    native_deps = field(dict[Label, Dependency], dict()),
+)
 
 PythonLibraryManifests = record(
     label = field(Label),
@@ -53,11 +60,6 @@ def _resource_artifacts(value: PythonLibraryManifests) -> list[ArgLike]:
         return []
     return [a for a, _ in value.default_resources[0].artifacts]
 
-def _resource_artifacts_simple(value: PythonLibraryManifests) -> list[ArgLike]:
-    if value.default_resources == None:
-        return []
-    return [cmd_args(a, p, delimiter = "::") for a, p in value.default_resources[0].artifacts]
-
 def _standalone_hidden_resources(value: PythonLibraryManifests) -> list[ArgLike]:
     if value.standalone_resources == None:
         return []
@@ -89,20 +91,10 @@ def _source_artifacts(value: PythonLibraryManifests) -> list[ArgLike]:
         return []
     return [a for a, _ in value.srcs.artifacts]
 
-def _sources_simple(value: PythonLibraryManifests) -> list[ArgLike]:
-    if value.srcs == None:
-        return []
-    return [cmd_args(a, p, delimiter = "::") for a, p in value.srcs.artifacts]
-
 def _source_type_manifests(value: PythonLibraryManifests) -> list[None] | Artifact:
     if value.src_types == None:
         return []
     return value.src_types.manifest
-
-def _source_type_manifest_jsons(value: PythonLibraryManifests) -> (TargetLabel, Artifact) | None:
-    if value.src_types == None:
-        return None
-    return (value.label.raw_target(), value.src_types.manifest)
 
 def _source_type_artifacts(value: PythonLibraryManifests) -> list[ArgLike]:
     if value.src_types == None:
@@ -117,13 +109,11 @@ _BYTECODE_PROJ_PREFIX = {
 args_projections = {
     "hidden_resources": _hidden_resources,
     "resource_artifacts": _resource_artifacts,
-    "resource_artifacts_simple": _resource_artifacts_simple,
     "resource_manifests": _resource_manifests,
     "source_artifacts": _source_artifacts,
     "source_manifests": _source_manifests,
     "source_type_artifacts": _source_type_artifacts,
     "source_type_manifests": _source_type_manifests,
-    "sources_simple": _sources_simple,
     "standalone_hidden_resources": _standalone_hidden_resources,
     "standalone_resource_artifacts": _standalone_resource_artifacts,
     "standalone_resource_manifests": _standalone_resource_manifests,
@@ -139,9 +129,6 @@ args_projections.update({
 
 PythonLibraryManifestsTSet = transitive_set(
     args_projections = args_projections,
-    json_projections = {
-        "source_type_manifests_json": _source_type_manifest_jsons,
-    },
     reductions = {
         "has_hidden_resources": _has_hidden_resources,
         "standalone_has_hidden_resources": _standalone_has_hidden_resources,
@@ -152,8 +139,13 @@ PythonLibraryManifestsTSet = transitive_set(
 PythonLibraryInfo = provider(fields = {
     # Shared libraries coming from cxx_python_extension targets
     "extension_shared_libraries": provider_field(SharedLibraryInfo),
+    "is_native_dep": provider_field(bool),
     # See the docs for PythonLibraryManifestsInterface
     "manifests": provider_field(PythonLibraryManifestsTSet),
+    # Native deps
+    "native_deps": provider_field(NativeDepsInfoTSet),
+    # PAR style for python binaries (None for libraries)
+    "par_style": provider_field(str | None, default = None),
     # Shared libraries coming from python_library and others
     "shared_libraries": provider_field(SharedLibraryInfo),
 })
@@ -176,12 +168,6 @@ def _get_hidden_resources(standalone: bool, manifests: PythonLibraryManifestsTSe
     else:
         return [manifests.project_as_args("hidden_resources")]
 
-def _get_resource_artifacts_with_path(standalone: bool, manifests: PythonLibraryManifestsTSet) -> list[(ArgLike, ArgLike)]:
-    if standalone:
-        return [(a, p) for m in manifests.traverse() if m != None and m.standalone_resources != None for a, p in m.standalone_resources[0].artifacts]
-    else:
-        return [(a, p) for m in manifests.traverse() if m != None and m.default_resources != None for a, p in m.default_resources[0].artifacts]
-
 def _get_has_hidden_resources(standalone: bool, manifests: PythonLibraryManifestsTSet) -> bool:
     if standalone:
         return manifests.reduce("standalone_has_hidden_resources")
@@ -190,20 +176,12 @@ def _get_has_hidden_resources(standalone: bool, manifests: PythonLibraryManifest
 
 def manifests_to_interface(manifests: PythonLibraryManifestsTSet) -> PythonLibraryManifestsInterface:
     return PythonLibraryManifestsInterface(
-        sources_simple = lambda: manifests.project_as_args("sources_simple"),
         src_manifests = lambda: [manifests.project_as_args("source_manifests")],
         src_artifacts = lambda: [manifests.project_as_args("source_artifacts")],
-        src_artifacts_with_paths = lambda: [(a, p) for m in manifests.traverse() if m != None and m.srcs != None for a, p in m.srcs.artifacts],
-        src_type_manifests = lambda: [manifests.project_as_args("source_manifests")],
-        src_type_artifacts = lambda: [manifests.project_as_args("source_artifacts")],
-        src_type_artifacts_with_path = lambda: [(a, p) for m in manifests.traverse() if m != None and m.src_types != None for a, p in m.src_types.artifacts],
         bytecode_manifests = lambda mode: [manifests.project_as_args("{}_manifests".format(_BYTECODE_PROJ_PREFIX[mode]))],
         bytecode_artifacts = lambda mode: [manifests.project_as_args("{}_artifacts".format(_BYTECODE_PROJ_PREFIX[mode]))],
-        bytecode_artifacts_with_paths = lambda mode: [(a, p) for m in manifests.traverse() if m != None and m.bytecode != None for a, p in m.bytecode[mode].artifacts],
         resource_manifests = lambda standalone = False: _get_resource_manifests(standalone, manifests),
         resource_artifacts = lambda standalone = False: _get_resource_artifacts(standalone, manifests),
-        resource_artifacts_with_paths = lambda standalone = False: _get_resource_artifacts_with_path(standalone, manifests),
-        resource_artifacts_simple = lambda: manifests.project_as_args("resource_artifacts_simple"),
         has_hidden_resources = lambda standalone = False: _get_has_hidden_resources(standalone, manifests),
         hidden_resources = lambda standalone = False: _get_hidden_resources(standalone, manifests),
     )

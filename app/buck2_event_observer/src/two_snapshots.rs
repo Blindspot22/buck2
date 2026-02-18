@@ -1,13 +1,13 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use std::mem;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -19,7 +19,7 @@ pub struct TwoSnapshots {
 
 impl TwoSnapshots {
     pub fn update(&mut self, timestamp: SystemTime, snapshot: &buck2_data::Snapshot) {
-        self.penultimate = mem::replace(&mut self.last, Some((timestamp, snapshot.clone())));
+        self.penultimate = self.last.replace((timestamp, snapshot.clone()));
     }
 
     fn non_zero_duration(&self) -> Option<Duration> {

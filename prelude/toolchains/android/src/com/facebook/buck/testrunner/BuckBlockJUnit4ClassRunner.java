@@ -1,18 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testrunner;
 
-import com.facebook.buck.util.concurrent.MostExecutors;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.Rule;
 import org.junit.Test;
@@ -37,15 +38,16 @@ import org.junit.runners.model.TestClass;
  */
 public class BuckBlockJUnit4ClassRunner extends BlockJUnit4ClassRunner {
 
-  // We create an ExecutorService based on the implementation of
-  // Executors.newSingleThreadExecutor(). The problem with Executors.newSingleThreadExecutor() is
-  // that it does not let us specify a RejectedExecutionHandler, which we need to ensure that
-  // garbage is not spewed to the user's console if the build fails.
   private final ThreadLocal<ExecutorService> executor =
       new ThreadLocal<ExecutorService>() {
         @Override
         protected ExecutorService initialValue() {
-          return MostExecutors.newSingleThreadExecutor(getClass().getSimpleName());
+          return Executors.newSingleThreadExecutor(
+              r -> {
+                Thread newThread = Executors.defaultThreadFactory().newThread(r);
+                newThread.setName(BuckBlockJUnit4ClassRunner.class.getSimpleName());
+                return newThread;
+              });
         }
       };
 

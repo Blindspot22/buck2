@@ -13,7 +13,7 @@
 [CI]: https://github.com/facebook/buck2/actions/workflows/build-and-test.yml
 
 <strong>
-  <a href="https://buck2.build">Homepage</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;<a href="https://buck2.build/docs/about/getting_started/">Getting Started</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;<a href="./CONTRIBUTING.md">Contributing</a>
+  <a href="https://buck2.build">Homepage</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;<a href="https://buck2.build/docs/getting_started/">Getting Started</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;<a href="./CONTRIBUTING.md">Contributing</a>
 </strong>
 
 ---
@@ -74,7 +74,7 @@ If you're familiar with systems like Buck1, [Bazel](https://bazel.build/), or
 and these ideas will be familiar. But then why create Buck2 if those already
 exist? Because that isn't all &mdash; the page
 _["Why Buck2?"](https://buck2.build/docs/about/why/)_ on our website goes into
-more detail on several other important design critera that separate Buck2 from
+more detail on several other important design criteria that separate Buck2 from
 the rest of the pack, including:
 
 - Support for ultra-large repositories, through filesystem virtualization and
@@ -102,7 +102,8 @@ Buck2 currently **does not have a stable release tag at this time**. Pre-release
 tags/binaries, and stable tags/binaries, will come at later dates. Despite that,
 it is used extensively inside of Meta on vast amounts of code every day, and
 [buck2-prelude](/prelude/) is the same code used internally for all these
-builds, as well.
+builds, as well. (However, Meta retains large amounts of Starlark code which
+builds on top of the prelude.)
 
 Meta just uses the latest committed `HEAD` version of Buck2 at all times. Your
 mileage may vary &mdash; but at the moment, tracking `HEAD` is ideal for

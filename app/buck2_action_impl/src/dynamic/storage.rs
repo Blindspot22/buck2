@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -18,11 +19,11 @@ use buck2_build_api::dynamic::storage::FrozenDynamicLambdaParamsStorage;
 use buck2_core::deferred::dynamic::DynamicLambdaIndex;
 use buck2_core::deferred::dynamic::DynamicLambdaResultsKey;
 use buck2_core::deferred::key::DeferredHolderKey;
-use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
 use dupe::Dupe;
 use starlark::any::AnyLifetime;
 use starlark::any::ProvidesStaticType;
+use starlark::values::DynStarlark;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
@@ -42,7 +43,6 @@ pub(crate) struct DynamicLambdaParamsStorageImpl<'v> {
 
 #[derive(Debug, Allocative, ProvidesStaticType)]
 pub(crate) struct FrozenDynamicLambdaParamsStorageImpl {
-    self_key: DeferredHolderKey,
     lambda_params: SmallMap<DynamicLambdaResultsKey, FrozenDynamicLambdaParams>,
 }
 
@@ -54,7 +54,7 @@ impl<'v> DynamicLambdaParamsStorageImpl<'v> {
             .lambda_params
             .as_any_mut()
             .downcast_mut()
-            .internal_error("Wrong type for lambda params storage")
+            .ok_or_else(|| internal_error!("Wrong type for lambda params storage"))
     }
 
     pub fn next_dynamic_actions_key(&self) -> buck2_error::Result<DynamicLambdaResultsKey> {
@@ -95,10 +95,10 @@ impl FrozenDynamicLambdaParamsStorageImpl {
             s.lambda_params
                 .as_any()
                 .downcast_ref::<FrozenDynamicLambdaParamsStorageImpl>()
-                .internal_error("Wrong type for lambda params storage")?
+                .ok_or_else(|| internal_error!("Wrong type for lambda params storage"))?
                 .lambda_params
                 .get(key)
-                .with_internal_error(|| format!("missing lambda `{}`", key))
+                .ok_or_else(|| internal_error!("missing lambda `{key}`"))
         })
     }
 }
@@ -123,19 +123,18 @@ impl<'v> DynamicLambdaParamsStorage<'v> for DynamicLambdaParamsStorageImpl<'v> {
     }
 
     fn freeze(
-        self: Box<Self>,
+        self: Box<DynStarlark<'v, Self>>,
         freezer: &Freezer,
     ) -> FreezeResult<Box<dyn FrozenDynamicLambdaParamsStorage>> {
         let DynamicLambdaParamsStorageImpl {
-            self_key,
             lambda_params,
-        } = *self;
+            self_key: _,
+        } = self.into_inner();
         let lambda_params = lambda_params
             .into_iter_hashed()
             .map(|(k, v)| Ok((k, v.freeze(freezer)?)))
             .collect::<FreezeResult<_>>()?;
         Ok(Box::new(FrozenDynamicLambdaParamsStorageImpl {
-            self_key,
             lambda_params,
         }))
     }
@@ -147,12 +146,11 @@ impl FrozenDynamicLambdaParamsStorage for FrozenDynamicLambdaParamsStorageImpl {
     }
 
     fn iter_dynamic_lambda_outputs(&self) -> Box<dyn Iterator<Item = BuildArtifact> + Send + '_> {
-        Box::new(self.lambda_params.values().flat_map(|v| {
-            v.static_fields
-                .outputs
-                .iter()
-                .map(|a| a.as_base_artifact().dupe())
-        }))
+        Box::new(
+            self.lambda_params
+                .values()
+                .flat_map(|v| v.outputs.iter().map(|a| a.as_build_artifact().dupe())),
+        )
     }
 }
 
@@ -163,19 +161,17 @@ pub(crate) fn init_dynamic_lambda_params_storages() {
         fn new_dynamic_lambda_params_storage<'v>(
             &self,
             self_key: DeferredHolderKey,
-        ) -> Box<dyn DynamicLambdaParamsStorage<'v>> {
-            Box::new(DynamicLambdaParamsStorageImpl {
+        ) -> Box<DynStarlark<'v, dyn DynamicLambdaParamsStorage<'v>>> {
+            Box::new(DynStarlark::new(DynamicLambdaParamsStorageImpl {
                 self_key,
                 lambda_params: SmallMap::new(),
-            })
+            }))
         }
 
         fn new_frozen_dynamic_lambda_params_storage(
             &self,
-            self_key: DeferredHolderKey,
         ) -> Box<dyn FrozenDynamicLambdaParamsStorage> {
             Box::new(FrozenDynamicLambdaParamsStorageImpl {
-                self_key,
                 lambda_params: SmallMap::new(),
             })
         }

@@ -1,17 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_event_log::FutureChildOutput;
 use buck2_event_log::should_block_on_log_upload;
 use buck2_event_log::should_upload_log;
@@ -19,6 +19,7 @@ use buck2_event_log::wait_for_child_and_log;
 use buck2_event_observer::unpack_event::UnpackedBuckEvent;
 use buck2_event_observer::unpack_event::unpack_event;
 use buck2_events::BuckEvent;
+use buck2_fs::paths::file_name::FileNameBuf;
 use futures::Future;
 
 use crate::subscribers::subscriber::EventSubscriber;
@@ -38,7 +39,7 @@ impl ReLog {
 
     fn log_upload(
         &mut self,
-    ) -> impl Future<Output = buck2_error::Result<()>> + 'static + Send + Sync {
+    ) -> impl Future<Output = buck2_error::Result<()>> + 'static + Send + Sync + use<> {
         // We put `None` in place of re_session_id which means we will only attempt to upload
         // the logs once no matter how many times this function is called
         let session_id = self.re_session_id.take();
@@ -56,10 +57,6 @@ impl ReLog {
 impl EventSubscriber for ReLog {
     fn name(&self) -> &'static str {
         "RE log"
-    }
-
-    async fn exit(&mut self) -> buck2_error::Result<()> {
-        self.log_upload().await
     }
 
     async fn handle_events(&mut self, events: &[Arc<BuckEvent>]) -> buck2_error::Result<()> {

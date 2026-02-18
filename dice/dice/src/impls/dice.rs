@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -14,6 +15,8 @@ use std::sync::Arc;
 use allocative::Allocative;
 use dupe::Dupe;
 
+use crate::DiceTransactionUpdater;
+use crate::DiceTransactionUpdaterImpl;
 use crate::api::cycles::DetectCycles;
 use crate::api::data::DiceData;
 use crate::api::user_data::UserComputationData;
@@ -22,25 +25,26 @@ use crate::impls::core::state::init_state;
 use crate::impls::key_index::DiceKeyIndex;
 use crate::impls::transaction::TransactionUpdater;
 use crate::introspection::graph::GraphIntrospectable;
-use crate::introspection::graph::ModernIntrospectable;
 use crate::metrics::Metrics;
 
+/// An incremental computation engine that executes arbitrary computations that
+/// maps `Key`s to values.
 #[derive(Allocative)]
-pub(crate) struct DiceModern {
+pub struct Dice {
     pub(crate) key_index: DiceKeyIndex,
     pub(crate) state_handle: CoreStateHandle,
     pub(crate) global_data: DiceData,
 }
 
-impl Debug for DiceModern {
+impl Debug for Dice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DiceModern").finish_non_exhaustive()
+        f.debug_struct("Dice").finish_non_exhaustive()
     }
 }
 
-pub(crate) struct DiceModernDataBuilder(DiceData);
+pub struct DiceDataBuilder(DiceData);
 
-impl DiceModernDataBuilder {
+impl DiceDataBuilder {
     pub(crate) fn new() -> Self {
         Self(DiceData::new())
     }
@@ -49,33 +53,38 @@ impl DiceModernDataBuilder {
         self.0.set(val);
     }
 
-    pub fn build(self, _detect_cycles: DetectCycles) -> Arc<DiceModern> {
-        DiceModern::new(self.0)
+    pub fn build(self, _detect_cycles: DetectCycles) -> Arc<Dice> {
+        Dice::new(self.0)
     }
 }
 
-impl DiceModern {
+impl Dice {
     pub(crate) fn new(global_data: DiceData) -> Arc<Self> {
         let state_handle = init_state();
 
-        Arc::new(DiceModern {
+        Arc::new(Dice {
             key_index: Default::default(),
             state_handle,
             global_data,
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn builder() -> DiceModernDataBuilder {
-        DiceModernDataBuilder::new()
+    pub fn builder() -> DiceDataBuilder {
+        DiceDataBuilder::new()
     }
 
-    pub fn updater(self: &Arc<Self>) -> TransactionUpdater {
+    pub fn updater(self: &Arc<Self>) -> DiceTransactionUpdater {
         self.updater_with_data(UserComputationData::new())
     }
 
-    pub fn updater_with_data(self: &Arc<Self>, extra: UserComputationData) -> TransactionUpdater {
-        TransactionUpdater::new(self.dupe(), Arc::new(extra))
+    pub fn updater_with_data(
+        self: &Arc<Self>,
+        extra: UserComputationData,
+    ) -> DiceTransactionUpdater {
+        DiceTransactionUpdater(DiceTransactionUpdaterImpl(TransactionUpdater::new(
+            self.dupe(),
+            Arc::new(extra),
+        )))
     }
 
     pub fn metrics(&self) -> Metrics {
@@ -89,12 +98,10 @@ impl DiceModern {
         // snapshotting the graphs will result in missing keys
         let key_index = self.key_index.introspect();
 
-        GraphIntrospectable::Modern {
-            introspection: ModernIntrospectable {
-                graph: graph_introspectable,
-                version_data: version_introspectable,
-                key_map: key_index,
-            },
+        GraphIntrospectable {
+            graph: graph_introspectable,
+            version_data: version_introspectable,
+            key_map: key_index,
         }
     }
 
@@ -106,7 +113,7 @@ impl DiceModern {
     }
 
     /// Wait until all active versions have exited.
-    pub fn wait_for_idle(&self) -> impl Future<Output = ()> + 'static {
+    pub fn wait_for_idle(&self) -> impl Future<Output = ()> + 'static + use<> {
         let rx = self.state_handle.get_tasks_pending_cancellation();
         async move {
             let tasks = rx.await;
@@ -127,11 +134,11 @@ pub(crate) mod testing {
     use dupe::Dupe;
 
     use crate::impls::ctx::SharedLiveTransactionCtx;
-    use crate::impls::dice::DiceModern;
+    use crate::impls::dice::Dice;
     use crate::impls::transaction::ActiveTransactionGuard;
     use crate::versions::VersionNumber;
 
-    impl DiceModern {
+    impl Dice {
         pub(crate) async fn testing_shared_ctx(
             &self,
             v: VersionNumber,

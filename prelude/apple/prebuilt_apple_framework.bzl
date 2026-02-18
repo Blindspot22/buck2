@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifact_tset.bzl",
@@ -15,7 +16,6 @@ load("@prelude//apple:apple_utility.bzl", "get_base_swiftinterface_compilation_f
 load("@prelude//apple/swift:apple_sdk_modules_utility.bzl", "is_sdk_modules_provided")
 load(
     "@prelude//apple/swift:swift_compilation.bzl",
-    "SwiftDependencyInfo",
     "create_swift_dependency_info",
     "get_external_debug_info_tsets",
     "get_swift_framework_anonymous_targets",
@@ -26,8 +26,8 @@ load(
     "SwiftPCMUncompiledInfo",
 )
 load("@prelude//apple/swift:swift_swiftinterface_compilation.bzl", "compile_swiftinterface_common")
-load("@prelude//apple/swift:swift_toolchain_types.bzl", "SwiftToolchainInfo")
-load("@prelude//apple/swift:swift_types.bzl", "FrameworkImplicitSearchPathInfo", "get_implicit_framework_search_path_providers")
+load("@prelude//apple/swift:swift_toolchain_types.bzl", "SwiftCompiledModuleTset", "SwiftToolchainInfo")
+load("@prelude//apple/swift:swift_types.bzl", "FrameworkImplicitSearchPathInfo", "SwiftDependencyInfo", "get_implicit_framework_search_path_providers")
 load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
 load(
     "@prelude//cxx:cxx_library_utility.bzl",
@@ -49,9 +49,12 @@ load(
 )
 load(
     "@prelude//linking:link_info.bzl",
+    "Archive",
+    "ArchiveLinkable",
     "LibOutputStyle",
     "LinkInfo",
     "LinkInfos",
+    "SharedLibLinkable",
     "create_merged_link_info",
 )
 load(
@@ -66,6 +69,7 @@ load(
     "merge_shared_libraries",
 )
 load("@prelude//linking:strip.bzl", "strip_object")
+load("@prelude//linking:types.bzl", "Linkage")
 load("@prelude//utils:utils.bzl", "filter_and_map_idx")
 load(":apple_bundle_types.bzl", "AppleBundleInfo", "AppleBundleTypeDefault")
 load(":apple_dsym.bzl", "DSYM_SUBTARGET")
@@ -74,12 +78,22 @@ load(":apple_toolchain_types.bzl", "AppleToolchainInfo", "AppleToolsInfo")
 load(":apple_utility.bzl", "get_apple_stripped_attr_value_with_default_fallback")
 load(":debug.bzl", "AppleDebuggableInfo")
 
+def _get_compiled_swift_deps_tset(ctx: AnalysisContext, deps_providers: list) -> SwiftCompiledModuleTset:
+    deps = [
+        d[SwiftDependencyInfo].exported_swiftmodules
+        for d in deps_providers
+        if SwiftDependencyInfo in d
+    ]
+    return ctx.actions.tset(SwiftCompiledModuleTset, children = deps)
+
 def prebuilt_apple_framework_impl(ctx: AnalysisContext) -> [list[Provider], Promise]:
     def get_prebuilt_apple_framework_providers(deps_providers) -> list[Provider]:
         providers = []
 
         framework_directory_artifact = ctx.attrs.framework
         framework_name = to_framework_name(framework_directory_artifact.basename)
+        framework_binary_name = ctx.attrs.binary if ctx.attrs.binary else framework_name
+        framework_library_artifact = framework_directory_artifact.project(framework_binary_name)
 
         # Check this rule's `supported_platforms_regex` with the current platform.
         if cxx_platform_supported(ctx):
@@ -92,21 +106,26 @@ def prebuilt_apple_framework_impl(ctx: AnalysisContext) -> [list[Provider], Prom
             # Add framework & pp info from deps.
             inherited_pp_info = cxx_inherited_preprocessor_infos(ctx.attrs.deps)
             providers.append(cxx_merge_cpreprocessors(
-                ctx,
+                ctx.actions,
                 [CPreprocessor(args = CPreprocessorArgs(args = ["-F", framework_dir]))],
                 inherited_pp_info,
             ))
 
-            # Add framework to link args.
-            # TODO(T110378120): Support shared linking for mac targets:
-            # https://fburl.com/code/pqrtt1qr.
-            args = []
-            args.extend(cxx_attr_exported_linker_flags(ctx))
-            args.extend(["-F", framework_dir])
-            args.extend(["-framework", framework_name])
+            if cxx_attr_preferred_linkage(ctx) == Linkage("static"):
+                linkable = ArchiveLinkable(
+                    archive = Archive(artifact = framework_library_artifact),
+                    linker_type = get_cxx_toolchain_info(ctx).linker_info.type,
+                )
+            else:
+                # If unspecified we default to "shared".
+                linkable = SharedLibLinkable(
+                    lib = framework_library_artifact,
+                )
+
             link = LinkInfo(
                 name = framework_name,
-                pre_flags = args,
+                linkables = [linkable],
+                pre_flags = [cxx_attr_exported_linker_flags(ctx)],
             )
             link_info = LinkInfos(default = link)
 
@@ -123,7 +142,6 @@ def prebuilt_apple_framework_impl(ctx: AnalysisContext) -> [list[Provider], Prom
                     ctx,
                     linkable_node = create_linkable_node(
                         ctx,
-                        preferred_linkage = cxx_attr_preferred_linkage(ctx),
                         link_infos = {output_style: link_info for output_style in LibOutputStyle},
                         # TODO(cjhopman): this should be set to non-None
                         default_soname = None,
@@ -192,20 +210,15 @@ def prebuilt_apple_framework_impl(ctx: AnalysisContext) -> [list[Provider], Prom
         return get_prebuilt_apple_framework_providers([])
 
 def _create_uncompiled_pcm_module_info(ctx: AnalysisContext, framework_directory_artifact: Artifact, framework_name: str) -> SwiftPCMUncompiledInfo:
-    exported_pp_info = CPreprocessor(
-        headers = [],
-        modular_args = [],
-        args = CPreprocessorArgs(args = [
-            cmd_args(["-F", cmd_args(framework_directory_artifact, parent = 1)], delimiter = ""),
-        ]),
-        modulemap_path = cmd_args(framework_directory_artifact, "/Modules/module.modulemap", delimiter = ""),
-    )
+    modulemap_artifact = framework_directory_artifact.project("Modules/module.modulemap").with_associated_artifacts([framework_directory_artifact])
+    clang_importer_args = cmd_args(framework_directory_artifact, parent = 1, format = "-F{}")
     return SwiftPCMUncompiledInfo(
-        name = framework_name,
-        is_transient = False,
-        exported_preprocessor = exported_pp_info,
+        clang_importer_args = cmd_args(),
+        exported_clang_importer_args = clang_importer_args,
         exported_deps = ctx.attrs.deps,
-        propagated_preprocessor_args_cmd = cmd_args([]),
+        is_transient = False,
+        modulemap_artifact = modulemap_artifact,
+        name = framework_name,
         uncompiled_sdk_modules = ctx.attrs.sdk_modules,
     )
 
@@ -234,6 +247,8 @@ def _compile_swiftinterface(
         delimiter = "",
     )
 
+    swift_third_party_deps = _get_compiled_swift_deps_tset(ctx, ctx.attrs.deps)
+
     swift_compiled_module, _ = compile_swiftinterface_common(
         ctx,
         ctx.attrs.deps,
@@ -244,14 +259,15 @@ def _compile_swiftinterface(
         swiftinterface_path,
         "prebuilt_framework_swiftinterface_compilation",
         compiled_underlying_pcm,
+        additional_compiled_swiftmodules = swift_third_party_deps,
     )
 
     debug_info_tset = make_artifact_tset(
         actions = ctx.actions,
         artifacts = [swift_compiled_module.output_artifact, compiled_underlying_pcm.output_artifact],
-        children = get_external_debug_info_tsets(ctx.attrs.deps),
+        children = get_external_debug_info_tsets(False, ctx.attrs.deps),
         label = ctx.label,
-        tags = [ArtifactInfoTag("swiftmodule")],
+        tags = [ArtifactInfoTag("swift_debug_info")],
     )
 
     swift_dependency_info = create_swift_dependency_info(
@@ -260,6 +276,7 @@ def _compile_swiftinterface(
         deps_providers,
         swift_compiled_module,
         debug_info_tset,
+        False,
     )
 
     return swift_dependency_info

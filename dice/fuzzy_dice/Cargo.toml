@@ -1,5 +1,5 @@
 [package]
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "fuzzy_dice"
 repository = { workspace = true }
@@ -15,18 +15,18 @@ crossbeam = "0.8"
 derivative = "2.1.1"
 derive_more = { version = "1.0.0", features = ["full"] }
 futures = "0.3"
-itertools = "0.13.0"
-parking_lot = { version = "0.11.2", features = ["send_guard"] }
+itertools = "0.14.0"
+parking_lot = { version = "0.12.1", features = ["send_guard"] }
 quickcheck = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.48"
-thiserror = "1.0.36"
+thiserror = "2.0.18"
 tokio = { version = "1.5", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.2", features = ["v4"] }
 
 allocative = { workspace = true }
-buck2_futures = { path = "../../app/buck2_futures" }
+dice_futures = { path = "../dice_futures" }
 dupe = { workspace = true }
 
 dice = { path = "../dice" }

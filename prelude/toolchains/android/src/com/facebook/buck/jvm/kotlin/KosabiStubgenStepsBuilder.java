@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin;
@@ -14,6 +15,7 @@ import static com.facebook.buck.jvm.java.JavaPaths.SRC_ZIP;
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.core.filesystems.RelPath;
 import com.facebook.buck.jvm.cd.command.kotlin.KotlinExtraParams;
+import com.facebook.buck.jvm.cd.command.kotlin.LanguageVersion;
 import com.facebook.buck.jvm.core.BuildTargetValue;
 import com.facebook.buck.jvm.core.BuildTargetValueExtraParams;
 import com.facebook.buck.jvm.java.CompilerParameters;
@@ -57,9 +59,18 @@ public class KosabiStubgenStepsBuilder {
       ImmutableMap<String, AbsPath> allKosabiPluginOptionPath,
       ImmutableList.Builder<AbsPath> sourceOnlyAbiClasspathBuilder,
       ImmutableList.Builder<IsolatedStep> postKotlinCompilationFailureSteps,
-      KotlinCDAnalytics kotlinCDAnalytics) {
+      KotlinCDAnalytics kotlinCDAnalytics,
+      LanguageVersion languageVersion) {
     ImmutableSortedSet<RelPath> stubsGenOutputPath;
-    if (invokingRule.isSourceOnlyAbi() && extraParams.getShouldUseStandaloneKosabi()) {
+    if (invokingRule.isSourceOnlyAbi()) {
+
+      if (allKosabiPluginOptionPath.isEmpty()) {
+        throw new RuntimeException(
+            "Building Kotlin SourceOnlyAbi without Kosabi plugins setup, please check if Kosabi is"
+                + " turn off (kotlin.enable_source_only_abi == false), or remove"
+                + " abi_generation_mode=\"source_only\" from the target.");
+      }
+
       RelPath stubgenOutputDir = buildTargetValueExtraParams.getGenPath("__%s_stubgen_stubs__");
       RelPath stubgenClassOutputDir =
           buildTargetValueExtraParams.getGenPath("__%s_stubgen_stubs_class__");
@@ -103,7 +114,10 @@ public class KosabiStubgenStepsBuilder {
               buckOut,
               allKosabiPluginOptionPath.entrySet().stream()
                   .filter(
-                      entry -> KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_PLUGIN.equals(entry.getKey()))
+                      entry ->
+                          (KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_PLUGIN.equals(entry.getKey())
+                              || KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_K2_PLUGIN.equals(
+                                  entry.getKey())))
                   .collect(ImmutableMap.toImmutableMap(Map.Entry::getKey, Map.Entry::getValue)),
               "Terminating compilation. We're done with Stubgen.",
               false,
@@ -113,7 +127,8 @@ public class KosabiStubgenStepsBuilder {
               extraParams.getDepTrackerPlugin(),
               stubgenOutputDir,
               stubgenClassOutputDir,
-              kotlinCDAnalytics));
+              kotlinCDAnalytics,
+              languageVersion));
 
       steps.add(
           new ZipIsolatedStep(

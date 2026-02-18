@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -16,13 +17,8 @@ import time
 from pathlib import Path
 
 import pytest
-
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test, env
-
-
-async def get_daemon_dir(buck: Buck) -> Path:
-    return Path((await buck.debug("daemon-dir")).stdout.strip())
 
 
 @buck_test()
@@ -45,8 +41,7 @@ async def test_inactivity_timeout(buck: Buck) -> None:
         time.sleep(1)
         result = await buck.status()
         if result.stderr.splitlines()[-1] == "no buckd running":
-            daemon_dir = await get_daemon_dir(buck)
-            stderr = (daemon_dir / "buckd.stderr").read_text()
+            stderr = await buck.daemon_stderr()
             assert "inactivity timeout elapsed" in stderr
             return
 
@@ -61,7 +56,7 @@ async def test_inactivity_timeout(buck: Buck) -> None:
 async def test_corrupted_buckd_info(buck: Buck, corrupt: str) -> None:
     await buck.targets("//:rule")
 
-    daemon_dir = await get_daemon_dir(buck)
+    daemon_dir = await buck.get_daemon_dir()
     with open(f"{daemon_dir}/buckd.info") as f:
         # Check file exists and valid.
         json.load(f)
@@ -148,7 +143,6 @@ async def test_prev_daemon_dir(buck: Buck) -> None:
     await buck.targets(":")  # Start a daemon
     await buck.kill()
     await buck.targets(":")  # Start another daemon
-    daemon_dir = await get_daemon_dir(buck)
 
     def extract_pid(stderr: str) -> int:
         pid = [re.match(r".* PID: (\d+)", line) for line in stderr.splitlines()]
@@ -156,8 +150,8 @@ async def test_prev_daemon_dir(buck: Buck) -> None:
         assert len(pid) == 1, pid[0]
         return int(pid[0].group(1))
 
-    new_daemon_stderr = (daemon_dir / "buckd.stderr").read_text()
-    killed_daemon_stderr = (daemon_dir / "prev/buckd.stderr").read_text()
+    new_daemon_stderr = await buck.daemon_stderr()
+    killed_daemon_stderr = await buck.prev_daemon_stderr()
 
     # check logs contain buckd pid and don't match
     assert extract_pid(new_daemon_stderr) != extract_pid(killed_daemon_stderr)

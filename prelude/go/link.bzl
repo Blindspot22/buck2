@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_library_utility.bzl", "cxx_inherited_link_info")
 load(
@@ -35,6 +36,8 @@ load(
 load(
     ":packages.bzl",
     "GoPkg",  # @Unused used as type
+    "GoStdlib",
+    "GoStdlibDynamicValue",
     "make_importcfg",
     "merge_pkgs",
 )
@@ -46,14 +49,17 @@ GoPkgLinkInfo = provider(fields = {
 })
 
 GoBuildMode = enum(
-    "executable",  # non-pic executable
+    "exe",  # non-pic executable
+    "pie",  # pic executable
     "c_shared",  # pic C-shared library
     "c_archive",  # pic C-static library
 )
 
 def _build_mode_param(mode: GoBuildMode) -> str:
-    if mode == GoBuildMode("executable"):
+    if mode == GoBuildMode("exe"):
         return "exe"
+    if mode == GoBuildMode("pie"):
+        return "pie"
     if mode == GoBuildMode("c_shared"):
         return "c-shared"
     if mode == GoBuildMode("c_archive"):
@@ -84,7 +90,7 @@ def _process_shared_dependencies(
         ctx.actions,
         deps = filter_and_map_idx(SharedLibraryInfo, deps),
     )
-    shared_libs = traverse_shared_library_info(shlib_info)
+    shared_libs = traverse_shared_library_info(shlib_info, transformation_provider = None)
 
     return executable_shared_lib_arguments(
         ctx,
@@ -96,16 +102,19 @@ def _process_shared_dependencies(
 def link(
         ctx: AnalysisContext,
         main: GoPkg,
+        cgo_enabled: bool,
         pkgs: dict[str, GoPkg] = {},
         deps: list[Dependency] = [],
-        build_mode: GoBuildMode = GoBuildMode("executable"),
+        build_mode: GoBuildMode = GoBuildMode("exe"),
         link_mode: [str, None] = None,
         link_style: LinkStyle = LinkStyle("static"),
         linker_flags: list[typing.Any] = [],
-        external_linker_flags: list[typing.Any] = [],
-        race: bool = False,
-        asan: bool = False):
+        external_linker_flags: list[typing.Any] = []):
     go_toolchain = ctx.attrs._go_toolchain[GoToolchainInfo]
+
+    if not cgo_enabled and (go_toolchain.asan or go_toolchain.race):
+        fail("`race=True` and `asan=True` are only supported when `cgo_enabled=True`")
+
     if go_toolchain.env_go_os == "windows":
         executable_extension = ".exe"
         shared_extension = ".dll"
@@ -118,28 +127,35 @@ def link(
     if build_mode == GoBuildMode("c_shared"):
         file_extension = shared_extension
         use_shared_code = True  # PIC
+        link_style = LinkStyle("shared")
     elif build_mode == GoBuildMode("c_archive"):
         file_extension = archive_extension
         use_shared_code = True  # PIC
-    else:  # GoBuildMode("executable")
+        link_style = LinkStyle("static_pic")
+    elif build_mode == GoBuildMode("pie"):
+        file_extension = executable_extension
+        use_shared_code = True  # PIC
+        link_style = LinkStyle("static_pic")
+    else:  # GoBuildMode("exe")
         file_extension = executable_extension
         use_shared_code = False  # non-PIC
     final_output_name = ctx.label.name + file_extension
-    output = ctx.actions.declare_output(ctx.label.name + "-tmp" + file_extension)
+    output = ctx.actions.declare_output(ctx.label.name + "-tmp" + file_extension, has_content_based_path = True)
 
     cmd = cmd_args()
 
-    cmd.add(go_toolchain.linker)
+    cmd.add(go_toolchain.go_wrapper)
+    cmd.add(["--go", go_toolchain.linker])
+    cmd.add("--")
     cmd.add(go_toolchain.linker_flags)
 
-    cmd.add("-o", output.as_output())
     cmd.add("-buildmode=" + _build_mode_param(build_mode))
     cmd.add("-buildid=")  # Setting to a static buildid helps make the binary reproducible.
 
-    if race:
+    if go_toolchain.race:
         cmd.add("-race")
 
-    if asan:
+    if go_toolchain.asan:
         cmd.add("-asan")
 
     # Add inherited Go pkgs to library search path.
@@ -150,9 +166,7 @@ def link(
 
     identifier_prefix = ctx.label.name + "_" + _build_mode_param(build_mode)
 
-    importcfg = make_importcfg(ctx, identifier_prefix, all_pkgs, use_shared_code)
-
-    cmd.add("-importcfg", importcfg)
+    go_stdlib = ctx.attrs._go_stdlib[GoStdlib]
 
     executable_args = _process_shared_dependencies(ctx, output, deps, link_style)
 
@@ -171,7 +185,13 @@ def link(
         is_win = ctx.attrs._exec_os_type[OsLookup].os == Os("windows")
 
         # Gather external link args from deps.
-        ext_links = get_link_args_for_strategy(ctx, cxx_inherited_link_info(deps), to_link_strategy(link_style))
+        ext_links = get_link_args_for_strategy(
+            ctx,
+            cxx_inherited_link_info(deps),
+            to_link_strategy(link_style),
+            prefer_stripped = False,
+            transformation_spec_context = None,
+        )
         ext_link_args_output = make_link_args(
             ctx,
             ctx.actions,
@@ -192,10 +212,16 @@ def link(
         # TODO: It feels a bit inefficient to generate a wrapper file for every
         # link.  Is there some way to etract the first arg of `RunInfo`?  Or maybe
         # we can generate the platform-specific stuff once and re-use?
+        ext_link_argfile, _ = ctx.actions.write(
+            output.short_path + ".go_ext_link_argsfile",
+            ext_link_args,
+            allow_args = True,
+            has_content_based_path = True,
+        )
         cxx_link_cmd = cmd_args(
             [
                 cxx_toolchain.linker_info.linker,
-                ext_link_args,
+                cmd_args(ext_link_argfile, format = "@{}"),
                 "%*" if is_win else "\"$@\"",
             ],
             delimiter = " ",
@@ -205,8 +231,9 @@ def link(
             ([] if is_win else ["#!/bin/sh"]) + [cxx_link_cmd],
             allow_args = True,
             is_executable = True,
+            has_content_based_path = True,
         )
-        cmd.add("-extld", linker_wrapper, cmd_args(hidden = cxx_link_cmd))
+        cmd.add("-extld", linker_wrapper, cmd_args(hidden = [cxx_link_cmd, ext_link_args, ext_link_args_output.hidden]))
         cmd.add("-extldflags", cmd_args(
             cxx_toolchain.linker_info.linker_flags,
             go_toolchain.external_linker_flags,
@@ -216,14 +243,62 @@ def link(
 
     cmd.add(linker_flags)
 
-    cmd.add(main.pkg_shared if use_shared_code else main.pkg)
-
     env = get_toolchain_env_vars(go_toolchain)
 
-    ctx.actions.run(cmd, env = env, category = "go_link", identifier = identifier_prefix)
+    ctx.actions.dynamic_output_new(_link(
+        go_stdlib_value = go_stdlib.dynamic_value,
+        env_vars = env,
+        link_args = cmd,
+        main_pkg = main,
+        deps_pkgs = all_pkgs,
+        shared = use_shared_code,
+        identifier = identifier_prefix,
+        out = output.as_output(),
+    ))
 
-    output = stamp_build_info(ctx, output)
+    # stamp only executable targets
+    if build_mode in [GoBuildMode("exe"), GoBuildMode("pie")]:
+        output = stamp_build_info(ctx, output, has_content_based_path = True)
 
     final_output = ctx.actions.copy_file(final_output_name, output)
 
     return (final_output, executable_args.runtime_files, executable_args.external_debug_info)
+
+def _link_impl(
+        actions: AnalysisActions,
+        go_stdlib_value: ResolvedDynamicValue,
+        env_vars: dict[str, str | cmd_args | Artifact],
+        link_args: cmd_args,
+        main_pkg: GoPkg,
+        deps_pkgs: dict[str, GoPkg],
+        shared: bool,
+        identifier: str,
+        out: OutputArtifact) -> list[Provider]:
+    go_stdlib_value = go_stdlib_value.providers[GoStdlibDynamicValue]
+
+    importcfg = make_importcfg(actions, go_stdlib_value, deps_pkgs, shared, link = True)
+    main_pkg_o = main_pkg.pkg_shared if shared else main_pkg.pkg
+
+    cmd = [
+        link_args,
+        ["-importcfg", importcfg],
+        ["-o", out],
+        main_pkg_o,
+    ]
+    actions.run(cmd, env = env_vars, category = "go_link", identifier = identifier)
+    return []
+
+_link = dynamic_actions(
+    impl = _link_impl,
+    # @unsorted-dict-items
+    attrs = {
+        "go_stdlib_value": dynattrs.dynamic_value(),  # GoStdlibDynamicValue
+        "env_vars": dynattrs.value(dict[str, str | cmd_args | Artifact]),
+        "link_args": dynattrs.value(cmd_args),
+        "main_pkg": dynattrs.value(GoPkg),
+        "deps_pkgs": dynattrs.value(dict[str, GoPkg]),
+        "shared": dynattrs.value(bool),
+        "identifier": dynattrs.value(str),
+        "out": dynattrs.output(),
+    },
+)

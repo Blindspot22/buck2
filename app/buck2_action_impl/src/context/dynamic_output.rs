@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -18,14 +19,13 @@ use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::Starla
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_value::StarlarkArtifactValue;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_declared_artifact::StarlarkDeclaredArtifact;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
-use buck2_build_api::interpreter::rule_defs::artifact::unpack_artifact::UnpackArtifactOrDeclaredArtifact;
+use buck2_build_api::interpreter::rule_defs::artifact::unpack_artifact::UnpackNonPromiseInputArtifact;
 use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_core::deferred::dynamic::DynamicLambdaResultsKey;
 use buck2_core::deferred::key::DeferredHolderKey;
-use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use dupe::Dupe;
-use indexmap::IndexSet;
 use starlark::environment::MethodsBuilder;
 use starlark::starlark_module;
 use starlark::values::FrozenValue;
@@ -35,6 +35,7 @@ use starlark::values::none::NoneType;
 use starlark::values::typing::StarlarkCallable;
 use starlark_map::small_map::SmallMap;
 
+use crate::dynamic::attrs::dedupe_output_artifacts;
 use crate::dynamic::dynamic_actions::StarlarkDynamicActions;
 use crate::dynamic::dynamic_actions::StarlarkDynamicActionsData;
 use crate::dynamic::dynamic_value::StarlarkDynamicValue;
@@ -83,16 +84,17 @@ impl DynamicActionsOutputArtifactBinder {
     }
 }
 
-fn output_artifacts_to_lambda_build_artifacts(
+fn output_artifacts_to_lambda_build_artifacts<'v>(
     dynamic_key: &DynamicLambdaResultsKey,
-    outputs: IndexSet<OutputArtifact>,
-) -> buck2_error::Result<Box<[BoundBuildArtifact]>> {
+    outputs: Vec<ValueTyped<'v, StarlarkOutputArtifact<'v>>>,
+) -> buck2_error::Result<Box<[ValueTyped<'v, StarlarkOutputArtifact<'v>>]>> {
+    let outputs = dedupe_output_artifacts(outputs);
     let mut bind = DynamicActionsOutputArtifactBinder::new(dynamic_key);
 
-    outputs
-        .into_iter()
-        .map(|output| bind.bind(output))
-        .collect::<buck2_error::Result<_>>()
+    for output in &outputs {
+        bind.bind(output.artifact())?;
+    }
+    Ok(outputs)
 }
 
 #[starlark_module]
@@ -136,11 +138,13 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
     /// the actions it outputs is actually requested as part of the build.
     fn dynamic_output<'v>(
         this: &'v AnalysisActions<'v>,
-        #[starlark(require = named)] dynamic: UnpackListOrTuple<UnpackArtifactOrDeclaredArtifact>,
+        #[starlark(require = named)] dynamic: UnpackListOrTuple<UnpackNonPromiseInputArtifact>,
         #[starlark(require = named)] inputs: Option<
-            UnpackListOrTuple<UnpackArtifactOrDeclaredArtifact>,
+            UnpackListOrTuple<UnpackNonPromiseInputArtifact>,
         >,
-        #[starlark(require = named)] outputs: UnpackListOrTuple<&'v StarlarkOutputArtifact>,
+        #[starlark(require = named)] outputs: UnpackListOrTuple<
+            ValueTyped<'v, StarlarkOutputArtifact<'v>>,
+        >,
         #[starlark(require = named)] f: StarlarkCallable<
             'v,
             (
@@ -165,11 +169,6 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
             .iter()
             .map(|x| x.artifact())
             .collect::<buck2_error::Result<_>>()?;
-        let outputs = outputs
-            .items
-            .iter()
-            .map(|x| x.artifact())
-            .collect::<buck2_error::Result<_>>()?;
 
         let attributes = this.attributes;
         let plugins = this.plugins;
@@ -182,7 +181,7 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
             DynamicLambdaParamsStorageImpl::get(&mut this.analysis_value_storage)?;
 
         let key = lambda_params_storage.next_dynamic_actions_key()?;
-        let outputs = output_artifacts_to_lambda_build_artifacts(&key, outputs)?;
+        let outputs = output_artifacts_to_lambda_build_artifacts(&key, outputs.items)?;
 
         // Registration
         let lambda_params = DynamicLambdaParams {
@@ -190,11 +189,10 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
             plugins,
             lambda: f.erase(),
             attr_values: None,
+            outputs,
             static_fields: DynamicLambdaStaticFields {
-                owner: key.owner().dupe(),
                 artifact_values,
-                dynamic_values: IndexSet::new(),
-                outputs,
+                dynamic_values: Box::new([]),
                 execution_platform,
             },
         };
@@ -202,9 +200,68 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
         Ok(NoneType)
     }
 
-    /// New version of `dynamic_output`.
+    /// Declares a dynamic action that reads artifact contents to produce outputs.
     ///
-    /// This is work in progress, and will eventually replace the old `dynamic_output`.
+    /// This is the new version of `dynamic_output` and will eventually replace it.
+    /// Dynamic actions enable build decisions based on the actual content of intermediate
+    /// artifacts.
+    ///
+    /// # Workflow
+    ///
+    /// 1. Define an implementation function with signature matching your dynamic attributes
+    /// 2. Create a factory (`DynamicActionsCallable`) using `dynamic_actions(impl=..., attrs=...)`
+    /// 3. Call that factory with concrete artifact values to create a `DynamicActions` instance
+    /// 4. Pass the `DynamicActions` to `ctx.actions.dynamic_output_new()`
+    ///
+    /// # Arguments
+    ///
+    /// * `dynamic_actions` - A `DynamicActions` instance created by calling a `DynamicActionsCallable`
+    ///
+    /// # Returns
+    ///
+    /// A `DynamicValue` that can be consumed by other dynamic actions via `dynattrs.dynamic_value()`.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// # Step 1: Define the implementation function
+    /// def _my_impl(actions: AnalysisActions, config: ArtifactValue, out: OutputArtifact):
+    ///     content = config.read_string()
+    ///     if "feature_enabled" in content:
+    ///         actions.write(out, "feature output")
+    ///     else:
+    ///         actions.write(out, "default output")
+    ///     return [DefaultInfo()]
+    ///
+    /// # Step 2: Create a factory
+    /// _my_dynamic_action = dynamic_actions(
+    ///     impl = _my_impl,
+    ///     attrs = {
+    ///         "config": dynattrs.artifact_value(),
+    ///         "out": dynattrs.output(),
+    ///     },
+    /// )
+    ///
+    /// # Step 3 & 4: Use it in a rule or bxl script
+    /// def _rule_impl(ctx: AnalysisContext):
+    ///     config_file = ctx.actions.write("config.txt", "feature_enabled")
+    ///     output = ctx.actions.declare_output("result")
+    ///
+    ///     # Call the factory to create a DynamicActions instance
+    ///     dynamic_action = _my_dynamic_action(
+    ///         config = config_file,
+    ///         out = output.as_output(),
+    ///     )
+    ///
+    ///     # Execute it
+    ///     ctx.actions.dynamic_output_new(dynamic_action)
+    ///     return [DefaultInfo(default_output = output)]
+    /// ```
+    ///
+    /// See [Dynamic Dependencies](../../../rule_authors/dynamic_dependencies) for an overall
+    /// overview of dynamic dependencies in buck2.
+    ///
+    /// For a guide on using this with BXL, see [How to run actions based on the content of artifacts](../../../bxl/how_tos/how_to_run_actions_based_on_the_content_of_artifact).
     fn dynamic_output_new<'v>(
         this: &'v AnalysisActions<'v>,
         #[starlark(require = pos)] dynamic_actions: ValueTyped<'v, StarlarkDynamicActions<'v>>,
@@ -214,9 +271,11 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
             .try_borrow_mut()
             .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?
             .take()
-            .buck_error_context(
-                "dynamic_action data can be used only in one `dynamic_output_new` call",
-            )?;
+            .ok_or_else(|| {
+                internal_error!(
+                    "dynamic_action data can be used only in one `dynamic_output_new` call",
+                )
+            })?;
         let StarlarkDynamicActionsData {
             attr_values,
             callable,
@@ -230,9 +289,9 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
             DynamicLambdaParamsStorageImpl::get(&mut this.analysis_value_storage)?;
         let key = lambda_params_storage.next_dynamic_actions_key()?;
 
-        let attr_values = attr_values.bind(&key)?;
+        attr_values.bind(&key)?;
 
-        let outputs = attr_values.outputs().into_iter().collect();
+        let outputs = attr_values.outputs();
         let artifact_values = attr_values.artifact_values();
         let dynamic_values = attr_values.dynamic_values();
 
@@ -242,11 +301,10 @@ pub(crate) fn analysis_actions_methods_dynamic_output(methods: &mut MethodsBuild
             plugins: None,
             lambda: callable.implementation.erase().to_callable(),
             attr_values: Some((attr_values, callable)),
+            outputs,
             static_fields: DynamicLambdaStaticFields {
-                owner: key.owner().dupe(),
                 artifact_values,
                 dynamic_values,
-                outputs,
                 execution_platform,
             },
         };

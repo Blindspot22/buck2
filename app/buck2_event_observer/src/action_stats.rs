@@ -1,14 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
 
+use buck2_data::SchedulingMode;
 use dupe::Dupe;
 
 use crate::cache_hit_rate::total_cache_hit_rate;
@@ -126,22 +128,31 @@ impl fmt::Display for ActionStats {
             )
             .as_str();
         }
-        write!(f, "{}", action_stats_message)
+        write!(f, "{action_stats_message}")
     }
 }
 
-/// Identify whether an action was a fallback action. A fallback action is an action that executed
-/// two commands, unless one of those was a Cancelled, which just means hybrid execution
-/// cancelled the local run (and which is not a fallback).
-pub fn was_fallback_action(action: &buck2_data::ActionExecutionEnd) -> bool {
-    use buck2_data::command_execution::Status;
+pub fn was_local_action(action: &buck2_data::ActionExecutionEnd) -> bool {
+    action.execution_kind() == buck2_data::ActionExecutionKind::Local
+        || action.execution_kind() == buck2_data::ActionExecutionKind::LocalWorker
+}
 
+pub fn scheduling_mode(action: &buck2_data::ActionExecutionEnd) -> Option<SchedulingMode> {
     action
-        .commands
-        .iter()
-        .filter(|c| !matches!(c.status, Some(Status::Cancelled(..))))
-        .count()
-        > 1
+        .scheduling_mode
+        .and_then(|o| SchedulingMode::try_from(o).ok())
+}
+
+/// Identify whether an action was a fallback action.
+/// An action was a fallback if it was a local action and triggered as a
+/// fallback by the hybrid executor.
+pub fn was_fallback_action(action: &buck2_data::ActionExecutionEnd) -> bool {
+    match scheduling_mode(action) {
+        Some(SchedulingMode::Fallback) | Some(SchedulingMode::FallbackReQueueEstimate) => {
+            was_local_action(action)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

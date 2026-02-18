@@ -1,23 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 
 import json
-
 import os
 import platform
 import random
 import string
 import subprocess
-import typing
 from pathlib import Path
-from typing import List, Tuple
 
 import pytest
 from buck2.tests.e2e_util.api.buck import Buck
@@ -59,7 +57,7 @@ async def test_prelude_imported_once(buck: Buck) -> None:
     await buck.build("cell1//...", "cell2//...")
 
 
-def read_all_outputs(buck: Buck, report: str) -> typing.List[str]:
+def read_all_outputs(buck: Buck, report: str) -> list[str]:
     ret = []
 
     with open(buck.cwd / report) as f:
@@ -345,7 +343,7 @@ async def test_cleanup(buck: Buck) -> None:
 
 @buck_test(data_dir="log_action_keys")
 async def test_log_action_keys(buck: Buck) -> None:
-    async def read_action_keys() -> List[Tuple[str, str]]:
+    async def read_action_keys() -> list[tuple[str, str]]:
         out = await read_what_ran(buck)
         return [
             (

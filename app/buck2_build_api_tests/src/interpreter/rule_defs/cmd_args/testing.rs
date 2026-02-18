@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_build_api::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
@@ -12,11 +13,12 @@ use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandL
 use buck2_core::execution_types::executor_config::PathSeparatorKind;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::buck_out_path::BuckOutPathResolver;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_execute::artifact::fs::ExecutorFs;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_interpreter_for_build::interpreter::testing::cells;
+use fxhash::FxHashMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::starlark_module;
 use starlark::values::UnpackValue;
@@ -41,10 +43,12 @@ fn get_command_line(value: Value) -> buck2_error::Result<Vec<String>> {
     let mut ctx = DefaultCommandLineContext::new(&executor_fs);
 
     match ValueAsCommandLineLike::unpack_value(value)? {
-        Some(v) => v.0.add_to_command_line(&mut cli, &mut ctx),
+        Some(v) => {
+            v.0.add_to_command_line(&mut cli, &mut ctx, &FxHashMap::default())
+        }
         None => ValueAsCommandLineLike::unpack_value_err(value)?
             .0
-            .add_to_command_line(&mut cli, &mut ctx),
+            .add_to_command_line(&mut cli, &mut ctx, &FxHashMap::default()),
     }?;
     Ok(cli)
 }
@@ -62,7 +66,7 @@ pub(crate) fn command_line_stringifier(builder: &mut GlobalsBuilder) {
         let mut ctx = DefaultCommandLineContext::new(&executor_fs);
         ValueAsCommandLineLike::unpack_value_err(value)?
             .0
-            .add_to_command_line(&mut cli, &mut ctx)?;
+            .add_to_command_line(&mut cli, &mut ctx, &FxHashMap::default())?;
         assert_eq!(1, cli.len());
         Ok(cli.first().unwrap().clone())
     }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -13,15 +14,15 @@ use std::sync::atomic::Ordering;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use derivative::Derivative;
 use derive_more::Display;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 
 use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::key::Key;
-use crate::impls::dice::DiceModern;
+use crate::impls::dice::Dice;
 
 #[tokio::test]
 async fn invalid_results_are_not_cached() -> anyhow::Result<()> {
@@ -52,7 +53,7 @@ async fn invalid_results_are_not_cached() -> anyhow::Result<()> {
         }
     }
 
-    let dice = DiceModern::builder().build(DetectCycles::Enabled);
+    let dice = Dice::builder().build(DetectCycles::Enabled);
     let is_ran = Arc::new(AtomicBool::new(false));
     {
         let mut ctx = dice.updater().commit().await;
@@ -140,7 +141,7 @@ async fn demo_with_transient() -> anyhow::Result<()> {
         }
     }
 
-    let dice = DiceModern::builder().build(DetectCycles::Enabled);
+    let dice = Dice::builder().build(DetectCycles::Enabled);
 
     let mut ctx = dice.updater().commit().await;
     let validity = Arc::new(AtomicBool::new(false));

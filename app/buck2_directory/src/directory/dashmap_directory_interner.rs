@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -12,7 +13,6 @@ use std::sync::Weak;
 
 use allocative::Allocative;
 use buck2_core::directory_digest::DirectoryDigest;
-use buck2_core::directory_digest::InternableDirectoryDigest;
 use buck2_util::hash::BuckHasherBuilder;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -34,7 +34,7 @@ where
 
 impl<L, H> DashMapDirectoryInterner<L, H>
 where
-    H: InternableDirectoryDigest,
+    H: DirectoryDigest,
 {
     pub fn new() -> Self {
         Self {
@@ -93,16 +93,7 @@ where
 
         SharedDirectory { inner: new_inner }
     }
-}
 
-impl<L, H> DashMapDirectoryInterner<L, H>
-where
-    // Note: We "should" require `H: InternableDirectoryDigest` here; however, we can't do that
-    // because `Drop` impls having to be always-applicable would force us to require `H:
-    // InternableDirectoryDigest` on `ImmutableDirectory`. This should still be ok though, because
-    // you can't create a `SharedDirectory` for which that trait bound is not met.
-    H: DirectoryDigest,
-{
     /// Notify the interner that an entry has been removed.
     pub fn dropped(&self, data: &SharedDirectoryData<L, H>) {
         // Note: we still check the count here, since you could hypothetically have a race where
@@ -114,5 +105,70 @@ where
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::directory::dashmap_directory_interner::DashMapDirectoryInterner;
+    use crate::directory::entry::DirectoryEntry;
+    use crate::directory::test::NopEntry;
+    use crate::directory::test::TestDirectoryBuilder;
+    use crate::directory::test::TestHasher;
+    use crate::directory::test::path;
+
+    #[test]
+    fn test_directory_interner() -> buck2_error::Result<()> {
+        let interner = DashMapDirectoryInterner::new();
+
+        let d1 = {
+            let mut b = TestDirectoryBuilder::empty();
+            b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
+            b.fingerprint(&TestHasher).shared(&interner)
+        };
+
+        let d2 = {
+            let mut b = TestDirectoryBuilder::empty();
+            b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
+            b.fingerprint(&TestHasher).shared(&interner)
+        };
+
+        assert!(d1.ptr_eq(&d2));
+
+        assert_eq!(interner.len(), 2);
+
+        drop(d1);
+        assert_eq!(interner.len(), 2);
+
+        drop(d2);
+        assert_eq!(interner.len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_directory_interner_deep() -> buck2_error::Result<()> {
+        let interner = DashMapDirectoryInterner::new();
+
+        let d1 = {
+            let mut b = TestDirectoryBuilder::empty();
+            b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
+            b.fingerprint(&TestHasher).shared(&interner)
+        };
+
+        let _d2 = {
+            let mut b = TestDirectoryBuilder::empty();
+            b.insert(path("b"), DirectoryEntry::Leaf(NopEntry))?;
+            b.fingerprint(&TestHasher).shared(&interner)
+        };
+
+        assert_eq!(interner.len(), 2);
+
+        drop(d1);
+
+        // Now we only have d2.
+        assert_eq!(interner.len(), 1);
+
+        Ok(())
     }
 }

@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin.buildtools
 
 import com.facebook.buck.core.build.execution.context.IsolatedExecutionContext
-import com.facebook.buck.core.exceptions.HumanReadableException
 import com.facebook.buck.core.filesystems.AbsPath
 import com.facebook.buck.core.filesystems.RelPath
 import com.facebook.buck.core.util.log.Logger
@@ -48,7 +48,7 @@ class BuildToolsKotlinc : Kotlinc {
       workingDirectory: Optional<Path>,
       ruleCellRoot: AbsPath,
       mode: KotlincMode,
-      kotlinCDLoggingContext: KotlinCDLoggingContext
+      kotlinCDLoggingContext: KotlinCDLoggingContext,
   ): Int {
     val compilerArgs =
         buildCompilerArgs(
@@ -57,26 +57,38 @@ class BuildToolsKotlinc : Kotlinc {
             workingDirectory,
             invokingRule,
             options,
-            kotlinCDLoggingContext)
+            kotlinCDLoggingContext,
+        )
 
     LOG.info(
         "[KotlinC Toolchain Build Step from for target:${invokingRule.fullyQualifiedName} type:${invokingRule.type}] " +
             "Running ${CompilationService::class.java.name} ${getIncrementalInfoMessage(mode)} " +
-            "with arguments:[${compilerArgs.joinToString()}] ")
-    context.stdOut.println("KotlinC: ${this::class.java.simpleName}")
+            "with arguments:[${compilerArgs.joinToString()}] "
+    )
+
+    // Machine-parseable log entry for tooling
+    // Format: KOTLINCD_INVOCATION|target|type|incremental|arg_count
+    // Followed by: KOTLINCD_ARG|<arg> for each argument
+    LOG.info(
+        "KOTLINCD_INVOCATION|${invokingRule.fullyQualifiedName}|${invokingRule.type}|${getIncrementalInfoMessage(mode)}|${compilerArgs.size}"
+    )
+    compilerArgs.forEach { arg -> LOG.info("KOTLINCD_ARG|$arg") }
 
     val kotlinCompilationService =
         KotlinCompilationService(
             CompilationService.loadImplementation(
-                context.classLoaderCache.getClassLoader(kotlinHomeLibraries)),
-            kotlinCDLoggingContext)
+                context.classLoaderCache.getClassLoader(kotlinHomeLibraries)
+            ),
+            kotlinCDLoggingContext,
+        )
 
     val result =
         kotlinCompilationService.compile(
             ProjectId.ProjectUUID(UUID.randomUUID()),
             compilerArgs,
             mode,
-            BuckKotlinLogger(UncloseablePrintStream(context.stdErr), kotlinCDLoggingContext))
+            BuckKotlinLogger(UncloseablePrintStream(context.stdErr), kotlinCDLoggingContext),
+        )
 
     return result.toExitCode.code
   }
@@ -91,8 +103,9 @@ class BuildToolsKotlinc : Kotlinc {
   private fun ClassLoaderCache.getClassLoader(kotlinHomeLibraries: List<AbsPath>): ClassLoader {
     val classPathURLs = kotlinHomeLibraries.map { absPath -> absPath.path.toUri().toURL() }
     return getClassLoaderForClassPath(
-        SharedApiClassesClassLoaderProvider.sharedSynchronizedApiClassesClassLoader,
-        ImmutableList.copyOf(classPathURLs))
+        SharedApiClassesClassLoaderProvider.sharedApiClassesClassLoader,
+        ImmutableList.copyOf(classPathURLs),
+    )
   }
 
   private fun buildCompilerArgs(
@@ -101,18 +114,24 @@ class BuildToolsKotlinc : Kotlinc {
       workingDirectory: Optional<Path>,
       invokingRule: BuildTargetValue,
       options: List<String>,
-      kotlinCDLoggingContext: KotlinCDLoggingContext
+      kotlinCDLoggingContext: KotlinCDLoggingContext,
   ): List<String> {
     val expandedSources: ImmutableList<Path> =
         getExpandedSourcePathsOrThrow(
-            ruleCellRoot, kotlinSourceFilePaths, workingDirectory, invokingRule)
+            ruleCellRoot,
+            kotlinSourceFilePaths,
+            workingDirectory,
+            invokingRule,
+        )
 
     expandedSources
         .groupingBy { path -> path.extension }
         .eachCount()
         .forEach { (extension, count) ->
           kotlinCDLoggingContext.addExtras(
-              BuildToolsKotlinc::class.java.simpleName, "Total count of $extension files: $count")
+              BuildToolsKotlinc::class.java.simpleName,
+              "Total count of $extension files: $count",
+          )
         }
 
     val resolvedExpandedSources =
@@ -139,19 +158,20 @@ class BuildToolsKotlinc : Kotlinc {
       ruleCellRoot: AbsPath,
       kotlinSourceFilePaths: ImmutableSortedSet<RelPath>,
       workingDirectory: Optional<Path>,
-      invokingRule: BuildTargetValue
+      invokingRule: BuildTargetValue,
   ) =
       try {
         getExpandedSourcePaths(ruleCellRoot, kotlinSourceFilePaths, workingDirectory)
       } catch (exception: IOException) {
         LOG.error(exception)
-        throw HumanReadableException(
-            "Unable to expand sources for ${invokingRule.fullyQualifiedName} into $workingDirectory")
+        throw RuntimeException(
+            "Unable to expand sources for ${invokingRule.fullyQualifiedName} into $workingDirectory"
+        )
       }
 
   private fun getExpandedMultiPlatformSourcePathsOrThrow(
       options: List<String>,
-      allSources: List<String>
+      allSources: List<String>,
   ): List<String> =
       buildList() {
         options
@@ -168,8 +188,7 @@ class BuildToolsKotlinc : Kotlinc {
                           allSources.firstOrNull { it.endsWith(fragmentPath) }
 
                       if (fragmentSourceAbsPath == null) {
-                        throw HumanReadableException(
-                            "Invalid fragment source path: $fragmentSourcePath")
+                        throw RuntimeException("Invalid fragment source path: $fragmentSourcePath")
                       }
                       "$fragmentName:$fragmentSourceAbsPath"
                     }
@@ -183,7 +202,7 @@ class BuildToolsKotlinc : Kotlinc {
   override fun getDescription(
       options: ImmutableList<String>,
       kotlinSourceFilePaths: ImmutableSortedSet<RelPath>,
-      pathToSrcsList: Path
+      pathToSrcsList: Path,
   ): String = buildString {
     append("kotlinc ")
     append(options.joinToString(separator = " "))

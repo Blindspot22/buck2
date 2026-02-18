@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -30,13 +31,13 @@ pub struct StringTag {
 
 impl ContextValue {
     /// Returns whether the context should be included in the error message
-    pub(crate) fn should_display(&self) -> bool {
+    pub(crate) fn display(&self) -> Option<String> {
         match self {
-            Self::Dyn(..) => true,
-            Self::Typed(e) => e.should_display(),
-            Self::Tags(_) => false,
-            Self::StringTag(..) => false,
-            Self::StarlarkError(..) => false,
+            Self::Dyn(v) => Some(format!("{}", v)),
+            Self::Typed(e) => e.display(),
+            Self::Tags(_) => None,
+            Self::StringTag(..) => None,
+            Self::StarlarkError(..) => None,
         }
     }
 
@@ -63,14 +64,14 @@ impl ContextValue {
     }
 }
 
-impl std::fmt::Display for ContextValue {
+impl std::fmt::Debug for ContextValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dyn(v) => f.write_str(v),
-            Self::Tags(tags) => write!(f, "{:?}", tags),
-            Self::Typed(v) => std::fmt::Display::fmt(v, f),
+            Self::Tags(tags) => write!(f, "{tags:?}"),
+            Self::Typed(v) => write!(f, "{}", v.display().unwrap_or_default()),
             Self::StringTag(v) => f.write_str(&v.tag),
-            Self::StarlarkError(v) => write!(f, "{}", v),
+            Self::StarlarkError(v) => write!(f, "{v}"),
         }
     }
 }
@@ -87,14 +88,10 @@ impl From<&str> for ContextValue {
     }
 }
 
-pub trait TypedContext:
-    allocative::Allocative + Send + Sync + std::fmt::Display + std::any::Any + 'static
-{
+pub trait TypedContext: allocative::Allocative + Send + Sync + std::any::Any + 'static {
     fn eq(&self, other: &dyn TypedContext) -> bool;
 
-    fn should_display(&self) -> bool {
-        true
-    }
+    fn display(&self) -> Option<String>;
 }
 
 impl<T: TypedContext> From<T> for ContextValue {
@@ -157,7 +154,7 @@ mod tests {
         let e: crate::Error = TestError.into();
         let e = e.context("foo");
         let e2 = e.clone().tag([ErrorTag::Input]);
-        assert_eq!(format!("{:#}", e), format!("{:#}", e2));
+        assert_eq!(format!("{e:#}"), format!("{:#}", e2));
     }
 
     #[test]

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollection;
@@ -24,7 +25,7 @@ fn dependency_creator(builder: &mut GlobalsBuilder) {
     fn create_collection<'v>(
         s: &str,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<Dependency<'v>> {
+    ) -> starlark::Result<Dependency<'v>> {
         let c = BuildContext::from_context(eval)?;
         let label = match ParsedPattern::<ProvidersPatternExtra>::parse_precise(
             s,
@@ -36,7 +37,7 @@ fn dependency_creator(builder: &mut GlobalsBuilder) {
                 .into_providers_label(package, target_name.as_ref())
                 .configure(ConfigurationData::testing_new()),
             _ => {
-                eprintln!("Expected a target, not {}", s);
+                eprintln!("Expected a target, not {s}");
                 panic!();
             }
         };

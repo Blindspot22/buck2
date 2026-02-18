@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -186,7 +187,7 @@ pub async fn async_depth_limited_traversal<
         if let Err(mut e) = result {
             let mut target = target;
             while let Some(Some(parent)) = visited.get(&target) {
-                e = e.context(format!("Error traversing children of {}", parent));
+                e = e.context(format!("Error traversing children of {parent}"));
                 target = parent.clone();
             }
             return Err(e);
@@ -255,10 +256,10 @@ mod tests {
     impl QueryTarget for Node {
         type Attr<'a> = Attr;
 
-        fn rule_type(&self) -> Cow<str> {
+        fn rule_type(&self) -> Cow<'_, str> {
             unimplemented!()
         }
-        fn name(&self) -> Cow<str> {
+        fn name(&self) -> Cow<'_, str> {
             unimplemented!()
         }
         fn buildfile_path(&self) -> &BuildFilePath {
@@ -348,7 +349,7 @@ mod tests {
     struct Graph(HashMap<Ref, Node>);
 
     impl Graph {
-        fn child_visitor<'a>(&self) -> impl AsyncChildVisitor<Node> + 'a {
+        fn child_visitor<'a>(&self) -> impl AsyncChildVisitor<Node> + use<'a> {
             struct ChildVisitorImpl;
 
             impl AsyncChildVisitor<Node> for ChildVisitorImpl {

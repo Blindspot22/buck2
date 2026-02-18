@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::iter::empty;
@@ -15,6 +16,7 @@ use buck2_build_api_derive::internal_provider;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
+use buck2_error::internal_error;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use either::Either;
 use indexmap::IndexMap;
@@ -23,7 +25,6 @@ use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
-use starlark::values::FreezeResult;
 use starlark::values::FrozenValue;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
@@ -40,6 +41,7 @@ use starlark::values::none::NoneType;
 use starlark::values::tuple::TupleRef;
 
 use crate as buck2_build_api;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
@@ -114,11 +116,11 @@ impl FrozenExternalRunnerTestInfo {
         self.test_type.to_value().get().unpack_str().unwrap()
     }
 
-    pub fn command(&self) -> impl Iterator<Item = TestCommandMember<'_>> {
+    pub fn command<'v>(&self) -> impl Iterator<Item = TestCommandMember<'v>> {
         unwrap_all(iter_test_command(self.command.get().to_value()))
     }
 
-    pub fn env(&self) -> impl Iterator<Item = (&str, &dyn CommandLineArgLike)> {
+    pub fn env<'v>(&self) -> impl Iterator<Item = (&'v str, &'v dyn CommandLineArgLike<'v>)> {
         unwrap_all(iter_test_env(self.env.get().to_value()))
     }
 
@@ -153,6 +155,10 @@ impl FrozenExternalRunnerTestInfo {
         unpack_opt_executor(self.default_executor.get().to_value()).unwrap()
     }
 
+    pub fn has_executor_overrides(&self) -> bool {
+        !self.executor_overrides.get().to_value().is_none()
+    }
+
     /// Access a specific executor override.
     pub fn executor_override(&self, key: &str) -> Option<&StarlarkCommandExecutorConfig> {
         let executor_overrides =
@@ -183,13 +189,13 @@ impl FrozenExternalRunnerTestInfo {
         )
     }
 
-    pub fn worker(&self) -> Option<&WorkerInfo> {
+    pub fn worker(&self) -> Option<&WorkerInfo<'_>> {
         unpack_opt_worker(self.worker.get().to_value()).unwrap()
     }
 
     pub fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'_>,
     ) -> buck2_error::Result<()> {
         for member in self.command() {
             match member {
@@ -212,7 +218,7 @@ impl FrozenExternalRunnerTestInfo {
 
 pub enum TestCommandMember<'v> {
     Literal(&'v str),
-    Arglike(&'v dyn CommandLineArgLike),
+    Arglike(&'v dyn CommandLineArgLike<'v>),
 }
 
 impl<'v> TestCommandMember<'v> {
@@ -220,10 +226,15 @@ impl<'v> TestCommandMember<'v> {
         &self,
         cli: &mut dyn CommandLineBuilder,
         context: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         match self {
-            Self::Literal(literal) => literal.add_to_command_line(cli, context),
-            Self::Arglike(arglike) => arglike.add_to_command_line(cli, context),
+            Self::Literal(literal) => {
+                literal.add_to_command_line(cli, context, artifact_path_mapping)
+            }
+            Self::Arglike(arglike) => {
+                arglike.add_to_command_line(cli, context, artifact_path_mapping)
+            }
         }
     }
 }
@@ -261,7 +272,7 @@ fn iter_test_command<'v>(
         }
 
         let arglike = ValueAsCommandLineLike::unpack_value_err(item)
-            .with_buck_error_context(|| format!("Invalid item in `command`: {}", item))?
+            .with_buck_error_context(|| format!("Invalid item in `command`: {item}"))?
             .0;
 
         Ok(TestCommandMember::Arglike(arglike))
@@ -270,7 +281,7 @@ fn iter_test_command<'v>(
 
 fn iter_test_env<'v>(
     env: Value<'v>,
-) -> impl Iterator<Item = buck2_error::Result<(&'v str, &'v dyn CommandLineArgLike)>> {
+) -> impl Iterator<Item = buck2_error::Result<(&'v str, &'v dyn CommandLineArgLike<'v>)>> {
     if env.is_none() {
         return Either::Left(Either::Left(empty()));
     }
@@ -289,12 +300,12 @@ fn iter_test_env<'v>(
     let env = env.iter().collect::<Vec<_>>();
 
     Either::Right(env.into_iter().map(|(key, value)| {
-        let key = key.unpack_str().with_buck_error_context(|| {
-            format!("Invalid key in `env`: Expected a str, got: `{}`", key)
-        })?;
+        let key = key
+            .unpack_str()
+            .ok_or_else(|| internal_error!("Invalid key in `env`: Expected a str, got: `{key}`"))?;
 
         let arglike = ValueAsCommandLineLike::unpack_value_err(value)
-            .with_buck_error_context(|| format!("Invalid value in `env` for key `{}`", key))?
+            .with_buck_error_context(|| format!("Invalid value in `env` for key `{key}`"))?
             .0;
 
         Ok((key, arglike))
@@ -313,7 +324,7 @@ fn iter_opt_str_list<'v>(
         Ok(v) => v,
         Err(e) => {
             return Either::Left(Either::Right(once(Err(
-                e.context(format!("Invalid `{}`", name))
+                e.context(format!("Invalid `{name}`"))
             ))));
         }
     };
@@ -321,7 +332,7 @@ fn iter_opt_str_list<'v>(
     Either::Right(iterable.map(move |item| {
         let item = item
             .unpack_str()
-            .with_buck_error_context(|| format!("Invalid item in `{}`: {}", name, item))?;
+            .ok_or_else(|| internal_error!("Invalid item in `{name}`: {item}"))?;
 
         Ok(item)
     }))
@@ -348,17 +359,13 @@ fn iter_executor_overrides<'v>(
     let executor_overrides = executor_overrides.iter().collect::<Vec<_>>();
 
     Either::Right(executor_overrides.into_iter().map(|(key, value)| {
-        let key = key.unpack_str().with_buck_error_context(|| {
-            format!(
-                "Invalid key in `executor_overrides`: Expected a str, got: `{}`",
-                key
-            )
+        let key = key.unpack_str().ok_or_else(|| {
+            internal_error!("Invalid key in `executor_overrides`: Expected a str, got: `{key}`")
         })?;
 
-        let config =
-            StarlarkCommandExecutorConfig::from_value(value).with_buck_error_context(|| {
-                format!("Invalid value in `executor_overrides` for key `{}`", key)
-            })?;
+        let config = StarlarkCommandExecutorConfig::from_value(value).ok_or_else(|| {
+            internal_error!("Invalid value in `executor_overrides` for key `{key}`")
+        })?;
 
         Ok((key, config))
     }))
@@ -385,11 +392,8 @@ fn iter_local_resources<'v>(
     let local_resources = local_resources.iter().collect::<Vec<_>>();
 
     Either::Right(local_resources.into_iter().map(|(key, value)| {
-        let key = key.unpack_str().with_buck_error_context(|| {
-            format!(
-                "Invalid key in `local_resources`: Expected a str, got: `{}`",
-                key
-            )
+        let key = key.unpack_str().ok_or_else(|| {
+            internal_error!("Invalid key in `local_resources`: Expected a str, got: `{key}`")
         })?;
 
         let resource = if value.is_none() {
@@ -420,7 +424,7 @@ fn unpack_opt_executor<'v>(
     }
 
     let executor = StarlarkCommandExecutorConfig::from_value(executor)
-        .with_buck_error_context(|| format!("Value is not an executor config: `{}`", executor))?;
+        .ok_or_else(|| internal_error!("Value is not an executor config: `{executor}`"))?;
 
     Ok(Some(executor))
 }
@@ -431,7 +435,7 @@ fn unpack_opt_worker<'v>(worker: Value<'v>) -> buck2_error::Result<Option<&'v Wo
     }
 
     let worker = WorkerInfo::from_value(worker)
-        .with_buck_error_context(|| format!("Value is not a worker: `{}`", worker))?;
+        .ok_or_else(|| internal_error!("Value is not a worker: `{worker}`"))?;
 
     Ok(Some(worker))
 }
@@ -489,10 +493,11 @@ where
         }
     }
 
-    NoneOr::<bool>::unpack_value(info.use_project_relative_paths.get().to_value())?
-        .buck_error_context("`use_project_relative_paths` must be a bool if provided")?;
+    NoneOr::<bool>::unpack_value(info.use_project_relative_paths.get().to_value())?.ok_or_else(
+        || internal_error!("`use_project_relative_paths` must be a bool if provided"),
+    )?;
     NoneOr::<bool>::unpack_value(info.run_from_project_root.get().to_value())?
-        .buck_error_context("`run_from_project_root` must be a bool if provided")?;
+        .ok_or_else(|| internal_error!("`run_from_project_root` must be a bool if provided"))?;
     unpack_opt_executor(info.default_executor.get().to_value())
         .buck_error_context("Invalid `default_executor`")?;
     unpack_opt_worker(info.worker.get().to_value()).buck_error_context("Invalid `worker`")?;
@@ -500,7 +505,7 @@ where
         .get()
         .to_value()
         .unpack_str()
-        .buck_error_context("`type` must be a str")?;
+        .ok_or_else(|| internal_error!("`type` must be a str"))?;
     Ok(())
 }
 

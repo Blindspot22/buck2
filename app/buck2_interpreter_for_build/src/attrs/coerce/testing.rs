@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use buck2_core::bzl::ImportPath;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::alias::NonEmptyCellAlias;
 use buck2_core::cells::build_file_cell::BuildFileCell;
+use buck2_core::cells::cell_path_with_allowed_relative_dir::CellPathWithAllowedRelativeDir;
 use buck2_core::cells::cell_root_path::CellRootPathBuf;
 use buck2_core::cells::name::CellName;
 use buck2_core::package::PackageLabel;
@@ -68,6 +70,9 @@ pub fn coercion_ctx_listing(package_listing: PackageListing) -> impl AttrCoercio
         (package, package_listing),
         false,
         Arc::new(ConcurrentTargetLabelInterner::default()),
+        CellPathWithAllowedRelativeDir::backwards_relative_not_supported(
+            package.as_cell_path().to_owned(),
+        ),
     )
 }
 
@@ -78,14 +83,14 @@ fn cell_resolver() -> CellResolver {
     )
 }
 
-pub fn to_value<'v>(env: &'v Module, globals: &Globals, content: &str) -> Value<'v> {
+pub fn to_value<'v>(env: &Module<'v>, globals: &Globals, content: &str) -> Value<'v> {
     let import_path = ImportPath::testing_new("root//:defs.bzl");
     let ast = AstModule::parse(
         &import_path.to_string(),
         content.to_owned(),
         &StarlarkFileType::Bzl.dialect(false),
     )
-    .unwrap_or_else(|err| panic!("Failed parsing `{}`. Error: `{}`", content, err));
+    .unwrap_or_else(|err| panic!("Failed parsing `{content}`. Error: `{err}`"));
     let cell_info = InterpreterCellInfo::new(
         BuildFileCell::new(CellName::testing_new("root")),
         cell_resolver(),
@@ -98,8 +103,7 @@ pub fn to_value<'v>(env: &'v Module, globals: &Globals, content: &str) -> Value<
     let host_platform = InterpreterHostPlatform::Linux;
     let host_architecture = InterpreterHostArchitecture::X86_64;
     let host_info = HostInfo::new(host_platform, host_architecture, None);
-    let build_ctx = BuildContext::new_for_module(
-        env,
+    let build_ctx = BuildContext::new(
         &cell_info,
         &mut buckconfigs,
         &host_info,
@@ -112,5 +116,5 @@ pub fn to_value<'v>(env: &'v Module, globals: &Globals, content: &str) -> Value<
     let mut eval = Evaluator::new(env);
     eval.extra = Some(&build_ctx);
     eval.eval_module(ast, globals)
-        .unwrap_or_else(|err| panic!("Failed interpreting `{}`. Error: `{}`", content, err))
+        .unwrap_or_else(|err| panic!("Failed interpreting `{content}`. Error: `{err}`"))
 }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -46,8 +47,8 @@ pub trait AnonTargetDyn: Send + Sync + Display {
 
     fn resolve_attrs<'v>(
         &self,
-        env: &'v Module,
-        dependents_analyses: AnonTargetDependentAnalysisResults<'v>,
+        env: &Module<'v>,
+        dependents_analyses: AnonTargetDependentAnalysisResults<'_>,
         exec_resolution: ExecutionPlatformResolution,
     ) -> buck2_error::Result<ValueOfUncheckedGeneric<Value<'v>, StructRef<'static>>>;
 }

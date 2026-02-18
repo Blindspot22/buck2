@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io::BufWriter;
@@ -22,10 +23,10 @@ use crate::Command;
 use crate::buck;
 use crate::buck::Buck;
 use crate::buck::select_mode;
-use crate::buck::to_json_project;
-use crate::json_project::JsonProject;
-use crate::json_project::Sysroot;
+use crate::buck::to_project_json;
 use crate::path::safe_canonicalize;
+use crate::project_json::ProjectJson;
+use crate::project_json::Sysroot;
 use crate::sysroot::SysrootConfig;
 use crate::sysroot::resolve_buckconfig_sysroot;
 use crate::sysroot::resolve_rustup_sysroot;
@@ -43,6 +44,7 @@ pub(crate) struct Develop {
 pub(crate) struct OutputCfg {
     out: Output,
     pretty: bool,
+    max_extra_targets: usize,
 }
 
 #[derive(Debug)]
@@ -63,7 +65,9 @@ impl Develop {
             pretty,
             mode,
             check_cycles,
+            buck2_command,
             include_all_buildfiles,
+            max_extra_targets,
             ..
         } = command
         {
@@ -82,7 +86,7 @@ impl Develop {
             };
 
             let mode = select_mode(mode.as_deref());
-            let buck = buck::Buck::new(mode);
+            let buck = buck::Buck::new(buck2_command.clone(), mode);
 
             let develop = Develop {
                 sysroot,
@@ -91,7 +95,12 @@ impl Develop {
                 invoked_by_ra: false,
                 include_all_buildfiles,
             };
-            let out = OutputCfg { out, pretty };
+            let max_extra_targets = max_extra_targets.unwrap_or(DEFAULT_EXTRA_TARGETS);
+            let out = OutputCfg {
+                out,
+                pretty,
+                max_extra_targets,
+            };
 
             let input = if !targets.is_empty() {
                 let targets = targets.into_iter().map(Target::new).collect();
@@ -104,11 +113,15 @@ impl Develop {
         }
 
         if let crate::Command::DevelopJson {
-            sysroot_mode, args, ..
+            sysroot_mode,
+            args,
+            buck2_command,
+            max_extra_targets,
+            mode,
+            ..
         } = command
         {
             let out = Output::Stdout;
-            let mode = select_mode(None);
 
             let sysroot = match sysroot_mode {
                 crate::SysrootMode::BuckConfig => SysrootConfig::BuckConfig,
@@ -123,7 +136,8 @@ impl Develop {
                 }
             };
 
-            let buck = buck::Buck::new(mode);
+            let mode = select_mode(mode.as_deref());
+            let buck = buck::Buck::new(buck2_command.clone(), mode);
 
             let develop = Develop {
                 sysroot,
@@ -132,7 +146,12 @@ impl Develop {
                 invoked_by_ra: true,
                 include_all_buildfiles: false,
             };
-            let out = OutputCfg { out, pretty: false };
+            let max_extra_targets = max_extra_targets.unwrap_or(DEFAULT_EXTRA_TARGETS);
+            let out = OutputCfg {
+                out,
+                pretty: false,
+                max_extra_targets,
+            };
 
             let input = match args {
                 crate::JsonArguments::Path(path) => Input::Files(vec![path]),
@@ -149,11 +168,14 @@ impl Develop {
 
 const DEFAULT_EXTRA_TARGETS: usize = 50;
 
+/// The final rust-project.json result for the rust-analyzer discovery protocol.
+///
+/// <https://rust-analyzer.github.io/book/configuration.html#workspace-discovery-protocol>
 #[derive(Serialize, Deserialize)]
-pub(crate) struct OutputData {
-    pub(crate) buildfile: PathBuf,
-    pub(crate) project: JsonProject,
+pub(crate) struct DiscoverProjectFinished {
     pub(crate) kind: String,
+    pub(crate) buildfile: PathBuf,
+    pub(crate) project: ProjectJson,
 }
 
 impl Develop {
@@ -179,10 +201,35 @@ impl Develop {
             Output::Stdout => BufWriter::new(Box::new(std::io::stdout())),
         };
 
-        let targets = self.related_targets(input.clone())?;
+        let targets = self.related_targets(input.clone(), cfg.max_extra_targets)?;
         if targets.is_empty() {
-            let err = anyhow::anyhow!("No owning target found")
-                .context(format!("Could not find owning target for {:?}", input));
+            let err = match input {
+                Input::Targets(targets) => {
+                    let pretty_targets = targets
+                        .iter()
+                        .map(|t| format!("{}", t))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::anyhow!("Could not find targets {}", pretty_targets)
+                }
+                Input::Files(paths) => {
+                    let pretty_paths = paths
+                        .iter()
+                        .map(|p| format!("{}", p.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::anyhow!("Could not find buck targets that own {}", pretty_paths)
+                }
+                Input::Buildfile(paths) => {
+                    let pretty_paths = paths
+                        .iter()
+                        .map(|p| format!("{}", p.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::anyhow!("Could not find any Rust targets in {}", pretty_paths)
+                }
+            };
+
             return Err(err);
         }
 
@@ -193,13 +240,13 @@ impl Develop {
                 // we have to log before we write the output, because rust-analyzer will kill us after the write
                 crate::scuba::log_develop(start.elapsed(), input.clone(), self.invoked_by_ra);
 
-                let out = OutputData {
+                let out = DiscoverProjectFinished {
                     buildfile,
                     project,
                     kind: "finished".to_owned(),
                 };
                 let out = serde_json::to_string(&out)?;
-                println!("{}", out);
+                println!("{out}");
             }
         } else {
             let mut targets = targets.into_values().flatten().collect::<Vec<_>>();
@@ -224,7 +271,7 @@ impl Develop {
         Ok(())
     }
 
-    pub(crate) fn run_inner(&self, targets: Vec<Target>) -> Result<JsonProject, anyhow::Error> {
+    pub(crate) fn run_inner(&self, targets: Vec<Target>) -> Result<ProjectJson, anyhow::Error> {
         let Develop {
             sysroot,
             buck,
@@ -233,7 +280,7 @@ impl Develop {
             ..
         } = self;
 
-        info!(kind = "progress", "fetching sysroot");
+        info!(kind = "progress", "finding std source code");
         let sysroot = match &sysroot {
             SysrootConfig::Sysroot(path) => Sysroot {
                 sysroot: safe_canonicalize(&expand_tilde(path)?),
@@ -242,7 +289,7 @@ impl Develop {
             },
             SysrootConfig::BuckConfig => {
                 let project_root = buck.resolve_project_root()?;
-                resolve_buckconfig_sysroot(&buck, &project_root)?
+                resolve_buckconfig_sysroot(&buck, &project_root, &targets)?
             }
             SysrootConfig::Rustup => resolve_rustup_sysroot()?,
         };
@@ -271,14 +318,11 @@ impl Develop {
     pub(crate) fn related_targets(
         &self,
         input: Input,
+        max_extra_targets: usize,
     ) -> Result<FxHashMap<PathBuf, Vec<Target>>, anyhow::Error> {
         // We want to load additional targets from the enclosing buildfile, to help users
         // who have a bunch of small targets in their buildfile. However, we want to set a limit
         // so we don't try to load everything in very large generated buildfiles.
-        let max_extra_targets: usize = match std::env::var("RUST_PROJECT_EXTRA_TARGETS") {
-            Ok(s) => s.parse::<usize>().unwrap_or(DEFAULT_EXTRA_TARGETS),
-            Err(_) => DEFAULT_EXTRA_TARGETS,
-        };
 
         // We always want the targets that directly own these Rust files.
         self.buck.query_owners(input, max_extra_targets)
@@ -304,25 +348,23 @@ pub(crate) fn develop_with_sysroot(
     check_cycles: bool,
     include_all_buildfiles: bool,
     extra_cfgs: &[String],
-) -> Result<JsonProject, anyhow::Error> {
+) -> Result<ProjectJson, anyhow::Error> {
     info!(kind = "progress", "building generated code");
     let expanded_and_resolved = buck.expand_and_resolve(&targets, exclude_workspaces)?;
 
     info!(kind = "progress", "resolving aliased libraries");
     let aliased_libraries =
-        buck.query_aliased_libraries(&expanded_and_resolved.expanded_targets)?;
+        buck.query_aliased_libraries(&expanded_and_resolved.expanded_targets, &targets)?;
 
-    info!(
-        kind = "progress",
-        "converting buck info to rust-project.json"
-    );
-    let rust_project = to_json_project(
+    info!(kind = "progress", "generating rust-project.json");
+    let rust_project = to_project_json(
         sysroot,
         expanded_and_resolved,
         aliased_libraries,
         check_cycles,
         include_all_buildfiles,
         extra_cfgs,
+        buck,
     )?;
 
     Ok(rust_project)

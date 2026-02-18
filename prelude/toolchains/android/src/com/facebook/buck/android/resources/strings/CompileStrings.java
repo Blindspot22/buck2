@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.resources.strings;
 
 import com.facebook.buck.android.resources.strings.StringResources.Gender;
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.io.filesystem.impl.ProjectFilesystemUtils;
 import com.facebook.buck.io.pathformat.PathFormatter;
@@ -209,9 +209,11 @@ public class CompileStrings {
             continue;
           }
 
-          throw new HumanReadableException(
-              "Invalid path passed to compile strings. Expected path to end with %s, got path %s.",
-              ENGLISH_STRING_PATH_SUFFIX, path);
+          throw new RuntimeException(
+              String.format(
+                  "Invalid path passed to compile strings. Expected path to end with %s, got path"
+                      + " %s.",
+                  ENGLISH_STRING_PATH_SUFFIX, path));
         }
 
         localeToFiles.put(ENGLISH_LOCALE, filepath);

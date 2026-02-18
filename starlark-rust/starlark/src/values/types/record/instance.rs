@@ -34,7 +34,6 @@ use crate::collections::StarlarkHasher;
 use crate::starlark_complex_value;
 use crate::typing::Ty;
 use crate::values::Freeze;
-use crate::values::FreezeResult;
 use crate::values::Heap;
 use crate::values::StarlarkValue;
 use crate::values::Trace;
@@ -59,7 +58,7 @@ pub struct RecordGen<V: ValueLifetimeless> {
 impl<'v, V: ValueLike<'v>> Display for RecordGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = self.record_type_name().unwrap_or("anon");
-        fmt_keyed_container(f, &format!("record[{}](", name), ")", "=", self.iter())
+        fmt_keyed_container(f, &format!("record[{name}]("), ")", "=", self.iter())
     }
 }
 
@@ -118,11 +117,11 @@ where
         }
     }
 
-    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         self.get_attr_hashed(Hashed::new(attribute), heap)
     }
 
-    fn get_attr_hashed(&self, attribute: Hashed<&str>, _heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr_hashed(&self, attribute: Hashed<&str>, _heap: Heap<'v>) -> Option<Value<'v>> {
         let i = self.get_record_fields().get_index_of_hashed(attribute)?;
         Some(self.values[i].to_value())
     }

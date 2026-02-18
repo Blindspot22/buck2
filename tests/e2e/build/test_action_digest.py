@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -53,6 +54,6 @@ async def test_action_digest(buck: Buck) -> None:
     ]
     deployed_digests.sort()
 
-    assert (
-        compiled_digests == deployed_digests
-    ), "Action Digest was modified, refer to comment on this test for next steps"
+    assert compiled_digests == deployed_digests, (
+        "Action Digest was modified, refer to comment on this test for next steps"
+    )

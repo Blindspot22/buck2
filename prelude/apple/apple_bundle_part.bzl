@@ -1,16 +1,17 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//apple/swift:swift_toolchain_types.bzl", "SwiftToolchainInfo")
 load("@prelude//utils:expect.bzl", "expect")
 load("@prelude//utils:utils.bzl", "value_or")
 load(":apple_bundle_destination.bzl", "AppleBundleDestination", "bundle_relative_path_for_destination")
-load(":apple_bundle_types.bzl", "AppleBundleManifest", "AppleBundleManifestInfo", "AppleBundleManifestLogFiles")
+load(":apple_bundle_types.bzl", "AppleBundleCodesignManifestTree", "AppleBundleManifest", "AppleBundleManifestInfo", "AppleBundleManifestLogFiles", "AppleBundleSigningContextTree")
 load(":apple_bundle_utility.bzl", "get_extension_attr", "get_product_name")
 load(":apple_code_signing_types.bzl", "CodeSignConfiguration", "CodeSignType", "get_code_signing_configuration_attr_value")
 load(":apple_entitlements.bzl", "get_entitlements_codesign_args", "should_include_entitlements")
@@ -42,6 +43,18 @@ AppleBundlePart = record(
     extra_codesign_paths = field([list[str], None], None),
 )
 
+# Represents an `AppleBundlePart` which has an associated codesign manifest
+AppleBundleCodesignManifestTreePart = record(
+    bundle_part = field(AppleBundlePart),
+    codesign_manifest_tree = field(AppleBundleCodesignManifestTree),
+)
+
+# Represents an `AppleBundlePart` which has an associated signing context
+AppleBundleSigningContextTreePart = record(
+    bundle_part = field(AppleBundlePart),
+    signing_context_tree = field(AppleBundleSigningContextTree),
+)
+
 SwiftStdlibArguments = record(
     primary_binary_rel_path = field(str),
 )
@@ -49,6 +62,8 @@ SwiftStdlibArguments = record(
 AppleBundleConstructionResult = record(
     providers = field(list[Provider]),
     sub_targets = field(dict[str, list[Provider]]),
+    codesign_manifest_tree = field(AppleBundleCodesignManifestTree),
+    signing_context_tree = field(AppleBundleSigningContextTree),
 )
 
 def bundle_output(ctx: AnalysisContext) -> Artifact:
@@ -60,6 +75,8 @@ def assemble_bundle(
         ctx: AnalysisContext,
         bundle: Artifact,
         parts: list[AppleBundlePart],
+        codesign_manifest_parts: list[AppleBundleCodesignManifestTreePart],
+        signing_context_parts: list[AppleBundleSigningContextTreePart],
         info_plist_part: [AppleBundlePart, None],
         swift_stdlib_args: [SwiftStdlibArguments, None],
         extra_hidden: list[Artifact] = [],
@@ -75,13 +92,22 @@ def assemble_bundle(
     tools = ctx.attrs._apple_tools[AppleToolsInfo]
     tool = tools.assemble_bundle
 
+    # Defines common codesign args that can be passed to all codesign-like tools
     codesign_args = []
 
+    # Defines codesign args for bundling only
+    codesign_bundle_extra_args = []
+
     codesign_tool = ctx.attrs._apple_toolchain[AppleToolchainInfo].codesign
+    if ctx.attrs._codesign_command_override:
+        codesign_tool = ctx.attrs._codesign_command_override[RunInfo]
+
     code_signing_configuration = get_code_signing_configuration_attr_value(ctx)
     if code_signing_configuration == CodeSignConfiguration("dry-run"):
         codesign_configuration_args = ["--codesign-configuration", "dry-run"]
         codesign_tool = tools.dry_codesign_tool
+    elif code_signing_configuration == CodeSignConfiguration("execution-bypass"):
+        codesign_configuration_args = ["--codesign-configuration", "execution-bypass"]
     elif code_signing_configuration == CodeSignConfiguration("fast-adhoc"):
         if _get_fast_adhoc_signing_enabled(ctx):
             codesign_configuration_args = ["--codesign-configuration", "fast-adhoc"]
@@ -122,8 +148,11 @@ def assemble_bundle(
         swift_args = []
 
     if codesign_required:
-        codesign_args = [
+        codesign_args += [
             "--codesign",
+        ]
+
+        codesign_bundle_extra_args += [
             "--codesign-tool",
             codesign_tool,
         ]
@@ -152,7 +181,7 @@ def assemble_bundle(
                 codesign_args.append("--embed-provisioning-profile-when-signing-ad-hoc")
 
         codesign_args += get_entitlements_codesign_args(ctx, codesign_type)
-        codesign_args += _get_extra_codesign_args(ctx)
+        codesign_bundle_extra_args += _get_extra_codesign_args(ctx)
 
         info_plist_args = [
             "--info-plist-source",
@@ -171,10 +200,26 @@ def assemble_bundle(
         strict_provisioning_profile_search = value_or(ctx.attrs.strict_provisioning_profile_search, ctx.attrs._strict_provisioning_profile_search_default)
         if strict_provisioning_profile_search:
             codesign_args.append("--strict-provisioning-profile-search")
+
+        if ctx.attrs._fast_provisioning_profile_parsing_enabled:
+            codesign_args.append("--fast-provisioning-profile-parsing")
     elif codesign_type.value == "skip":
         pass
     else:
         fail("Code sign type `{}` not supported".format(codesign_type))
+
+    # - Always request codesign manifest, even if signing not required.
+    #   Removes the need for conditional subtargets and fields in JSON output.
+    #  - Manifest file name reflects whether signing is required or not.
+    #    Useful for debugging purposes.
+    codesign_manifest_file_name = "codesign_manifest.json" if codesign_required else "placeholder_codesign_manifest.json"
+    codesign_manifest = ctx.actions.declare_output(codesign_manifest_file_name)
+    codesign_bundle_extra_args += [
+        "--codesign-manifest",
+        codesign_manifest.as_output(),
+    ]
+
+    verify_entitlements_args = ["--verify-entitlements"] if ctx.attrs.entitlements_verification_check_enabled else []
 
     command = cmd_args(
         [
@@ -183,7 +228,7 @@ def assemble_bundle(
             bundle.as_output(),
             "--spec",
             spec_file,
-        ] + codesign_args + platform_args + swift_args,
+        ] + codesign_args + codesign_bundle_extra_args + verify_entitlements_args + platform_args + swift_args,
         hidden =
             [part.source for part in all_parts] +
             [part.codesign_entitlements for part in all_parts if part.codesign_entitlements] +
@@ -216,9 +261,6 @@ def assemble_bundle(
     if ctx.attrs._profile_bundling_enabled:
         profile_output = ctx.actions.declare_output("bundling_profile.txt").as_output()
         command.add("--profile-output", profile_output)
-
-    if ctx.attrs._fast_provisioning_profile_parsing_enabled:
-        command.add("--fast-provisioning-profile-parsing")
 
     subtargets = {}
     bundling_log_output = None
@@ -276,7 +318,132 @@ def assemble_bundle(
         error_handler = apple_build_error_handler,
         **run_incremental_args
     )
-    return AppleBundleConstructionResult(sub_targets = subtargets, providers = providers)
+
+    codesign_manifest_tree = _make_codesign_manifest_tree(ctx, codesign_manifest, codesign_manifest_parts)
+    codesign_manifest_tree_json = _get_codesign_manifest_tree_as_json(codesign_manifest_tree)
+    codesign_manifest_tree_json_file = ctx.actions.declare_output("codesign_manifest_tree.json")
+    codesign_manifest_tree_json_cmd_args = ctx.actions.write_json(
+        codesign_manifest_tree_json_file,
+        codesign_manifest_tree_json,
+        with_inputs = True,
+        pretty = True,
+    )
+
+    tools = ctx.attrs._apple_tools[AppleToolsInfo]
+    manifest_tree_postprocessor = tools.codesign_manifest_tree_postprocessor
+
+    postprocessed_codesign_manifest_tree = ctx.actions.declare_output("postprocessed_codesign_manifest_tree.json")
+    ctx.actions.run(
+        cmd_args(
+            [
+                manifest_tree_postprocessor,
+                "--codesign-manifest-tree",
+                codesign_manifest_tree_json_cmd_args,
+                "--output",
+                postprocessed_codesign_manifest_tree.as_output(),
+            ],
+        ),
+        category = "codesign_manifest_tree_postprocess",
+    )
+
+    subtargets["codesign-manifest"] = [
+        DefaultInfo(
+            default_output = postprocessed_codesign_manifest_tree,
+        ),
+    ]
+
+    signing_context_output = ctx.actions.declare_output("provisioning-manifest.json")
+    ctx.actions.run(
+        cmd_args(
+            [
+                tools.signing_context,
+                "--output",
+                signing_context_output.as_output(),
+            ] + platform_args + codesign_args,
+        ),
+        category = "apple_provisioning_manifest",
+    )
+
+    signing_context_tree = _make_signing_context_tree(ctx, signing_context_output, signing_context_parts)
+    signing_context_tree_json = _get_signing_context_tree_as_json(signing_context_tree)
+    signing_context_tree_json_file = ctx.actions.declare_output("provisioning-manifest-tree.json")
+    signing_context_tree_json_cmd_args = ctx.actions.write_json(
+        signing_context_tree_json_file,
+        signing_context_tree_json,
+        with_inputs = True,
+        pretty = True,
+    )
+
+    postprocessed_signing_context_tree = ctx.actions.declare_output("postprocessed-provisioning-manifest-tree.json")
+    ctx.actions.run(
+        cmd_args(
+            [
+                tools.signing_context_tree_postprocessor,
+                "--signing-context-tree",
+                signing_context_tree_json_cmd_args,
+                "--output",
+                postprocessed_signing_context_tree.as_output(),
+            ],
+        ),
+        category = "apple_provisioning_manifest_tree_postprocess",
+    )
+
+    subtargets["provisioning-manifest"] = [DefaultInfo(default_output = postprocessed_signing_context_tree)]
+
+    return AppleBundleConstructionResult(
+        sub_targets = subtargets,
+        providers = providers,
+        codesign_manifest_tree = codesign_manifest_tree,
+        signing_context_tree = signing_context_tree,
+    )
+
+def _make_codesign_manifest_tree(ctx: AnalysisContext, codesign_manifest: Artifact, inner_parts: list[AppleBundleCodesignManifestTreePart]) -> AppleBundleCodesignManifestTree:
+    inner_manifest_trees = {}
+
+    for codesign_manifest_tree_part in inner_parts:
+        relative_path = get_apple_bundle_part_relative_destination_path(ctx, codesign_manifest_tree_part.bundle_part)
+        inner_manifest_trees[relative_path] = codesign_manifest_tree_part.codesign_manifest_tree
+
+    return AppleBundleCodesignManifestTree(
+        codesign_manifest = codesign_manifest,
+        inner_codesign_manifests = inner_manifest_trees,
+    )
+
+def _get_codesign_manifest_tree_as_json(codesign_manifest_tree: AppleBundleCodesignManifestTree) -> dict[str, typing.Any]:
+    json_obj = {
+        "codesign_manifest": codesign_manifest_tree.codesign_manifest,
+    }
+
+    inner_manifests = {}
+    for relative_path, inner_codesign_manifest_tree in codesign_manifest_tree.inner_codesign_manifests.items():
+        inner_manifests[relative_path] = _get_codesign_manifest_tree_as_json(inner_codesign_manifest_tree)
+
+    json_obj["inner_codesign_manifests"] = inner_manifests
+    return json_obj
+
+def _make_signing_context_tree(ctx: AnalysisContext, signing_context: Artifact, inner_parts: list[AppleBundleSigningContextTreePart]) -> AppleBundleSigningContextTree:
+    inner_context_trees = {}
+
+    for signing_context_tree_part in inner_parts:
+        relative_path = get_apple_bundle_part_relative_destination_path(ctx, signing_context_tree_part.bundle_part)
+        inner_context_trees[relative_path] = signing_context_tree_part.signing_context_tree
+
+    return AppleBundleSigningContextTree(
+        signing_context = signing_context,
+        inner_signing_contexts = inner_context_trees,
+    )
+
+def _get_signing_context_tree_as_json(signing_context_tree: AppleBundleSigningContextTree) -> dict[str, typing.Any]:
+    json_obj = {
+        "signing_context": signing_context_tree.signing_context,
+    }
+
+    inner_contexts = {}
+    for relative_path, inner_signing_context_tree in signing_context_tree.inner_signing_contexts.items():
+        inner_contexts[relative_path] = _get_signing_context_tree_as_json(inner_signing_context_tree)
+
+    json_obj["inner_signing_contexts"] = inner_contexts
+    return json_obj
 
 def get_bundle_dir_name(ctx: AnalysisContext) -> str:
     return paths.replace_extension(get_product_name(ctx), "." + get_extension_attr(ctx))

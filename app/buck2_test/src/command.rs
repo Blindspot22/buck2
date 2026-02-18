@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -13,7 +14,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use async_trait::async_trait;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_build_api::actions::calculation::get_target_rule_type_name;
@@ -21,13 +21,15 @@ use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
 use buck2_build_api::build::AsyncBuildTargetResultBuilder;
 use buck2_build_api::build::BuildConfiguredLabelOptions;
 use buck2_build_api::build::BuildEvent;
+use buck2_build_api::build::BuildEventConsumer;
 use buck2_build_api::build::BuildTargetResult;
 use buck2_build_api::build::BuildTargetResultBuilder;
 use buck2_build_api::build::ConfiguredBuildEventVariant;
 use buck2_build_api::build::ProvidersToBuild;
 use buck2_build_api::build::build_configured_label;
 use buck2_build_api::build::build_report::build_report_opts;
-use buck2_build_api::build::build_report::generate_build_report;
+use buck2_build_api::build::build_report::write_build_report;
+use buck2_build_api::interpreter::rule_defs::provider::builtin::run_info::FrozenRunInfo;
 use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValue;
 use buck2_build_api::interpreter::rule_defs::provider::test_provider::TestProvider;
 use buck2_build_api::materialize::MaterializationAndUploadContext;
@@ -43,17 +45,18 @@ use buck2_common::liveliness_observer::LivelinessGuard;
 use buck2_common::liveliness_observer::LivelinessObserver;
 use buck2_common::liveliness_observer::LivelinessObserverExt;
 use buck2_common::liveliness_observer::TimeoutLivelinessObserver;
-use buck2_common::pattern::parse_from_cli::parse_patterns_from_cli_args;
+use buck2_common::pattern::parse_from_cli::parse_patterns_with_modifiers_from_cli_args;
 use buck2_common::pattern::resolve::ResolveTargetPatterns;
 use buck2_common::pattern::resolve::ResolvedPattern;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::name::CellName;
 use buck2_core::configuration::compatibility::MaybeCompatible;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
-use buck2_core::package::PackageLabel;
+use buck2_core::package::PackageLabelWithModifiers;
+use buck2_core::pattern::pattern::Modifiers;
+use buck2_core::pattern::pattern::ModifiersError;
 use buck2_core::pattern::pattern::PackageSpec;
+use buck2_core::pattern::pattern::ProvidersLabelWithModifiers;
 use buck2_core::pattern::pattern_type::ConfiguredProvidersPatternExtra;
 use buck2_core::pattern::pattern_type::ProvidersPatternExtra;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
@@ -63,10 +66,12 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_data::BuildResult;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
-use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_events::dispatch::console_message;
 use buck2_events::dispatch::with_dispatcher_async;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_path::AbsPathBuf;
 use buck2_interpreter::extra::InterpreterHostPlatform;
 use buck2_interpreter_for_build::interpreter::context::HasInterpreterContext;
 use buck2_node::load_patterns::MissingTargetBehavior;
@@ -81,11 +86,13 @@ use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
 use buck2_server_ctx::template::ServerCommandTemplate;
 use buck2_server_ctx::template::run_server_command;
 use buck2_server_ctx::test_command::TEST_COMMAND;
+use buck2_server_ctx::tpx_experiment_util::get_tpx_experiments;
 use buck2_test_api::data::TestResult;
 use buck2_test_api::data::TestStatus;
 use buck2_test_api::protocol::TestExecutor;
 use dice::DiceTransaction;
 use dice::LinearRecomputeDiceComputations;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use futures::channel::mpsc;
@@ -119,11 +126,10 @@ struct TestOutcome {
 }
 
 impl TestOutcome {
-    fn exit_code(&self) -> anyhow::Result<Option<i32>> {
+    fn exit_code(&self) -> buck2_error::Result<i32> {
         self.executor_report
             .exit_code
-            .context("Test executor did not provide an exit code")
-            .map(Some)
+            .ok_or_else(|| internal_error!("Test executor did not provide an exit code"))
     }
 }
 
@@ -187,7 +193,9 @@ impl Default for CounterWithExamples {
 struct TestStatuses {
     passed: CounterWithExamples,
     skipped: CounterWithExamples,
+    omitted: CounterWithExamples,
     failed: CounterWithExamples,
+    infra_failure: CounterWithExamples,
     fatals: CounterWithExamples,
     listing_success: CounterWithExamples,
     listing_failed: CounterWithExamples,
@@ -198,9 +206,10 @@ impl TestStatuses {
             TestStatus::PASS => self.passed.add(&result.name),
             TestStatus::FAIL => self.failed.add(&result.name),
             TestStatus::SKIP => self.skipped.add(&result.name),
-            TestStatus::OMITTED => self.skipped.add(&result.name),
+            TestStatus::OMITTED => self.omitted.add(&result.name),
             TestStatus::FATAL => self.fatals.add(&result.name),
             TestStatus::TIMEOUT => self.failed.add(&result.name),
+            TestStatus::INFRA_FAILURE => self.infra_failure.add(&result.name),
             TestStatus::UNKNOWN => {}
             TestStatus::RERUN => {}
             TestStatus::LISTING_SUCCESS => self.listing_success.add(&result.name),
@@ -218,11 +227,16 @@ enum TestError {
     #[error("Test execution completed but tests were skipped")]
     #[buck2(tag = Input)]
     TestSkipped,
+    #[error("Tests were filtered out and not run")]
+    #[buck2(tag = Input)]
+    TestOmitted,
     #[error("Test listing failed")]
     #[buck2(tag = Input)]
     ListingFailed,
     #[error("Fatal error encountered during test execution")]
     Fatal,
+    #[error("Infra Failure error encountered during test execution")]
+    InfraFailure,
 }
 
 #[derive(Debug, buck2_error_derive::Error)]
@@ -254,10 +268,6 @@ impl ServerCommandTemplate for TestServerCommand {
     type EndEvent = buck2_data::TestCommandEnd;
     type Response = buck2_cli_proto::TestResponse;
     type PartialResult = NoPartialResult;
-
-    fn is_success(&self, response: &Self::Response) -> bool {
-        matches!(response.exit_code, Some(0)) && response.errors.is_empty()
-    }
 
     fn build_result(&self, response: &Self::Response) -> Option<BuildResult> {
         let build_completed =
@@ -293,6 +303,61 @@ impl ServerCommandTemplate for TestServerCommand {
     }
 }
 
+fn test_executor_errors(
+    executor_exit_code: i32,
+    test_statuses: &buck2_cli_proto::test_response::TestStatuses,
+) -> Vec<buck2_data::ErrorReport> {
+    // FIXME: These errors should be derived from exit code only
+    let mut errors = Vec::new();
+    if let Some(failed) = &test_statuses.failed {
+        if failed.count > 0 {
+            errors.push(buck2_data::ErrorReport::from(&TestError::TestFailed.into()));
+        }
+    }
+    if let Some(infra_failure) = &test_statuses.infra_failure {
+        if infra_failure.count > 0 {
+            errors.push(buck2_data::ErrorReport::from(
+                &TestError::InfraFailure.into(),
+            ));
+        }
+    }
+    if let Some(fatal) = &test_statuses.fatals {
+        if fatal.count > 0 {
+            errors.push(buck2_data::ErrorReport::from(&TestError::Fatal.into()));
+        }
+    }
+    if let Some(listing_failed) = &test_statuses.listing_failed {
+        if listing_failed.count > 0 {
+            errors.push(buck2_data::ErrorReport::from(
+                &TestError::ListingFailed.into(),
+            ));
+        }
+    }
+    // If a test was skipped due to condition not being met a non-zero exit code will be returned,
+    // this doesn't seem quite right, but for now just tag it with TestSkipped to track occurrence.
+    if let Some(skipped) = &test_statuses.skipped {
+        if skipped.count > 0 {
+            errors.push(buck2_data::ErrorReport::from(
+                &TestError::TestSkipped.into(),
+            ));
+        }
+    }
+    if let Some(omitted) = &test_statuses.omitted {
+        if omitted.count > 0 {
+            errors.push(buck2_data::ErrorReport::from(
+                &TestError::TestOmitted.into(),
+            ));
+        }
+    }
+    if errors.is_empty() {
+        errors.push(buck2_data::ErrorReport::from(&buck2_error::buck2_error!(
+            buck2_error::ErrorTag::TestExecutor,
+            "Test Executor Failed with exit code {executor_exit_code}"
+        )))
+    }
+    errors
+}
+
 async fn test(
     server_ctx: &dyn ServerCommandContextTrait,
     mut ctx: DiceTransaction,
@@ -302,14 +367,14 @@ async fn test(
 
     let cwd = server_ctx.working_dir();
     let cell_resolver = ctx.get_cell_resolver().await?;
-    let working_dir_cell = cell_resolver.find(cwd)?;
+    let working_dir_cell = cell_resolver.find(cwd);
 
     let client_ctx = request.client_context()?;
     let global_cfg_options = global_cfg_options_from_client_context(
         request
             .target_cfg
             .as_ref()
-            .internal_error("target_cfg must be set")?,
+            .ok_or_else(|| internal_error!("target_cfg must be set"))?,
         server_ctx,
         &mut ctx,
     )
@@ -331,8 +396,7 @@ async fn test(
     let (test_executor, test_executor_args) = match test_executor_config {
         Some(config) => {
             let test_executor = post_process_test_executor(config.as_ref())
-                .with_context(|| format!("Invalid `test.v2_test_executor`: {}", config))
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Environment))?;
+                .with_buck_error_context(|| format!("Invalid `test.v2_test_executor`: {config}"))?;
             let mut test_executor_args =
                 vec!["--buck-trace-id".to_owned(), client_ctx.trace_id.clone()];
             let platform = match (*ctx)
@@ -347,41 +411,12 @@ async fn test(
                 _ => "",
             };
             test_executor_args.push("--config-entry".to_owned());
-            test_executor_args.push(format!("host={}", platform));
+            test_executor_args.push(format!("host={platform}"));
 
-            let config_flags = client_ctx
-                .representative_config_flags
-                .iter()
-                .filter_map(|s| {
-                    s.source.as_ref().and_then(|source| {
-                        if let representative_config_flag::Source::ConfigFlag(s) = source {
-                            Some(s)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .sorted()
-                .join(";");
-
-            test_executor_args.push("--config-entry".to_owned());
-            test_executor_args.push(format!("config={}", config_flags));
-
-            let flagfiles = client_ctx
-                .representative_config_flags
-                .iter()
-                .filter_map(|s| {
-                    s.source.as_ref().and_then(|source| {
-                        if let representative_config_flag::Source::ModeFile(s) = source {
-                            Some(s)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .join(";");
-            test_executor_args.push("--config-entry".to_owned());
-            test_executor_args.push(format!("mode={}", flagfiles));
+            generate_config_entry_args(
+                &mut test_executor_args,
+                &client_ctx.representative_config_flags,
+            );
 
             (test_executor, test_executor_args)
         }
@@ -393,11 +428,21 @@ async fn test(
         }
     };
 
-    let parsed_patterns =
-        parse_patterns_from_cli_args(&mut ctx, &request.target_patterns, cwd).await?;
-    server_ctx.log_target_pattern(&parsed_patterns);
+    let parsed_patterns_with_modifiers =
+        parse_patterns_with_modifiers_from_cli_args(&mut ctx, &request.target_patterns, cwd)
+            .await?;
+    server_ctx.log_target_pattern_with_modifiers(&parsed_patterns_with_modifiers);
 
-    let resolved_pattern = ResolveTargetPatterns::resolve(&mut ctx, &parsed_patterns).await?;
+    let has_pattern_modifiers = parsed_patterns_with_modifiers
+        .iter()
+        .any(|p| p.modifiers.as_slice().is_some());
+    if !global_cfg_options.cli_modifiers.is_empty() && has_pattern_modifiers {
+        return Err(ModifiersError::PatternModifiersWithGlobalModifiers.into());
+    }
+
+    let resolved_pattern =
+        ResolveTargetPatterns::resolve_with_modifiers(&mut ctx, &parsed_patterns_with_modifiers)
+            .await?;
 
     let launcher: Box<dyn ExecutorLauncher> = Box::new(OutOfProcessTestExecutor {
         executable: test_executor,
@@ -408,8 +453,7 @@ async fn test(
     let options = request
         .session_options
         .as_ref()
-        .context("Missing `options`")
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Input))?;
+        .ok_or_else(|| internal_error!("Missing `options`"))?;
 
     let session = TestSession::new(TestSessionOptions {
         allow_re: options.allow_re,
@@ -420,16 +464,17 @@ async fn test(
     let build_opts = request
         .build_opts
         .as_ref()
-        .buck_error_context("should have build options")?;
+        .ok_or_else(|| internal_error!("should have build options"))?;
 
     let timeout = request
         .timeout
         .as_ref()
-        .map(|t| t.clone().try_into())
+        .map(|t| (*t).try_into())
         .transpose()
-        .context("Invalid `duration`")
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Input))?;
+        .buck_error_context("Invalid `duration`")?;
 
+    let project_root = server_ctx.project_root();
+    let tpx_experiments = get_tpx_experiments(ctx.dupe(), project_root).await?;
     let test_outcome = test_targets(
         ctx.dupe(),
         resolved_pattern,
@@ -449,9 +494,11 @@ async fn test(
         MissingTargetBehavior::from_skip(build_opts.skip_missing_targets),
         timeout,
         request.ignore_tests_attribute,
+        request.build_default_info,
+        request.build_run_info,
+        tpx_experiments,
     )
-    .await
-    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::TestExecutor))?;
+    .await?;
 
     send_target_cfg_event(
         server_ctx.events(),
@@ -460,10 +507,7 @@ async fn test(
     );
 
     // TODO(bobyf) remap exit code for buck reserved exit code
-    let exit_code = test_outcome
-        .exit_code()
-        .context("No exit code available")
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::TestExecutor))?;
+    let executor_exit_code = test_outcome.exit_code()?;
 
     // Filtering out individual types might not be best here. While we just have 1 non-build
     // error that seems OK, but if we add more we should reconsider (we could add a type on all
@@ -491,6 +535,13 @@ async fn test(
                 .skipped
                 .to_cli_proto_counter(),
         ),
+        omitted: Some(
+            test_outcome
+                .executor_report
+                .statuses
+                .omitted
+                .to_cli_proto_counter(),
+        ),
         failed: Some(
             test_outcome
                 .executor_report
@@ -503,6 +554,13 @@ async fn test(
                 .executor_report
                 .statuses
                 .fatals
+                .to_cli_proto_counter(),
+        ),
+        infra_failure: Some(
+            test_outcome
+                .executor_report
+                .statuses
+                .infra_failure
                 .to_cli_proto_counter(),
         ),
         listing_success: Some(
@@ -524,9 +582,10 @@ async fn test(
 
     let serialized_build_report = if build_opts.unstable_print_build_report {
         let artifact_fs = ctx.get_artifact_fs().await?;
-        let build_report_opts = build_report_opts(&mut ctx, &cell_resolver, build_opts).await?;
+        let build_report_opts =
+            build_report_opts(&mut ctx, &cell_resolver, build_opts, Default::default()).await?;
 
-        generate_build_report(
+        write_build_report(
             build_report_opts,
             &artifact_fs,
             &cell_resolver,
@@ -534,7 +593,11 @@ async fn test(
             cwd,
             server_ctx.events().trace_id(),
             &test_outcome.build_target_result.configured,
+            &test_outcome
+                .build_target_result
+                .configured_to_pattern_modifiers,
             &test_outcome.build_target_result.other_errors,
+            None,
         )?
     } else {
         None
@@ -546,51 +609,21 @@ async fn test(
             .push(get_target_rule_type_name(&mut ctx, &configured.target()).await?);
     }
 
-    let exit_code_overide = if test_outcome.errors.is_empty() {
-        exit_code
+    let mut errors = test_outcome.errors;
+    let exit_code_override = if errors.is_empty() {
+        Some(executor_exit_code)
     } else {
+        // only use executor exit code if there were no errors in buck
         None
     };
 
-    let mut errors = test_outcome.errors;
-    if let Some(failed) = &test_statuses.failed {
-        if failed.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(&TestError::TestFailed.into()));
-        }
-    }
-    if let Some(fatal) = &test_statuses.fatals {
-        if fatal.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(&TestError::Fatal.into()));
-        }
-    }
-    if let Some(listing_failed) = &test_statuses.listing_failed {
-        if listing_failed.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(
-                &TestError::ListingFailed.into(),
-            ));
-        }
-    }
-    // If a test was skipped due to condition not being met a non-zero exit code will be returned,
-    // this doesn't seem quite right, but for now just tag it with TestSkipped to track occurrence.
-    if let Some(skipped) = &test_statuses.skipped {
-        if skipped.count > 0 && exit_code.is_none_or(|code| code != 0) {
-            errors.push(buck2_data::ErrorReport::from(
-                &TestError::TestSkipped.into(),
-            ));
-        }
-    }
-
-    if let Some(code) = exit_code {
-        if errors.is_empty() && code != 0 {
-            errors.push(buck2_data::ErrorReport::from(&buck2_error::buck2_error!(
-                buck2_error::ErrorTag::TestExecutor,
-                "Test Executor Failed with exit code {code}"
-            )))
-        }
+    if executor_exit_code != 0 {
+        let test_executor_errors = test_executor_errors(executor_exit_code, &test_statuses);
+        errors.extend(test_executor_errors);
     }
 
     Ok(TestResponse {
-        exit_code: exit_code_overide,
+        exit_code: exit_code_override,
         errors,
         test_statuses: Some(test_statuses),
         executor_stdout: test_outcome.executor_stdout,
@@ -615,7 +648,10 @@ async fn test_targets(
     missing_target_behavior: MissingTargetBehavior,
     timeout: Option<Duration>,
     ignore_tests_attribute: bool,
-) -> anyhow::Result<TestOutcome> {
+    build_default_info: bool,
+    build_run_info: bool,
+    tpx_experiments: HashSet<String>,
+) -> buck2_error::Result<TestOutcome> {
     let session = Arc::new(session);
 
     let (mut liveliness_observer, _guard) = LivelinessGuard::create();
@@ -634,17 +670,26 @@ async fn test_targets(
         ];
         args.extend(external_runner_args);
 
+        if cfg!(fbcode_build) {
+            // Our OSS test runner does not support `--experiment` flags, so only pass these flags internally.
+            args.extend(
+                tpx_experiments
+                    .iter()
+                    .flat_map(|experiment| ["--experiment".to_owned(), experiment.to_owned()]),
+            );
+        }
+
         args
     };
 
     let res = launcher
         .launch(tpx_args)
         .await
-        .context("Failed to launch executor");
+        .buck_error_context("Failed to launch executor");
 
     let res = tag_result!(
         "executor_launch_failed",
-        res.map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tpx)),
+        res,
         quiet: true,
         daemon_in_memory_state_is_corrupted: true,
         task: false
@@ -681,7 +726,7 @@ async fn test_targets(
                     CancellationContext::never_cancelled(), // sending the orchestrator directly to be spawned by make_server, which never calls it.
                 )
                 .await
-                .context("Failed to create a BuckTestOrchestrator")?;
+                .buck_error_context("Failed to create a BuckTestOrchestrator")?;
 
                 let server_handle = make_server(orchestrator, BuckTestDownwardApi);
 
@@ -695,6 +740,8 @@ async fn test_targets(
                     working_dir_cell,
                     missing_target_behavior,
                     ignore_tests_attribute,
+                    build_default_info,
+                    build_run_info,
                 });
 
                 driver.push_pattern(
@@ -720,7 +767,7 @@ async fn test_targets(
                 test_executor
                     .end_of_test_requests()
                     .await
-                    .context("Failed to notify test executor of end-of-tests")?;
+                    .buck_error_context("Failed to notify test executor of end-of-tests")?;
 
                 // Wait for the tests to finish running.
                 let test_statuses = test_status_receiver
@@ -729,24 +776,24 @@ async fn test_targets(
                         future::ready(Ok(acc))
                     })
                     .await
-                    .context("Did not receive all results from executor")?;
+                    .buck_error_context("Did not receive all results from executor")?;
 
                 // Shutdown our server. This is technically not *required* since dropping it would shut it
                 // down implicitly, but let's do it anyway so we can collect any errors.
                 server_handle
                     .shutdown()
                     .await
-                    .context("Failed to shutdown orchestrator")?;
+                    .buck_error_context("Failed to shutdown orchestrator")?;
 
                 let local_resource_registry = ctx.get_local_resource_registry()?;
 
                 local_resource_registry
                     .release_all_resources()
                     .await
-                    .context("Failed to release local resources")?;
+                    .buck_error_context("Failed to release local resources")?;
 
                 // Process the build errors we've collected.
-                let mut builder = BuildTargetResultBuilder::new();
+                let mut builder = BuildTargetResultBuilder::new(None);
                 for event in driver.error_events {
                     builder.event(event)?;
                 }
@@ -755,17 +802,21 @@ async fn test_targets(
                 driver.build_target_result.extend(error_target_result);
 
                 // And finally return our results;
-                anyhow::Ok((driver.build_target_result, test_statuses))
+                buck2_error::Ok((driver.build_target_result, test_statuses))
             },
         )
     });
 
     let executor_output = executor_handle
         .await
-        .context("Failed to retrieve executor exit code")?;
+        .buck_error_context("Failed to retrieve executor exit code")?;
 
     if executor_output.exit_code != 0 {
-        return Err(anyhow::Error::msg(executor_output.to_string()));
+        return Err(buck2_error::buck2_error!(
+            ErrorTag::TestExecutor,
+            "{}",
+            executor_output.to_string()
+        ));
     }
 
     // Now that the executor has exited, we notify our results channel. Two things can happen:
@@ -774,14 +825,15 @@ async fn test_targets(
     // - The executor had not reported end-of-tests. Assuming we didn't crash on our end (in which
     // case we're about to get this Err out of test_statuses), then this will ensure we don't wait
     // forever on the executor to notify us!
-    let _ignored = test_status_sender.unbounded_send(Err(anyhow::Error::msg(
+    let _ignored = test_status_sender.unbounded_send(Err(buck2_error::buck2_error!(
+        ErrorTag::TestExecutor,
         "Executor exited without reporting end-of-tests",
     )));
 
     // TODO(bobyf, torozco) we can use cancellation handle here instead of liveliness observer
     let (build_target_result, executor_report) = test_server
         .await
-        .context("Failed to collect executor report")??;
+        .buck_error_context("Failed to collect executor report")??;
 
     let mut errors = convert_error(&build_target_result)
         .iter()
@@ -806,21 +858,28 @@ async fn test_targets(
 
 enum TestDriverTask {
     InterpretTarget {
-        package: PackageLabel,
+        package_with_modifiers: PackageLabelWithModifiers,
         spec: PackageSpec<ProvidersPatternExtra>,
         skip_incompatible_targets: bool,
     },
     ConfigureTarget {
-        label: ProvidersLabel,
+        label_with_modifiers: ProvidersLabelWithModifiers,
         skippable: bool,
+        test_config_unification_rollout: bool,
     },
     BuildTarget {
         label: ConfiguredProvidersLabel,
+        modifiers: Modifiers,
+        test_config_unification_rollout: bool,
+        oncall: Option<String>,
     },
     TestTarget {
         label: ConfiguredProvidersLabel,
+        modifiers: Modifiers,
         providers: FrozenProviderCollectionValue,
         build_target_result: BuildTargetResult,
+        test_config_unification_rollout: bool,
+        oncall: Option<String>,
     },
 }
 
@@ -835,13 +894,15 @@ struct TestDriverState<'a, 'e> {
     working_dir_cell: CellName,
     missing_target_behavior: MissingTargetBehavior,
     ignore_tests_attribute: bool,
+    build_default_info: bool,
+    build_run_info: bool,
 }
 
 /// Maintains the state of an ongoing test execution.
 struct TestDriver<'a, 'e> {
     state: TestDriverState<'a, 'e>,
     work: FuturesUnordered<BoxFuture<'a, ControlFlow<Vec<BuildEvent>, Vec<TestDriverTask>>>>,
-    labels_configured: HashSet<(ProvidersLabel, bool)>,
+    labels_configured: HashSet<(ProvidersLabelWithModifiers, bool)>,
     labels_tested: HashSet<ConfiguredProvidersLabel>,
     error_events: Vec<BuildEvent>,
     build_target_result: BuildTargetResult,
@@ -865,10 +926,10 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         pattern: ResolvedPattern<ProvidersPatternExtra>,
         skip_incompatible_targets: bool,
     ) {
-        for (package, spec) in pattern.specs.into_iter() {
+        for (package_with_modifiers, spec) in pattern.specs.into_iter() {
             let fut = future::ready(ControlFlow::Continue(vec![
                 TestDriverTask::InterpretTarget {
-                    package,
+                    package_with_modifiers,
                     spec,
                     skip_incompatible_targets,
                 },
@@ -887,24 +948,56 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                     for task in tasks {
                         match task {
                             TestDriverTask::InterpretTarget {
-                                package,
+                                package_with_modifiers,
                                 spec,
                                 skip_incompatible_targets,
                             } => {
-                                self.interpret_targets(package, spec, skip_incompatible_targets);
+                                self.interpret_targets(
+                                    package_with_modifiers,
+                                    spec,
+                                    skip_incompatible_targets,
+                                );
                             }
-                            TestDriverTask::ConfigureTarget { label, skippable } => {
-                                self.configure_target(label, skippable);
+                            TestDriverTask::ConfigureTarget {
+                                label_with_modifiers,
+                                skippable,
+                                test_config_unification_rollout,
+                            } => {
+                                self.configure_target(
+                                    label_with_modifiers,
+                                    skippable,
+                                    test_config_unification_rollout,
+                                );
                             }
-                            TestDriverTask::BuildTarget { label } => {
-                                self.build_target(label);
+                            TestDriverTask::BuildTarget {
+                                label,
+                                modifiers,
+                                test_config_unification_rollout,
+                                oncall,
+                            } => {
+                                self.build_target(
+                                    label,
+                                    modifiers,
+                                    test_config_unification_rollout,
+                                    oncall,
+                                );
                             }
                             TestDriverTask::TestTarget {
                                 label,
+                                modifiers,
                                 providers,
                                 build_target_result,
+                                test_config_unification_rollout,
+                                oncall,
                             } => {
-                                self.test_target(label, providers, build_target_result);
+                                self.test_target(
+                                    label,
+                                    modifiers,
+                                    providers,
+                                    build_target_result,
+                                    test_config_unification_rollout,
+                                    oncall,
+                                );
                             }
                         }
                     }
@@ -916,11 +1009,13 @@ impl<'a, 'e> TestDriver<'a, 'e> {
 
     fn interpret_targets(
         &mut self,
-        package: PackageLabel,
+        package_with_modifiers: PackageLabelWithModifiers,
         spec: PackageSpec<ProvidersPatternExtra>,
         skip_incompatible_targets: bool,
     ) {
         let state = self.state;
+
+        let PackageLabelWithModifiers { package, modifiers } = package_with_modifiers;
 
         self.work.push(
             async move {
@@ -932,7 +1027,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 {
                     Ok(res) => res,
                     Err(e) => {
-                        let e: buck2_error::Error = e.into();
+                        let e: buck2_error::Error = e;
                         let mut events = Vec::new();
                         // Try to associate the error to concrete targets, if possible
                         match spec {
@@ -949,7 +1044,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                                     });
                                 }
                             }
-                            PackageSpec::All => events.push(BuildEvent::OtherError {
+                            PackageSpec::All() => events.push(BuildEvent::OtherError {
                                 label: None,
                                 err: e,
                             }),
@@ -962,7 +1057,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 // Indicates whether this should be skipped if incompatible.
                 let skippable = match spec {
                     PackageSpec::Targets(..) => skip_incompatible_targets,
-                    PackageSpec::All => true,
+                    PackageSpec::All() => true,
                 };
 
                 let (targets, missing) = res.apply_spec(spec);
@@ -987,13 +1082,28 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                     }
                 }
 
-                let labels = targets.into_keys().map(|(target_name, providers_pattern)| {
-                    providers_pattern.into_providers_label(package.dupe(), target_name.as_ref())
-                });
-
+                let labels =
+                    targets
+                        .into_iter()
+                        .map(|((target_name, providers_pattern), target_node)| {
+                            (
+                                providers_pattern.into_providers_label_with_modifiers(
+                                    package.dupe(),
+                                    target_name.as_ref(),
+                                    modifiers.dupe(),
+                                ),
+                                target_node.test_config_unification_rollout(),
+                            )
+                        });
                 let work = labels
                     .into_iter()
-                    .map(|label| TestDriverTask::ConfigureTarget { label, skippable })
+                    .map(|(label_with_modifiers, test_config_unification_rollout)| {
+                        TestDriverTask::ConfigureTarget {
+                            label_with_modifiers,
+                            skippable,
+                            test_config_unification_rollout,
+                        }
+                    })
                     .collect();
 
                 ControlFlow::Continue(work)
@@ -1002,25 +1112,46 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         );
     }
 
-    fn configure_target(&mut self, label: ProvidersLabel, skippable: bool) {
-        if !self.labels_configured.insert((label.dupe(), skippable)) {
+    fn configure_target(
+        &mut self,
+        label_with_modifiers: ProvidersLabelWithModifiers,
+        skippable: bool,
+        test_config_unification_rollout: bool,
+    ) {
+        if !self
+            .labels_configured
+            .insert((label_with_modifiers.dupe(), skippable))
+        {
             return;
         }
 
+        let ProvidersLabelWithModifiers {
+            providers_label,
+            modifiers,
+        } = label_with_modifiers;
+
         let state = self.state;
+
+        let local_cfg_options = match modifiers.as_slice() {
+            Some(modifiers) => GlobalCfgOptions {
+                target_platform: state.global_cfg_options.target_platform.dupe(),
+                cli_modifiers: modifiers.to_vec().into(),
+            },
+            None => state.global_cfg_options.dupe(),
+        };
 
         let fut = async move {
             let label = match state
                 .ctx
                 .clone()
-                .get_configured_provider_label(&label, state.global_cfg_options)
+                .get_configured_provider_label(&providers_label, &local_cfg_options)
                 .await
             {
                 Ok(label) => label,
                 Err(e) => {
                     return ControlFlow::Break(vec![BuildEvent::OtherError {
-                        label: Some(label),
-                        err: e.into(),
+                        label: Some(providers_label),
+                        err: e,
                     }]);
                 }
             };
@@ -1033,10 +1164,9 @@ impl<'a, 'e> TestDriver<'a, 'e> {
             {
                 Ok(node) => node,
                 Err(e) => {
-                    return ControlFlow::Break(vec![BuildEvent::new_configured(
-                        label,
-                        ConfiguredBuildEventVariant::Error { err: e.into() },
-                    )]);
+                    return ControlFlow::Break(create_and_map_configured_build_error(
+                        label, e, modifiers,
+                    ));
                 }
             };
 
@@ -1047,19 +1177,25 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                         tracing::debug!("{}", reason.skipping_message(label.target()));
                         return ControlFlow::Continue(vec![]);
                     } else {
-                        return ControlFlow::Break(vec![BuildEvent::new_configured(
+                        return ControlFlow::Break(create_and_map_configured_build_error(
                             label,
-                            ConfiguredBuildEventVariant::Error {
-                                err: reason.to_err().into(),
-                            },
-                        )]);
+                            reason.to_err(),
+                            modifiers,
+                        ));
                     }
                 }
                 MaybeCompatible::Compatible(node) => node,
             };
 
+            let oncall = node.oncall().map(|s| s.to_owned());
+
             // Build and then test this: it's compatible.
-            let mut work = vec![TestDriverTask::BuildTarget { label }];
+            let mut work = vec![TestDriverTask::BuildTarget {
+                label,
+                modifiers: modifiers.dupe(),
+                test_config_unification_rollout,
+                oncall,
+            }];
 
             // If this node is a forward, it'll get flattened when we do analysis and run the
             // test later, but its `tests` attribute here will not be, and that means we'll
@@ -1071,10 +1207,14 @@ impl<'a, 'e> TestDriver<'a, 'e> {
             if !state.ignore_tests_attribute {
                 for test in node.tests() {
                     work.push(TestDriverTask::ConfigureTarget {
-                        label: test.unconfigured(),
+                        label_with_modifiers: ProvidersLabelWithModifiers {
+                            providers_label: test.unconfigured(),
+                            modifiers: modifiers.dupe(),
+                        },
                         // Historically `skippable: false` is what we enforced here, perhaps that
                         // should change.
                         skippable: false,
+                        test_config_unification_rollout,
                     });
                 }
             }
@@ -1086,8 +1226,24 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         self.work.push(fut);
     }
 
-    fn build_target(&mut self, label: ConfiguredProvidersLabel) {
+    fn build_target(
+        &mut self,
+        label: ConfiguredProvidersLabel,
+        modifiers: Modifiers,
+        test_config_unification_rollout: bool,
+        oncall: Option<String>,
+    ) {
         if !self.labels_tested.insert(label.dupe()) {
+            self.work.push(
+                async move {
+                    ControlFlow::Break(vec![BuildEvent::new_configured(
+                        label,
+                        ConfiguredBuildEventVariant::MapModifiers { modifiers },
+                    )])
+                }
+                .boxed(),
+            );
+
             return;
         }
 
@@ -1096,20 +1252,27 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         let fut = async move {
             let ctx = &mut state.ctx.clone();
 
+            let modifiers_dupe = modifiers.dupe();
+
             let result = match ctx
                 .with_linear_recompute(|ctx| async move {
-                    build_target_result(&ctx, &state.label_filtering, build_label).await
+                    build_target_result(
+                        &ctx,
+                        &state.label_filtering,
+                        build_label,
+                        modifiers_dupe,
+                        state.build_default_info,
+                        state.build_run_info,
+                    )
+                    .await
                 })
                 .await
             {
                 Ok(result) => result,
                 Err(e) => {
-                    return ControlFlow::Break(vec![BuildEvent::new_configured(
-                        label,
-                        ConfiguredBuildEventVariant::Error {
-                            err: from_any_with_tag(e, buck2_error::ErrorTag::Tier0),
-                        },
-                    )]);
+                    return ControlFlow::Break(create_and_map_configured_build_error(
+                        label, e, modifiers,
+                    ));
                 }
             };
 
@@ -1117,6 +1280,9 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 label,
                 build_target_result: result.0,
                 providers: result.1,
+                modifiers,
+                test_config_unification_rollout,
+                oncall,
             }])
         }
         .boxed();
@@ -1127,8 +1293,11 @@ impl<'a, 'e> TestDriver<'a, 'e> {
     fn test_target(
         &mut self,
         label: ConfiguredProvidersLabel,
+        modifiers: Modifiers,
         providers: FrozenProviderCollectionValue,
         build_target_result: BuildTargetResult,
+        test_config_unification_rollout: bool,
+        oncall: Option<String>,
     ) {
         let should_test = !build_target_result.build_failed && !build_target_result.is_empty();
         self.build_target_result.extend(build_target_result);
@@ -1148,15 +1317,14 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 state.label_filtering.dupe(),
                 state.cell_resolver,
                 state.working_dir_cell,
+                test_config_unification_rollout,
+                oncall,
             )
             .await
             {
-                return ControlFlow::Break(vec![BuildEvent::new_configured(
-                    label,
-                    ConfiguredBuildEventVariant::Error {
-                        err: from_any_with_tag(e, buck2_error::ErrorTag::TestExecutor),
-                    },
-                )]);
+                return ControlFlow::Break(create_and_map_configured_build_error(
+                    label, e, modifiers,
+                ));
             }
 
             ControlFlow::Continue(vec![])
@@ -1171,7 +1339,10 @@ async fn build_target_result(
     ctx: &LinearRecomputeDiceComputations<'_>,
     label_filtering: &TestLabelFiltering,
     label: ConfiguredProvidersLabel,
-) -> anyhow::Result<(BuildTargetResult, FrozenProviderCollectionValue)> {
+    modifiers: Modifiers,
+    build_default_info: bool,
+    build_run_info: bool,
+) -> buck2_error::Result<(BuildTargetResult, FrozenProviderCollectionValue)> {
     // NOTE: We fail if we hit an incompatible target here. This can happen if we reach an
     // incompatible target via `tests = [...]`. This should perhaps change, but that's how it works
     // in v1: https://fb.workplace.com/groups/buckeng/posts/8520953297953210
@@ -1182,41 +1353,55 @@ async fn build_target_result(
         .require_compatible()?;
     let collections = providers.provider_collection();
 
-    let build_target_result = match <dyn TestProvider>::from_collection(collections) {
-        Some(test_info) => {
-            if skip_build_based_on_labels(test_info, label_filtering) {
-                return Ok((BuildTargetResult::new(), providers));
-            }
-            let materialization_and_upload = MaterializationAndUploadContext::skip();
-            let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new();
-            result_builder
-                .wait_for(
-                    false,
-                    build_configured_label(
-                        &consumer,
-                        &ctx,
-                        &materialization_and_upload,
-                        label,
-                        &ProvidersToBuild {
-                            default: false,
-                            default_other: false,
-                            run: false,
-                            tests: true,
-                        },
-                        BuildConfiguredLabelOptions {
-                            skippable: false,
-                            graph_properties: Default::default(),
-                        },
-                        None, // TODO: is this right?
-                    ),
-                )
-                .await?
+    // We build target if any of the following is true
+    // 1. It's a test (aka it produces a TestInfo provider) and it is not skipped by label filtering
+    // 2. --build-default-info is requested
+    // 3. --build-run-info is requested and the target produces a RunInfo
+    if let Some(test_info) = <dyn TestProvider>::from_collection(collections) {
+        let skip_build_based_on_labels = !label_filtering.build_filtered_targets
+            && label_filtering.is_excluded(test_info.labels());
+        if skip_build_based_on_labels {
+            return Ok((BuildTargetResult::new(), providers));
         }
-        None => {
-            // not a test
-            BuildTargetResult::new()
-        }
-    };
+    } else if !(build_default_info
+        || build_run_info
+            && providers
+                .provider_collection()
+                .builtin_provider::<FrozenRunInfo>()
+                .is_some())
+    {
+        return Ok((BuildTargetResult::new(), providers));
+    }
+
+    let materialization_and_upload = MaterializationAndUploadContext::skip();
+    let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new(None);
+    consumer.consume(BuildEvent::new_configured(
+        label.dupe(),
+        ConfiguredBuildEventVariant::MapModifiers { modifiers },
+    ));
+    let build_target_result = result_builder
+        .wait_for(
+            false,
+            build_configured_label(
+                &consumer,
+                &ctx,
+                materialization_and_upload,
+                label,
+                &ProvidersToBuild {
+                    default: build_default_info,
+                    default_other: build_default_info,
+                    run: build_run_info,
+                    tests: true,
+                },
+                BuildConfiguredLabelOptions {
+                    skippable: false,
+                    graph_properties: Default::default(),
+                },
+                None, // TODO: is this right?
+            ),
+        )
+        .await?;
+
     Ok((build_target_result, providers))
 }
 
@@ -1228,12 +1413,14 @@ async fn test_target(
     label_filtering: Arc<TestLabelFiltering>,
     cell_resolver: &CellResolver,
     working_dir_cell: CellName,
-) -> anyhow::Result<Option<ConfiguredProvidersLabel>> {
+    test_config_unification_rollout: bool,
+    oncall: Option<String>,
+) -> buck2_error::Result<Option<ConfiguredProvidersLabel>> {
     let collection = providers.provider_collection();
 
     let fut = match <dyn TestProvider>::from_collection(collection) {
         Some(test_info) => {
-            if skip_run_based_on_labels(test_info, &label_filtering) {
+            if label_filtering.is_excluded(test_info.labels()) {
                 return Ok(None);
             }
             run_tests(
@@ -1243,6 +1430,8 @@ async fn test_target(
                 session,
                 cell_resolver,
                 working_dir_cell,
+                test_config_unification_rollout,
+                oncall,
             )
             .map(|l| Some(l).transpose())
             .left_future()
@@ -1271,21 +1460,6 @@ fn convert_error(build_result: &BuildTargetResult) -> Vec<buck2_error::Error> {
     errors
 }
 
-fn skip_run_based_on_labels(
-    provider: &dyn TestProvider,
-    label_filtering: &TestLabelFiltering,
-) -> bool {
-    let target_labels = provider.labels();
-    label_filtering.is_excluded(target_labels)
-}
-
-fn skip_build_based_on_labels(
-    provider: &dyn TestProvider,
-    label_filtering: &TestLabelFiltering,
-) -> bool {
-    !label_filtering.build_filtered_targets && skip_run_based_on_labels(provider, label_filtering)
-}
-
 fn run_tests<'a, 'b>(
     test_executor: Arc<dyn TestExecutor + 'a>,
     providers_label: ConfiguredProvidersLabel,
@@ -1293,9 +1467,16 @@ fn run_tests<'a, 'b>(
     session: &'b TestSession,
     cell_resolver: &'b CellResolver,
     working_dir_cell: CellName,
-) -> BoxFuture<'a, anyhow::Result<ConfiguredProvidersLabel>> {
-    let maybe_handle =
-        build_configured_target_handle(providers_label.dupe(), session, cell_resolver);
+    test_config_unification_rollout: bool,
+    oncall: Option<String>,
+) -> BoxFuture<'a, buck2_error::Result<ConfiguredProvidersLabel>> {
+    let maybe_handle = build_configured_target_handle(
+        providers_label.dupe(),
+        session,
+        cell_resolver,
+        test_config_unification_rollout,
+        oncall,
+    );
 
     match maybe_handle {
         Ok(handle) => {
@@ -1303,13 +1484,30 @@ fn run_tests<'a, 'b>(
 
             (async move {
                 fut.await
-                    .buck_error_context_anyhow("Failed to notify test executor of a new test")?;
+                    .buck_error_context("Failed to notify test executor of a new test")?;
                 Ok(providers_label)
             })
             .boxed()
         }
         Err(err) => future::ready(Err(err)).boxed(),
     }
+}
+
+// TODO(azhang2542): Ideally we would only have to map the `Modifier`` to a `ConfiguredProvidersLabel`
+// just once when we first get the `ConfiguredProvidersLabel`. Refactor the code so that we have to do
+// a call to mapping minimally, potentially by adding the mappings to the `TestDriverState`.
+fn create_and_map_configured_build_error(
+    label: ConfiguredProvidersLabel,
+    err: buck2_error::Error,
+    modifiers: Modifiers,
+) -> Vec<BuildEvent> {
+    vec![
+        BuildEvent::new_configured(label.dupe(), ConfiguredBuildEventVariant::Error { err }),
+        BuildEvent::new_configured(
+            label,
+            ConfiguredBuildEventVariant::MapModifiers { modifiers },
+        ),
+    ]
 }
 
 struct TestLabelFiltering {
@@ -1374,30 +1572,120 @@ impl TestLabelFiltering {
     }
 }
 
-fn post_process_test_executor(s: &str) -> anyhow::Result<PathBuf> {
+fn generate_config_entry_args(
+    test_executor_args: &mut Vec<String>,
+    representative_config_flags: &[buck2_cli_proto::RepresentativeConfigFlag],
+) {
+    let mut config_flags = String::new();
+    let mut config_files = String::new();
+    let mut flagfiles = String::new();
+    let mut modifiers = String::new();
+    let mut target_platforms = String::new();
+
+    for s in representative_config_flags {
+        if let Some(source) = &s.source {
+            match source {
+                representative_config_flag::Source::ConfigFlag(s) => {
+                    if config_flags.is_empty() {
+                        config_flags.push_str(s);
+                    } else {
+                        config_flags.push(';');
+                        config_flags.push_str(s);
+                    }
+                }
+                representative_config_flag::Source::ConfigFile(s) => {
+                    if config_files.is_empty() {
+                        config_files.push_str(s);
+                    } else {
+                        config_files.push(';');
+                        config_files.push_str(s);
+                    }
+                }
+                representative_config_flag::Source::ModeFile(s) => {
+                    if flagfiles.is_empty() {
+                        flagfiles.push_str(s);
+                    } else {
+                        flagfiles.push(';');
+                        flagfiles.push_str(s);
+                    }
+                }
+                representative_config_flag::Source::Modifier(s) => {
+                    if modifiers.is_empty() {
+                        modifiers.push_str(s);
+                    } else {
+                        modifiers.push(';');
+                        modifiers.push_str(s);
+                    }
+                }
+                representative_config_flag::Source::TargetPlatforms(s) => {
+                    if target_platforms.is_empty() {
+                        target_platforms.push_str(s);
+                    } else {
+                        target_platforms.push(';');
+                        target_platforms.push_str(s);
+                    }
+                }
+            }
+        }
+    }
+
+    if !config_flags.is_empty() {
+        test_executor_args.push("--config-entry".to_owned());
+        test_executor_args.push(format!("config={config_flags}"));
+    }
+    if !config_files.is_empty() {
+        test_executor_args.push("--config-entry".to_owned());
+        test_executor_args.push(format!("config_file={config_files}"));
+    }
+    if !flagfiles.is_empty() {
+        test_executor_args.push("--config-entry".to_owned());
+        test_executor_args.push(format!("mode={flagfiles}"));
+    }
+    if !modifiers.is_empty() {
+        test_executor_args.push("--config-entry".to_owned());
+        test_executor_args.push(format!("modifier={modifiers}"));
+    }
+    if !target_platforms.is_empty() {
+        test_executor_args.push("--config-entry".to_owned());
+        test_executor_args.push(format!("target_platforms={target_platforms}"));
+    }
+}
+
+fn post_process_test_executor(s: &str) -> buck2_error::Result<PathBuf> {
     match s.split_once("$BUCK2_BINARY_DIR/") {
         Some(("", rest)) => {
-            let exe =
-                AbsPathBuf::new(std::env::current_exe().context("Cannot get Buck2 executable")?)?;
-            let exe = fs_util::canonicalize(&exe).buck_error_context_anyhow(
-                "Failed to canonicalize path to Buck2 executable. Try running `buck2 kill`.",
+            let exe = AbsPathBuf::new(
+                std::env::current_exe().buck_error_context("Cannot get Buck2 executable")?,
             )?;
+            let exe = fs_util::canonicalize(&exe)
+                .categorize_internal()
+                .buck_error_context(
+                    "Failed to canonicalize path to Buck2 executable. Try running `buck2 kill`.",
+                )?;
 
             let exe = exe.as_abs_path();
             let exe_dir = exe
                 .parent()
-                .context("Buck2 executable directory has no parent")?;
+                .ok_or_else(|| internal_error!("Buck2 executable directory has no parent"))?;
 
             Ok(exe_dir.join(rest).to_path_buf())
         }
-        Some(..) => Err(anyhow::anyhow!("Invalid value: {}", s)),
+        Some(..) => Err(buck2_error::buck2_error!(
+            ErrorTag::Environment,
+            "Invalid value: {}",
+            s
+        )),
         None => Ok(s.into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use buck2_cli_proto::RepresentativeConfigFlag;
+    use buck2_cli_proto::representative_config_flag;
+
     use crate::command::TestLabelFiltering;
+    use crate::command::generate_config_entry_args;
 
     #[test]
     fn only_include_labels_in_includes() {
@@ -1464,5 +1752,155 @@ mod tests {
         );
 
         assert!(conflicting_filter.is_excluded(vec!["include_me"]));
+    }
+
+    #[test]
+    fn test_generate_config_entry_args_empty() {
+        let mut args = Vec::new();
+        let config_flags = Vec::new();
+
+        generate_config_entry_args(&mut args, &config_flags);
+
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_generate_config_entry_args_single_config_flag() {
+        let mut args = Vec::new();
+        let config_flags = vec![RepresentativeConfigFlag {
+            source: Some(representative_config_flag::Source::ConfigFlag(
+                "key=value".to_owned(),
+            )),
+        }];
+
+        generate_config_entry_args(&mut args, &config_flags);
+
+        assert_eq!(args, vec!["--config-entry", "config=key=value"]);
+    }
+
+    #[test]
+    fn test_generate_config_entry_args_multiple_config_flags() {
+        let mut args = Vec::new();
+        let config_flags = vec![
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::ConfigFlag(
+                    "key1=value1".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::ConfigFlag(
+                    "key2=value2".to_owned(),
+                )),
+            },
+        ];
+
+        generate_config_entry_args(&mut args, &config_flags);
+
+        assert_eq!(
+            args,
+            vec!["--config-entry", "config=key1=value1;key2=value2"]
+        );
+    }
+
+    #[test]
+    fn test_generate_config_entry_args_all_types() {
+        let mut args = Vec::new();
+        let config_flags = vec![
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::ConfigFlag(
+                    "config_key=config_value".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::ConfigFile(
+                    "config_file_path".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::ModeFile(
+                    "mode_file_path".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::Modifier(
+                    "modifier_value".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::TargetPlatforms(
+                    "platform1".to_owned(),
+                )),
+            },
+        ];
+
+        generate_config_entry_args(&mut args, &config_flags);
+
+        let expected = vec![
+            "--config-entry",
+            "config=config_key=config_value",
+            "--config-entry",
+            "config_file=config_file_path",
+            "--config-entry",
+            "mode=mode_file_path",
+            "--config-entry",
+            "modifier=modifier_value",
+            "--config-entry",
+            "target_platforms=platform1",
+        ];
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn test_generate_config_entry_args_multiple_same_type() {
+        let mut args = Vec::new();
+        let config_flags = vec![
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::ConfigFile(
+                    "file1.cfg".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::ConfigFile(
+                    "file2.cfg".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::Modifier(
+                    "mod1".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::Modifier(
+                    "mod2".to_owned(),
+                )),
+            },
+        ];
+
+        generate_config_entry_args(&mut args, &config_flags);
+
+        let expected = vec![
+            "--config-entry",
+            "config_file=file1.cfg;file2.cfg",
+            "--config-entry",
+            "modifier=mod1;mod2",
+        ];
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn test_generate_config_entry_args_with_none_source() {
+        let mut args = Vec::new();
+        let config_flags = vec![
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::ConfigFlag(
+                    "key=value".to_owned(),
+                )),
+            },
+            RepresentativeConfigFlag { source: None },
+        ];
+
+        generate_config_entry_args(&mut args, &config_flags);
+
+        assert_eq!(args, vec!["--config-entry", "config=key=value"]);
     }
 }

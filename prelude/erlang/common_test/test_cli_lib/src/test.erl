@@ -5,16 +5,15 @@
 %% License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 %% of this source tree.
 
-%%%-------------------------------------------------------------------
-%%% @doc
-%%%   User-Facing library for quick-iteration testing of Common Test
-%%%
-%%%     use test:help() for more information
-%%% @end
-%%% % @format
-
+%% @format
 -module(test).
--eqwalizer(ignore).
+-moduledoc """
+User-Facing library for quick-iteration testing of Common Test
+
+  use test:help() for more information
+""".
+-typing([eqwalizer]).
+-compile(warn_missing_spec_all).
 
 -include_lib("common/include/buck_ct_records.hrl").
 
@@ -41,8 +40,10 @@
     list_impl/1
 ]).
 
+-define(raw_file_access, prim_file).
+
 -type test_id() :: string() | non_neg_integer() | atom().
--type test_info() :: #{name := string(), suite := atom()}.
+-type test_info() :: #{name := string(), suite := module()}.
 -type run_spec() :: test_id() | [test_info()].
 -type run_result() :: {non_neg_integer(), non_neg_integer()}.
 
@@ -73,7 +74,9 @@ info() ->
     help(),
     io:format("~n").
 
-%% @doc Print a description of all available commands.
+-doc """
+Print a description of all available commands.
+""".
 -spec help() -> ok.
 help() ->
     io:format("Buck2 Common Test Runner Shell Interface~n~n"),
@@ -90,11 +93,11 @@ help() ->
 print_help(Fun, Arity) ->
     #{args := Args, desc := [DescFirst | DescRest]} = command_description(Fun, Arity),
     FunSig = string:pad(
-        io_lib:format("~s:~s(~s)", [?MODULE, Fun, lists:join(", ", Args)]), 30, trailing
+        io_lib:format("~ts:~ts(~ts)", [?MODULE, Fun, lists:join(", ", Args)]), 30, trailing
     ),
-    io:format("~s -- ~s~n", [FunSig, DescFirst]),
+    io:format("~ts -- ~ts~n", [FunSig, DescFirst]),
     Padding = string:pad("", 34),
-    [io:format("~s~s~n", [Padding, DescLine]) || DescLine <- DescRest],
+    [io:format("~ts~ts~n", [Padding, DescLine]) || DescLine <- DescRest],
     ok.
 
 -spec command_description(Fun :: atom(), arity()) -> #{args := [string()], desc := [string()]}.
@@ -142,43 +145,53 @@ command_description(logs, 0) ->
 command_description(F, A) ->
     error({help_is_missing, {F, A}}).
 
-%% @doc List all available tests
-%% @equiv test:list("")
+-doc """
+List all available tests
+""".
+-doc #{equiv => test:list("")}.
 -spec list() -> ok | {error, term()}.
 list() ->
     list("").
 
-%% @doc List all available tests, filters by the given RegEx. Please check
-%% [https://www.erlang.org/doc/man/re.html#regexp_syntax] for the supported
-%% regular expression syntax. If a module is given as argument, list all
-%% tests from that module instead
+-doc """
+List all available tests, filters by the given RegEx. Please check
+[https://www.erlang.org/doc/man/re.html#regexp_syntax] for the supported
+regular expression syntax. If a module is given as argument, list all
+tests from that module instead
+""".
 -spec list(RegExOrModule :: module() | string()) -> ok | {error, term()}.
 list(RegEx) when is_list(RegEx) ->
     case list_impl(RegEx) of
-        {ok, TestsString} -> io:format("~s", [TestsString]);
+        {ok, TestsString} -> io:format("~ts", [TestsString]);
         Error -> Error
     end.
 
-%% @doc Run a test given by either the test id from the last list() command, or
-%% a regex that matches exactly one test. Tests are run with the shortest possible
-%% setup. This call does not recompile the test suite and its dependencies, but
-%% runs them as is. You can manually recompile code with c(Module).
-%% To reset the test state use reset().
+-doc """
+Run a test given by either the test id from the last list() command, or
+a regex that matches exactly one test. Tests are run with the shortest possible
+setup. This call does not recompile the test suite and its dependencies, but
+runs them as is. You can manually recompile code with c(Module).
+To reset the test state use reset().
+""".
 -spec rerun(run_spec()) -> run_result().
 rerun(Spec) ->
     ensure_initialized(),
     do_plain_test_run(Spec).
 
-%% @doc update code and run all tests
-%% @equiv run("")
+-doc """
+update code and run all tests
+""".
+-doc #{equiv => run("")}.
 -spec run() -> run_result() | error.
 run() ->
     run("").
 
-%% @doc Run a test given by either the test id from the last list() command, or
-%% a regex that matches exactly one test. Tests are run with the shortest possible
-%% setup. This call does recompile the test suite and its dependencies. You can
-%% manually recompile code with c(Module). To reset the test state use reset().
+-doc """
+Run a test given by either the test id from the last list() command, or
+a regex that matches exactly one test. Tests are run with the shortest possible
+setup. This call does recompile the test suite and its dependencies. You can
+manually recompile code with c(Module). To reset the test state use reset().
+""".
 -spec run(string() | non_neg_integer()) -> run_result() | error.
 run(RegExOrId) ->
     ensure_initialized(),
@@ -190,22 +203,29 @@ run(RegExOrId) ->
             case shell_buck2_utils:rebuild_modules(Suites) of
                 ok ->
                     io:format("Reloading all changed modules... "),
-                    Loaded = ct_daemon:load_changed(),
-                    case erlang:length(Loaded) of
-                        0 ->
-                            do_plain_test_run(ToRun);
-                        ChangedCount ->
-                            io:format("reloaded ~p modules ~P~n", [ChangedCount, Loaded, 10]),
-                            % There were some changes, so list the tests again, then run but without recompiling changes
-                            % Note that if called with the RegEx instead of ToRun test list like above, do_plain_test_run/1 will list the tests again
-                            do_plain_test_run(RegExOrId)
+                    case ct_daemon:load_changed() of
+                        Loaded when is_list(Loaded) ->
+                            case erlang:length(Loaded) of
+                                0 ->
+                                    do_plain_test_run(ToRun);
+                                ChangedCount ->
+                                    io:format("reloaded ~tp modules ~tP~n", [ChangedCount, Loaded, 10]),
+                                    % There were some changes, so list the tests again, then run but without recompiling changes
+                                    % Note that if called with the RegEx instead of ToRun test list like above, do_plain_test_run/1 will list the tests again
+                                    do_plain_test_run(RegExOrId)
+                            end;
+                        node_down ->
+                            io:format("Node down!~n"),
+                            error
                     end;
                 Error ->
                     Error
             end
     end.
 
-%% @doc restarts the test node, enabling a clean test state
+-doc """
+restarts the test node, enabling a clean test state
+""".
 -spec reset() -> ok | {error, term()}.
 reset() ->
     case is_debug_session() of
@@ -220,35 +240,39 @@ reset() ->
             })
     end.
 
-%% @doc Print all the logs of the currently running test suites
+-doc """
+Print all the logs of the currently running test suites
+""".
 -spec logs() -> ok.
 logs() ->
     ensure_initialized(),
     case logs_impl() of
         {ok, Logs} ->
-            lists:foreach(fun(LogPath) -> io:format("~s~n", [LogPath]) end, Logs),
+            lists:foreach(fun(LogPath) -> io:format("~ts~n", [LogPath]) end, Logs),
             io:format("~n");
         {error, not_found} ->
             io:format("no logs found~n")
     end.
 
 %% internal
--spec list_impl(RegEx :: string()) -> {ok, string()} | {error, term()}.
+-spec list_impl(RegEx :: string()) -> {ok, string()} | {error, Error} when
+    Error :: node_down | {invalid_regex, {string(), non_neg_integer()}}.
 list_impl(RegEx) ->
     ensure_initialized(),
     case ct_daemon:list(RegEx) of
+        Tests when is_list(Tests) -> {ok, print_tests(Tests)};
         {invalid_regex, _} = Err -> {error, Err};
-        Tests -> {ok, print_tests(Tests)}
+        node_down -> {error, node_down}
     end.
 
+-spec ensure_initialized() -> ok.
 ensure_initialized() ->
     PrintInit = lists:foldl(
         fun(Fun, Acc) -> Fun() orelse Acc end,
         false,
         [
             fun init_utility_apps/0,
-            fun init_node/0,
-            fun init_group_leader/0
+            fun init_node/0
         ]
     ),
     case PrintInit of
@@ -260,25 +284,52 @@ ensure_initialized() ->
 
 -spec init_utility_apps() -> boolean().
 init_utility_apps() ->
-    _ = application:load(test_cli_lib),
     UtilityApps = application:get_env(test_cli_lib, utility_applications, []),
-    RunningApps = proplists:get_value(running, application:info()),
-    StartResults = [init_utility_app(RunningApps, UtilityApp) || UtilityApp <- UtilityApps],
+    StartedApps = #{App => true || {App, _} <- proplists:get_value(started, application:info())},
+    StartResults = [init_utility_app(StartedApps, UtilityApp) || UtilityApp <- UtilityApps],
     lists:any(fun(B) when is_boolean(B) -> B end, StartResults).
 
--spec init_utility_app(RunningApps :: [atom()], UtilityApp :: atom()) -> boolean().
-init_utility_app(RunningApps, UtilityApp) ->
-    case proplists:is_defined(UtilityApp, RunningApps) of
-        true ->
+-spec init_utility_app(StartedApps :: #{atom() => term()}, UtilityApp :: atom()) -> boolean().
+init_utility_app(StartedApps, UtilityApp) ->
+    case StartedApps of
+        #{UtilityApp := _} ->
             false;
-        false ->
-            io:format("starting utility application ~s...~n", [UtilityApp]),
-            case application:ensure_all_started(UtilityApp) of
+        _ ->
+            io:format("starting utility application ~ts...~n", [UtilityApp]),
+            {Mod, Fun} = application:get_env(test_cli_lib, application_starter, {application, ensure_all_started}),
+            case Mod:Fun(UtilityApp) of
                 {ok, _} ->
                     true;
                 Error ->
-                    abort("could not start utility applications:~n~p", [Error])
+                    abort("could not start utility applications:~n~tp", [Error])
             end
+    end.
+
+-spec init_common_app_env(#{binary() => binary()}) -> ok.
+init_common_app_env(CommonAppEnv) ->
+    case map_size(CommonAppEnv) of
+        0 ->
+            ok;
+        _ ->
+            case application:load(common) of
+                ok -> ok;
+                {error, {already_loaded, common}} -> ok
+            end,
+            maps:foreach(
+                fun(Key, Value) ->
+                    KeyAtom = binary_to_atom(Key, utf8),
+                    % Only set the env if it's not already set to allow cli overrides
+                    case application:get_env(common, KeyAtom) of
+                        undefined ->
+                            ValueTerm = buck_ct_parser:parse_str(Value),
+                            application:set_env(common, KeyAtom, ValueTerm);
+                        _ ->
+                            ok
+                    end
+                end,
+                CommonAppEnv
+            ),
+            ok
     end.
 
 -define(TYPE_IS_OK(Type), (Type =:= shortnames orelse Type =:= longnames)).
@@ -290,7 +341,8 @@ init_node() ->
             false;
         false ->
             io:format("starting test node...~n", []),
-            #test_info{erl_cmd = ErlCmd} = get_provided_test_info(),
+            #test_info{erl_cmd = ErlCmd, common_app_env = CommonAppEnv} = get_provided_test_info(),
+            init_common_app_env(CommonAppEnv),
             case application:get_env(test_cli_lib, node_config) of
                 undefined ->
                     ct_daemon:start(ErlCmd);
@@ -347,14 +399,6 @@ watchdog() ->
             erlang:halt()
     end.
 
--spec init_group_leader() -> boolean().
-init_group_leader() ->
-    %% set the group leader unconditionally, we need to do this since
-    %% during init, the group leader is different then the one from the
-    %% started shell
-    ct_daemon:set_gl(),
-    false.
-
 -spec print_tests([{module(), [{non_neg_integer(), string()}]}]) -> string().
 print_tests([]) ->
     "no tests found\n";
@@ -365,8 +409,8 @@ print_tests(Tests) ->
 print_tests_impl([]) ->
     "";
 print_tests_impl([{Suite, SuiteTests} | Rest]) ->
-    SuiteString = io_lib:format("~s:~n", [Suite]),
-    TestsString = [io_lib:format("\t~b - ~s~n", [Id, Test]) || {Id, Test} <- SuiteTests],
+    SuiteString = io_lib:format("~ts:~n", [Suite]),
+    TestsString = [io_lib:format("\t~b - ~ts~n", [Id, Test]) || {Id, Test} <- SuiteTests],
     RestString = print_tests_impl(Rest),
     SuiteString ++ TestsString ++ RestString.
 
@@ -377,19 +421,22 @@ is_debug_session() ->
             Value
     end.
 
--spec collect_results(#{module => [string()]}) -> #{string() => ct_daemon_core:run_result()}.
+-spec collect_results(#{module() => [string()]}) -> #{string() => ct_daemon_core:run_result()}.
 collect_results(PerSuite) ->
     maps:fold(
         fun(Suite, Tests, Acc) ->
             %% check if we need to reset the test node
             ensure_per_suite_encapsulation(Suite),
-            io:format("running ~b test(s) for ~s with output dir ~s~n", [
+            io:format("running ~b test(s) for ~ts with output dir ~ts~n", [
                 erlang:length(Tests), Suite, ct_daemon:output_dir()
             ]),
             %% run all tests for the current SUITE
             case ct_daemon:run({discovered, [#{suite => Suite, name => Test} || Test <- Tests]}) of
                 node_down ->
                     io:format("test node shut down during test execution, aborting~n", []),
+                    Acc;
+                {error, Reason} ->
+                    io:format("Error selecting tests to run: ~p~n", [Reason]),
                     Acc;
                 RunResult ->
                     maps:merge(
@@ -434,6 +481,9 @@ discover(RegExOrId) ->
         {error, Reason} ->
             io:format("cannot run tests ~0p: ~0p~n", [RegExOrId, Reason]),
             [];
+        node_down ->
+            io:format("test node unexpectedly down~n"),
+            [];
         [] ->
             io:format("no tests found for ~0p~n", [RegExOrId]),
             [];
@@ -470,15 +520,9 @@ do_plain_test_run(RegExOrId) ->
         ToRun -> do_plain_test_run(ToRun)
     end.
 
--spec start_shell() -> ok | {error, term()}.
+-spec start_shell() -> ok | {error, already_started}.
 start_shell() ->
-    case string:to_integer(erlang:system_info(otp_release)) of
-        {Version, _} when Version >= 26 ->
-            shell:start_interactive();
-        _ ->
-            user_drv:start(),
-            ok
-    end.
+    shell:start_interactive().
 
 -spec logs_impl() -> {ok, [file:filename_all()]} | {error, not_found}.
 logs_impl() ->
@@ -487,9 +531,9 @@ logs_impl() ->
             {error, not_found};
         PrivDir ->
             PatternLog = filename:join(PrivDir, "*.log"),
-            LogPaths = filelib:wildcard(PatternLog),
+            LogPaths = filelib:wildcard(PatternLog, ".", ?raw_file_access),
             PatternLogJson = filename:join(PrivDir, "*.log.json"),
-            LogJsonPaths = filelib:wildcard(PatternLogJson),
+            LogJsonPaths = filelib:wildcard(PatternLogJson, ".", ?raw_file_access),
             AllLogs = lists:sort(LogPaths ++ LogJsonPaths),
             {ok, AllLogs}
     end.

@@ -35,6 +35,7 @@ use crate::coerce::coerce;
 use crate::collections::StarlarkHasher;
 use crate::private::Private;
 use crate::typing::Ty;
+use crate::values::AllocStaticSimple;
 use crate::values::FrozenValue;
 use crate::values::Heap;
 use crate::values::StarlarkValue;
@@ -47,10 +48,6 @@ use crate::values::comparison::compare_slice;
 use crate::values::comparison::equals_slice;
 use crate::values::index::apply_slice;
 use crate::values::index::convert_index;
-use crate::values::layout::avalue::AValueFrozenTuple;
-use crate::values::layout::avalue::AValueImpl;
-use crate::values::layout::avalue::alloc_static;
-use crate::values::layout::heap::repr::AValueRepr;
 
 /// Define the tuple type. See [`Tuple`] and [`FrozenTuple`] as the two aliases.
 #[repr(C)]
@@ -97,8 +94,8 @@ impl<V: ValueLifetimeless> TupleGen<V> {
     }
 }
 
-pub(crate) static VALUE_EMPTY_TUPLE: AValueRepr<AValueImpl<'static, AValueFrozenTuple>> =
-    alloc_static(unsafe { FrozenTuple::new(0) });
+pub(crate) static VALUE_EMPTY_TUPLE: AllocStaticSimple<FrozenTuple> =
+    AllocStaticSimple::alloc(unsafe { FrozenTuple::new(0) });
 
 /// Runtime type of unfrozen tuple.
 pub(crate) type Tuple<'v> = TupleGen<Value<'v>>;
@@ -179,7 +176,7 @@ where
         }
     }
 
-    fn at(&self, index: Value, _heap: &'v Heap) -> crate::Result<Value<'v>> {
+    fn at(&self, index: Value, _heap: Heap<'v>) -> crate::Result<Value<'v>> {
         let i = convert_index(index, self.len() as i32)? as usize;
         Ok(self.content()[i].to_value())
     }
@@ -202,12 +199,12 @@ where
         start: Option<Value>,
         stop: Option<Value>,
         stride: Option<Value>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> crate::Result<Value<'v>> {
         Ok(heap.alloc_tuple(&apply_slice(coerce(self.content()), start, stop, stride)?))
     }
 
-    unsafe fn iterate(&self, me: Value<'v>, _heap: &'v Heap) -> crate::Result<Value<'v>> {
+    unsafe fn iterate(&self, me: Value<'v>, _heap: Heap<'v>) -> crate::Result<Value<'v>> {
         Ok(me)
     }
 
@@ -217,13 +214,13 @@ where
         (rem, Some(rem))
     }
 
-    unsafe fn iter_next(&self, index: usize, _heap: &'v Heap) -> Option<Value<'v>> {
+    unsafe fn iter_next(&self, index: usize, _heap: Heap<'v>) -> Option<Value<'v>> {
         self.content().get(index).map(|v| v.to_value())
     }
 
     unsafe fn iter_stop(&self) {}
 
-    fn add(&self, other: Value<'v>, heap: &'v Heap) -> Option<crate::Result<Value<'v>>> {
+    fn add(&self, other: Value<'v>, heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
         if let Some(other) = Tuple::from_value(other) {
             let mut result = Vec::with_capacity(self.len() + other.len());
             for x in self.iter() {
@@ -238,7 +235,7 @@ where
         }
     }
 
-    fn mul(&self, other: Value, heap: &'v Heap) -> Option<crate::Result<Value<'v>>> {
+    fn mul(&self, other: Value, heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
         let l = match i32::unpack_value(other) {
             Ok(Some(l)) => l,
             Ok(None) => return None,
@@ -251,7 +248,7 @@ where
         Some(Ok(heap.alloc_tuple(&result)))
     }
 
-    fn rmul(&self, lhs: Value<'v>, heap: &'v Heap) -> Option<crate::Result<Value<'v>>> {
+    fn rmul(&self, lhs: Value<'v>, heap: Heap<'v>) -> Option<crate::Result<Value<'v>>> {
         self.mul(lhs, heap)
     }
 

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -11,7 +12,7 @@
 import dataclasses
 import json
 import pathlib
-from typing import Dict, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 
 
 class BuildMapLoadError(Exception):
@@ -34,7 +35,7 @@ class PartialBuildMap:
                 "Input JSON for build map should be a dict."
                 f"Got {type(input_json)} instead"
             )
-        result: Dict[str, str] = {}
+        result: dict[str, str] = {}
         for key, value in input_json.items():
             if not isinstance(key, str):
                 raise BuildMapLoadError(
@@ -51,7 +52,7 @@ class PartialBuildMap:
 
     @staticmethod
     def load_from_path(input_path: pathlib.Path) -> "PartialBuildMap":
-        with open(input_path, "r") as input_file:
+        with open(input_path) as input_file:
             return PartialBuildMap.load_from_json(json.load(input_file))
 
 
@@ -83,5 +84,5 @@ def load_targets_and_build_maps_from_json(input_json: object) -> Iterable[Target
 
 
 def load_targets_and_build_maps_from_path(input_path: str) -> Iterable[TargetEntry]:
-    with open(input_path, "r") as input_file:
+    with open(input_path) as input_file:
         return load_targets_and_build_maps_from_json(json.load(input_file))

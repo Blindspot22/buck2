@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -20,12 +21,14 @@ use http::Method;
 use http::Uri;
 use http::request::Builder;
 use http::uri::Scheme;
-use hyper::Body;
+use http_body_util::BodyExt;
+use http_body_util::Full;
 use hyper::Request;
 use hyper::Response;
-use hyper::client::ResponseFuture;
-use hyper::client::connect::Connect;
+use hyper_util::client::legacy::ResponseFuture;
+use hyper_util::client::legacy::connect::Connect;
 use tokio::io::AsyncReadExt;
+use tokio::sync::Semaphore;
 use tokio_util::io::StreamReader;
 
 use crate::HttpError;
@@ -49,6 +52,9 @@ pub struct HttpClient {
     supports_vpnless: bool,
     http2: bool,
     stats: HttpNetworkStats,
+    // tokio::sync::Semaphore doesn't impl Allocative
+    #[allocative(skip)]
+    concurrent_requests_budget: Option<Arc<Semaphore>>,
 }
 
 impl HttpClient {
@@ -72,7 +78,7 @@ impl HttpClient {
     pub async fn get(
         &self,
         uri: &str,
-    ) -> Result<Response<BoxStream<hyper::Result<Bytes>>>, HttpError> {
+    ) -> Result<Response<BoxStream<'_, hyper::Result<Bytes>>>, HttpError> {
         let req = self
             .request_builder(uri)
             .method(Method::GET)
@@ -86,7 +92,7 @@ impl HttpClient {
         uri: &str,
         body: Bytes,
         headers: Vec<(String, String)>,
-    ) -> Result<Response<BoxStream<hyper::Result<Bytes>>>, HttpError> {
+    ) -> Result<Response<BoxStream<'_, hyper::Result<Bytes>>>, HttpError> {
         let mut builder = self.request_builder(uri).method(Method::POST);
         for (name, value) in headers {
             builder = builder.header(name, value);
@@ -100,7 +106,7 @@ impl HttpClient {
         uri: &str,
         body: Bytes,
         headers: Vec<(String, String)>,
-    ) -> Result<Response<BoxStream<hyper::Result<Bytes>>>, HttpError> {
+    ) -> Result<Response<BoxStream<'_, hyper::Result<Bytes>>>, HttpError> {
         let mut builder = self.request_builder(uri).method(Method::PUT);
         for (name, value) in headers {
             builder = builder.header(name, value);
@@ -112,7 +118,7 @@ impl HttpClient {
     async fn send_request_impl(
         &self,
         mut request: Request<Bytes>,
-    ) -> Result<Response<BoxStream<hyper::Result<Bytes>>>, HttpError> {
+    ) -> Result<Response<BoxStream<'_, hyper::Result<Bytes>>>, HttpError> {
         let uri = request.uri().to_string();
         let now = tokio::time::Instant::now();
 
@@ -124,28 +130,43 @@ impl HttpClient {
             );
             change_scheme_to_http(&mut request)?;
         }
+        let semaphore_guard = match self.concurrent_requests_budget.as_ref() {
+            Some(sem) => Some(
+                sem.acquire()
+                    .await
+                    .expect("Semaphore should never be closed"),
+            ),
+            None => None,
+        };
+
         let resp = self.inner.request(request).await.map_err(|e| {
             if is_hyper_error_due_to_timeout(&e) {
                 HttpError::Timeout {
                     uri,
-                    duration: now.elapsed().as_secs(),
+                    duration: (tokio::time::Instant::now() - now).as_secs(),
                 }
             } else {
                 HttpError::SendRequest { uri, source: e }
             }
         })?;
-        Ok(
-            resp.map(|body| {
-                CountingStream::new(body, self.stats.downloaded_bytes().dupe()).boxed()
-            }),
-        )
+        Ok(resp.map(move |body| {
+            CountingStream::new(
+                body.into_data_stream(),
+                self.stats.downloaded_bytes().dupe(),
+            )
+            .inspect(move |_| {
+                // Ensure we keep a concurrent request permit alive until the stream is consumed
+                let _guard = &semaphore_guard;
+            })
+            .boxed()
+        }))
     }
 
     /// Send a generic request.
     pub async fn request(
         &self,
         request: Request<Bytes>,
-    ) -> Result<Response<BoxStream<hyper::Result<Bytes>>>, HttpError> {
+    ) -> Result<Response<BoxStream<'_, hyper::Result<Bytes>>>, HttpError> {
         let pending_request = PendingRequest::from_request(&request);
         let uri = request.uri().clone();
         tracing::debug!("http: request: {:?}", request);
@@ -207,25 +228,23 @@ pub(super) trait RequestClient: Send + Sync {
     fn request(&self, request: Request<Bytes>) -> ResponseFuture;
 }
 
-impl<C> RequestClient for hyper::Client<C>
+impl<C> RequestClient for hyper_util::client::legacy::Client<C, Full<Bytes>>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
     fn request(&self, request: Request<Bytes>) -> ResponseFuture {
-        self.request(request.map(Body::from))
+        let mapped_request: Request<Full<Bytes>> = request.map(Full::new);
+        self.request(mapped_request)
     }
 }
 
 async fn read_truncated_error_response(
     mut resp: Response<BoxStream<'_, hyper::Result<Bytes>>>,
 ) -> String {
-    let read = StreamReader::new(
-        resp.body_mut()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
-    );
+    let read = StreamReader::new(resp.body_mut().map_err(std::io::Error::other));
     let mut buf = Vec::with_capacity(1024);
     read.take(1024).read_to_end(&mut buf).await.map_or_else(
-        |e| format!("Error decoding response: {:?}", e),
+        |e| format!("Error decoding response: {e:?}"),
         |_| String::from_utf8_lossy(buf.as_ref()).into_owned(),
     )
 }
@@ -233,14 +252,13 @@ async fn read_truncated_error_response(
 /// Helper function to consume a response stream and convert it to a Bytes container.
 /// Warning: This does no length checking (like hyper::body::to_bytes). Should
 /// only be used for trusted endpoints.
-pub async fn to_bytes(body: BoxStream<'_, hyper::Result<Bytes>>) -> anyhow::Result<Bytes> {
-    let mut reader =
-        StreamReader::new(body.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+pub async fn to_bytes(body: BoxStream<'_, hyper::Result<Bytes>>) -> buck2_error::Result<Bytes> {
+    let mut reader = StreamReader::new(body.map_err(std::io::Error::other));
     let mut buf = Vec::new();
     reader
         .read_to_end(&mut buf)
         .await
-        .buck_error_context_anyhow("Reading response body")?;
+        .buck_error_context("Reading response body")?;
     Ok(buf.into())
 }
 
@@ -260,7 +278,7 @@ fn change_scheme_to_http(request: &mut Request<Bytes>) -> Result<(), HttpError> 
 
 /// Helper function to check if any error in the chain of errors produced by
 /// hyper is due to a timeout.
-fn is_hyper_error_due_to_timeout(e: &hyper::Error) -> bool {
+fn is_hyper_error_due_to_timeout(e: &hyper_util::client::legacy::Error) -> bool {
     use std::error::Error;
 
     let mut cause = e.source();
@@ -287,6 +305,7 @@ mod tests {
 
     #[test]
     fn test_change_scheme_to_http_succeeds() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let mut request = Request::builder()
             .method(Method::GET)
             .uri("https://some.site/foo")
@@ -305,6 +324,7 @@ mod tests {
 
     #[test]
     fn test_change_scheme_to_http_no_effect() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let uri: Uri = "http://some.site/foo".try_into()?;
         let mut request = Request::builder()
             .method(Method::GET)
@@ -318,6 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_get_success() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(request::method_path("GET", "/foo"))
@@ -333,6 +354,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_put_success() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(all_of![
@@ -358,6 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_post_success() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(all_of![
@@ -383,6 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_404_not_found_is_error() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(request::method_path("GET", "/foo"))
@@ -409,6 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_count_response_size() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(request::method_path("GET", "/foo"))
@@ -435,6 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_follows_redirects() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         // Chain of two redirects /foo -> /bar -> /baz.
         test_server.expect(
@@ -469,6 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_head_changes_to_get_on_redirect() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         // Chain of two redirects /foo -> /bar -> /baz.
         test_server.expect(
@@ -496,6 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_gets_redirected() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         // Redirect /foo -> /bar
         test_server.expect(
@@ -543,6 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_too_many_redirects_fails() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         // Chain of three redirects /foo -> /bar -> /baz -> /boo.
         test_server.expect(
@@ -593,13 +622,12 @@ mod tests {
 
     #[cfg(unix)]
     mod unix {
-        use std::convert::Infallible;
         use std::path::PathBuf;
 
-        use hyper::Server;
-        use hyper::service::make_service_fn;
-        use hyper::service::service_fn;
-        use hyper_unix_connector::UnixConnector;
+        use http_body_util::BodyExt;
+        use hyper::body::Incoming;
+        use hyper_util::rt::TokioExecutor;
+        use hyper_util::rt::TokioIo;
 
         use super::*;
 
@@ -620,30 +648,43 @@ mod tests {
                 let tempdir = tempfile::tempdir()?;
                 let socket = tempdir.path().join("test-uds.sock");
 
-                let listener: UnixConnector = tokio::net::UnixListener::bind(&socket)
-                    .buck_error_context("binding to unix socket")?
-                    .into();
-                let handler_func = make_service_fn(|_conn| async move {
-                    Ok::<_, Infallible>(service_fn(|mut req: Request<Body>| async move {
-                        let client = hyper::Client::new();
-                        req.headers_mut().insert(
-                            http::header::VIA,
-                            http::HeaderValue::from_static("testing-proxy-server"),
-                        );
-                        println!("Proxying request: {:?}", req);
-                        client
-                            .request(req.map(Body::from))
-                            .await
-                            .buck_error_context_anyhow("Failed sending requeest to destination")
-                    }))
-                });
+                let handler_func = |mut req: Request<Incoming>| async move {
+                    let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new());
+                    req.headers_mut().insert(
+                        http::header::VIA,
+                        http::HeaderValue::from_static("testing-proxy-server"),
+                    );
 
-                let handle = tokio::task::spawn(async move {
-                    println!("started proxy server");
-                    Server::builder(listener)
-                        .serve(handler_func)
+                    let forwarded_body = http_body_util::Full::new(
+                        req.body_mut()
+                            .collect()
+                            .await
+                            .expect("Couldn't get all bytes from incoming request")
+                            .to_bytes(),
+                    );
+                    println!("Proxying request: {req:?}");
+                    client
+                        .build_http()
+                        // Use 'map' here to preserve headers from original request
+                        // even though we already accessed the effective body above
+                        .request(req.map(|_| forwarded_body))
                         .await
-                        .expect("Proxy server exited unexpectedly");
+                };
+
+                let listener = tokio::net::UnixListener::bind(&socket)
+                    .buck_error_context("binding to unix socket")?;
+                let handle = tokio::task::spawn(async move {
+                    loop {
+                        let (stream, _) =
+                            listener.accept().await.expect("Couldn't accept connection");
+                        let io = TokioIo::new(stream);
+                        let svc_fn = hyper::service::service_fn(handler_func);
+
+                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .serve_connection(io, svc_fn)
+                            .await
+                            .expect("Expected to serve connection")
+                    }
                 });
 
                 Ok(Self {
@@ -658,6 +699,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_proxies_through_unix_socket_when_set() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let proxy_server = unix::UnixSocketProxyServer::new().await?;
 
         let test_server = httptest::Server::run();
@@ -675,9 +717,9 @@ mod tests {
 
         let client = HttpClientBuilder::https_with_system_roots()
             .await?
-            .with_x2p_proxy(hyper_proxy::Proxy::new(
-                hyper_proxy::Intercept::Http,
-                hyper_unix_connector::Uri::new(proxy_server.socket, "/").into(),
+            .with_x2p_proxy(hyper_http_proxy::Proxy::new(
+                hyper_http_proxy::Intercept::Http,
+                hyperlocal::Uri::new(proxy_server.socket, "/").into(),
             ))
             .build();
         let resp = client.get(&url.to_string()).await?;
@@ -688,6 +730,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_x2p_error_response_is_forbidden_host() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         let url = test_server.url("/foo");
         test_server.expect(
@@ -716,6 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_x2p_error_response_is_access_denied() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         let url = test_server.url("/foo");
         test_server.expect(
@@ -744,6 +788,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_x2p_error_response_is_generic_error() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
+
         let test_server = httptest::Server::run();
         let url = test_server.url("/foo");
         test_server.expect(
@@ -768,27 +814,88 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_concurrency_limit() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
+        let test_server = httptest::Server::run();
+        test_server.expect(
+            Expectation::matching(request::method_path("GET", "/foo"))
+                .times(3)
+                .respond_with(responders::status_code(200)),
+        );
+
+        let client = HttpClientBuilder::https_with_system_roots()
+            .await?
+            .with_max_concurrent_requests(Some(2))
+            .build();
+        let url = test_server.url_str("/foo");
+        let req1 = client.get(&url).await?;
+        let req2 = client.get(&url).await?;
+        assert_eq!(
+            client
+                .concurrent_requests_budget
+                .as_ref()
+                .unwrap()
+                .available_permits(),
+            0
+        );
+        let mut req3 = std::pin::pin!(client.get(&url));
+        // TODO: Use `tokio::time::pause` to make this faster and deterministic. Blocked by
+        // https://github.com/ggriffiniii/httptest/issues/29.
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), &mut req3)
+                .await
+                .is_err()
+        );
+        drop(req1);
+        req3.await?;
+        assert_eq!(
+            client
+                .concurrent_requests_budget
+                .as_ref()
+                .unwrap()
+                .available_permits(),
+            1
+        );
+        drop(req2);
+        assert_eq!(
+            client
+                .concurrent_requests_budget
+                .as_ref()
+                .unwrap()
+                .available_permits(),
+            2
+        );
+
+        Ok(())
+    }
 }
 
 // TODO(skarlage, T160529958): Debug why these tests fail on CircleCI
 #[cfg(all(test, fbcode_build))]
 mod proxy_tests {
-    use std::convert::Infallible;
-    use std::net::TcpListener;
     use std::net::ToSocketAddrs;
     use std::time::Duration;
 
     use buck2_error::BuckErrorContext;
+    use bytes::Bytes;
+    use http::Method;
     use httptest::Expectation;
     use httptest::matchers::*;
     use httptest::responders;
-    use hyper::Server;
-    use hyper::service::make_service_fn;
-    use hyper::service::service_fn;
-    use hyper_proxy::Intercept;
-    use hyper_proxy::Proxy;
+    use hyper::Request;
+    use hyper::body::Incoming;
+    use hyper_http_proxy::Intercept;
+    use hyper_http_proxy::Proxy;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+    use hyper_util::rt::TokioIo;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::HttpError;
     use crate::proxy::DefaultSchemeUri;
 
     const HEADER_SLEEP_DURATION_MS: &str = "x-buck2-test-proxy-sleep-duration-ms";
@@ -807,38 +914,39 @@ mod proxy_tests {
         async fn new() -> buck2_error::Result<Self> {
             let proxy_server_addr = "[::1]:0".to_socket_addrs().unwrap().next().unwrap();
             let listener = TcpListener::bind(proxy_server_addr)
+                .await
                 .buck_error_context("failed to bind to local address")?;
             let proxy_server_addr = listener.local_addr()?;
 
-            let make_proxy_service = make_service_fn(|_conn| async move {
-                Ok::<_, Infallible>(service_fn(|mut req: Request<Body>| async move {
-                    // Sleep if requested to simulate slow reads.
-                    if let Some(s) = req.headers().get(HEADER_SLEEP_DURATION_MS) {
-                        let sleep_duration =
-                            Duration::from_millis(s.to_str().unwrap().parse().unwrap());
-                        tokio::time::sleep(sleep_duration).await;
-                    }
-
-                    let client = hyper::Client::new();
-                    req.headers_mut().insert(
-                        http::header::VIA,
-                        http::HeaderValue::from_static("testing-proxy-server"),
-                    );
-                    println!("Proxying request: {:?}", req);
-                    client
-                        .request(req)
-                        .await
-                        .buck_error_context_anyhow("Failed sending requeest to destination")
-                }))
-            });
-
-            let handle = tokio::task::spawn(async move {
+            let handle: JoinHandle<()> = tokio::task::spawn(async move {
                 println!("started proxy server");
-                Server::from_tcp(listener)
-                    .unwrap()
-                    .serve(make_proxy_service)
-                    .await
-                    .expect("Proxy server exited unexpectedly");
+                loop {
+                    let (stream, _) = listener.accept().await.expect("Couldn't accept connection");
+                    let io = TokioIo::new(stream);
+
+                    let svc_fn =
+                        hyper::service::service_fn(|mut req: Request<Incoming>| async move {
+                            // Sleep if requested to simulate slow reads.
+                            if let Some(s) = req.headers().get(HEADER_SLEEP_DURATION_MS) {
+                                let sleep_duration =
+                                    Duration::from_millis(s.to_str().unwrap().parse().unwrap());
+                                tokio::time::sleep(sleep_duration).await;
+                            }
+
+                            let client = Client::builder(TokioExecutor::new()).build_http();
+                            req.headers_mut().insert(
+                                http::header::VIA,
+                                http::HeaderValue::from_static("testing-proxy-server"),
+                            );
+                            println!("Proxying request: {req:?}");
+                            client.request(req).await
+                        });
+
+                    hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(io, svc_fn)
+                        .await
+                        .expect("Expected to serve connection");
+                }
             });
 
             Ok(Self {
@@ -859,6 +967,7 @@ mod proxy_tests {
 
     #[tokio::test]
     async fn test_uses_http_proxy() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(all_of![
@@ -884,6 +993,7 @@ mod proxy_tests {
 
     #[tokio::test]
     async fn test_uses_http_proxy_with_no_scheme_in_proxy_uri() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(all_of![
@@ -898,7 +1008,7 @@ mod proxy_tests {
 
         let authority = proxy_server.uri()?.authority().unwrap().clone();
         let proxy_uri = format!("{}:{}", authority.host(), authority.port().unwrap());
-        println!("proxy_uri: {}", proxy_uri);
+        println!("proxy_uri: {proxy_uri}");
         let client = HttpClientBuilder::https_with_system_roots()
             .await?
             .with_proxy(Proxy::new(
@@ -914,6 +1024,7 @@ mod proxy_tests {
 
     #[tokio::test]
     async fn test_does_not_proxy_when_no_proxy_matches() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(all_of![request::method_path("GET", "/foo")])
@@ -949,6 +1060,7 @@ mod proxy_tests {
 
     #[tokio::test]
     async fn test_proxies_when_no_proxy_does_not_match() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         test_server.expect(
             Expectation::matching(all_of![
@@ -981,6 +1093,7 @@ mod proxy_tests {
     // Use proxy server harness to test slow connections.
     #[tokio::test]
     async fn test_timeout() -> buck2_error::Result<()> {
+        buck2_certs::certs::maybe_setup_cryptography();
         let test_server = httptest::Server::run();
         let proxy_server = ProxyServer::new().await?;
 

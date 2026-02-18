@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _write(ctx: AnalysisContext) -> list[Provider]:
     out = ctx.actions.write("out", "test")
@@ -54,7 +55,7 @@ dynamic_cp = rule(impl = _dynamic_cp, attrs = {
 })
 
 def _dynamic_cp2(ctx: AnalysisContext) -> list[Provider]:
-    dummy = ctx.actions.write("dummy", "")
+    ctx.actions.write("dummy", "")
 
     inp = ctx.attrs.dep[DefaultInfo].default_outputs[0]
     out = ctx.actions.declare_output("out")
@@ -68,3 +69,28 @@ def _dynamic_cp2(ctx: AnalysisContext) -> list[Provider]:
 dynamic_cp2 = rule(impl = _dynamic_cp2, attrs = {
     "dep": attrs.dep(),
 })
+
+script = """
+import sys;
+import time;
+if '--list' in sys.argv:
+    print('test1\\n')
+else:
+    time.sleep(0.1) # Sleep for 100ms
+sys.exit(0)
+"""
+
+def _simple_test_impl(ctx):
+    return [
+        DefaultInfo(),
+        ExternalRunnerTestInfo(
+            command = ["fbpython", "-c", script],
+            type = "lionhead",
+            env = {"seed": ctx.attrs.seed},
+        ),
+    ]
+
+simple_test = rule(
+    impl = _simple_test_impl,
+    attrs = {"seed": attrs.string()},
+)

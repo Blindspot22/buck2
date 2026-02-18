@@ -1,13 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@fbcode//buck2/app:modifier.bzl", "buck2_modifiers")
 load("@fbcode_macros//build_defs:native_rules.bzl", "buck_filegroup")
-load("@fbcode_macros//build_defs:python.bzl", "python")
 load("@fbcode_macros//build_defs:python_pytest.bzl", "python_pytest")
 load("@fbsource//tools/target_determinator/macros:ci.bzl", "ci")
 load("@fbsource//tools/target_determinator/macros:ci_hint.bzl", "ci_hint")
@@ -130,9 +130,6 @@ def buck_e2e_test(
     if "windows" in skip_for_os:
         labels += ci.remove_labels(ci.windows(ci.opt()))
 
-    metadata = {}
-    metadata["buck.cfg_modifiers"] = cfg_modifiers
-
     python_pytest(
         name = name,
         base_module = base_module,
@@ -148,7 +145,7 @@ def buck_e2e_test(
         pytest_marks = pytest_marks,
         pytest_expr = pytest_expr,
         pytest_confcutdir = pytest_confcutdir,
-        metadata = metadata,
+        modifiers = cfg_modifiers,
         compatible_with = compatible_with,
     )
 
@@ -188,6 +185,7 @@ def buck2_e2e_test(
         test_with_deployed_buck2 = False,
         test_with_reverted_buck2 = False,
         use_compiled_buck2_client_and_tpx = False,
+        skip_deployed_buck2_version_dep = False,
         deps = (),
         env = None,
         skip_for_os = (),
@@ -227,6 +225,11 @@ def buck2_e2e_test(
         A full prod archive is distinct from a normal build of buck2 in that it uses a client-only
         binary and additionally makes TPX available. Needed if you want to be able to `buck.test`
         Default is False.
+    skip_deployed_buck2_version_dep:
+        A boolean for whether to skip adding the dependency on tools/buck2-versions:stable when
+        test_with_deployed_buck2 is True. This is useful for tests that don't need the version
+        dependency for Target Determinator purposes (e.g., bxl tests that test Starlark logic).
+        Default is False.
     """
     kwargs = {
         "base_module": base_module,
@@ -258,6 +261,8 @@ def buck2_e2e_test(
 
     if test_with_compiled_buck2:
         compiled_env = dict(env)
+
+        # TODO(ctolliday) use BUCK2_HARD_ERROR=panic
         compiled_env["BUCK2_HARD_ERROR"] = "true"
         compiled_env["BUCK2_TPX"] = "$BUCK2_BINARY_DIR/buck2-tpx"
 
@@ -290,14 +295,15 @@ def buck2_e2e_test(
         deps = deps or []
 
         # Add a buck2 version file as dep so we can run deployed buck2 tests on version bumps.
-        deps += ["fbsource//tools/buck2-versions:stable"]
+        # Skip this dependency if skip_deployed_buck2_version_dep is True (e.g., for bxl tests).
+        if not skip_deployed_buck2_version_dep:
+            deps += ["fbsource//tools/buck2-versions:stable"]
         buck_e2e_test(
             name = name,
             env = deployed_env,
             executable = "buck2",
             skip_for_os = skip_for_os,
             deps = deps,
-            cfg_modifiers = python.get_opt_setup_modifiers(),
             **kwargs
         )
 
@@ -310,7 +316,6 @@ def buck2_e2e_test(
             executable = "buck2",
             skip_for_os = skip_for_os,
             deps = deps,
-            cfg_modifiers = python.get_opt_setup_modifiers(),
             **kwargs
         )
 

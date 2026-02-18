@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -44,12 +45,12 @@ use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::subscribers::emit_event::emit_event_if_relevant;
 use crate::subscribers::subscriber::EventSubscriber;
-use crate::subscribers::subscriber::Tick;
 use crate::subscribers::superconsole::io::io_in_flight_non_zero_counters;
 use crate::subscribers::system_warning::check_memory_pressure_snapshot;
 use crate::subscribers::system_warning::check_remaining_disk_space_snapshot;
 use crate::subscribers::system_warning::low_disk_space_msg;
 use crate::subscribers::system_warning::system_memory_exceeded_msg;
+use crate::ticker::Tick;
 
 /// buck2 daemon info is printed to stderr if there are no other updates available
 /// within this duration.
@@ -67,9 +68,9 @@ fn with_timestamps(message: &str) -> String {
     let now = now_display();
     for line in message.lines() {
         if line.is_empty() {
-            writeln!(s, "[{}]", now).unwrap();
+            writeln!(s, "[{now}]").unwrap();
         } else {
-            writeln!(s, "[{}] {}", now, line).unwrap();
+            writeln!(s, "[{now}] {line}").unwrap();
         }
     }
     // Remove the trailing newline
@@ -142,6 +143,10 @@ fn init_remaining_system_warning_count() {
         .lock()
         .unwrap()
         .insert(HealthCheckType::StableRevision, (Instant::now(), 1));
+    ELAPSED_HEALTH_CHECK_MAP
+        .lock()
+        .unwrap()
+        .insert(HealthCheckType::SlowBuild, (Instant::now(), 1));
 }
 
 /// Just repeats stdout and stderr to client process.
@@ -230,7 +235,7 @@ where
         &mut self,
         event: &Arc<BuckEvent>,
     ) -> buck2_error::Result<()> {
-        self.observer.observe(Instant::now(), event).await
+        self.observer.observe(event).await
     }
 
     fn notify_printed(&mut self) {
@@ -267,7 +272,7 @@ where
                 }
             }
             if let Some(cpu) = snapshots.cpu_percents() {
-                parts.push(format!("CPU: {}%", cpu));
+                parts.push(format!("CPU: {cpu}%"));
             }
             if !parts.is_empty() {
                 echo!("Resource usage: {}", parts.join(" "))?;
@@ -276,7 +281,7 @@ where
             if let Some((_ts, snapshot)) = &snapshots.last {
                 let mut parts = Vec::new();
                 for (key, value) in io_in_flight_non_zero_counters(snapshot) {
-                    parts.push(format!("{:?}: {}", key, value));
+                    parts.push(format!("{key:?}: {value}"));
                 }
                 if !parts.is_empty() {
                     echo!("IO: {}", parts.join(" "))?;
@@ -391,6 +396,12 @@ where
                     }
                     buck2_data::instant_event::Data::ActionError(error) => {
                         self.handle_action_error(error).await
+                    }
+                    buck2_data::instant_event::Data::StreamingOutput(message) => {
+                        crate::stdio::print_bytes(message.message.as_bytes())?;
+                        crate::stdio::flush()?;
+                        self.notify_printed();
+                        Ok(())
                     }
                     _ => Ok(()),
                 }
@@ -547,7 +558,7 @@ where
         result: &buck2_data::TestResult,
         _event: &BuckEvent,
     ) -> buck2_error::Result<()> {
-        if let Some(msg) = display::format_test_result(result)? {
+        if let Some(msg) = display::format_test_result(result, self.verbosity)? {
             let mut buffer = String::new();
 
             for line in msg {
@@ -645,7 +656,9 @@ where
     }
 
     async fn tick(&mut self, _: &Tick) -> buck2_error::Result<()> {
-        if self.verbosity.print_status() && self.last_print_time.elapsed() > KEEPALIVE_TIME_LIMIT {
+        if self.verbosity.print_status()
+            && Instant::now() - self.last_print_time > KEEPALIVE_TIME_LIMIT
+        {
             let mut show_stats = self.expect_spans;
 
             for report in self

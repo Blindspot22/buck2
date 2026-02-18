@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.dex;
@@ -20,6 +21,7 @@ import com.facebook.buck.android.apkmodule.APKModule;
 import com.facebook.buck.util.zip.CustomZipOutputStream;
 import com.facebook.buck.util.zip.ZipOutputStreams;
 import com.facebook.buck.util.zip.ZipScrubber;
+import com.facebook.infer.annotation.Nullsafe;
 import com.google.common.base.Preconditions;
 import com.google.common.hash.Hashing;
 import com.google.common.io.ByteStreams;
@@ -45,6 +47,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /** Runs d8. */
+@Nullsafe(Nullsafe.Mode.LOCAL)
 public class D8Utils {
 
   public static D8Output runD8Command(
@@ -73,19 +76,28 @@ public class D8Utils {
     boolean outputToDex = outputDexFile.getFileName().toString().endsWith(".dex");
     Path output = outputToDex ? Files.createTempDirectory("buck-d8") : outputDexFile;
 
+    // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
     D8Command.Builder builder =
+        // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
         D8Command.builder(diagnosticsHandler)
+            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
             .addProgramFiles(inputs)
+            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
             .setIntermediate(options.contains(D8Options.INTERMEDIATE))
+            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
             .addLibraryFiles(androidJarPath)
             .setMode(
                 options.contains(D8Options.NO_OPTIMIZE)
                     ? CompilationMode.DEBUG
                     : CompilationMode.RELEASE)
+            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
             .setOutput(output, OutputMode.DexIndexed)
+            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
             .setDisableDesugaring(options.contains(D8Options.NO_DESUGAR))
+            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
             .setInternalOptionsModifier(
                 (InternalOptions opt) -> {
+                  // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
                   opt.testing.forceJumboStringProcessing = options.contains(D8Options.FORCE_JUMBO);
                   if (options.contains(D8Options.MINIMIZE_PRIMARY_DEX)) {
                     opt.minimalMainDex = true;
@@ -95,13 +107,17 @@ public class D8Utils {
                 });
 
     minSdkVersion.ifPresent(builder::setMinApiLevel);
-    primaryDexClassNamesPath.ifPresent(builder::addMainDexListFiles);
+    if (minSdkVersion.orElse(0) <= 21) {
+      // addMainDexListFiles is not supported for minSdkVersion > 21
+      primaryDexClassNamesPath.ifPresent(builder::addMainDexListFiles);
+    }
 
     if (classpathFiles != null) {
       // classpathFiles is needed only for D8 Java 8 desugar
       builder.addClasspathFiles(classpathFiles);
     }
 
+    // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
     D8Command d8Command = builder.build();
     com.android.tools.r8.D8.run(d8Command);
 
@@ -112,6 +128,7 @@ public class D8Utils {
       }
     }
 
+    // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
     return new D8Output(
         d8Command.getDexItemFactory().computeReferencedResources(),
         d8Command.getDexItemFactory().computeSynthesizedTypes());

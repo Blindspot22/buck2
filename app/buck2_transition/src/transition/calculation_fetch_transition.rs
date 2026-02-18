@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -15,7 +16,6 @@ use buck2_build_api::transition::TRANSITION_ATTRS_PROVIDER;
 use buck2_build_api::transition::TransitionAttrProvider;
 use buck2_core::configuration::transition::id::TransitionId;
 use buck2_core::provider::label::ProvidersLabel;
-use buck2_core::target::label::label::TargetLabel;
 use buck2_interpreter::load_module::InterpreterCalculation;
 use dice::DiceComputations;
 use dice::Key;
@@ -35,7 +35,7 @@ pub(crate) enum TransitionData {
 impl TransitionData {
     pub(crate) fn refs(
         &self,
-    ) -> impl Iterator<Item = (&FrozenStringValue, &TargetLabel)> + Send + Sync {
+    ) -> impl Iterator<Item = (&FrozenStringValue, &ProvidersLabel)> + Send + Sync {
         match self {
             TransitionData::MagicObject(v) => Either::Left(v.refs.iter()),
             TransitionData::Target(_) => Either::Right([].into_iter()),

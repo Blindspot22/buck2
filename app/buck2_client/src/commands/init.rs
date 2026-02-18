@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io::ErrorKind;
@@ -13,21 +14,22 @@ use std::io::Write;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::common::ui::CommonConsoleOptions;
-use buck2_client_ctx::exit_result::ExitCode;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::final_console::FinalConsole;
 use buck2_client_ctx::path_arg::PathArg;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_error::BuckErrorContext;
+use buck2_error::ErrorTag;
 use buck2_error::buck2_error;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_path::AbsPath;
 use buck2_util::process::background_command;
 
 /// Initializes a buck2 project at the provided path.
 #[derive(Debug, clap::Parser)]
-#[clap(name = "install", about = "Initialize a buck2 project")]
+#[clap(name = "init", about = "Initialize a buck2 project")]
 pub struct InitCommand {
     /// The path to initialize the project in. The folder does not need to exist.
     #[clap(default_value = ".")]
@@ -59,8 +61,7 @@ impl InitCommand {
             Err(e) => {
                 // include the backtrace with the error output
                 // (same behaviour as returning the Error from main)
-                console.print_error(&format!("{:?}", e))?;
-                ExitResult::status(ExitCode::UnknownFailure)
+                buck2_error!(ErrorTag::Tier0, "{:?}", e).into()
             }
         }
     }
@@ -77,7 +78,7 @@ fn exec_impl(
 ) -> buck2_error::Result<()> {
     let path = cmd.path.resolve(&ctx.working_dir);
     fs_util::create_dir_all(&path)?;
-    let absolute = fs_util::canonicalize(&path)?;
+    let absolute = fs_util::canonicalize(&path).categorize_internal()?;
     let git = cmd.git;
 
     if absolute.is_file() {
@@ -154,7 +155,9 @@ fn initialize_buckconfig(repo_root: &AbsPath, prelude: bool, git: bool) -> buck2
         writeln!(buckconfig, "[parser]")?;
         writeln!(
             buckconfig,
-            "  target_platform_detector_spec = target:root//...->prelude//platforms:default"
+            "  target_platform_detector_spec = target:root//...->prelude//platforms:default \\
+    target:prelude//...->prelude//platforms:default \\
+    target:toolchains//...->prelude//platforms:default"
         )?;
         writeln!(buckconfig)?;
         writeln!(buckconfig, "[build]")?;
@@ -209,14 +212,14 @@ fn initialize_root_buck(repo_root: &AbsPath, prelude: bool) -> buck2_error::Resu
 fn set_up_gitignore(repo_root: &AbsPath) -> buck2_error::Result<()> {
     let gitignore = repo_root.join(".gitignore");
     // If .gitignore is empty or doesn't exist, add in buck-out
-    if !gitignore.exists() || fs_util::metadata(&gitignore)?.len() == 0 {
-        fs_util::write(gitignore, "/buck-out\n")?;
+    if !gitignore.exists() || fs_util::metadata(&gitignore).categorize_internal()?.len() == 0 {
+        fs_util::write(gitignore, "/buck-out\n").categorize_internal()?;
     }
     Ok(())
 }
 
 fn set_up_buckroot(repo_root: &AbsPath) -> buck2_error::Result<()> {
-    fs_util::write(repo_root.join(".buckroot"), "")?;
+    fs_util::write(repo_root.join(".buckroot"), "").categorize_internal()?;
     Ok(())
 }
 
@@ -250,7 +253,7 @@ fn set_up_project(repo_root: &AbsPath, git: bool, prelude: bool) -> buck2_error:
     if prelude {
         let toolchains = repo_root.join("toolchains");
         if !toolchains.exists() {
-            fs_util::create_dir(&toolchains)?;
+            fs_util::create_dir(&toolchains).categorize_internal()?;
             initialize_toolchains_buck(&toolchains)?;
         }
     }
@@ -262,8 +265,8 @@ fn set_up_project(repo_root: &AbsPath, git: bool, prelude: bool) -> buck2_error:
 
 #[cfg(test)]
 mod tests {
-    use buck2_core::fs::fs_util;
-    use buck2_core::fs::paths::abs_path::AbsPath;
+    use buck2_fs::fs_util::uncategorized as fs_util;
+    use buck2_fs::paths::abs_path::AbsPath;
 
     use crate::commands::init::initialize_buckconfig;
     use crate::commands::init::initialize_root_buck;
@@ -348,7 +351,9 @@ mod tests {
   prelude = bundled
 
 [parser]
-  target_platform_detector_spec = target:root//...->prelude//platforms:default
+  target_platform_detector_spec = target:root//...->prelude//platforms:default \\
+    target:prelude//...->prelude//platforms:default \\
+    target:toolchains//...->prelude//platforms:default
 
 [build]
   execution_platforms = prelude//platforms:default

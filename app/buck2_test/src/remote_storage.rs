@@ -1,13 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use anyhow::Ok;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use buck2_error::Ok;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest::CasDigestToReExt;
 use buck2_execute::directory::ActionDirectoryEntry;
@@ -18,24 +23,62 @@ use buck2_test_api::data::RemoteStorageConfig;
 use dupe::Dupe;
 use remote_execution::TDigest;
 
-pub async fn apply_config(
+type CacheKey = TDigest;
+
+pub struct ReClientWithCache {
     client: UnconfiguredRemoteExecutionClient,
-    artifact: &ArtifactValue,
-    config: &RemoteStorageConfig,
-) -> anyhow::Result<()> {
-    match &config.ttl_config {
-        Some(ttl_config) => {
-            // Note that deps represent artifacts that symlinks depend on. Currently, test artifact trees
-            // that contain symlinks cannot be converted into remote objects. Therefore, we do not extend
-            // the TTL of symlinks. Additionally, it is rare for test outputs to include symlinks, but if they do,
-            // we are materializing them on disk.
-            let digests = collect_digests(artifact.entry());
-            Ok(client
-                .with_use_case(ttl_config.use_case.dupe())
-                .extend_digest_ttl(digests, ttl_config.ttl)
-                .await?)
+    cache: Mutex<HashSet<Arc<CacheKey>>>,
+}
+
+impl ReClientWithCache {
+    pub fn new(client: UnconfiguredRemoteExecutionClient) -> Self {
+        Self {
+            client,
+            cache: Mutex::new(HashSet::new()),
         }
-        _ => Ok(()),
+    }
+
+    pub async fn apply_config(
+        &self,
+        artifact: &ArtifactValue,
+        config: &RemoteStorageConfig,
+    ) -> buck2_error::Result<()> {
+        match &config.ttl_config {
+            Some(ttl_config) => {
+                // Note that deps represent artifacts that symlinks depend on. Currently, test artifact trees
+                // that contain symlinks cannot be converted into remote objects. Therefore, we do not extend
+                // the TTL of symlinks. Additionally, it is rare for test outputs to include symlinks, but if they do,
+                // we are materializing them on disk.
+                let digests = collect_digests(artifact.entry());
+
+                // Filter out digests that are already in cache
+                let digests_to_extend = {
+                    let mut cache = self.cache.lock().unwrap();
+                    let mut uncached_digests = Vec::new();
+                    for digest in digests {
+                        let digest = Arc::new(digest);
+                        if !cache.contains(&digest) {
+                            cache.insert(digest.dupe());
+                            uncached_digests.push(Arc::unwrap_or_clone(digest));
+                        }
+                    }
+                    uncached_digests
+                };
+
+                // Only extend TTL for digests not in cache
+                if digests_to_extend.is_empty() {
+                    return Ok(());
+                }
+
+                Ok(self
+                    .client
+                    .clone()
+                    .with_use_case(ttl_config.use_case.dupe())
+                    .extend_digest_ttl(digests_to_extend, ttl_config.ttl)
+                    .await?)
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -46,8 +89,7 @@ fn collect_digests(directory_entry: &ActionDirectoryEntry<ActionSharedDirectory>
             let mut digests: Vec<_> = dir
                 .entries()
                 .into_iter()
-                .map(|(_, entry)| collect_digests(entry))
-                .flatten()
+                .flat_map(|(_, entry)| collect_digests(entry))
                 .collect();
             digests.push(dir.fingerprint().to_re());
             digests
@@ -58,8 +100,8 @@ fn collect_digests(directory_entry: &ActionDirectoryEntry<ActionSharedDirectory>
 
 #[cfg(test)]
 mod tests {
-    use buck2_common::file_ops::FileMetadata;
-    use buck2_common::file_ops::TrackedFileDigest;
+    use buck2_common::file_ops::metadata::FileMetadata;
+    use buck2_common::file_ops::metadata::TrackedFileDigest;
     use buck2_core::fs::project_rel_path::ProjectRelativePath;
     use buck2_execute::digest_config::DigestConfig;
     use buck2_execute::directory::ActionDirectoryBuilder;
@@ -86,7 +128,7 @@ mod tests {
             expected.push(empty_file.digest.to_re());
             let _unused = insert_file(
                 &mut builder,
-                ProjectRelativePath::new(file).unwrap(),
+                ProjectRelativePath::new(file).unwrap().to_buf(),
                 empty_file,
             );
         }

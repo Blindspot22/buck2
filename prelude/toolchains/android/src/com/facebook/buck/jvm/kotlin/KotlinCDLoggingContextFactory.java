@@ -1,21 +1,26 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin;
 
+import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.jvm.cd.command.kotlin.LanguageVersion;
 import com.facebook.buck.jvm.kotlin.cd.analytics.ClasspathChangesParam;
 import com.facebook.buck.jvm.kotlin.cd.analytics.KotlinCDLoggingContext;
-import com.facebook.buck.jvm.kotlin.cd.analytics.KotlincModeParam;
+import com.facebook.buck.jvm.kotlin.cd.analytics.ModeParam;
 import com.facebook.buck.jvm.kotlin.cd.analytics.StepParam;
 import com.facebook.buck.jvm.kotlin.kotlinc.incremental.ClasspathChanges;
+import com.facebook.buck.jvm.kotlin.kotlinc.incremental.KotlinSourceChanges;
 import com.facebook.buck.jvm.kotlin.kotlinc.incremental.KotlincMode;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public class KotlinCDLoggingContextFactory {
 
@@ -26,12 +31,25 @@ public class KotlinCDLoggingContextFactory {
     return new KotlinCDLoggingContext(create(kotlincStep), languageVersion, create(kotlincMode));
   }
 
-  private static KotlincModeParam create(KotlincMode kotlincMode) {
+  private static ModeParam create(KotlincMode kotlincMode) {
     if (kotlincMode instanceof KotlincMode.NonIncremental) {
-      return KotlincModeParam.NonIncremental.INSTANCE;
+      return ModeParam.NonIncremental.INSTANCE;
     } else if (kotlincMode instanceof KotlincMode.Incremental) {
-      return new KotlincModeParam.Incremental(
-          create(((KotlincMode.Incremental) kotlincMode).getClasspathChanges()));
+      KotlincMode.Incremental incrementalMode = (KotlincMode.Incremental) kotlincMode;
+      Set<AbsPath> removedFiles = null;
+      Set<AbsPath> modifiedFiles = null;
+
+      if (incrementalMode.getKotlinSourceChanges() instanceof KotlinSourceChanges.Known) {
+        KotlinSourceChanges.Known knownSourceChanges =
+            (KotlinSourceChanges.Known) incrementalMode.getKotlinSourceChanges();
+
+        modifiedFiles =
+            knownSourceChanges.getAddedAndModifiedFiles().stream().collect(Collectors.toSet());
+        removedFiles = knownSourceChanges.getRemovedFiles().stream().collect(Collectors.toSet());
+      }
+
+      return new ModeParam.Incremental(
+          create(incrementalMode.getClasspathChanges()), modifiedFiles, removedFiles);
     } else {
       throw new IllegalArgumentException("Unsupported kotlinc mode: " + kotlincMode);
     }
@@ -40,6 +58,8 @@ public class KotlinCDLoggingContextFactory {
   private static ClasspathChangesParam create(ClasspathChanges classpathChanges) {
     if (classpathChanges instanceof ClasspathChanges.ToBeComputedByIncrementalCompiler) {
       return ClasspathChangesParam.TO_BE_COMPUTED_BY_INCREMENTAL_COMPILER;
+    } else if (classpathChanges instanceof ClasspathChanges.HasRemovals) {
+      return ClasspathChangesParam.HAS_REMOVALS;
     } else if (classpathChanges instanceof ClasspathChanges.NoChanges) {
       return ClasspathChangesParam.NO_CHANGES;
     } else if (classpathChanges instanceof ClasspathChanges.Unknown) {

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -16,7 +17,6 @@ use std::sync::atomic::Ordering;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use derive_more::Display;
 use dice::DetectCycles;
 use dice::Dice;
@@ -27,6 +27,7 @@ use dice::InjectedKey;
 use dice::Key;
 use dice::ProjectionKey;
 use dice::UserComputationData;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use parking_lot::Mutex;
 
@@ -94,7 +95,7 @@ impl Key for FileKey {
             .lock()
             .computations
             .push(Computation::File);
-        Ok(Arc::new(format!("<{}>", value)))
+        Ok(Arc::new(format!("<{value}>")))
     }
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
@@ -194,7 +195,7 @@ async fn smoke() -> anyhow::Result<()> {
         computations: Vec::new(),
     }));
 
-    let mut dice = Dice::modern();
+    let mut dice = Dice::builder();
 
     dice.set(tracker.dupe());
     let dice = dice.build(DetectCycles::Enabled);
@@ -296,7 +297,7 @@ async fn smoke() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn projection_sync_and_then_recompute_incremental_reuses_key() -> anyhow::Result<()> {
-    let dice = Dice::modern();
+    let dice = Dice::builder();
     let dice = dice.build(DetectCycles::Enabled);
 
     #[derive(Allocative, Clone, Debug, Display)]

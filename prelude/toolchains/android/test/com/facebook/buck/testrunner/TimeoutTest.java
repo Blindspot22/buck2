@@ -1,15 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testrunner;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.google.common.collect.ImmutableSet;
@@ -17,7 +19,6 @@ import com.google.common.collect.Iterables;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.junit.Assume;
 import org.junit.Test;
 import org.junit.runner.Computer;
 import org.junit.runner.JUnitCore;
@@ -96,19 +97,19 @@ public class TimeoutTest {
 
     @Test
     public void verifyTestRunsOnCreatorThread() {
-      Assume.assumeTrue(isBeingUsedForTimeoutTest.get());
+      assertTrue(isBeingUsedForTimeoutTest.get());
       assertEquals(creatorThreadId, Thread.currentThread().getId());
     }
 
     @Test
     public void testsMayTimeOut() throws InterruptedException {
-      Assume.assumeTrue(isBeingUsedForTimeoutTest.get());
+      assertTrue(isBeingUsedForTimeoutTest.get());
       Thread.sleep(5000);
     }
 
     @Test
     public void failingTestsAreReported() {
-      Assume.assumeTrue(isBeingUsedForTimeoutTest.get());
+      assertTrue(isBeingUsedForTimeoutTest.get());
       fail("This is expected");
     }
   }

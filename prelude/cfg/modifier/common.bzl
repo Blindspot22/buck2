@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:asserts.bzl", "asserts")
 load(":asserts.bzl", "verify_normalized_modifier")
@@ -65,7 +66,7 @@ def get_tagged_modifiers(
         for rule_name, modifiers in extra_cfg_modifiers_per_rule.items()
     ]
 
-def get_constraint_setting(constraint_settings: dict[TargetLabel, None], modifier: Modifier, location: ModifierLocation) -> TargetLabel:
+def get_constraint_setting(constraint_settings: set[TargetLabel], modifier: Modifier, location: ModifierLocation) -> TargetLabel:
     if len(constraint_settings) == 0:
         fail("`modifiers.match` cannot be empty. Found empty `modifiers.match` at `{}`".format(location_to_string(location)))
     if len(constraint_settings) > 1:
@@ -74,9 +75,9 @@ def get_constraint_setting(constraint_settings: dict[TargetLabel, None], modifie
             "Modifier `{}` from `{}` is found to modify the following constraint settings:\n".format(
                 modifier,
                 location_to_string(location),
-            ) + "\n".join([str(k) for k in constraint_settings.keys()]),
+            ) + "\n".join([str(k) for k in constraint_settings]),
         )
-    return list(constraint_settings.keys())[0]
+    return list(constraint_settings)[0]
 
 def get_modifier_info(
         refs: dict[str, ProviderCollection],
@@ -88,19 +89,29 @@ def get_modifier_info(
     if is_modifiers_match(modifier):
         default = None
         modifiers_match_info = []
-        constraint_settings = {}  # Used like a set
+        constraint_settings = set()
         for key, sub_modifier in modifier.items():
             if key == "DEFAULT":
                 if sub_modifier:
                     default_constraint_setting, default = get_modifier_info(refs, sub_modifier, location)
-                    constraint_settings[default_constraint_setting] = None
+                    constraint_settings.add(default_constraint_setting)
                 else:
                     default = None
             elif key != "_type":
                 cfg_info = refs[key][ConfigurationInfo]
+                if cfg_info.values:
+                    soft_error(
+                        "starlark_config_setting_non_empty_buckconfig_values_in_conditional_modifier",
+                        "config_setting `{}` defines buckconfig values {} which are NOT supported in conditional modifiers.\n".format(key, cfg_info.values) +
+                        "These buckconfig values are being IGNORED.\n\n" +
+                        "Action required: Remove the `values` parameter from this config_setting {} and use only `constraint_values` instead.\n".format(key) +
+                        "Note: This may become a hard error in the future to prevent silent misconfiguration.",
+                        quiet = True,
+                        stack = False,
+                    )
                 if sub_modifier:
                     sub_constraint_setting, sub_modifier_info = get_modifier_info(refs, sub_modifier, location)
-                    constraint_settings[sub_constraint_setting] = None
+                    constraint_settings.add(sub_constraint_setting)
                 else:
                     sub_modifier_info = None
                 modifiers_match_info.append((cfg_info, sub_modifier_info))
@@ -118,13 +129,13 @@ def get_modifier_info(
             return conditional_modifier_info.key, conditional_modifier_info.inner
         cfg_info = modifier_info[ConfigurationInfo]
         asserts.true(len(cfg_info.constraints) == 1, "Modifier should only be a single constraint value. Found multiple or none in `{}`".format(modifier))
-        constraint_value_info = list(cfg_info.constraints.values())[0]
-        return constraint_value_info.setting.label, constraint_value_info
+        fail("Internal error: Modifer (`{}` type `{}`) with single constraint value should have ConditionalModifierInfo provider.".format(modifier_info, type(modifier_info)))
     fail("Internal error: Found unexpected modifier `{}` type `{}`".format(modifier, type(modifier)))
 
 def _is_subset(a: ConfigurationInfo, b: ConfigurationInfo) -> bool:
-    for (constraint_setting, a_constraint_value) in a.constraints.items():
-        b_constraint_value = b.constraints.get(constraint_setting)
+    for (_constraint_setting, a_constraint_value) in a.constraints.items():
+        setting_info = a_constraint_value.setting
+        b_constraint_value = b.get(setting_info)
         if a_constraint_value != b_constraint_value:
             return False
     return True

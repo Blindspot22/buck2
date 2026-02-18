@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::OnceCell;
@@ -38,6 +39,7 @@ use starlark::eval::Evaluator;
 use starlark::eval::ParametersSpec;
 use starlark::eval::ParametersSpecParam;
 use starlark::eval::param_specs;
+use starlark::type_matcher;
 use starlark::typing::Ty;
 use starlark::typing::TyCallable;
 use starlark::typing::TyStarlarkValue;
@@ -71,6 +73,7 @@ use starlark_map::StarlarkHasherBuilder;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
+use crate::interpreter::rule_defs::provider::doc::ProviderMembersSource;
 use crate::interpreter::rule_defs::provider::doc::provider_callable_documentation;
 use crate::interpreter::rule_defs::provider::ty::abstract_provider::AbstractProvider;
 use crate::interpreter::rule_defs::provider::ty::provider::ty_provider;
@@ -89,7 +92,7 @@ enum ProviderCallableError {
         "Provider type must be assigned to a variable, e.g. `ProviderInfo = provider(fields = {0:?})`"
     )]
     ProviderNotAssigned(SmallSet<String>),
-    #[error("non-unique field names: [{}]", .0.iter().map(|s| format!("`{}`", s)).join(", "))]
+    #[error("non-unique field names: [{}]", .0.iter().map(|s| format!("`{s}`")).join(", "))]
     NonUniqueFields(Vec<String>),
     #[error("Field default value can be either frozen value or an empty list or dict")]
     InvalidDefaultValue,
@@ -194,7 +197,7 @@ pub(crate) struct UserProviderField {
 }
 
 impl<'v> AllocValue<'v> for UserProviderField {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_simple(self)
     }
 }
@@ -203,7 +206,7 @@ impl Display for UserProviderField {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "ProviderField({}, ", self.ty)?;
         if let Some(default) = &self.default {
-            write!(f, "default = {}", default)?;
+            write!(f, "default = {default}")?;
         } else {
             write!(f, "required")?;
         }
@@ -257,7 +260,7 @@ fn user_provider_callable_display(
         }
         write!(f, "\"{}\": provider_field({}", name, ty.ty)?;
         if let Some(default) = ty.default {
-            write!(f, ", default={}", default)?;
+            write!(f, ", default={default}")?;
         }
         write!(f, ")")?;
     }
@@ -296,7 +299,7 @@ impl ProviderCallableLike for UserProviderCallable {
 }
 
 impl<'v> AllocValue<'v> for UserProviderCallable {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -332,6 +335,7 @@ struct UserProviderMatcher {
     type_instance_id: TypeInstanceId,
 }
 
+#[type_matcher]
 impl TypeMatcher for UserProviderMatcher {
     fn matches(&self, value: Value) -> bool {
         match UserProvider::from_value(value) {
@@ -360,7 +364,7 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
                 path: Some(self.path.clone()),
                 name: variable_name.to_owned(),
             });
-            let ty_provider_type_instance_id = TypeInstanceId::gen();
+            let ty_provider_type_instance_id = TypeInstanceId::r#gen();
             let ty_provider = ty_provider(
                 &provider_id.name,
                 ty_provider_type_instance_id,
@@ -379,7 +383,7 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
                 ty_provider.clone(),
             )?;
             let ty_callable = ty_provider_callable::<UserProviderCallable>(creator_func)?;
-            anyhow::Ok(UserProviderCallableNamed {
+            buck2_error::Ok(UserProviderCallableNamed {
                 id: provider_id.dupe(),
                 signature,
                 data: eval.frozen_heap().alloc_any(UserProviderCallableData {
@@ -402,9 +406,7 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
     ) -> starlark::Result<Value<'v>> {
         match self.callable.get() {
             Some(callable) => callable.invoke(args, eval),
-            None => Err(starlark::Error::new_other(buck2_error::Error::from(
-                ProviderCallableError::NotBound,
-            ))),
+            None => Err(buck2_error::Error::from(ProviderCallableError::NotBound).into()),
         }
     }
 
@@ -426,14 +428,17 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
                 typ: Ty::any(),
             }));
         };
+        let field_names: Vec<_> = self.fields.keys().map(|x| x.as_str()).collect();
         provider_callable_documentation(
             None,
+            ProviderMembersSource::FromFields {
+                fields: &field_names,
+                // TODO(nga): types.
+                field_docs: &vec![None; self.fields.len()],
+                field_types: &return_types,
+            },
             callable.ty_callable.dupe(),
             &self.docs,
-            &self.fields.keys().map(|x| x.as_str()).collect::<Vec<_>>(),
-            // TODO(nga): types.
-            &vec![None; self.fields.len()],
-            &return_types,
         )
     }
 
@@ -498,13 +503,16 @@ impl<'v> StarlarkValue<'v> for FrozenUserProviderCallable {
 
     fn documentation(&self) -> DocItem {
         let return_types = vec![Ty::any(); self.fields.len()];
+        let field_names: Vec<_> = self.fields.keys().map(|x| x.as_str()).collect();
         provider_callable_documentation(
             None,
+            ProviderMembersSource::FromFields {
+                fields: &field_names,
+                field_docs: &vec![None; self.fields.len()],
+                field_types: &return_types,
+            },
             self.callable.ty_callable.dupe(),
             &self.docs,
-            &self.fields.keys().map(|x| x.as_str()).collect::<Vec<_>>(),
-            &vec![None; self.fields.len()],
-            &return_types,
         )
     }
 

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-unsafe
 
@@ -129,6 +130,25 @@ async def test_exclude_workspaces(buck: Buck) -> None:
     assert result["expanded_targets"] == [
         "fbcode//buck2/integrations/rust-project/tests/targets/foo:e",
     ]
+
+
+@buck_test(inplace=True, skip_for_os=["darwin", "windows"])
+async def test_fallback_compatible_with(buck: Buck) -> None:
+    result = await buck.bxl(
+        "prelude//rust/rust-analyzer/resolve_deps.bxl:resolve_targets",
+        "--",
+        "--targets",
+        "//buck2/integrations/rust-project/tests/targets/foo:g_with_compatibility",
+    )
+    result = json.load(open(result.stdout.rstrip()))
+
+    assert len(result["expanded_targets"]) > 0
+    assert len(result["resolved_deps"]) > 0
+
+    dep = list(result["resolved_deps"].values())[0]
+
+    assert dep["kind"] == "prelude//rules.bzl:rust_library"
+    assert dep["source_folder"] is not None
 
 
 # FIXME: Remove once actual tests work on mac and windows

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_providers.bzl", "AndroidPackageableInfo", "merge_android_packageable_info")
 load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
@@ -62,7 +63,7 @@ def android_app_modularity_impl(ctx: AnalysisContext) -> list[Provider]:
         ctx.actions,
         deps = filter(None, [x.get(SharedLibraryInfo) for x in all_deps]),
     )
-    traversed_shared_library_info = traverse_shared_library_info(shared_library_info)
+    traversed_shared_library_info = traverse_shared_library_info(shared_library_info, transformation_provider = None)
 
     cmd, output = _get_base_cmd_and_output(
         ctx.actions,
@@ -125,7 +126,7 @@ def get_target_to_module_mapping(ctx: AnalysisContext, deps_by_platform: dict[st
             ctx.actions,
             deps = filter(None, [x.get(SharedLibraryInfo) for x in deps]),
         )
-        shared_libraries.extend(traverse_shared_library_info(shared_library_info))
+        shared_libraries.extend(traverse_shared_library_info(shared_library_info, transformation_provider = None))
 
     cmd, output = _get_base_cmd_and_output(
         ctx.actions,

@@ -1,27 +1,24 @@
 [package]
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_core"
 repository = { workspace = true }
 version = "0.1.0"
 
 [dependencies]
-arc-swap = { workspace = true }
 blake3 = { workspace = true }
-compact_str = { workspace = true }
 derivative = { workspace = true }
 derive_more = { workspace = true }
-dunce = { workspace = true }
 equivalent = { workspace = true }
 futures = { workspace = true }
+hex = { workspace = true }
 hostname = { workspace = true }
 indent_write = { workspace = true }
 itertools = { workspace = true }
-libc = { workspace = true }
-linkme = { workspace = true }
 memchr = { workspace = true }
 once_cell = { workspace = true }
 os_str_bytes = { workspace = true }
+pagable = { workspace = true }
 pin-project = { workspace = true }
 rand = { workspace = true }
 ref-cast = { workspace = true }
@@ -30,7 +27,7 @@ relative-path = { workspace = true }
 sequence_trie = { workspace = true }
 serde = { workspace = true }
 smallvec = { workspace = true }
-starlark_map = { workspace = true }
+starlark_map = { workspace = true, features = ["pagable"] }
 static_assertions = { workspace = true }
 strong_hash = { workspace = true }
 tempfile = { workspace = true }
@@ -47,11 +44,10 @@ lock_free_hashtable = { workspace = true }
 static_interner = { workspace = true }
 
 buck2_data = { workspace = true }
+buck2_env = { workspace = true }
 buck2_error = { workspace = true }
+buck2_fs = { workspace = true }
 buck2_util = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
-nix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 common-path = { workspace = true }

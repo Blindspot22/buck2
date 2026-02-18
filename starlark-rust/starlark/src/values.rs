@@ -30,7 +30,6 @@
 //! * All the nested modules represent the built-in Starlark values. These are all defined using [`StarlarkValue`],
 //!   so may serve as interesting inspiration for writing your own values, in addition to occurring in Starlark programs.
 
-pub use layout::alloc_static_simple::AllocStaticSimple;
 pub use owned_frozen_ref::OwnedFrozenRef;
 pub use owned_frozen_ref::OwnedRefFrozenRef;
 pub use starlark_derive::AllocFrozenValue;
@@ -56,12 +55,15 @@ pub use crate::values::freeze_error::FreezeErrorContext;
 pub use crate::values::freeze_error::FreezeResult;
 pub use crate::values::frozen_ref::FrozenRef;
 pub use crate::values::iter::StarlarkIterator;
+pub use crate::values::layout::avalues::static_::AllocStaticSimple;
 pub use crate::values::layout::complex::ValueTypedComplex;
-pub use crate::values::layout::heap::heap_type::Freezer;
+pub use crate::values::layout::freezer::Freezer;
 pub use crate::values::layout::heap::heap_type::FrozenHeap;
 pub use crate::values::layout::heap::heap_type::FrozenHeapRef;
 pub use crate::values::layout::heap::heap_type::Heap;
 pub use crate::values::layout::heap::heap_type::Tracer;
+pub use crate::values::layout::heap::send::DynStarlark;
+pub use crate::values::layout::heap::send::HeapSendable;
 pub use crate::values::layout::identity::ValueIdentity;
 pub use crate::values::layout::static_string::StarlarkStrNRepr;
 pub use crate::values::layout::static_string::constant_string;
@@ -86,7 +88,6 @@ pub use crate::values::types::array;
 pub use crate::values::types::bool;
 pub use crate::values::types::dict;
 pub use crate::values::types::enumeration;
-pub use crate::values::types::exported_name;
 pub use crate::values::types::float;
 pub use crate::values::types::function;
 pub use crate::values::types::int;

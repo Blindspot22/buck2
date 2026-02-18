@@ -1,5 +1,7 @@
 load("//go:rules.bzl", "go_binary")
 
+oncall("build_infra")
+
 go_binary(
     name = "main",
     srcs = glob(["*.go"]),

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.step.isolatedsteps.common
@@ -16,8 +17,7 @@ import com.facebook.buck.io.filesystem.impl.ProjectFilesystemUtils
 import com.facebook.buck.step.StepExecutionResult
 import com.facebook.buck.step.StepExecutionResults
 import com.facebook.buck.step.isolatedsteps.IsolatedStep
-import com.facebook.buck.util.types.Pair
-import com.facebook.buck.util.zip.CustomZipEntry
+import com.facebook.buck.util.zip.CustomZipEntryWithPath
 import com.facebook.buck.util.zip.Zip
 import com.facebook.buck.util.zip.ZipCompressionLevel
 import com.facebook.buck.util.zip.ZipOutputStreams
@@ -26,7 +26,6 @@ import com.google.common.collect.ImmutableSet
 import java.io.BufferedOutputStream
 import java.io.IOException
 import java.nio.file.Path
-import java.util.Optional
 import java.util.TreeMap
 
 /**
@@ -44,16 +43,17 @@ data class ZipIsolatedStep(
     val paths: ImmutableSet<Path>,
     val junkPaths: Boolean,
     val compressionLevel: ZipCompressionLevel,
-    val baseDir: Path
+    val baseDir: Path,
 ) : IsolatedStep {
   @Throws(IOException::class, InterruptedException::class)
   override fun executeIsolatedStep(context: IsolatedExecutionContext): StepExecutionResult {
+    // Delete any stale zip file from a previous interrupted build.
+    // This can happen when ctrl+c interrupts a build mid-execution.
     if (ProjectFilesystemUtils.exists(rootPath, pathToZipFile)) {
-      throw RuntimeException(
-          String.format("Attempting to overwrite an existing zip: %s", pathToZipFile))
+      ProjectFilesystemUtils.deleteFileAtPath(rootPath, pathToZipFile)
     }
 
-    val entries: Map<String, Pair<CustomZipEntry, Optional<Path>>> = TreeMap()
+    val entries: Map<String, CustomZipEntryWithPath> = TreeMap()
 
     BufferedOutputStream(ProjectFilesystemUtils.newFileOutputStream(rootPath, pathToZipFile)).use {
         baseOut ->
@@ -62,7 +62,14 @@ data class ZipIsolatedStep(
          * If walking the file directory throws, then an empty jar file is still created.
          */
         Zip.walkBaseDirectoryToCreateEntries(
-            rootPath, entries, baseDir, ignoredPaths, paths, junkPaths, compressionLevel)
+            rootPath,
+            entries,
+            baseDir,
+            ignoredPaths,
+            paths,
+            junkPaths,
+            compressionLevel,
+        )
         Zip.writeEntriesToZip(rootPath, out, entries)
       }
     }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin;
@@ -142,12 +143,12 @@ public class KaptStepsBuilder {
 
     // KAPT folders
     RelPath kaptSourcesOutput =
-        buildTargetValueExtraParams.getAnnotationPath("__%s_kapt_sources__");
+        buildTargetValueExtraParams.getAnnotationOutputPath("__%s_kapt_sources__");
     RelPath kaptClassesOutput =
-        buildTargetValueExtraParams.getAnnotationPath("__%s_kapt_classes__");
-    RelPath stubsOutput = buildTargetValueExtraParams.getAnnotationPath("__%s_kapt_stubs__");
+        buildTargetValueExtraParams.getAnnotationOutputPath("__%s_kapt_classes__");
+    RelPath stubsOutput = buildTargetValueExtraParams.getAnnotationOutputPath("__%s_kapt_stubs__");
     RelPath kaptGeneratedOutput =
-        buildTargetValueExtraParams.getAnnotationPath("__%s_kapt_generated__");
+        buildTargetValueExtraParams.getAnnotationOutputPath("__%s_kapt_generated__");
     RelPath kaptGenOutputFolder = buildTargetValueExtraParams.getGenPath("__%s_kapt_gen_sources__");
     RelPath kaptGenOutput =
         buildTargetValueExtraParams.getGenPath("__%s_kapt_gen_sources__/generated" + SRC_ZIP);

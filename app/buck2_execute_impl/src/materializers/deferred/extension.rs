@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -12,18 +13,18 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Write;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
-use buck2_core::fs::fs_util;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
-use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_error::BuckErrorContext;
 use buck2_events::dispatch::get_dispatcher;
-use buck2_execute::directory::ActionDirectoryMember;
 use buck2_execute::materialize::materializer::DeferredMaterializerEntry;
 use buck2_execute::materialize::materializer::DeferredMaterializerExtensions;
 use buck2_execute::materialize::materializer::DeferredMaterializerIterItem;
 use buck2_execute::materialize::materializer::DeferredMaterializerSubscription;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::TimeZone;
@@ -83,13 +84,13 @@ impl Display for PathData {
         match &self.stage {
             PathStage::Materialized { ts, size } => {
                 if let Some(size) = size {
-                    write!(f, "materialized (ts={:?}, size={})", ts, size)?;
+                    write!(f, "materialized (ts={ts:?}, size={size})")?;
                 } else {
-                    write!(f, "materialized (ts={:?})", ts)?;
+                    write!(f, "materialized (ts={ts:?})")?;
                 }
             }
             PathStage::Declared(method) => {
-                write!(f, "declared: {}", method)?;
+                write!(f, "declared: {method}")?;
             }
         }
 
@@ -121,7 +122,7 @@ struct Iterate {
 impl<T: IoHandler> ExtensionCommand<T> for Iterate {
     fn execute(self: Box<Self>, processor: &mut DeferredMaterializerCommandProcessor<T>) {
         // Ensure up to date access times
-        processor.flush_access_times(0);
+        processor.flush_access_times();
         for (path, data) in processor.tree.iter_with_paths() {
             let stage = match &data.stage {
                 ArtifactMaterializationStage::Declared { method, .. } => {
@@ -132,13 +133,6 @@ impl<T: IoHandler> ExtensionCommand<T> for Iterate {
                     metadata,
                     ..
                 } => {
-                    let size = match &metadata.0 {
-                        DirectoryEntry::Dir(meta) => meta.total_size,
-                        DirectoryEntry::Leaf(ActionDirectoryMember::File(file_metadata)) => {
-                            file_metadata.digest.size()
-                        }
-                        DirectoryEntry::Leaf(_) => 0,
-                    };
                     // drop nano-seconds
                     let ts = Utc
                         .timestamp_opt(last_access_time.timestamp(), 0)
@@ -146,7 +140,7 @@ impl<T: IoHandler> ExtensionCommand<T> for Iterate {
                         .unwrap();
                     PathStage::Materialized {
                         ts,
-                        size: Some(size),
+                        size: Some(metadata.size()),
                     }
                 }
             };
@@ -226,7 +220,8 @@ impl<T: IoHandler> ExtensionCommand<T> for Fsck {
             // actual things are in flight.
 
             let path = ProjectRelativePathBuf::from(path);
-            let res = fs_util::symlink_metadata(processor.io.fs().resolve(&path));
+            let res =
+                fs_util::symlink_metadata(processor.io.fs().resolve(&path)).categorize_internal();
             match res {
                 Ok(..) => {}
                 Err(e) => {
@@ -280,7 +275,7 @@ impl<T: IoHandler> ExtensionCommand<T> for GetTtlRefreshLog {
                     writeln!(&mut out, "OK").unwrap();
                 }
                 Some(Err(e)) => {
-                    writeln!(&mut out, "ERR\t{:#}", e).unwrap();
+                    writeln!(&mut out, "ERR\t{e:#}").unwrap();
                 }
             }
         }
@@ -314,7 +309,7 @@ impl<T> ExtensionCommand<T> for TestIter {
             &mut out,
             "Elapsed for iter() ({} times): {:?}",
             self.count,
-            now.elapsed()
+            Instant::now() - now
         )
         .unwrap();
 
@@ -332,7 +327,7 @@ impl<T> ExtensionCommand<T> for TestIter {
             &mut out,
             "Elapsed for iter().with_paths() ({} times): {:?}",
             self.count,
-            now.elapsed()
+            Instant::now() - now
         )
         .unwrap();
 
@@ -350,7 +345,7 @@ impl<T: IoHandler> ExtensionCommand<T> for FlushAccessTimes {
     fn execute(self: Box<Self>, processor: &mut DeferredMaterializerCommandProcessor<T>) {
         let mut out = String::new();
 
-        writeln!(&mut out, "{}", processor.flush_access_times(0)).unwrap();
+        writeln!(&mut out, "{}", processor.flush_access_times()).unwrap();
         let _ignored = self.sender.send(out);
     }
 }

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Attributes for OCaml build rules.
 
@@ -62,8 +63,6 @@ def ocaml_object_attributes() -> dict:
         "linker_flags": attrs.list(attrs.string(), default = []),
         "ocamldep_flags": attrs.list(attrs.arg(), default = []),
         "platform": attrs.option(attrs.string(), default = None),
-        "platform_deps": attrs.list(attrs.tuple(attrs.regex(), attrs.set(attrs.dep(), sorted = True)), default = []),
-        "platform_linker_flags": attrs.list(attrs.tuple(attrs.regex(), attrs.list(attrs.string())), default = []),
         "srcs": attrs.option(attrs.named_set(attrs.source(), sorted = False), default = None),
         "warnings_flags": attrs.option(attrs.string(), default = None),
         "_cxx_toolchain": _cxx_toolchain(),
@@ -82,8 +81,6 @@ def ocaml_shared_attributes() -> dict:
         "linker_flags": attrs.list(attrs.string(), default = []),
         "ocamldep_flags": attrs.list(attrs.arg(), default = []),
         "platform": attrs.option(attrs.string(), default = None),
-        "platform_deps": attrs.list(attrs.tuple(attrs.regex(), attrs.set(attrs.dep(), sorted = True)), default = []),
-        "platform_linker_flags": attrs.list(attrs.tuple(attrs.regex(), attrs.list(attrs.string())), default = []),
         "srcs": attrs.option(attrs.named_set(attrs.source(), sorted = False), default = None),
         "warnings_flags": attrs.option(attrs.string(), default = None),
         "_cxx_toolchain": _cxx_toolchain(),

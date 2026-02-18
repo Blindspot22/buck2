@@ -1,17 +1,25 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 
+GoBootstrapDistrInfo = provider(
+    # @unsorted-dict-items
+    fields = {
+        "bin_go": provider_field(RunInfo),
+        "go_root": provider_field(Artifact | None),
+    },
+)
 GoBootstrapToolchainInfo = provider(
     fields = {
         "env_go_arch": provider_field(str),
         "env_go_os": provider_field(str),
-        "env_go_root": provider_field(typing.Any, default = None),
+        "env_go_root": provider_field(Artifact | None, default = None),
         "go": provider_field(RunInfo),
         "go_wrapper": provider_field(RunInfo),
     },
@@ -27,12 +35,13 @@ def go_bootstrap_binary_impl(ctx: AnalysisContext) -> list[Provider]:
 
     target_is_win = go_toolchain.env_go_os == "windows"
     exe_suffix = ".exe" if target_is_win else ""
-    output = ctx.actions.declare_output(ctx.label.name + exe_suffix)
+    output = ctx.actions.declare_output(ctx.label.name + exe_suffix, has_content_based_path = True)
 
     # Copy files, because go:embed doesn't work with symlinks
     srcs_dir = ctx.actions.copied_dir(
         "__srcs_dir__",
         {paths.relativize(src.short_path, ctx.attrs.workdir): src for src in ctx.attrs.srcs},
+        has_content_based_path = True,
     )
 
     cmd = cmd_args([

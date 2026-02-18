@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Implementation of the cli and query_* attr query language.
@@ -51,9 +52,9 @@ pub enum QueryError {
     #[error("query function {0} not available in this context")]
     NotAvailableInContext(&'static str),
     #[error(
-        "Operation + requires either two set types, or one set and one string, got `{0}` and `{1}`"
+        "Set operation requires either two set types, or one set and one string, got `{0}` and `{1}`"
     )]
-    UnionIncompatibleTypes(&'static str, &'static str),
+    SetIncompatibleTypes(&'static str, &'static str),
     /// Used to propagate up an inner error. The inner span will mark where the inner error was (which itself may be the
     /// propagation of another error). This error will end up in a Spanned that indicates where this error (the propagation) occurs.
     /// Since QueryError has an impl for `From<Spanned<QueryError>>`, just propagating inner eval errors via `?` will hit this case (and
@@ -82,7 +83,7 @@ impl From<Spanned<QueryError>> for QueryError {
 impl QueryError {
     pub fn drop_spans(err: Spanned<Self>) -> buck2_error::Error {
         match err.value {
-            Self::Error(inner) => inner.into(),
+            Self::Error(inner) => inner,
             Self::Inner(inner) => Self::drop_spans(*inner),
             e => {
                 // TODO(cjhopman): This is going to drop the backtrace attached to the error, we should figure
@@ -95,11 +96,9 @@ impl QueryError {
         let context = err.get_err_context(input);
 
         match err.value {
-            Self::Error(inner) => inner
-                .context(format!("Error evaluating expression:{}", context))
-                .into(),
+            Self::Error(inner) => inner.context(format!("Error evaluating expression:{context}")),
             Self::Inner(inner) => Self::convert_error(*inner, input)
-                .context(format!("Error evaluating expression:{}", context)),
+                .context(format!("Error evaluating expression:{context}")),
             e => {
                 // TODO(cjhopman): This is going to drop the backtrace attached to the error, we should figure
                 // out how to keep that.

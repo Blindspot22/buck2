@@ -28,10 +28,10 @@ are available:
 
 - Defining a custom toolchain for a language that is supported in the prelude.
   One can then either:
-  - Return the `*ToolchainInfo` provider defined in the prelude, to get
-    compatibility with all the prelude target rules for free.
-  - Return a custom toolchain provider, for use with a custom set of target
-    rules (which is a lot more effort).
+    - Return the `*ToolchainInfo` provider defined in the prelude, to get
+      compatibility with all the prelude target rules for free.
+    - Return a custom toolchain provider, for use with a custom set of target
+      rules (which is a lot more effort).
 - Defining a toolchain for a custom language/process. One then has to define a
   toolchain provider for it, which will be used by the rules for that language.
 
@@ -67,7 +67,7 @@ system_cxx_toolchain(
 )
 ```
 
-One would typically use [`select`](configurations_by_example.md) to customize
+One would typically use [`select`](../concepts/configurations.md) to customize
 the toolchain e.g. based on the build mode (debug vs release) or compiler type.
 
 Note that several toolchains require you to also define a `python_bootstrap`
@@ -134,9 +134,9 @@ instead explicitly downloads and tracks them as part of the build.
 Doing is typically as follows:
 
 - Download the tools, e.g. using the
-  [`http_archive`](../../prelude/globals/#http_archive) rule (see the
+  [`http_archive`](../../prelude/rules/core/http_archive) rule (see the
   [Zig-based C++ toolchain in the prelude](https://github.com/facebook/buck2/tree/main/prelude/toolchains/cxx/zig)
   as an example).
 - Expose those tools as [`RunInfo`](../../api/build/RunInfo/) providers in rules
-  that are referenced as [exec deps](configurations_by_example.md#exec-deps) in
-  a toolchain implementation.
+  that are referenced as [exec deps](configurations.md#execution-deps)
+  in a toolchain implementation.

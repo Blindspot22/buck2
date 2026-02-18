@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_build_api::interpreter::rule_defs::provider::registration::register_builtin_providers;
@@ -24,7 +25,7 @@ fn run_display() {
         .run_starlark_bzl_test(
             r#"
 def test():
-    assert_eq('WorkerInfo(exe=cmd_args("x"), concurrency=None, streaming=None, supports_bazel_remote_persistent_worker_protocol=False)', str(WorkerInfo(exe="x")))
+    assert_eq('WorkerInfo(exe=cmd_args("x"), env=None, concurrency=None, streaming=None, supports_bazel_remote_persistent_worker_protocol=False)', str(WorkerInfo(exe="x")))
 "#,
         )
         .unwrap();

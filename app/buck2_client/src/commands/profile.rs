@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
@@ -22,6 +23,7 @@ use buck2_client_ctx::common::CommonBuildConfigurationOptions;
 use buck2_client_ctx::common::CommonCommandOptions;
 use buck2_client_ctx::common::CommonEventLogOptions;
 use buck2_client_ctx::common::CommonStarlarkOptions;
+use buck2_client_ctx::common::profiling::BuckProfileMode;
 use buck2_client_ctx::common::target_cfg::TargetCfgWithUniverseOptions;
 use buck2_client_ctx::common::ui::CommonConsoleOptions;
 use buck2_client_ctx::daemon::client::BuckdClientConnector;
@@ -34,7 +36,7 @@ use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
-use dupe::Dupe;
+use buck2_error::internal_error;
 
 use super::bxl::BxlCommandOptions;
 
@@ -47,31 +49,23 @@ pub enum ProfileCommand {
 }
 
 impl ProfileCommand {
-    pub fn exec(self, matches: BuckArgMatches<'_>, ctx: ClientCommandContext<'_>) -> ExitResult {
+    pub fn exec(
+        self,
+        matches: BuckArgMatches<'_>,
+        ctx: ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
+    ) -> ExitResult {
         let submatches = matches.unwrap_subcommand();
-        ctx.exec(ProfileSubcommand { subcommand: self }, submatches)
+        ctx.exec(
+            ProfileSubcommand { subcommand: self },
+            submatches,
+            events_ctx,
+        )
     }
 
     pub fn sanitize_argv(&self, argv: Argv) -> SanitizedArgv {
         argv.no_need_to_sanitize()
     }
-}
-
-#[derive(clap::ValueEnum, Dupe, Clone, Copy, Debug)]
-pub(crate) enum BuckProfileMode {
-    TimeFlame,
-    HeapAllocated,
-    HeapRetained,
-    HeapFlameAllocated,
-    HeapFlameRetained,
-    HeapSummaryAllocated,
-    HeapSummaryRetained,
-    Statement,
-    Bytecode,
-    BytecodePairs,
-    Typecheck,
-    Coverage,
-    None,
 }
 
 /// Profile BXL script.
@@ -149,24 +143,6 @@ struct ProfileSubcommand {
     subcommand: ProfileCommand,
 }
 
-pub(crate) fn profile_mode_to_profile(mode: BuckProfileMode) -> buck2_cli_proto::ProfileMode {
-    match mode {
-        BuckProfileMode::TimeFlame => buck2_cli_proto::ProfileMode::TimeFlame,
-        BuckProfileMode::HeapAllocated => buck2_cli_proto::ProfileMode::HeapAllocated,
-        BuckProfileMode::HeapRetained => buck2_cli_proto::ProfileMode::HeapRetained,
-        BuckProfileMode::HeapFlameAllocated => buck2_cli_proto::ProfileMode::HeapFlameAllocated,
-        BuckProfileMode::HeapFlameRetained => buck2_cli_proto::ProfileMode::HeapFlameRetained,
-        BuckProfileMode::HeapSummaryAllocated => buck2_cli_proto::ProfileMode::HeapSummaryAllocated,
-        BuckProfileMode::HeapSummaryRetained => buck2_cli_proto::ProfileMode::HeapSummaryRetained,
-        BuckProfileMode::Statement => buck2_cli_proto::ProfileMode::Statement,
-        BuckProfileMode::Bytecode => buck2_cli_proto::ProfileMode::Bytecode,
-        BuckProfileMode::BytecodePairs => buck2_cli_proto::ProfileMode::BytecodePairs,
-        BuckProfileMode::Typecheck => buck2_cli_proto::ProfileMode::Typecheck,
-        BuckProfileMode::Coverage => buck2_cli_proto::ProfileMode::Coverage,
-        BuckProfileMode::None => buck2_cli_proto::ProfileMode::None,
-    }
-}
-
 impl ProfileSubcommand {
     fn common_opts(&self) -> &ProfileCommonOptions {
         match &self.subcommand {
@@ -198,7 +174,7 @@ impl StreamingCommand for ProfileSubcommand {
 
         let console_opts = ctx.console_interaction_stream(self.console_opts());
 
-        let profiler = profile_mode_to_profile(profile_mode);
+        let profiler = profile_mode.to_proto();
 
         let profile_opts = match &self.subcommand {
             ProfileCommand::Loading(loading) => ProfileOpts::TargetProfile(TargetProfile {
@@ -279,7 +255,7 @@ impl StreamingCommand for ProfileSubcommand {
         } = response;
 
         let elapsed = elapsed
-            .buck_error_context("Missing duration")
+            .ok_or_else(|| internal_error!("Missing duration"))
             .and_then(|d| {
                 Duration::try_from(d).map_err(|_| {
                     buck2_error::buck2_error!(buck2_error::ErrorTag::Input, "Duration is negative")

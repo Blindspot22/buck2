@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Translated from the Rust `cc` crate's windows_registry.rs.
 # https://github.com/rust-lang/cc-rs/blob/1.0.79/src/windows_registry.rs
@@ -18,7 +19,7 @@ import sys
 import tempfile
 import winreg
 from pathlib import Path
-from typing import IO, List, NamedTuple
+from typing import IO, NamedTuple
 
 VC_EXE_NAMES = ["cl.exe", "cvtres.exe", "lib.exe", "ml64.exe", "link.exe"]
 UCRT_EXE_NAMES = ["rc.exe"]
@@ -36,9 +37,9 @@ class OutputJsonFiles(NamedTuple):
 
 class Tool(NamedTuple):
     exe: Path
-    LIB: List[Path] = []
-    PATH: List[Path] = []
-    INCLUDE: List[Path] = []
+    LIB: list[Path] = []
+    PATH: list[Path] = []
+    INCLUDE: list[Path] = []
 
 
 def find_in_path(executable, is_optional=False):

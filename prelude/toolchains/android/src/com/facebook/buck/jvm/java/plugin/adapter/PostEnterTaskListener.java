@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java.plugin.adapter;
 
-import com.facebook.buck.jvm.java.version.utils.JavaVersionUtils;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.util.TaskEvent;
@@ -109,14 +109,11 @@ public class PostEnterTaskListener implements TaskListener {
     // For source ABI generation, we want to short circuit the compiler as early as possible to reap
     // the performance benefits. When annotation processing isn't involved, the last ENTER finished
     // event, which comes before the ANALYZE and GENERATE phases, tells us the right time to do
-    // this. When annotation processing is involved, the behavior is different between Java 8 and
-    // Java 9+. In Java 8, we get a bunch of ENTER events after the ANNOTATION_PROCESSING finished
-    // event, and we can do the same thing and look at the last ENTER finished event. In Java 9+,
-    // the last set of ENTER events happen right *before* the ANNOTATION_PROCESSING finished event,
-    // so we have to rely on the ANNOTATION_PROCESSING finished event itself.
+    // this. In Java 9+, the last set of ENTER events happen right *before* the
+    // ANNOTATION_PROCESSING finished event, so we have to rely on the ANNOTATION_PROCESSING
+    // finished event itself.
     if ((e.getKind() == TaskEvent.Kind.ENTER && !annotationProcessing && pendingEnterCalls == 0)
-        || (JavaVersionUtils.getMajorVersion() >= 9
-            && e.getKind() == TaskEvent.Kind.ANNOTATION_PROCESSING)) {
+        || e.getKind() == TaskEvent.Kind.ANNOTATION_PROCESSING) {
       Set<Element> unmodifiableTopLevelElements = Collections.unmodifiableSet(topLevelElements);
       callback.accept(unmodifiableTopLevelElements);
     }

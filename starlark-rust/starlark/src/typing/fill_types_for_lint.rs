@@ -116,7 +116,7 @@ impl<'v> GlobalValue<'v> {
 
 struct GlobalTypesBuilder<'a, 'v> {
     approximations: &'a mut Vec<Approximation>,
-    heap: &'v Heap,
+    heap: Heap<'v>,
     values: UnorderedMap<ModuleSlotId, GlobalValue<'v>>,
     errors: Vec<TypingError>,
     module_scope_data: &'a ModuleScopeData<'a>,
@@ -770,19 +770,20 @@ pub(crate) fn fill_types_for_lint_typechecker(
     module_scope_data: &ModuleScopeData,
     approximations: &mut Vec<Approximation>,
 ) -> Result<(Vec<TypingError>, ModuleVarTypes), InternalError> {
-    let heap = Heap::new();
-    let mut builder = GlobalTypesBuilder {
-        heap: &heap,
-        ctx,
-        values: UnorderedMap::new(),
-        errors: Vec::new(),
-        module_scope_data,
-        approximations,
-    };
-    for stmt in module.iter_mut() {
-        builder.top_level_stmt(stmt)?;
-    }
-    let GlobalTypesBuilder { errors, values, .. } = builder;
-    let types = values.map_values(|v| v.ty);
-    Ok((errors, ModuleVarTypes { types }))
+    Heap::temp(|heap| {
+        let mut builder = GlobalTypesBuilder {
+            heap,
+            ctx,
+            values: UnorderedMap::new(),
+            errors: Vec::new(),
+            module_scope_data,
+            approximations,
+        };
+        for stmt in module.iter_mut() {
+            builder.top_level_stmt(stmt)?;
+        }
+        let GlobalTypesBuilder { errors, values, .. } = builder;
+        let types = values.map_values(|v| v.ty);
+        Ok((errors, ModuleVarTypes { types }))
+    })
 }

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_binary.bzl", "get_build_config_java_libraries")
 load("@prelude//android:android_binary_native_library_rules.bzl", "get_android_binary_native_library_info")
@@ -39,7 +40,19 @@ def android_aar_impl(ctx: AnalysisContext) -> list[Provider]:
         ))
 
     enhancement_ctx = create_enhancement_context(ctx)
-    android_binary_native_library_info = get_android_binary_native_library_info(enhancement_ctx, android_packageable_info, deps_by_platform)
+    android_binary_native_library_info = get_android_binary_native_library_info(
+        enhancement_ctx,
+        android_packageable_info,
+        deps_by_platform,
+        native_library_merge_glue = getattr(ctx.attrs, "native_library_merge_glue", None),
+        native_library_merge_sequence = getattr(ctx.attrs, "native_library_merge_sequence", None),
+        native_library_merge_map = getattr(ctx.attrs, "native_library_merge_map", None),
+        native_library_merge_non_asset_libs = getattr(ctx.attrs, "native_library_merge_non_asset_libs", False),
+        native_library_merge_linker_args = getattr(ctx.attrs, "native_library_merge_linker_args", None),
+        native_library_merge_linker_args_all = getattr(ctx.attrs, "native_library_merge_linker_args_all", None),
+        native_library_merge_code_generator = getattr(ctx.attrs, "native_library_merge_code_generator", None),
+        native_library_merge_sequence_blocklist = getattr(ctx.attrs, "native_library_merge_sequence_blocklist", None),
+    )
     java_packaging_deps.extend([create_java_packaging_dep(
         ctx,
         library_output,
@@ -149,6 +162,11 @@ def android_aar_impl(ctx: AnalysisContext) -> list[Provider]:
         create_aar_cmd.add([
             "--proguard_config_file",
             ctx.attrs.proguard_config,
+        ])
+
+    if ctx.attrs.hardcode_permissions_for_deterministic_output == True:
+        create_aar_cmd.add([
+            "--hardcode_permissions_for_deterministic_output",
         ])
 
     ctx.actions.run(create_aar_cmd, category = "create_aar")

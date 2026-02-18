@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -11,9 +12,7 @@ import argparse
 import os
 import shutil
 import subprocess
-
 import tempfile
-
 from pathlib import Path
 
 from apple.tools.re_compatibility_utils.writable import make_dir_recursively_writable
@@ -61,7 +60,16 @@ def _package_ipa_contents(
         make_dir_recursively_writable(str(processed_package_dir_path))
 
         with open(ipa_output_path, "wb") as ipa_file:
-            zip_cmd = ["zip", "-X", "-r", f"-{compression_level}", "-", "."]
+            zip_cmd = [
+                "zip",
+                "-X",
+                "-n",
+                "zst",  # avoid deflating already compressed files
+                "-r",
+                f"-{compression_level}",
+                "-",
+                ".",
+            ]
             subprocess.run(
                 zip_cmd,
                 # .ipa zip file requires to be created relative to the package dir,

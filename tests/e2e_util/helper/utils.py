@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-unsafe
 
@@ -16,6 +17,7 @@ import typing
 from pathlib import Path
 
 from buck2.tests.e2e_util.api.buck import Buck
+from buck2.tests.e2e_util.api.buck_result import InvocationRecord
 
 
 async def read_what_ran(buck: Buck, *args) -> typing.List[typing.Dict[str, typing.Any]]:
@@ -57,6 +59,7 @@ def get_targets_from_what_ran(what_ran):
 
     for entry in what_ran:
         m = re.match(r"^(.*?)( \((.*?)\))?( \((.*?)\))?$", entry["identity"])
+        assert m is not None
         rule, category = m.group(1), m.group(5)
         targets.add((rule, category))
 
@@ -106,8 +109,48 @@ def replace_digest(s: str) -> str:
     return re.sub(r"\b[0-9a-f]{40}:[0-9]{1,3}\b", "<DIGEST>", s)
 
 
-def read_invocation_record(record: Path) -> typing.Dict[str, typing.Any]:
-    record_json = json.loads(record.read_text(encoding="utf-8"))
-    record = record_json["data"]["Record"]["data"]["InvocationRecord"]
-    record["trace_id"] = record_json["trace_id"]
-    return record
+def read_invocation_record(record: Path) -> InvocationRecord:
+    return InvocationRecord(record)
+
+
+async def get_last_execution_kind(
+    buck: Buck,
+    category: typing.Optional[str] = None,
+    excluded_execution_kinds: typing.Optional[typing.List[int]] = None,
+    target_name: typing.Optional[str] = None,
+) -> typing.Optional[int]:
+    if excluded_execution_kinds is None:
+        excluded_execution_kinds = []
+    action_executions = await filter_events(
+        buck,
+        "Event",
+        "data",
+        "SpanEnd",
+        "data",
+        "ActionExecution",
+    )
+    for action_execution in reversed(action_executions):
+        execution_kind = action_execution.get("execution_kind", None)
+
+        if execution_kind is None or execution_kind in excluded_execution_kinds:
+            continue
+
+        if category is not None:
+            action_category = action_execution.get("name", {}).get("category", None)
+            if action_category != category:
+                continue
+
+        if target_name is not None:
+            action_target_name = (
+                action_execution.get("key", {})
+                .get("owner", {})
+                .get("TargetLabel", {})
+                .get("label", {})
+                .get("name", None)
+            )
+            if action_target_name != target_name:
+                continue
+
+        return execution_kind
+
+    return None

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_data::ErrorReport;
@@ -48,9 +49,9 @@ impl From<ErrorReport> for crate::Error {
 impl From<&crate::Error> for ErrorReport {
     fn from(err: &crate::Error) -> Self {
         let (message, telemetry_message) = if let Some(f) = err.is_emitted() {
-            (format!("{:?}", f), Some(format!("{:?}", err)))
+            (format!("{f:?}"), Some(format!("{err:?}")))
         } else {
-            (format!("{:?}", err), None)
+            (format!("{err:?}"), None)
         };
 
         let category_key = err.category_key();

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.resources.strings;
@@ -13,8 +14,7 @@ import static com.facebook.buck.util.zip.ZipOutputStreams.HandleDuplicates.THROW
 
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.io.filesystem.impl.ProjectFilesystemUtils;
-import com.facebook.buck.util.types.Pair;
-import com.facebook.buck.util.zip.CustomZipEntry;
+import com.facebook.buck.util.zip.CustomZipEntryWithPath;
 import com.facebook.buck.util.zip.CustomZipOutputStream;
 import com.facebook.buck.util.zip.Zip;
 import com.facebook.buck.util.zip.ZipCompressionLevel;
@@ -27,7 +27,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
-import java.util.Optional;
 import java.util.TreeMap;
 import java.util.function.Function;
 import org.kohsuke.args4j.CmdLineException;
@@ -109,7 +108,7 @@ public class PackageStringsAsAssetsExecutableMain {
   private void zipEntries(
       AbsPath root, Path pathToZipFile, Path assetsDir, ImmutableSet<Path> pathsToInclude)
       throws IOException {
-    Map<String, Pair<CustomZipEntry, Optional<Path>>> entries = new TreeMap<>();
+    Map<String, CustomZipEntryWithPath> entries = new TreeMap<>();
 
     try (BufferedOutputStream baseOut =
             new BufferedOutputStream(

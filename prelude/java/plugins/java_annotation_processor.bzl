@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//java:java_providers.bzl", "JavaLibraryInfo", "JavaPackagingDepTSet", "JavaPackagingInfo")
 load("@prelude//utils:type_defs.bzl", "is_tuple")
@@ -103,14 +104,38 @@ def create_annotation_processor_properties(
                 isolate_class_loader = ap_plugin.isolate_class_loader,
             ))
 
-    annotation_processor_params = annotation_processor_params + [
+    annotation_processor_params = _update_first(
+        annotation_processor_params,
+        "buck.current_buck_target=<will_be_replaced>",
         "buck.current_buck_target=" + str(ctx.label.raw_target()),
-    ]
+    )
+
+    annotation_processor_params = _update_first(
+        annotation_processor_params,
+        "buck.required_for_source_only_abi=<will_be_replaced>",
+        ("buck.required_for_source_only_abi=" + str(ctx.attrs.required_for_source_only_abi)) if hasattr(ctx.attrs, "required_for_source_only_abi") else None,
+    )
 
     return AnnotationProcessorProperties(
         annotation_processors = annotation_processors,
         annotation_processor_params = annotation_processor_params,
     )
+
+def _update_first(iterable, old_value, new_value):
+    """
+    Replaces the first occurrence of old_value with new_value.
+    If new_value is None, removes the first occurrence instead.
+    Returns the original iterable unchanged if old_value is not found.
+    """
+    if old_value not in iterable:
+        return iterable
+    result = list(iterable)
+    idx = result.index(old_value)
+    if new_value == None:
+        result.pop(idx)
+    else:
+        result[idx] = new_value
+    return result
 
 def create_ksp_annotation_processor_properties(plugins: list[[Dependency, (Dependency, list[str])]]) -> AnnotationProcessorProperties:
     annotation_processors = []
@@ -159,5 +184,5 @@ def java_annotation_processor_impl(ctx: AnalysisContext) -> list[Provider]:
             runs_on_java_only = ctx.attrs.runs_on_java_only,
             isolate_class_loader = ctx.attrs.isolate_class_loader,
         ),
-        DefaultInfo(default_output = None, other_outputs = [packaging_dep.jar for packaging_dep in transitive_deps.traverse() if packaging_dep.jar]),
+        DefaultInfo(default_output = None, other_outputs = [transitive_deps.project_as_args("full_jar_args")]),
     ]

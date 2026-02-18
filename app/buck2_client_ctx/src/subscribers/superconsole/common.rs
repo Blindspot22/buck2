@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -31,8 +32,12 @@ impl<A: Component, B: Component> HeaderLineComponent<A, B> {
     }
 }
 
-impl<A: Component, B: Component> Component for HeaderLineComponent<A, B> {
-    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
+impl<A: Component<Error = buck2_error::Error>, B: Component<Error = buck2_error::Error>> Component
+    for HeaderLineComponent<A, B>
+{
+    type Error = buck2_error::Error;
+
+    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> buck2_error::Result<Lines> {
         let mut draw = DrawHorizontal::new(dimensions);
         draw.draw(&self.lhs, mode)?;
         draw.draw(
@@ -54,7 +59,13 @@ pub(crate) struct StaticStringComponent<S: AsRef<str>> {
 }
 
 impl<S: AsRef<str>> Component for StaticStringComponent<S> {
-    fn draw_unchecked(&self, _dimensions: Dimensions, _mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = buck2_error::Error;
+
+    fn draw_unchecked(
+        &self,
+        _dimensions: Dimensions,
+        _mode: DrawMode,
+    ) -> buck2_error::Result<Lines> {
         Ok(Lines(vec![Line::unstyled(self.header.as_ref())?]))
     }
 }

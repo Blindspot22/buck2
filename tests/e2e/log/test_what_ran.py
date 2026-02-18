@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -33,7 +34,7 @@ async def test_what_ran_json_target_without_explicit_test_cases(buck: Buck) -> N
 
     repro = out[0]
     assert repro["reason"] == "test.run"
-    assert repro["identity"] == "buck2/tests/targets/rules/sh_test:test"
+    assert repro["identity"] == "fbcode//buck2/tests/targets/rules/sh_test:test"
     assert repro["reproducer"]["executor"] == "Local"
     assert repro["reproducer"]["details"]["command"][1] == "arg1"
     assert repro["extra"]["testcases"] == []
@@ -77,8 +78,10 @@ if fbcode_linux_only():
         out = [json.loads(line) for line in out if line]
         assert any(
             rec["std_err"] == "" or rec["std_err"] == "HELLO_STDERR\n" for rec in out
-        ), "we should have some empty std_errs and also HELLO_STDERR since we echo it in TARGETS: `{}`".format(
-            out
+        ), (
+            "we should have some empty std_errs and also HELLO_STDERR since we echo it in TARGETS: `{}`".format(
+                out
+            )
         )
 
         out = await buck.log(
@@ -86,9 +89,9 @@ if fbcode_linux_only():
         )
         out = [line.strip() for line in out.stdout.splitlines()]
         out = [json.loads(line) for line in out if line]
-        assert all(
-            rec["std_err"] != "" for rec in out
-        ), "we should have no empty std_errs: `{}`".format(out)
+        assert all(rec["std_err"] != "" for rec in out), (
+            "we should have no empty std_errs: `{}`".format(out)
+        )
 
     @buck_test(inplace=True)
     async def test_what_ran_json_target_with_test_cases(buck: Buck) -> None:
@@ -103,12 +106,12 @@ if fbcode_linux_only():
 
         # test discovery
         discovery = repros["test.discovery"]
-        assert discovery["identity"] == "buck2/tests/targets/rules/go/test:test"
+        assert discovery["identity"] == "fbcode//buck2/tests/targets/rules/go/test:test"
 
         # test running
         repro = repros["test.run"]
         assert repro["reason"] == "test.run"
-        assert repro["identity"] == "buck2/tests/targets/rules/go/test:test"
+        assert repro["identity"] == "fbcode//buck2/tests/targets/rules/go/test:test"
         assert repro["reproducer"]["executor"] == "Local"
         assert repro["extra"]["testcases"] == ["TestFoo"]
 
@@ -119,21 +122,21 @@ if fbcode_linux_only():
         out = [line.strip() for line in out.stdout.splitlines()]
         header = ["reason", "identity", "executor", "reproducer"]
         out = [dict(zip(header, record)) for record in csv.reader(out) if record]
-        assert out[0] == dict(
-            zip(header, header)
-        ), "ensure that first entry in csv is the header"
+        assert out[0] == dict(zip(header, header)), (
+            "ensure that first entry in csv is the header"
+        )
         out = [repro for repro in out if repro.get("reason", "").startswith("test.")]
         assert len(out) == 2, "out should have 2 test lines: `{}`".format(out)
         repros = {repro["reason"]: repro for repro in out}
 
         # test discovery
         discovery = repros["test.discovery"]
-        assert discovery["identity"] == "buck2/tests/targets/rules/go/test:test"
+        assert discovery["identity"] == "fbcode//buck2/tests/targets/rules/go/test:test"
 
         # test running
         repro = repros["test.run"]
         assert repro["reason"] == "test.run"
-        assert repro["identity"] == "buck2/tests/targets/rules/go/test:test"
+        assert repro["identity"] == "fbcode//buck2/tests/targets/rules/go/test:test"
 
 
 # TODO: This would be more reliable if it were an isolated test.

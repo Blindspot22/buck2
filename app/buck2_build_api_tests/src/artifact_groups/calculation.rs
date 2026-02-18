@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ use buck2_build_api::analysis::AnalysisResult;
 use buck2_build_api::analysis::registry::RecordedAnalysisValues;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::artifact_groups::TransitiveSetProjectionKey;
+use buck2_build_api::artifact_groups::TransitiveSetProjectionWrapper;
 use buck2_build_api::artifact_groups::calculation::ArtifactGroupCalculation;
 use buck2_build_api::artifact_groups::deferred::TransitiveSetKey;
 use buck2_build_api::context::SetBuildContextData;
@@ -26,8 +28,8 @@ use buck2_build_api::interpreter::rule_defs::transitive_set::TransitiveSetOrderi
 use buck2_build_api::keep_going::HasKeepGoing;
 use buck2_common::dice::cells::SetCellResolver;
 use buck2_common::dice::data::testing::SetTestingIoProvider;
-use buck2_common::file_ops::FileMetadata;
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_common::file_ops::testing::TestFileOps;
 use buck2_common::legacy_configs::configs::LegacyBuckConfig;
 use buck2_common::legacy_configs::dice::inject_legacy_config_for_test;
@@ -53,6 +55,7 @@ use maplit::btreemap;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::OwnedFrozenValueTyped;
 
+use crate::interpreter::transitive_set::testing::TSET_TEST_LOCK;
 use crate::interpreter::transitive_set::testing::new_transitive_set;
 
 fn mock_analysis_for_tsets(
@@ -99,7 +102,10 @@ fn mock_analysis_for_tsets(
 }
 
 #[tokio::test]
-async fn test_ensure_artifact_group() -> anyhow::Result<()> {
+async fn test_ensure_artifact_group() -> buck2_error::Result<()> {
+    // Serialize with other tests that use make_tset() and its shared global counter
+    let _guard = TSET_TEST_LOCK.lock().unwrap();
+
     let digest_config = DigestConfig::testing_default();
 
     let set = new_transitive_set(indoc!(
@@ -196,7 +202,7 @@ async fn test_ensure_artifact_group() -> anyhow::Result<()> {
     let mut extra = UserComputationData::new();
     extra.set_keep_going(true);
 
-    let mut dice = dice_builder.build(extra)?;
+    let mut dice = dice_builder.build(extra).unwrap();
     dice.set_cell_resolver(cell_resolver)?;
     dice.set_buck_out_path(None)?;
     inject_legacy_config_for_test(&mut dice, cell_parent, LegacyBuckConfig::empty())?;
@@ -204,10 +210,14 @@ async fn test_ensure_artifact_group() -> anyhow::Result<()> {
 
     let result = dice
         .ensure_artifact_group(&ArtifactGroup::TransitiveSetProjection(Arc::new(
-            TransitiveSetProjectionKey {
-                key: set.key.dupe(),
-                projection: 0,
-            },
+            TransitiveSetProjectionWrapper::new(
+                TransitiveSetProjectionKey {
+                    key: set.key.dupe(),
+                    projection: 0,
+                },
+                false,
+                false,
+            ),
         )))
         .await?
         .iter()

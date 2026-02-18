@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 // This triggers on Arc<Arc<...>>, but we do that here for lifetime/ownership reasons
@@ -23,11 +24,12 @@ use buck2_core::buck2_env;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
 use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_re_configuration::RemoteExecutionStaticMetadata;
 use chrono::DateTime;
 use chrono::Utc;
@@ -55,6 +57,7 @@ use crate::re::action_identity::ReActionIdentity;
 use crate::re::client::ActionCacheWriteType;
 use crate::re::client::ExecuteResponseOrCancelled;
 use crate::re::client::RemoteExecutionClient;
+use crate::re::metadata::RemoteExecutionMetadataExt;
 use crate::re::re_get_session_id::ReGetSessionId;
 use crate::re::stats::RemoteExecutionClientStats;
 use crate::re::uploader::UploadStats;
@@ -146,7 +149,7 @@ impl LazyRemoteExecutionClient {
         let init_fut = async move { self.init().boxed().await };
         match self.client.get_or_init(init_fut).await {
             Ok(v) => Ok(v),
-            Err(e) => Err(e.dupe().into()),
+            Err(e) => Err(e.dupe()),
         }
     }
 
@@ -333,7 +336,7 @@ impl UnconfiguredRemoteExecutionClient {
     fn lock(&self) -> buck2_error::Result<Arc<Arc<LazyRemoteExecutionClient>>> {
         self.data
             .upgrade()
-            .buck_error_context("Internal error: the underlying RE connection has terminated because the corresponding guard has been dropped.")
+            .ok_or_else(|| internal_error!("Internal error: the underlying RE connection has terminated because the corresponding guard has been dropped."))
     }
 
     pub async fn get_session_id(&self) -> buck2_error::Result<String> {
@@ -380,6 +383,7 @@ impl ManagedRemoteExecutionClient {
         input_dir: &ActionImmutableDirectory,
         identity: Option<&ReActionIdentity<'_>>,
         digest_config: DigestConfig,
+        deduplicate_get_digests_ttl_calls: bool,
     ) -> buck2_error::Result<UploadStats> {
         self.lock()?
             .get()
@@ -393,6 +397,7 @@ impl ManagedRemoteExecutionClient {
                 self.use_case,
                 identity,
                 digest_config,
+                deduplicate_get_digests_ttl_calls,
             )
             .await
     }
@@ -420,6 +425,7 @@ impl ManagedRemoteExecutionClient {
         action_digest: ActionDigest,
         platform: &RE::Platform,
         dependencies: impl IntoIterator<Item = &'a RemoteExecutorDependency>,
+        re_gang_workers: &[buck2_core::execution_types::executor_config::ReGangWorker],
         identity: &ReActionIdentity<'_>,
         manager: &mut CommandExecutionManager,
         skip_cache_read: bool,
@@ -428,6 +434,8 @@ impl ManagedRemoteExecutionClient {
         re_resource_units: Option<i64>,
         knobs: &ExecutorGlobalKnobs,
         meta_internal_extra_params: &MetaInternalExtraParams,
+        worker_tool_action_digest: Option<ActionDigest>,
+        priority: Option<i32>,
     ) -> buck2_error::Result<ExecuteResponseOrCancelled> {
         self.lock()?
             .get()
@@ -436,6 +444,7 @@ impl ManagedRemoteExecutionClient {
                 action_digest,
                 platform,
                 dependencies,
+                re_gang_workers,
                 self.use_case,
                 identity,
                 manager,
@@ -445,6 +454,8 @@ impl ManagedRemoteExecutionClient {
                 re_resource_units,
                 knobs,
                 meta_internal_extra_params,
+                worker_tool_action_digest,
+                priority,
             )
             .await
     }
@@ -495,7 +506,7 @@ impl ManagedRemoteExecutionClient {
         self.lock()?
             .get()
             .await?
-            .get_digest_expirations(digests, self.use_case)
+            .get_digest_expirations(digests, self.use_case.metadata(None))
             .await
     }
 

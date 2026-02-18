@@ -1,5 +1,5 @@
-load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_binary.bzl", "rust_binary")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
 
 oncall("build_infra")
 
@@ -24,7 +24,6 @@ rust_binary(
             "fbsource//third-party/rust:smallvec",
             "fbsource//third-party/rust:thiserror",
             "//buck2/app/buck2_miniperf_proto:buck2_miniperf_proto",
-            "//buck2/app/buck2_util:buck2_util",
         ],
     }),
 )

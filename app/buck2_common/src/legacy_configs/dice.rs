@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Dice operations for legacy configuration
@@ -17,8 +18,8 @@ use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_core::cells::name::CellName;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::dispatch::get_dispatcher;
-use buck2_futures::cancellation::CancellationContext;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::DiceProjectionComputations;
@@ -27,7 +28,9 @@ use dice::InjectedKey;
 use dice::Key;
 use dice::OpaqueValue;
 use dice::ProjectionKey;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
 
 use crate::dice::cells::HasCellResolver;
 use crate::legacy_configs::cells::BuckConfigBasedCells;
@@ -155,7 +158,7 @@ pub trait HasLegacyConfigs {
 pub trait SetLegacyConfigs {
     fn set_legacy_config_external_data(
         &mut self,
-        overrides: Arc<ExternalBuckconfigData>,
+        overrides: ExternalBuckconfigData,
     ) -> buck2_error::Result<()>;
 
     fn set_none_legacy_config_external_data(&mut self) -> buck2_error::Result<()>;
@@ -173,7 +176,7 @@ impl InjectedKey for LegacyExternalBuckConfigDataKey {
     }
 }
 
-#[derive(Clone, Display, Debug, Hash, Eq, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Hash, Eq, PartialEq, Allocative, Pagable)]
 #[display("LegacyBuckConfigForCellKey({})", self.cell_name)]
 struct LegacyBuckConfigForCellKey {
     cell_name: CellName,
@@ -195,7 +198,7 @@ impl Key for LegacyBuckConfigForCellKey {
             .with_buck_error_context(|| {
                 format!("Computing legacy buckconfigs for cell `{}`", self.cell_name)
             })?;
-        let config = config.filter_values(should_keep_config_change);
+        let config = config.filter_values(is_config_invisible_to_dice);
 
         let event = buck2_data::CellHasNewConfigs {
             cell: self.cell_name.as_str().to_owned(),
@@ -275,9 +278,9 @@ impl HasInjectedLegacyConfigs for DiceComputations<'_> {
     async fn get_injected_external_buckconfig_data(
         &mut self,
     ) -> buck2_error::Result<Arc<ExternalBuckconfigData>> {
-        self.compute(&LegacyExternalBuckConfigDataKey).await?.internal_error(
+        self.compute(&LegacyExternalBuckConfigDataKey).await?.ok_or_else(|| internal_error!(
             "Tried to retrieve LegacyExternalBuckConfigDataKey from the graph, but key has None value"
-        )
+        ))
     }
 
     async fn is_injected_external_buckconfig_data_key_set(&mut self) -> buck2_error::Result<bool> {
@@ -308,7 +311,7 @@ impl HasLegacyConfigs for DiceComputations<'_> {
             .compute_opaque(&LegacyBuckConfigForCellKey { cell_name })
             .await?;
         if let Some(error) = self.projection(&config, &LegacyBuckConfigErrorKey())? {
-            return Err(error.into());
+            return Err(error);
         }
         Ok(OpaqueLegacyBuckConfigOnDice {
             config: Arc::new(config),
@@ -362,10 +365,9 @@ impl HasLegacyConfigs for DiceComputations<'_> {
 impl SetLegacyConfigs for DiceTransactionUpdater {
     fn set_legacy_config_external_data(
         &mut self,
-        data: Arc<ExternalBuckconfigData>,
+        data: ExternalBuckconfigData,
     ) -> buck2_error::Result<()> {
-        // Don't invalidate state if RE use case is overridden.
-        let data = data.filter_values(should_keep_config_change);
+        let data = data.filter_values(is_config_invisible_to_dice);
         Ok(self.changed_to(vec![(
             LegacyExternalBuckConfigDataKey,
             Some(Arc::new(data)),
@@ -377,9 +379,23 @@ impl SetLegacyConfigs for DiceTransactionUpdater {
     }
 }
 
-fn should_keep_config_change(config_key: &BuckconfigKeyRef) -> bool {
-    !(config_key.section == "buck2_re_client" && config_key.property == "override_use_case")
+fn is_config_invisible_to_dice(key: &BuckconfigKeyRef) -> bool {
+    !CONFIGS_INVISIBLE_TO_DICE.contains(key)
 }
+
+/// A set of buckconfigs that are visibile outside of dice, but not within it. Importantly, changes
+/// to these configs do not cause state invalidations.
+// FIXME(JakobDegen): Error if someone tries to read any of these from in dice
+const CONFIGS_INVISIBLE_TO_DICE: &[BuckconfigKeyRef<'static>] = &[
+    BuckconfigKeyRef {
+        section: "buck2_re_client",
+        property: "override_use_case",
+    },
+    BuckconfigKeyRef {
+        section: "scuba",
+        property: "defaults",
+    },
+];
 
 #[cfg(test)]
 mod tests {
@@ -404,12 +420,12 @@ mod tests {
             &[ConfigOverride::flag_no_cell("sec1.d=e")],
         )?;
 
-        assert_eq!(config1.compare(&config1), true);
-        assert_eq!(config2.compare(&config2), true);
-        assert_eq!(config3.compare(&config3), true);
-        assert_eq!(config1.compare(&config2), true);
-        assert_eq!(config1.compare(&config3), false);
-        assert_eq!(config2.compare(&config3), false);
+        assert!(config1.compare(&config1));
+        assert!(config2.compare(&config2));
+        assert!(config3.compare(&config3));
+        assert!(config1.compare(&config2));
+        assert!(!config1.compare(&config3));
+        assert!(!config2.compare(&config3));
 
         Ok(())
     }

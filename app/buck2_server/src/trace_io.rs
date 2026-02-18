@@ -1,15 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_cli_proto::trace_io_request;
 use buck2_cli_proto::trace_io_response;
-use buck2_common::file_ops::RawSymlink;
+use buck2_common::file_ops::metadata::RawSymlink;
 use buck2_common::io::trace::TracingIoProvider;
 use buck2_error::BuckErrorContext;
 use buck2_events::dispatch::span_async;
@@ -22,10 +23,9 @@ pub(crate) async fn trace_io_command(
     context: &ServerCommandContext<'_>,
     req: buck2_cli_proto::TraceIoRequest,
 ) -> buck2_error::Result<buck2_cli_proto::TraceIoResponse> {
-    let start_event = buck2_data::CommandStart {
-        metadata: context.request_metadata().await?,
-        data: Some(buck2_data::TraceIoCommandStart {}.into()),
-    };
+    let start_event = context
+        .command_start_event(buck2_data::TraceIoCommandStart {}.into())
+        .await?;
     span_async(start_event, async move {
         let tracing_provider = TracingIoProvider::from_io(&*context.base_context.daemon.io);
         let respond_with_trace = matches!(
@@ -49,11 +49,10 @@ pub(crate) async fn trace_io_command(
                 relative_symlinks: Vec::new(),
                 external_symlinks: Vec::new(),
             }),
-        }
-        .map_err(Into::into);
+        };
 
         let end_event = command_end(&result, buck2_data::TraceIoCommandEnd {});
-        (result.map_err(Into::into), end_event)
+        (result, end_event)
     })
     .await
 }
@@ -77,7 +76,7 @@ async fn build_response_with_trace(
     let mut external_symlinks = Vec::new();
     for link in provider.trace().symlinks.iter() {
         match &link.to {
-            RawSymlink::Relative(to) => {
+            RawSymlink::Relative(to, _) => {
                 relative_symlinks.push(trace_io_response::RelativeSymlink {
                     link: link.at.to_string(),
                     target: to.to_string(),
@@ -97,15 +96,24 @@ async fn build_response_with_trace(
         }
     }
 
+    let mut trace: Vec<String> = entries.into_iter().map(|path| path.to_string()).collect();
+    trace.sort_unstable();
+
+    let mut external_entries: Vec<String> = provider
+        .trace()
+        .external_entries()
+        .into_iter()
+        .map(|path| path.to_string())
+        .collect();
+    external_entries.sort_unstable();
+
+    relative_symlinks.sort_unstable_by(|a, b| a.link.cmp(&b.link));
+    external_symlinks.sort_unstable_by(|a, b| a.link.cmp(&b.link));
+
     Ok(buck2_cli_proto::TraceIoResponse {
         enabled: true,
-        trace: entries.into_iter().map(|path| path.to_string()).collect(),
-        external_entries: provider
-            .trace()
-            .external_entries()
-            .into_iter()
-            .map(|path| path.to_string())
-            .collect(),
+        trace,
+        external_entries,
         relative_symlinks,
         external_symlinks,
     })

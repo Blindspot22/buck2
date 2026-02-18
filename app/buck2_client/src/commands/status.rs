@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
@@ -17,22 +18,14 @@ use buck2_client_ctx::daemon::client::connect::connect_buckd;
 use buck2_client_ctx::daemon::client::connect::establish_connection_existing;
 use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::subscribers::stdout_stderr_forwarder::StdoutStderrForwarder;
-use buck2_client_ctx::subscribers::subscribers::EventSubscribers;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
 use buck2_common::daemon_dir::DaemonDir;
-use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use chrono::DateTime;
 use humantime::format_duration;
 use walkdir::WalkDir;
-
-#[derive(Debug, buck2_error::Error)]
-#[buck2(tag = Input)]
-enum StatusError {
-    #[error("Incorrect seconds/nanos argument")]
-    NativeDateTime,
-}
 
 #[derive(Debug, clap::Parser)]
 #[clap(about = "Buckd status")]
@@ -41,6 +34,8 @@ pub struct StatusCommand {
     snapshot: bool,
     #[clap(long, help = "Enable printing status for all running buckd")]
     all: bool,
+    #[clap(long, help = "Enable printing metrics from the Tokio runtime")]
+    include_tokio_runtime_metrics: bool,
 }
 
 impl StatusCommand {
@@ -50,8 +45,7 @@ impl StatusCommand {
         ctx: ClientCommandContext<'_>,
     ) -> buck2_error::Result<()> {
         ctx.with_runtime(|ctx| async move {
-            let mut events_ctx =
-                EventsCtx::new(EventSubscribers::new(vec![Box::new(StdoutStderrForwarder)]));
+            let mut events_ctx = EventsCtx::new(None, vec![Box::new(StdoutStderrForwarder)]);
             if self.all {
                 let mut daemon_dirs = Vec::new();
                 let root = ctx.paths()?.roots.common_buckd_dir()?;
@@ -77,7 +71,11 @@ impl StatusCommand {
                             bootstrap_client
                                 .to_connector()
                                 .with_flushing()
-                                .status(&mut events_ctx, self.snapshot)
+                                .status(
+                                    &mut events_ctx,
+                                    self.snapshot,
+                                    self.include_tokio_runtime_metrics,
+                                )
                                 .await?,
                         )?);
                     }
@@ -100,7 +98,11 @@ impl StatusCommand {
                         let json_status = process_status(
                             client
                                 .with_flushing()
-                                .status(&mut events_ctx, self.snapshot)
+                                .status(
+                                    &mut events_ctx,
+                                    self.snapshot,
+                                    self.include_tokio_runtime_metrics,
+                                )
                                 .await?,
                         )?;
                         buck2_client_ctx::println!(
@@ -122,7 +124,7 @@ impl StatusCommand {
 
 fn timestamp_to_string(seconds: u64, nanos: u32) -> buck2_error::Result<String> {
     Ok(DateTime::from_timestamp(seconds as i64, nanos)
-        .buck_error_context(StatusError::NativeDateTime)?
+        .ok_or_else(|| internal_error!("Incorrect seconds/nanos argument"))?
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string())
 }
@@ -158,6 +160,10 @@ fn process_status(status: StatusResponse) -> buck2_error::Result<serde_json::Val
         "http2": status.http2,
         "io_provider": status.io_provider,
     });
+
+    if let Some(tokio_runtime_metrics) = status.tokio_runtime_metrics {
+        value["tokio_runtime_metrics"] = serde_json::to_value(tokio_runtime_metrics)?;
+    }
 
     if let Some(valid_working_directory) = status.valid_working_directory {
         value["valid_working_directory"] = serde_json::to_value(valid_working_directory)?;

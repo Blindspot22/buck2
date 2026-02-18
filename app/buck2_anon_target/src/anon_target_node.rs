@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -23,13 +23,15 @@ use buck2_build_api::anon_target::AnonTargetDependentAnalysisResults;
 use buck2_build_api::anon_target::AnonTargetDyn;
 use buck2_build_api::artifact_groups::promise::PromiseArtifactId;
 use buck2_build_api::artifact_groups::promise::PromiseArtifactResolveError;
-use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::configuration::pair::ConfigurationNoExec;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKeyDyn;
+use buck2_core::deferred::base_deferred_key::PathResolutionError;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_core::fs::buck_out_path::BuckOutPathKind;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
@@ -37,10 +39,10 @@ use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_data::ToProtoMessage;
 use buck2_data::action_key_owner::BaseDeferredKeyProto;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_node::rule_type::StarlarkRuleType;
 use buck2_util::strong_hasher::Blake3StrongHasher;
-use buck2_util::strong_hasher::USE_CORRECT_ANON_TARGETS_HASH;
 use cmp_any::PartialEqAny;
 use dupe::Dupe;
 use fxhash::FxHasher;
@@ -72,16 +74,6 @@ pub(crate) struct AnonTarget {
     exec_cfg: ConfigurationNoExec,
     /// Variant of the anon target, either bxl or bzl.
     variant: AnonTargetVariant,
-    /// The hash of the `rule_type` and `attrs` for bzl anon targets.
-    /// Or
-    /// The hash of the `rule_type`, `attrs` and `global_cfg_options` for bxl anon targets.
-    ///
-    /// FIXME(JakobDegen): We use this to disambiguate artifact paths, so hashing only some of these
-    /// values is super dangerous - if there's anything we forget to include in the path, we get
-    /// what is effectively UB
-    ///
-    /// FIXME(JakobDegen): This needs to use a strong hash
-    partial_hash: String,
     /// The cached strong hash value - we do have to cache this, it's quite perf sensitive
     strong_hash: u64,
     strong_hash_str: String,
@@ -129,14 +121,6 @@ impl AnonTarget {
         exec_cfg: ConfigurationNoExec,
         variant: AnonTargetVariant,
     ) -> Self {
-        let mut hasher = DefaultHasher::new();
-        rule_type.hash(&mut hasher);
-        attrs.hash(&mut hasher);
-        if let AnonTargetVariant::Bxl(global_cfg_options) = &variant {
-            global_cfg_options.hash(&mut hasher);
-        }
-        let partial_hash = format!("{:x}", hasher.finish());
-
         let mut full_hash = FxHasher::default();
         rule_type.hash(&mut full_hash);
         name.hash(&mut full_hash);
@@ -152,7 +136,7 @@ impl AnonTarget {
         exec_cfg.hash(&mut strong_hash);
         variant.hash(&mut strong_hash);
         let strong_hash = strong_hash.finish();
-        let strong_hash_str = format!("{:x}", strong_hash);
+        let strong_hash_str = format!("{strong_hash:x}");
 
         AnonTarget {
             name,
@@ -160,7 +144,6 @@ impl AnonTarget {
             attrs,
             exec_cfg,
             variant,
-            partial_hash,
             hash: full_hash,
             strong_hash,
             strong_hash_str,
@@ -177,11 +160,7 @@ impl AnonTarget {
 
     /// The hash that is used in anon target artifact paths
     fn path_hash(&self) -> &str {
-        if *USE_CORRECT_ANON_TARGETS_HASH.get().unwrap() {
-            &self.strong_hash_str
-        } else {
-            &self.partial_hash
-        }
+        &self.strong_hash_str
     }
 
     pub(crate) fn exec_cfg(&self) -> &ConfigurationNoExec {
@@ -210,8 +189,8 @@ impl AnonTargetDyn for AnonTarget {
 
     fn resolve_attrs<'v>(
         &self,
-        env: &'v Module,
-        dependents_analyses: AnonTargetDependentAnalysisResults<'v>,
+        env: &Module<'v>,
+        dependents_analyses: AnonTargetDependentAnalysisResults<'_>,
         exec_resolution: ExecutionPlatformResolution,
     ) -> buck2_error::Result<ValueOfUncheckedGeneric<Value<'v>, StructRef<'static>>> {
         let dep_analysis_results =
@@ -219,7 +198,7 @@ impl AnonTargetDyn for AnonTarget {
 
         // No attributes are allowed to contain macros or other stuff, so an empty resolution context works
         let rule_analysis_attr_resolution_ctx = RuleAnalysisAttrResolutionContext {
-            module: &env,
+            module: env,
             dep_analysis_results,
             query_results: HashMap::new(),
             execution_platform_resolution: exec_resolution,
@@ -257,7 +236,7 @@ impl AnonTargetDyn for AnonTarget {
 
             let promise_id = PromiseArtifactId::new(BaseDeferredKey::AnonTarget(self.dupe()), id);
 
-            match ValueAsArtifactLike::unpack_value(artifact)? {
+            match ValueAsInputArtifactLike::unpack_value(artifact)? {
                 Some(artifact) => {
                     fulfilled_artifact_mappings
                         .insert(promise_id.clone(), artifact.0.get_bound_artifact()?);
@@ -279,7 +258,7 @@ impl AnonTargetDyn for AnonTarget {
 }
 
 impl BaseDeferredKeyDyn for AnonTarget {
-    fn eq_token(&self) -> PartialEqAny {
+    fn eq_token(&self) -> PartialEqAny<'_> {
         PartialEqAny::new(self)
     }
 
@@ -297,7 +276,9 @@ impl BaseDeferredKeyDyn for AnonTarget {
         prefix: &ForwardRelativePath,
         action_key: Option<&str>,
         path: &ForwardRelativePath,
-    ) -> ProjectRelativePathBuf {
+        path_resolution_method: BuckOutPathKind,
+        content_hash: Option<&ContentBasedPathHash>,
+    ) -> buck2_error::Result<ProjectRelativePathBuf> {
         let cell_relative_path = self.name().pkg().cell_relative_path().as_str();
 
         // It is performance critical that we use slices and allocate via `join` instead of
@@ -309,15 +290,31 @@ impl BaseDeferredKeyDyn for AnonTarget {
             prefix.as_str(),
             "-anon/",
             self.name().pkg().cell_name().as_str(),
-            "/",
-            self.exec_cfg().cfg().output_hash().as_str(),
+            if path_resolution_method == BuckOutPathKind::Configuration {
+                "/"
+            } else {
+                ""
+            },
+            if path_resolution_method == BuckOutPathKind::Configuration {
+                self.exec_cfg().cfg().output_hash().as_str()
+            } else {
+                ""
+            },
             cell_relative_path,
             if cell_relative_path.is_empty() {
                 ""
             } else {
                 "/"
             },
-            self.path_hash(),
+            if path_resolution_method == BuckOutPathKind::Configuration {
+                self.path_hash()
+            } else if let Some(content_hash) = content_hash {
+                content_hash.as_str()
+            } else {
+                return Err(PathResolutionError::ContentBasedPathWithNoContentHash(
+                    path.to_buf(),
+                ))?;
+            },
             "/__",
             self.name().name().as_str(),
             "__",
@@ -327,7 +324,7 @@ impl BaseDeferredKeyDyn for AnonTarget {
             path.as_str(),
         ];
 
-        ProjectRelativePathBuf::unchecked_new(parts.concat())
+        Ok(ProjectRelativePathBuf::unchecked_new(parts.concat()))
     }
 
     fn configured_label(&self) -> Option<ConfiguredTargetLabel> {
@@ -347,5 +344,26 @@ impl BaseDeferredKeyDyn for AnonTarget {
             AnonTargetVariant::Bzl => None,
             AnonTargetVariant::Bxl(global_cfg_options) => Some(global_cfg_options.dupe()),
         }
+    }
+}
+
+impl buck2_interpreter::dice::starlark_provider::DynEvalKindKey for AnonTarget {
+    fn hash(&self, state: &mut dyn Hasher) {
+        state.write_u64(self.hash);
+    }
+
+    fn strong_hash(&self, state: &mut dyn Hasher) {
+        state.write_u64(self.strong_hash);
+    }
+
+    fn eq(&self, other: &dyn buck2_interpreter::dice::starlark_provider::DynEvalKindKey) -> bool {
+        match other.as_any().downcast_ref::<Self>() {
+            None => false,
+            Some(v) => v == self,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

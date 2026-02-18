@@ -1,16 +1,18 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 import json
 import re
+import sys
 from enum import Enum
-from typing import Dict, TextIO
+from typing import Optional, TextIO
 
 
 class _ReGroupName(str, Enum):
@@ -33,7 +35,7 @@ _re_string: str = "\\$(?P<{openparen}>[\\{{\\(])(?P<{variable}>[^\\}}\\):]+)(?::
 
 def _make_substitution_dict(
     substitutions_json_file: TextIO, product_name: str
-) -> Dict[str, str]:
+) -> dict[str, str]:
     result = {
         "EXECUTABLE_NAME": product_name,
         "PRODUCT_NAME": product_name,
@@ -45,8 +47,18 @@ def _make_substitution_dict(
 
 
 def _process_line(
-    line: str, pattern: re.Pattern[str], substitutions: Dict[str, str]
+    line: str,
+    pattern: re.Pattern[str],
+    substitutions: dict[str, str],
+    minimum_os_version_key: Optional[str],
 ) -> str:
+    if (
+        minimum_os_version_key is not None
+        and line.strip() == f"<key>{minimum_os_version_key}</key>"
+    ):
+        print("Found minimum OS version key in plist file", file=sys.stderr)
+        sys.exit(1)
+
     result = line
     pos = 0
     substituted_keys = set()
@@ -56,7 +68,7 @@ def _process_line(
             break
         key = match.group(_ReGroupName.variable)
         if key in substituted_keys:
-            raise RuntimeError("Recursive plist variable: ... -> {} -> ...".format(key))
+            raise RuntimeError(f"Recursive plist variable: ... -> {key} -> ...")
         if key in substitutions:
             result = (
                 result[: match.start()] + substitutions[key] + result[match.end() :]
@@ -77,8 +89,11 @@ def preprocess(
     output_file: TextIO,
     substitutions_file: TextIO,
     product_name: str,
+    minimum_os_version_key: Optional[str] = None,
 ) -> None:
     pattern = re.compile(_re_string)
     substitutions = _make_substitution_dict(substitutions_file, product_name)
     for line in input_file:
-        output_file.write(_process_line(line, pattern, substitutions))
+        output_file.write(
+            _process_line(line, pattern, substitutions, minimum_os_version_key)
+        )

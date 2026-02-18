@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -49,7 +50,7 @@ pub(crate) fn gen_fbs(
     data: Vec<ConfiguredTargetNode>,
     actions: Vec<(String, ActionEntryData)>,
     changed_files: Vec<ChangedFilesEntryData>,
-) -> anyhow::Result<FlatBufferBuilder<'static>> {
+) -> buck2_error::Result<FlatBufferBuilder<'static>> {
     // associate actions and changed files with targets when possible
     let (target_data, other_actions_data, other_changed_files) = {
         // These are in case we need to debug orphan actions or changed files
@@ -128,7 +129,7 @@ pub(crate) fn gen_fbs(
 fn target_to_fbs<'a>(
     builder: &'_ mut FlatBufferBuilder<'static>,
     data: &'_ TargetData,
-) -> anyhow::Result<WIPOffset<fbs::ConfiguredTargetNode<'a>>, anyhow::Error> {
+) -> buck2_error::Result<WIPOffset<fbs::ConfiguredTargetNode<'a>>> {
     let node = &data.node;
 
     let actions = {
@@ -386,7 +387,7 @@ mod tests {
             Some("cell/pkg/BUCK")
         );
         assert_eq!(target.code_pointer().unwrap().line(), 0);
-        assert_eq!(target.deps().unwrap().is_empty(), true);
+        assert!(target.deps().unwrap().is_empty());
 
         let target2 = build.targets().unwrap().get(1);
         assert_eq!(

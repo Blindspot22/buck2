@@ -1,18 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Testing utilities for Superconsole.
 use std::any::Any;
 
-use anyhow::Context as _;
-
 use crate::Dimensions;
+use crate::error::OutputError;
+use crate::output::OutputTarget;
 use crate::output::SuperConsoleOutput;
 use crate::superconsole::SuperConsole;
 
@@ -24,6 +25,18 @@ pub struct TestOutput {
     pub terminal_size: Dimensions,
     /// The frames that were written to this output.
     pub frames: Vec<Vec<u8>>,
+    /// Whether auxiliary output is compatible with tty
+    aux_stream_is_tty: bool,
+}
+
+impl TestOutput {
+    fn aux_prefix() -> &'static str {
+        "AUX PREFIX: "
+    }
+
+    pub fn aux_output_with_prefix(content: &str) -> String {
+        format!("{}{}", Self::aux_prefix(), content)
+    }
 }
 
 impl SuperConsoleOutput for TestOutput {
@@ -31,16 +44,36 @@ impl SuperConsoleOutput for TestOutput {
         self.should_render
     }
 
-    fn output(&mut self, buffer: Vec<u8>) -> anyhow::Result<()> {
+    fn output(&mut self, buffer: Vec<u8>) -> Result<(), OutputError> {
         self.frames.push(buffer);
         Ok(())
     }
 
-    fn terminal_size(&self) -> anyhow::Result<Dimensions> {
+    fn output_to(&mut self, buffer: Vec<u8>, target: OutputTarget) -> Result<(), OutputError> {
+        match target {
+            OutputTarget::Main => self.output(buffer),
+            OutputTarget::Aux => {
+                let output = Self::aux_prefix()
+                    .as_bytes()
+                    .iter()
+                    .copied()
+                    .chain(buffer.into_iter())
+                    .collect::<Vec<u8>>();
+                self.frames.push(output);
+                Ok(())
+            }
+        }
+    }
+
+    fn aux_stream_is_tty(&self) -> bool {
+        self.aux_stream_is_tty
+    }
+
+    fn terminal_size(&self) -> Result<Dimensions, OutputError> {
         Ok(self.terminal_size)
     }
 
-    fn finalize(self: Box<Self>) -> anyhow::Result<()> {
+    fn finalize(self: Box<Self>) -> Result<(), OutputError> {
         Ok(())
     }
 
@@ -54,27 +87,35 @@ impl SuperConsoleOutput for TestOutput {
 }
 
 pub trait SuperConsoleTestingExt {
-    fn test_output(&self) -> anyhow::Result<&TestOutput>;
-    fn test_output_mut(&mut self) -> anyhow::Result<&mut TestOutput>;
+    fn test_output(&self) -> &TestOutput;
+    fn test_output_mut(&mut self) -> &mut TestOutput;
 }
 
 impl SuperConsoleTestingExt for SuperConsole {
-    fn test_output(&self) -> anyhow::Result<&TestOutput> {
+    fn test_output(&self) -> &TestOutput {
         self.output
             .as_any()
             .downcast_ref()
-            .context("Downcast failed")
+            .expect("Downcast failed")
     }
 
-    fn test_output_mut(&mut self) -> anyhow::Result<&mut TestOutput> {
+    fn test_output_mut(&mut self) -> &mut TestOutput {
         self.output
             .as_any_mut()
             .downcast_mut()
-            .context("Downcast failed")
+            .expect("Downcast failed")
     }
 }
 
 pub fn test_console() -> SuperConsole {
+    test_console_inner(true)
+}
+
+pub fn test_console_aux_incompatible() -> SuperConsole {
+    test_console_inner(false)
+}
+
+fn test_console_inner(aux_stream_is_tty: bool) -> SuperConsole {
     let size = Dimensions {
         width: 80,
         height: 80,
@@ -85,6 +126,7 @@ pub fn test_console() -> SuperConsole {
             should_render: true,
             terminal_size: size,
             frames: Vec::new(),
+            aux_stream_is_tty,
         }),
     )
 }

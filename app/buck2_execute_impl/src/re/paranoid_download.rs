@@ -1,20 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use allocative::Allocative;
-use buck2_core::fs::fs_util;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
-use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::execute::blocking::IoRequest;
 use buck2_execute::execute::clean_output_paths::CleanOutputPaths;
@@ -23,9 +22,12 @@ use buck2_execute::execute::manager::CommandExecutionManagerExt;
 use buck2_execute::execute::manager::CommandExecutionManagerWithClaim;
 use buck2_execute::execute::result::CommandExecutionResult;
 use buck2_execute::materialize::materializer::CasDownloadInfo;
+use buck2_execute::materialize::materializer::DeclareArtifactPayload;
 use buck2_execute::materialize::materializer::Materializer;
 use buck2_execute::re::manager::ReConnectionManager;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
@@ -72,7 +74,7 @@ impl ParanoidDownloader {
         materializer: &dyn Materializer,
         manager: CommandExecutionManager,
         info: CasDownloadInfo,
-        artifacts: Vec<(ProjectRelativePathBuf, ArtifactValue)>,
+        artifacts: Vec<DeclareArtifactPayload>,
         cancellations: &CancellationContext,
     ) -> ControlFlow<CommandExecutionResult, CommandExecutionManagerWithClaim> {
         let inner = self.inner.dupe();
@@ -81,11 +83,17 @@ impl ParanoidDownloader {
 
         let cache_artifacts = artifacts
             .iter()
-            .map(|(path, value)| {
-                let path = inner.cache_path.join(path);
-                paths_to_clean.push(path.clone());
-                (path, value.dupe())
-            })
+            .map(
+                |DeclareArtifactPayload {
+                     path,
+                     artifact: value,
+                     persist_full_directory_structure: _,
+                 }| {
+                    let path = inner.cache_path.join(path);
+                    paths_to_clean.push(path.clone());
+                    (path, value.dupe())
+                },
+            )
             .collect::<Vec<_>>();
 
         let future = tokio::task::spawn(async move {
@@ -108,10 +116,7 @@ impl ParanoidDownloader {
 
             buck2_error::Result::Ok(())
         })
-        .map(|r| match r {
-            Ok(r) => r,
-            Err(e) => Err(e.into()),
-        })
+        .map(|r| r.unwrap_or_else(|e| Err(e.into())))
         .boxed()
         .shared();
 
@@ -141,14 +146,16 @@ impl ParanoidDownloader {
                     .io
                     .execute_io(
                         Box::new(CleanOutputPaths {
-                            paths: artifacts.map(|(p, _)| p.to_owned()),
+                            paths: artifacts
+                                .map(|DeclareArtifactPayload { path: p, .. }| p.to_owned()),
                         }),
                         cancellations,
                     )
                     .await?;
 
-                let mapping =
-                    artifacts.map(|(path, _)| (self.inner.cache_path.join(path), path.clone()));
+                let mapping = artifacts.map(|DeclareArtifactPayload { path, .. }| {
+                    (self.inner.cache_path.join(path), path.clone())
+                });
 
                 self.inner
                     .io
@@ -236,7 +243,7 @@ impl IoRequest for MoveOutputsIntoPlace {
 
             tracing::trace!(from = %from, to = %to, "Move path");
 
-            fs_util::rename(&from, &to)?;
+            fs_util::rename(&from, &to).categorize_internal()?;
         }
 
         Ok(())

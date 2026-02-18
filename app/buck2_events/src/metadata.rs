@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Metadata collection, for telemetry purposes.
@@ -16,10 +17,10 @@ use buck2_core::ci::ci_identifiers;
 use buck2_core::facebook_only;
 use buck2_wrapper_common::BUCK2_WRAPPER_ENV_VAR;
 
-use crate::daemon_id::DAEMON_UUID;
+use crate::daemon_id::DaemonId;
 
 /// Collects metadata from the current binary and environment and writes it as map, suitable for telemetry purposes.
-pub fn collect() -> HashMap<String, String> {
+pub fn collect(daemon: &DaemonId) -> HashMap<String, String> {
     facebook_only();
     fn add_env_var(map: &mut HashMap<String, String>, key: &'static str, var: &'static str) {
         if let Ok(data) = env::var(var) {
@@ -66,11 +67,15 @@ pub fn collect() -> HashMap<String, String> {
     }
 
     // Global trace ID
-    map.insert("daemon_uuid".to_owned(), DAEMON_UUID.to_string());
+    map.insert("daemon_uuid".to_owned(), daemon.to_string());
 
     map.insert("os".to_owned(), info.os);
     if let Some(version) = info.os_version {
         map.insert("os_version".to_owned(), version);
+    }
+
+    if let Some(environment) = environment() {
+        map.insert("environment".to_owned(), environment);
     }
 
     add_env_var(&mut map, "launched_via_wrapper", BUCK2_WRAPPER_ENV_VAR);
@@ -172,6 +177,19 @@ pub fn devx_session_id() -> Option<String> {
     }
 }
 
+pub fn environment() -> Option<String> {
+    #[cfg(fbcode_build)]
+    {
+        use hostcaps::get_env;
+
+        Some(get_env().to_string().to_lowercase())
+    }
+    #[cfg(not(fbcode_build))]
+    {
+        None
+    }
+}
+
 pub fn username() -> buck2_error::Result<Option<String>> {
     #[cfg(fbcode_build)]
     {
@@ -205,7 +223,7 @@ mod tests {
 
     #[test]
     fn os_version_produces_reasonable_windows_version() {
-        let data = collect();
+        let data = collect(&DaemonId::new());
         // This logic used to use the `GetVersionExW` win32 API, which
         // always returns the value below on recent versions of windows. See
         // https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getversionexw

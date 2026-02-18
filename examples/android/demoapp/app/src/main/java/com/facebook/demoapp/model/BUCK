@@ -1,0 +1,12 @@
+oncall("build_infra")
+
+android_library(
+    name = "model",
+    srcs = glob(["*.kt"]),
+    # We should make default language Kotlin
+    language = "KOTLIN",
+    visibility = ["PUBLIC"],
+    deps = [
+        "//app/libs/androidx/annotation/annotation:annotation",
+    ],
+)

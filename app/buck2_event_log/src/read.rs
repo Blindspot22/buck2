@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io;
@@ -20,11 +21,13 @@ use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::bufread::ZstdDecoder;
 use buck2_cli_proto::protobuf_util::ProtobufSplitter;
 use buck2_cli_proto::*;
-use buck2_core::fs::async_fs_util;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::BuckEvent;
+use buck2_fs::async_fs_util;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::abs_path::AbsPathBuf;
 use buck2_wrapper_common::invocation_id::TraceId;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -50,6 +53,39 @@ use crate::utils::KNOWN_ENCODINGS;
 use crate::utils::LogMode;
 
 type EventLogReader<'a> = Box<dyn AsyncRead + Send + Sync + Unpin + 'a>;
+
+/// Check if an error is caused by a truncated compressed stream. This
+/// can happen when reading in-progress event logs that don't have a
+/// proper compression footer yet.
+fn is_truncated_stream_error(error: &buck2_error::Error) -> bool {
+    // Match exact error messages from compression-codecs library:
+    // - zstd/bzip2/lz4: "... stream did not finish"
+    // - gzip: "unexpected end of file" (default UnexpectedEof message)
+    let msg = error.to_string().to_lowercase();
+    msg.contains("did not finish") || msg.contains("unexpected end of file")
+}
+
+/// Wrap a stream to treat truncated compressed stream errors as EOF.
+/// This allows reading in-progress event logs that may not have a
+/// proper compression footer yet.
+fn tolerant_of_truncation<T>(
+    stream: impl Stream<Item = buck2_error::Result<T>>,
+) -> impl Stream<Item = buck2_error::Result<T>> {
+    stream.scan(false, |stopped, result| {
+        if *stopped {
+            return futures::future::ready(None);
+        }
+        match result {
+            Ok(item) => futures::future::ready(Some(Ok(item))),
+            Err(e) if is_truncated_stream_error(&e) => {
+                // Treat truncation error as end of stream
+                *stopped = true;
+                futures::future::ready(None)
+            }
+            Err(e) => futures::future::ready(Some(Err(e))),
+        }
+    })
+}
 
 pub struct ReaderStats {
     compressed_bytes: AtomicUsize,
@@ -142,9 +178,9 @@ impl EventLogPathBuf {
     fn file_name(path: &AbsPathBuf) -> buck2_error::Result<&str> {
         let name = path
             .file_name()
-            .with_buck_error_context(|| EventLogInferenceError::NoFilename(path.clone()))?
+            .ok_or_else(|| EventLogInferenceError::NoFilename(path.clone()))?
             .to_str()
-            .with_buck_error_context(|| EventLogInferenceError::InvalidFilename(path.clone()))?;
+            .ok_or_else(|| EventLogInferenceError::InvalidFilename(path.clone()))?;
         Ok(name)
     }
 
@@ -205,7 +241,7 @@ impl EventLogPathBuf {
             .next_line()
             .await
             .buck_error_context("Error reading header line")?
-            .buck_error_context("No header line")?;
+            .ok_or_else(|| internal_error!("No header line"))?;
         let invocation = Invocation::parse_json_line(&header)?;
 
         let events = LinesStream::new(log_lines).map(|line| {
@@ -213,6 +249,9 @@ impl EventLogPathBuf {
             serde_json::from_str::<StreamValue>(&line)
                 .with_buck_error_context(|| format!("Invalid line: {}", line.trim_end()))
         });
+
+        // Wrap in tolerant_of_truncation to handle in-progress logs
+        let events = tolerant_of_truncation(events);
 
         Ok((invocation, events.boxed()))
     }
@@ -229,20 +268,10 @@ impl EventLogPathBuf {
         let invocation = stream
             .try_next()
             .await?
-            .buck_error_context("No invocation found")?;
+            .ok_or_else(|| internal_error!("No invocation found"))?;
         let invocation = buck2_data::Invocation::decode_length_delimited(invocation)
             .buck_error_context("Invalid Invocation")?;
-        let invocation = Invocation {
-            command_line_args: invocation.command_line_args,
-            expanded_command_line_args: invocation.expanded_command_line_args,
-            working_dir: invocation.working_dir,
-            trace_id: invocation
-                .trace_id
-                .map(|t| t.parse())
-                .transpose()
-                .buck_error_context("Invalid TraceId")?
-                .unwrap_or_else(TraceId::null),
-        };
+        let invocation = Invocation::from_proto(invocation);
 
         let events = stream.and_then(|data| async move {
             let val = buck2_cli_proto::CommandProgress::decode_length_delimited(data)
@@ -260,6 +289,9 @@ impl EventLogPathBuf {
             }
         });
 
+        // Wrap in tolerant_of_truncation to handle in-progress logs
+        let events = tolerant_of_truncation(events);
+
         Ok((invocation, events.boxed()))
     }
 
@@ -268,7 +300,7 @@ impl EventLogPathBuf {
         stats: Option<&'a ReaderStats>,
     ) -> buck2_error::Result<(
         Invocation,
-        impl Stream<Item = buck2_error::Result<StreamValue>> + 'a,
+        impl Stream<Item = buck2_error::Result<StreamValue>> + use<'a>,
     )> {
         match self.encoding.mode {
             LogMode::Json => self.unpack_stream_json(stats).await,
@@ -282,7 +314,7 @@ impl EventLogPathBuf {
         stats: &'a ReaderStats,
     ) -> buck2_error::Result<(
         Invocation,
-        impl Stream<Item = buck2_error::Result<StreamValue>> + 'a,
+        impl Stream<Item = buck2_error::Result<StreamValue>> + use<'a>,
     )> {
         self.unpack_stream_inner(Some(stats)).await
     }
@@ -291,7 +323,7 @@ impl EventLogPathBuf {
         &self,
     ) -> buck2_error::Result<(
         Invocation,
-        impl Stream<Item = buck2_error::Result<StreamValue>> + 'static,
+        impl Stream<Item = buck2_error::Result<StreamValue>> + 'static + use<>,
     )> {
         self.unpack_stream_inner(None).await
     }
@@ -314,7 +346,9 @@ impl EventLogPathBuf {
             None => (None, None),
         };
 
-        let file = async_fs_util::open(&self.path).await?;
+        let file = async_fs_util::open(&self.path)
+            .await
+            .categorize_internal()?;
         let file = CountingReader::new(file, compressed_bytes);
         let file = match self.encoding.compression {
             Compression::None => {
@@ -345,13 +379,7 @@ impl EventLogPathBuf {
             })
             .try_next()
             .await?
-            .ok_or_else(|| {
-                buck2_error::buck2_error!(
-                    buck2_error::ErrorTag::EventLog,
-                    "{}",
-                    EventLogErrors::EndOfFile(self.path.to_str().unwrap().to_owned())
-                )
-            })?
+            .ok_or_else(|| EventLogErrors::EndOfFile(self.path.to_str().unwrap().to_owned()))?
             .try_into()?;
         Ok(EventLogSummary {
             trace_id: buck_event.trace_id()?,
@@ -367,12 +395,10 @@ impl EventLogPathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
     use buck2_data::CommandStart;
     use buck2_data::SpanStartEvent;
     use buck2_events::span::SpanId;
+    use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 
     use super::*;
     use crate::file_names::get_logfile_name;
@@ -403,8 +429,7 @@ mod tests {
             SpanStartEvent {
                 data: Some(
                     CommandStart {
-                        data: None,
-                        metadata: HashMap::new(),
+                        ..Default::default()
                     }
                     .into(),
                 ),

@@ -14,7 +14,6 @@ erlang_application(
     applications = [
         "kernel",
         "stdlib",
-        "debugger",
         "prelude//erlang/common_test/common:common",
         "prelude//erlang/common_test/cth_hooks:cth_hooks",
     ],
@@ -34,6 +33,16 @@ erlang_tests(
     contacts = ["whatsapp_testing_infra"],
     labels = ["unit"],
     suites = ["test/ct_executor_SUITE.erl"],
+    deps = [
+        "stdlib",
+        ":test_exec",
+    ],
+)
+
+erlang_tests(
+    contacts = ["whatsapp_testing_infra"],
+    labels = ["unit"],
+    suites = ["test/ct_daemon_capture_SUITE.erl"],
     deps = [
         "stdlib",
         ":test_exec",

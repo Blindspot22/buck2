@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![allow(clippy::ref_option_ref)] // within Serialize
@@ -14,9 +15,9 @@ use std::path::PathBuf;
 
 use buck2_common::cas_digest::CasDigest;
 use buck2_common::cas_digest::TrackedCasDigest;
-use buck2_common::file_ops::FileDigestKind;
-use buck2_core::fs::paths::RelativePathBuf;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_common::file_ops::metadata::FileDigestKind;
+use buck2_fs::paths::RelativePathBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use serde::Serialize;
 use serde::Serializer;
 

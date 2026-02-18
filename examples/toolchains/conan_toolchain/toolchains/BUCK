@@ -1,6 +1,8 @@
 load("@prelude//toolchains:demo.bzl", "system_demo_toolchains")
 load("@prelude//toolchains/conan:defs.bzl", "conan_init", "conan_profile", "system_conan_toolchain")
 
+oncall("build_infra")
+
 system_conan_toolchain(
     name = "conan",
     conan_path = "conan",

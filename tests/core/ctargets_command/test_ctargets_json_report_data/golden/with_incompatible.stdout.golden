@@ -1,0 +1,33 @@
+# This file is @generated, regenerate by re-running test with `-- --env BUCK2_UPDATE_GOLDEN=1` appended to the test command
+
+{
+  "compatible_targets": [
+  {
+    "buck.target":"root//a:target1",
+    "buck.type":"nano_prelude//stub_rules.bzl:stub",
+    "buck.deps":[],
+    "buck.inputs":[],
+    "buck.package":"root//a",
+    "name":"target1",
+    "visibility":[],
+    "within_view":["PUBLIC"]
+  },
+  {
+    "buck.target":"root//a:target2",
+    "buck.type":"nano_prelude//stub_rules.bzl:stub",
+    "buck.deps":[],
+    "buck.inputs":[],
+    "buck.package":"root//a",
+    "name":"target2",
+    "visibility":[],
+    "within_view":["PUBLIC"]
+  }
+  ],
+  "incompatible_targets": [
+  {
+    "buck.target":"root//a:macos_only",
+    "buck.incompatible.cause":"ValidIncompatible",
+    "buck.incompatible.reason":"root//a:macos_only\n    is incompatible with root//:linux_platform#<HASH> (root//:macos unsatisfied), check the target's compatibility attributes"
+  }
+  ]
+}

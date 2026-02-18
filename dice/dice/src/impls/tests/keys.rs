@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::hash::Hash;
@@ -13,8 +14,8 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use derive_more::Display;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future::join3;
@@ -23,7 +24,7 @@ use tokio::sync::Mutex;
 use crate::api::computations::DiceComputations;
 use crate::api::data::DiceData;
 use crate::api::key::Key;
-use crate::impls::dice::DiceModern;
+use crate::impls::dice::Dice;
 
 #[tokio::test]
 async fn concurrent_identical_requests_are_deduped() -> anyhow::Result<()> {
@@ -61,12 +62,12 @@ async fn concurrent_identical_requests_are_deduped() -> anyhow::Result<()> {
         }
     }
 
-    let dice = DiceModern::new(DiceData::new());
+    let dice = Dice::new(DiceData::new());
 
     let guard = Arc::new(Mutex::new(0));
     let _g = guard.lock().await;
 
-    let mut ctx = dice.updater().commit().await;
+    let mut ctx = dice.updater().commit().await.0.0;
 
     let k = &ComputeOnce(guard.dupe());
 
@@ -137,7 +138,7 @@ fn different_requests_are_spawned_in_parallel() -> anyhow::Result<()> {
     let barrier = Arc::new(std::sync::Barrier::new(n_thread));
 
     rt.block_on(async move {
-        let dice = DiceModern::new(DiceData::new());
+        let dice = Dice::new(DiceData::new());
 
         let ctx = &dice.updater().commit().await;
         let k = &ComputeParallel(barrier.dupe());

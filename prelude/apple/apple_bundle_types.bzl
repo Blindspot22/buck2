@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(":debug.bzl", "AppleDebuggableInfo")
 
@@ -34,6 +35,22 @@ AppleBundleManifest = record(
     log_file_map = dict[Label, AppleBundleManifestLogFiles],
 )
 
+AppleBundleCodesignManifestTree = record(
+    # Codesign manifest for the bundle itself
+    codesign_manifest = field(Artifact),
+    # Codesign manifest for inner bundles.
+    # Maps from relative bundle destination -> AppleBundleCodesignManifestTree
+    inner_codesign_manifests = field(dict[str, typing.Any]),
+)
+
+AppleBundleSigningContextTree = record(
+    # Signing context for the bundle itself
+    signing_context = field(Artifact),
+    # Signing contexts for inner bundles.
+    # Maps from relative bundle destination -> AppleBundleSigningContextTree
+    inner_signing_contexts = field(dict[str, typing.Any]),
+)
+
 AppleBundleManifestInfo = provider(
     fields = {
         "manifest": provider_field(AppleBundleManifest),
@@ -59,6 +76,8 @@ AppleBundleInfo = provider(
         "skip_copying_swift_stdlib": provider_field([bool, None]),
         # List of extra paths (relative to bundle root) to be codesigned.
         "extra_codesign_paths": provider_field([list[str], None], default = None),
+        "codesign_manifest_tree": provider_field(AppleBundleCodesignManifestTree | None, default = None),
+        "signing_context_tree": provider_field(AppleBundleSigningContextTree | None, default = None),
     },
 )
 
@@ -106,3 +125,7 @@ AppleBundleTypeAttributeType = enum(
     "extensionkit_extension",
     "watchapp",
 )
+
+AppleInfoPlistInfo = provider(fields = {
+    "info_plist": provider_field(Artifact),
+})

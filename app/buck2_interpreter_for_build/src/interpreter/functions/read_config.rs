@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use starlark::environment::GlobalsBuilder;
@@ -47,7 +48,7 @@ pub(crate) fn register_read_config(globals: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
         let buckconfigs = &BuildContext::from_context(eval)?.buckconfigs;
-        match buckconfigs.current_cell_get(section, key)? {
+        match buckconfigs.current_cell_get(section, key, eval)? {
             Some(v) => Ok(v.to_value()),
             None => Ok(default.unwrap_or_else(Value::new_none)),
         }
@@ -64,7 +65,7 @@ pub(crate) fn register_read_config(globals: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<NoneOr<StringValue<'v>>> {
         let buckconfigs = &BuildContext::from_context(eval)?.buckconfigs;
-        match buckconfigs.root_cell_get(section, key)? {
+        match buckconfigs.root_cell_get(section, key, eval)? {
             Some(v) => Ok(NoneOr::Other(v.to_string_value())),
             None => Ok(default),
         }

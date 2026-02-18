@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -14,9 +15,9 @@ use buck2_build_api::bxl::calculation::BXL_CALCULATION_IMPL;
 use buck2_build_api::bxl::calculation::BxlCalculationDyn;
 use buck2_build_api::bxl::calculation::BxlComputeResult;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKeyBxl;
-use buck2_futures::cancellation::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::future::FutureExt;
 
@@ -34,7 +35,9 @@ impl BxlCalculationDyn for BxlCalculationImpl {
         ctx: &mut DiceComputations<'_>,
         bxl: BaseDeferredKeyBxl,
     ) -> buck2_error::Result<BxlComputeResult> {
-        Ok(eval_bxl(ctx, BxlKey::from_base_deferred_key_dyn_impl_err(bxl)?).await?)
+        eval_bxl(ctx, BxlKey::from_base_deferred_key_dyn_impl_err(bxl)?)
+            .await
+            .map_err(|e| e.error)
     }
 }
 

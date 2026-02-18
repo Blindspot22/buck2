@@ -1,4 +1,4 @@
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
 
 oncall("build_infra")
 
@@ -8,12 +8,13 @@ rust_library(
         ["src/**/*.rs"],
     ),
     deps = [
-        "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:futures",
-        "fbsource//third-party/rust:http",
+        "fbsource//third-party/rust:hyper",
+        "fbsource//third-party/rust:hyper-util",
         "fbsource//third-party/rust:pin-project",
         "fbsource//third-party/rust:tokio",
-        "fbsource//third-party/rust:tonic",
+        "fbsource//third-party/rust:tonic-0-12-3",
         "fbsource//third-party/rust:tower",
+        "//buck2/app/buck2_error:buck2_error",
     ],
 )

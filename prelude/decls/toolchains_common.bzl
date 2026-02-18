@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_toolchain.bzl", "AndroidPlatformInfo", "AndroidToolchainInfo")
 load("@prelude//csharp:toolchain.bzl", "CSharpToolchainInfo")
@@ -22,10 +23,10 @@ load(
     "@prelude//kotlin:kotlin_toolchain.bzl",
     "KotlinToolchainInfo",
 )
+load("@prelude//python:python_wheel_toolchain.bzl", "PythonWheelToolchainInfo")
 load("@prelude//python:toolchain.bzl", "PythonPlatformInfo", "PythonToolchainInfo")
 load("@prelude//python_bootstrap:python_bootstrap.bzl", "PythonBootstrapToolchainInfo")
 load("@prelude//rust:rust_toolchain.bzl", "RustToolchainInfo")
-load("@prelude//sabaton:sabaton_toolchain.bzl", "SabatonToolchainInfo")
 load("@prelude//tests:remote_test_execution_toolchain.bzl", "RemoteTestExecutionToolchainInfo")
 load("@prelude//tests:test_toolchain.bzl", "TestToolchainInfo")
 load("@prelude//zip_file:zip_file_toolchain.bzl", "ZipFileToolchainInfo")
@@ -86,6 +87,9 @@ def _python_toolchain():
 def _python_bootstrap_toolchain():
     return _toolchain("python_bootstrap", [PythonBootstrapToolchainInfo])
 
+def _python_wheel_toolchain():
+    return _toolchain("python_wheel", [PythonWheelToolchainInfo])
+
 def _rust_toolchain():
     return _toolchain("rust", [RustToolchainInfo])
 
@@ -97,9 +101,6 @@ def _remote_test_execution_toolchain():
 
 def _test_toolchain():
     return _toolchain("test", [TestToolchainInfo])
-
-def _sabaton_toolchain():
-    return _toolchain("sabaton", [SabatonToolchainInfo])
 
 toolchains_common = struct(
     android = _android_toolchain,
@@ -119,9 +120,9 @@ toolchains_common = struct(
     prebuilt_jar = _prebuilt_jar_toolchain,
     python = _python_toolchain,
     python_bootstrap = _python_bootstrap_toolchain,
+    python_wheel = _python_wheel_toolchain,
     test_toolchain = _test_toolchain,
     rust = _rust_toolchain,
     zip_file = _zip_file_toolchain,
     remote_test_execution = _remote_test_execution_toolchain,
-    sabaton = _sabaton_toolchain,
 )

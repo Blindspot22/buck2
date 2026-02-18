@@ -1,19 +1,21 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 
-use buck2_core::fs::fs_util;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
+use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::entry::DirectoryEntry;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
+use buck2_fs::fs_util;
 use dupe::Dupe;
 
 use crate::artifact_value::ArtifactValue;
@@ -27,6 +29,7 @@ use crate::directory::extract_artifact_value;
 use crate::directory::insert_artifact;
 use crate::directory::insert_entry;
 use crate::directory::new_symlink;
+use crate::directory::override_executable_bit;
 use crate::directory::relativize_directory;
 
 pub struct ArtifactValueBuilder<'a> {
@@ -47,7 +50,7 @@ impl<'a> ArtifactValueBuilder<'a> {
 
     pub fn add_entry(
         &mut self,
-        path: &ProjectRelativePath,
+        path: ProjectRelativePathBuf,
         entry: ActionDirectoryEntry<ActionDirectoryBuilder>,
     ) -> buck2_error::Result<()> {
         insert_entry(&mut self.builder, path, entry)
@@ -57,7 +60,7 @@ impl<'a> ArtifactValueBuilder<'a> {
     /// symlinks to calculate the `deps` of the `ArtifactValue`.
     pub fn add_input_value(
         &mut self,
-        path: &ProjectRelativePath,
+        path: ProjectRelativePathBuf,
         value: &ArtifactValue,
     ) -> buck2_error::Result<()> {
         insert_artifact(&mut self.builder, path, value)
@@ -69,11 +72,12 @@ impl<'a> ArtifactValueBuilder<'a> {
     pub fn add_symlinked(
         &mut self,
         src_value: &ArtifactValue,
-        src: &ProjectRelativePath,
+        src: ProjectRelativePathBuf,
         dest: &ProjectRelativePath,
     ) -> buck2_error::Result<()> {
+        let symlink = new_symlink(self.project_fs.relative_path(&src, dest))?;
         insert_artifact(&mut self.builder, src, src_value)?;
-        let entry = DirectoryEntry::Leaf(new_symlink(self.project_fs.relative_path(src, dest))?);
+        let entry = DirectoryEntry::Leaf(symlink);
         self.builder.insert(dest, entry)?;
         Ok(())
     }
@@ -87,13 +91,17 @@ impl<'a> ArtifactValueBuilder<'a> {
         src_value: &ArtifactValue,
         src: &ProjectRelativePath,
         dest: &ProjectRelativePath,
+        executable_bit_override: Option<bool>,
     ) -> buck2_error::Result<ActionDirectoryEntry<ActionSharedDirectory>> {
-        insert_artifact(&mut self.builder, src, src_value)?;
+        insert_artifact(&mut self.builder, src.to_buf(), src_value)?;
 
         let entry = match src_value.entry() {
             DirectoryEntry::Dir(directory) => {
                 let mut builder = directory.dupe().into_builder();
                 relativize_directory(&mut builder, src, dest)?;
+                if let Some(executable_bit_override) = executable_bit_override {
+                    override_executable_bit(&mut builder, executable_bit_override)?;
+                }
                 DirectoryEntry::Dir(
                     builder.fingerprint(self.digest_config.as_directory_serializer()),
                 )
@@ -102,7 +110,7 @@ impl<'a> ArtifactValueBuilder<'a> {
                 // TODO: This seems like it normally shouldn't need to be normalizing anything.
                 let reldest = self.project_fs.relative_path(
                     src.parent()
-                        .buck_error_context("Symlink has no dir parent")?,
+                        .ok_or_else(|| internal_error!("Symlink has no dir parent"))?,
                     dest,
                 );
                 // RelativePathBuf converts platform specific path separators.
@@ -116,7 +124,12 @@ impl<'a> ArtifactValueBuilder<'a> {
                 ))
             }
             DirectoryEntry::Leaf(ActionDirectoryMember::File(f)) => {
-                DirectoryEntry::Leaf(ActionDirectoryMember::File(f.dupe()))
+                let file_metadata = if let Some(executable_bit_override) = executable_bit_override {
+                    f.dupe().with_executable(executable_bit_override)
+                } else {
+                    f.dupe()
+                };
+                DirectoryEntry::Leaf(ActionDirectoryMember::File(file_metadata))
             }
         };
 
@@ -144,10 +157,10 @@ impl<'a> ArtifactValueBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use buck2_common::file_ops::metadata::Symlink;
     use buck2_core::fs::project::ProjectRootTemp;
 
     use super::*;
-    use crate::directory::Symlink;
 
     fn path(s: &str) -> &ProjectRelativePath {
         ProjectRelativePath::new(s).unwrap()
@@ -182,6 +195,7 @@ mod tests {
                 &get_symlink_artifact_value("../../../d6/target"),
                 path("d1/d2/d3/d4/link"),
                 path("d1/d5/new_link"),
+                None,
             )?
         };
 

@@ -1,15 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::OnceLock;
 
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 
 /// Value (typically a function pointer or a trait pointer) that is initialized at program start.
 ///
@@ -113,6 +114,6 @@ impl<T> LateBinding<T> {
     pub fn get(&self) -> buck2_error::Result<&T> {
         self.symbol
             .get()
-            .with_internal_error(|| format!("{} not set", self.name))
+            .ok_or_else(|| internal_error!("{} not set", self.name))
     }
 }

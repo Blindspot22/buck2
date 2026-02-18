@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Avoid some copy-paste
 def _app(s):
@@ -13,9 +14,17 @@ def _app(s):
 # directly
 LATE_BINDING_ONLY_CRATES = [
     _app("buck2_anon_target"),
-    _app("buck2_audit_server"),
+    _app("buck2_cmd_audit_server"),
+    _app("buck2_cmd_query_server"),
+    _app("buck2_cmd_targets_server"),
     _app("buck2_bxl"),
     _app("buck2_query_impls"),
+]
+
+# These crates may only be depended on from `app/buck2`
+TOP_LEVEL_ONLY_CRATES = [
+    _app("buck2_cmd_debug_client"),
+    _app("buck2_cmd_log_client"),
 ]
 
 # Unordered pairs where neither crate may depend on the other

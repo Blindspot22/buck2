@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future::Future;
@@ -12,8 +13,11 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use dice_error::DiceResult;
+use dice_futures::cancellation::CancellationContext;
+use dice_futures::owning_future::OwningFuture;
+use dupe::Dupe;
+use futures::FutureExt;
 use futures::future::BoxFuture;
 
 use crate::DiceKeyTrackedInvalidationPaths;
@@ -25,6 +29,7 @@ use crate::api::opaque::OpaqueValue;
 use crate::api::user_data::UserComputationData;
 use crate::ctx::DiceComputationsImpl;
 use crate::ctx::LinearRecomputeDiceComputationsImpl;
+use crate::impls::ctx::ModernDiceComputationsData;
 
 /// The context for computations to register themselves, and request for additional dependencies.
 /// The dependencies accessed are tracked for caching via the `DiceCtx`.
@@ -49,7 +54,7 @@ impl DiceComputations<'_> {
     pub fn compute<'a, K>(
         &'a mut self,
         key: &K,
-    ) -> impl Future<Output = DiceResult<<K as Key>::Value>> + 'a
+    ) -> impl Future<Output = DiceResult<<K as Key>::Value>> + use<'a, K>
     where
         K: Key,
     {
@@ -63,7 +68,7 @@ impl DiceComputations<'_> {
     pub fn compute_opaque<'a, K>(
         &'a self,
         key: &K,
-    ) -> impl Future<Output = DiceResult<OpaqueValue<K>>> + 'a
+    ) -> impl Future<Output = DiceResult<OpaqueValue<K>>> + use<'a, K>
     where
         K: Key,
     {
@@ -116,10 +121,14 @@ impl DiceComputations<'_> {
     /// ```
     ///
     /// In this example, the recomputation of all of keys2 and keys3 would be done linearly, but keys1 and keys4 would be recomputed in parallel.
-    pub fn with_linear_recompute<'a, T, Fut: Future<Output = T> + 'a>(
+    pub fn with_linear_recompute<'a, Func, Fut, T>(
         &'a mut self,
-        func: impl FnOnce(LinearRecomputeDiceComputations<'a>) -> Fut + 'a,
-    ) -> impl Future<Output = T> + 'a {
+        func: Func,
+    ) -> impl Future<Output = T> + use<'a, Func, Fut, T>
+    where
+        Func: FnOnce(LinearRecomputeDiceComputations<'a>) -> Fut,
+        Fut: Future<Output = T>,
+    {
         self.0.with_linear_recompute(func)
     }
 
@@ -140,12 +149,14 @@ impl DiceComputations<'_> {
     /// ));
     /// futures::future::join_all(futs).await;
     /// ```
-    pub fn compute_many<'a, T: 'a>(
+    pub fn compute_many<'a, Computes, F, T>(
         &'a mut self,
-        computes: impl IntoIterator<
-            Item = impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, T> + Send,
-        >,
-    ) -> Vec<impl Future<Output = T> + 'a> {
+        computes: Computes,
+    ) -> Vec<impl Future<Output = T> + use<'a, Computes, F, T>>
+    where
+        Computes: IntoIterator<Item = F>,
+        F: for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, T> + Send,
+    {
         self.0.compute_many(computes)
     }
 
@@ -173,13 +184,19 @@ impl DiceComputations<'_> {
     /// );
     /// ctx.compute_join(keys, compute_one).await;
     /// ````
-    pub fn compute_join<'a, T: Send, R: 'a>(
+    pub fn compute_join<'a, Items, Mapper, T, R>(
         &'a mut self,
-        items: impl IntoIterator<Item = T>,
-        mapper: (
-            impl for<'x> FnOnce(&'x mut DiceComputations<'a>, T) -> BoxFuture<'x, R> + Send + Sync + Copy
-        ),
-    ) -> impl Future<Output = Vec<R>> + 'a {
+        items: Items,
+        mapper: Mapper,
+    ) -> impl Future<Output = Vec<R>> + use<'a, Items, Mapper, T, R>
+    where
+        Items: IntoIterator<Item = T>,
+        Mapper: for<'x> FnOnce(&'x mut DiceComputations<'a>, T) -> BoxFuture<'x, R>
+            + Send
+            + Sync
+            + Copy,
+        T: Send,
+    {
         let futs = self.compute_many(items.into_iter().map(move |v| {
             DiceComputations::declare_closure(move |ctx: &mut DiceComputations| -> BoxFuture<R> {
                 mapper(ctx, v)
@@ -190,16 +207,19 @@ impl DiceComputations<'_> {
 
     /// Maps the items into computations futures and then returns a future which represents either a
     /// collection of the results or an error.
-    pub fn try_compute_join<'a, T: Send, R: 'a, E: 'a>(
+    pub fn try_compute_join<'a, Items, Mapper, T, R, E>(
         &'a mut self,
-        items: impl IntoIterator<Item = T>,
-        mapper: (
-            impl for<'x> FnOnce(&'x mut DiceComputations<'a>, T) -> BoxFuture<'x, Result<R, E>>
+        items: Items,
+        mapper: Mapper,
+    ) -> impl Future<Output = Result<Vec<R>, E>> + use<'a, Items, Mapper, T, R, E>
+    where
+        Items: IntoIterator<Item = T>,
+        Mapper: for<'x> FnOnce(&'x mut DiceComputations<'a>, T) -> BoxFuture<'x, Result<R, E>>
             + Send
             + Sync
-            + Copy
-        ),
-    ) -> impl Future<Output = Result<Vec<R>, E>> + 'a {
+            + Copy,
+        T: Send,
+    {
         let futs = self.compute_many(items.into_iter().map(move |v| {
             DiceComputations::declare_closure(
                 move |ctx: &mut DiceComputations| -> BoxFuture<Result<R, E>> { mapper(ctx, v) },
@@ -211,23 +231,31 @@ impl DiceComputations<'_> {
     /// Computes all the given tasks in parallel.
     ///
     /// If the closures are defined out of the compute2 call, you need to use declare_closure() to get the right lifetimes.
-    pub fn compute2<'a, T: 'a, U: 'a>(
+    pub fn compute2<'a, Compute1, T, Compute2, U>(
         &'a mut self,
-        compute1: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, T> + Send,
-        compute2: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, U> + Send,
-    ) -> impl Future<Output = (T, U)> + 'a {
+        compute1: Compute1,
+        compute2: Compute2,
+    ) -> impl Future<Output = (T, U)> + use<'a, Compute1, T, Compute2, U>
+    where
+        Compute1: for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, T> + Send,
+        Compute2: for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, U> + Send,
+    {
         let (t, u) = self.0.compute2(compute1, compute2);
         futures::future::join(t, u)
     }
 
     /// Compute all the given tasks in parallel.
-    pub fn try_compute2<'a, T: 'a, U: 'a, E: 'a>(
+    pub fn try_compute2<'a, Compute1, T, Compute2, U, E>(
         &'a mut self,
-        compute1: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<T, E>>
-        + Send,
-        compute2: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<U, E>>
-        + Send,
-    ) -> impl Future<Output = Result<(T, U), E>> + 'a {
+        compute1: Compute1,
+        compute2: Compute2,
+    ) -> impl Future<Output = Result<(T, U), E>> + use<'a, Compute1, T, Compute2, U, E>
+    where
+        Compute1:
+            for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<T, E>> + Send,
+        Compute2:
+            for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<U, E>> + Send,
+    {
         let (t, u) = self.0.compute2(compute1, compute2);
         futures::future::try_join(t, u)
     }
@@ -235,26 +263,36 @@ impl DiceComputations<'_> {
     /// Computes all the given tasks in parallel.
     ///
     /// If the closures are defined out of the compute3 call, you need to use declare_closure() to get the right lifetimes.
-    pub fn compute3<'a, T: 'a, U: 'a, V: 'a>(
+    pub fn compute3<'a, Compute1, T, Compute2, U, Compute3, V>(
         &'a mut self,
-        compute1: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, T> + Send,
-        compute2: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, U> + Send,
-        compute3: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, V> + Send,
-    ) -> impl Future<Output = (T, U, V)> + 'a {
+        compute1: Compute1,
+        compute2: Compute2,
+        compute3: Compute3,
+    ) -> impl Future<Output = (T, U, V)> + use<'a, Compute1, T, Compute2, U, Compute3, V>
+    where
+        Compute1: for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, T> + Send,
+        Compute2: for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, U> + Send,
+        Compute3: for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, V> + Send,
+    {
         let (t, u, v) = self.0.compute3(compute1, compute2, compute3);
         futures::future::join3(t, u, v)
     }
 
     /// Compute all the given tasks in parallel.
-    pub fn try_compute3<'a, T: 'a, U: 'a, V: 'a, E: 'a>(
+    pub fn try_compute3<'a, Compute1, T, Compute2, U, Compute3, V, E>(
         &'a mut self,
-        compute1: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<T, E>>
-        + Send,
-        compute2: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<U, E>>
-        + Send,
-        compute3: impl for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<V, E>>
-        + Send,
-    ) -> impl Future<Output = Result<(T, U, V), E>> + 'a {
+        compute1: Compute1,
+        compute2: Compute2,
+        compute3: Compute3,
+    ) -> impl Future<Output = Result<(T, U, V), E>> + use<'a, Compute1, T, Compute2, U, Compute3, V, E>
+    where
+        Compute1:
+            for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<T, E>> + Send,
+        Compute2:
+            for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<U, E>> + Send,
+        Compute3:
+            for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, Result<V, E>> + Send,
+    {
         let (t, u, v) = self.0.compute3(compute1, compute2, compute3);
         futures::future::try_join3(t, u, v)
     }
@@ -280,6 +318,12 @@ impl DiceComputations<'_> {
         Closure: for<'x> FnOnce(&'x mut DiceComputations<'a>) -> BoxFuture<'x, R>,
     {
         closure
+    }
+
+    /// Returns a handle to the DICE data that provides access to global and per-transaction
+    /// data without the ability to request new keys.
+    pub fn data(&self) -> DiceComputationsData {
+        self.0.data()
     }
 
     /// Data that is static per the entire lifetime of Dice. These data are initialized at the
@@ -311,6 +355,28 @@ impl DiceComputations<'_> {
     pub fn get_invalidation_paths(&mut self) -> DiceKeyTrackedInvalidationPaths {
         self.0.get_invalidation_paths()
     }
+
+    /// Spawn a computation on a new tokio task.
+    ///
+    /// This allows spawning work that requires access to the `DiceComputations` context
+    /// without running into lifetime issues with `tokio::spawn` requiring `'static` futures.
+    /// Dependencies accessed in the spawned task are tracked and merged back into the
+    /// parent computation. If the returned future is dropped, the spawned task will be cancelled.
+    pub fn spawned<'a, T, Compute>(
+        &'a mut self,
+        closure: Compute,
+    ) -> impl Future<Output = T> + use<'a, Compute, T>
+    where
+        T: Send + 'static,
+        Compute: (for<'x> FnOnce(
+                &'x mut DiceComputations<'_>,
+                &'x CancellationContext,
+            ) -> BoxFuture<'x, T>)
+            + Send
+            + 'static,
+    {
+        self.0.spawned(closure)
+    }
 }
 
 pub struct LinearRecomputeDiceComputations<'a>(pub(crate) LinearRecomputeDiceComputationsImpl<'a>);
@@ -318,6 +384,46 @@ pub struct LinearRecomputeDiceComputations<'a>(pub(crate) LinearRecomputeDiceCom
 impl LinearRecomputeDiceComputations<'_> {
     pub fn get(&self) -> DiceComputations<'_> {
         self.0.get()
+    }
+
+    /// Spawn a computation on a new tokio task.
+    ///
+    /// See [`DiceComputations::spawned`] for details.
+    pub fn spawned<'a, T, Compute>(
+        &'a self,
+        closure: Compute,
+    ) -> impl Future<Output = T> + use<'a, Compute, T>
+    where
+        T: Send + 'static,
+        Compute: (for<'x> FnOnce(
+                &'x mut DiceComputations<'_>,
+                &'x CancellationContext,
+            ) -> BoxFuture<'x, T>)
+            + Send
+            + 'static,
+    {
+        OwningFuture::new(self.get(), |ctx| ctx.spawned(closure).boxed())
+    }
+}
+
+/// A holder for the user data attached to DICE. APIs that require access to data stored on DICE
+/// but that won't request keys can indicate that by accepting a `DiceComputationsData`.
+#[derive(Clone, Dupe)]
+pub struct DiceComputationsData(pub(crate) ModernDiceComputationsData);
+
+impl DiceComputationsData {
+    /// Data that is static per the entire lifetime of Dice. These data are initialized at the
+    /// time that Dice is initialized via the constructor.
+    pub fn global_data(&self) -> &DiceData {
+        self.0.global_data()
+    }
+
+    /// Data that is static for the lifetime of the current request context. This lifetime is
+    /// the lifetime of the top-level `DiceComputation` used for all requests.
+    /// The data is also specific to each request context, so multiple concurrent requests can
+    /// each have their own individual data.
+    pub fn per_transaction_data(&self) -> &UserComputationData {
+        self.0.per_transaction_data()
     }
 }
 

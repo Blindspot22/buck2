@@ -1,15 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.dex;
 
 import com.facebook.buck.android.proguard.ProguardTranslatorFactory;
+import com.facebook.infer.annotation.Nullsafe;
 import com.google.common.io.ByteStreams;
 import java.io.BufferedOutputStream;
 import java.io.FileOutputStream;
@@ -23,6 +25,7 @@ import java.util.function.Function;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import org.jetbrains.annotations.Nullable;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
@@ -31,26 +34,33 @@ import org.kohsuke.args4j.Option;
  * Main entry point for splitting a .jar into the .class files that should go into the primary .dex,
  * and the .class files that should go into a secondary .dex.
  */
+@Nullsafe(Nullsafe.Mode.LOCAL)
 public class JarSplitterExecutableMain {
   /** name suffix that identifies it as a Java class file. */
   private static final String CLASS_NAME_SUFFIX = ".class";
 
   @Option(name = "--input-jar", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String inputJar;
 
   @Option(name = "--primary-dex-patterns", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String primaryDexPatterns;
 
   @Option(name = "--proguard-configuration-file")
-  private String proguardConfigurationFileString;
+  @Nullable
+  private String proguardConfigurationFileString = null;
 
   @Option(name = "--proguard-mapping-file")
-  private String proguardMappingFileString;
+  @Nullable
+  private String proguardMappingFileString = null;
 
   @Option(name = "--primary-dex-classes-jar", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String primaryDexClassesJar;
 
   @Option(name = "--secondary-dex-classes-jar", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String secondaryDexClassesJar;
 
   public static void main(String[] args) throws IOException {
@@ -61,7 +71,7 @@ public class JarSplitterExecutableMain {
       main.run();
       System.exit(0);
     } catch (CmdLineException e) {
-      System.err.println(e.getMessage());
+      System.err.println(e.toString());
       parser.printUsage(System.err);
       System.exit(1);
     }
@@ -106,7 +116,7 @@ public class JarSplitterExecutableMain {
                 : secondaryJarOutputStream;
         zipEntry.setCompressedSize(-1);
         jarOutputStream.putNextEntry(zipEntry);
-        ByteStreams.copy(zipFile.getInputStream(zipEntry), jarOutputStream);
+        ByteStreams.copy(Objects.requireNonNull(zipFile.getInputStream(zipEntry)), jarOutputStream);
         jarOutputStream.closeEntry();
       }
     }

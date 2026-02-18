@@ -1,14 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load(
+    "@prelude//cxx:transformation_spec.bzl",
+    "TransformationKind",
+    "TransformationSpecContext",  # @unused Used as a type
+)
+load(
     "@prelude//linking:link_info.bzl",
     "LinkArgs",
+    "LinkableFlavor",  # @unused Used as a type
     "LinkedObject",  # @unused Used as a type
 )
 load("@prelude//linking:strip.bzl", "strip_object")
@@ -22,8 +29,8 @@ Soname = record(
     ensure_str = field(typing.Callable),
     # Return `True` if the SONAME is respresented as a string.
     is_str = field(bool),
-    # The the actual SONAME can be rerepsented by a static string, or the
-    # contents of a file genrated at build time.
+    # The actual SONAME can be represented by a static string, or the
+    # contents of a file generated at build time.
     _soname = field(str | Artifact),
 )
 
@@ -71,15 +78,46 @@ def create_shlib(
     )
 
 SharedLibraries = record(
+    label = field(Label | None, None),
     # A mapping of shared library SONAME (e.g. `libfoo.so.2`) to the artifact.
     # Since the SONAME is what the dynamic loader uses to uniquely identify
     # libraries, using this as the key allows easily detecting conflicts from
     # dependencies.
     libraries = field(list[SharedLibrary]),
+    flavored_libraries = field(dict[LinkableFlavor, SharedLibrary] | None, None),
 )
 
+def _project_external_debug_info(shared_libraries: SharedLibraries) -> cmd_args:
+    rv = cmd_args()
+    for shared_library in shared_libraries.libraries:
+        external_debug_info = shared_library.lib.external_debug_info._tset
+        if external_debug_info:
+            rv.add(external_debug_info.project_as_args("artifacts"))
+    return rv
+
+def _project_symlink_tree(shared_libraries: SharedLibraries) -> list[(bool, str | Artifact, Artifact, Artifact | None)]:
+    rv = []
+    for shared_library in shared_libraries.libraries:
+        soname = shared_library.soname  # type: Soname
+        linked_object = shared_library.lib  # type: LinkedObject
+
+        rv.append((
+            soname.is_str,
+            soname._soname,
+            linked_object.output,
+            linked_object.dwp,
+        ))
+    return rv
+
 # T-set of SharedLibraries
-SharedLibrariesTSet = transitive_set()
+SharedLibrariesTSet = transitive_set(
+    args_projections = {
+        "external_debug_info": _project_external_debug_info,
+    },
+    json_projections = {
+        "symlink_tree": _project_symlink_tree,
+    },
+)
 
 # Shared libraries required by top-level packaging rules (e.g. shared libs
 # for Python binary, symlink trees of shared libs for C++ binaries)
@@ -96,7 +134,8 @@ def get_strip_non_global_flags(cxx_toolchain: CxxToolchainInfo) -> list:
 def create_shlib_from_ctx(
         ctx: AnalysisContext,
         soname: str | Artifact | Soname,
-        lib: LinkedObject):
+        lib: LinkedObject,
+        extra_outputs: dict[str, list[DefaultInfo]] = {}) -> SharedLibrary:
     cxx_toolchain = getattr(ctx.attrs, "_cxx_toolchain", None)
     return create_shlib(
         lib = lib,
@@ -112,18 +151,55 @@ def create_shlib_from_ctx(
         for_primary_apk = getattr(ctx.attrs, "used_by_wrap_script", False),
         label = ctx.label,
         soname = soname,
+        extra_outputs = extra_outputs,
+    )
+
+NamedLinkedObject = record(
+    soname = field(str),
+    linked_object = field(LinkedObject),
+    extra_outputs = field(dict[str, list[DefaultInfo]], {}),
+)
+
+def create_flavored_shared_libraries(
+        ctx: AnalysisContext,
+        libraries: dict[LinkableFlavor, NamedLinkedObject]) -> SharedLibraries:
+    default_libraries = []
+    flavored_libraries = {}
+    for flavor in libraries:
+        solib = libraries[flavor]
+        shlib = create_shlib_from_ctx(
+            ctx = ctx,
+            soname = solib.soname,
+            lib = solib.linked_object,
+            extra_outputs = solib.extra_outputs,
+        )
+        flavored_libraries[flavor] = shlib
+        if flavor == LinkableFlavor("default"):
+            default_libraries.append(shlib)
+
+    return SharedLibraries(
+        label = ctx.label,
+        libraries = default_libraries,
+        flavored_libraries = flavored_libraries,
     )
 
 def create_shared_libraries(
         ctx: AnalysisContext,
-        libraries: dict[str, LinkedObject]) -> SharedLibraries:
+        libraries: dict[str, LinkedObject],
+        extra_outputs: dict[str, dict[str, list[DefaultInfo]]] = {}) -> SharedLibraries:
     """
     Take a mapping of dest -> src and turn it into a mapping that will be
     passed around in providers. Used for both srcs, and resources.
     """
     return SharedLibraries(
+        label = ctx.label,
         libraries = [
-            create_shlib_from_ctx(ctx = ctx, soname = name, lib = shlib)
+            create_shlib_from_ctx(
+                ctx = ctx,
+                soname = name,
+                lib = shlib,
+                extra_outputs = extra_outputs.get(name, {}),
+            )
             for (name, shlib) in libraries.items()
         ],
     )
@@ -148,11 +224,27 @@ def merge_shared_libraries(
     set = actions.tset(SharedLibrariesTSet, **kwargs) if kwargs else None
     return SharedLibraryInfo(set = set)
 
-def traverse_shared_library_info(info: SharedLibraryInfo):  # -> list[SharedLibrary]:
+def traverse_shared_library_info(
+        info: SharedLibraryInfo,
+        transformation_provider: TransformationSpecContext | None) -> list[SharedLibrary]:
     libraries = []
     if info.set:
         for libs in info.set.traverse():
-            libraries.extend(libs.libraries)
+            fallback_to_default = True
+
+            if transformation_provider and not transformation_provider.provider.is_empty and libs.label and libs.flavored_libraries:
+                transformation_kind = transformation_provider.provider.determine_transformation(libs.label, transformation_provider.graph_info)
+
+                if transformation_kind == TransformationKind("debug") and LinkableFlavor("debug") in libs.flavored_libraries:
+                    libraries.append(libs.flavored_libraries[LinkableFlavor("debug")])
+                    fallback_to_default = False
+                elif transformation_kind == TransformationKind("optimized") and LinkableFlavor("optimized") in libs.flavored_libraries:
+                    libraries.append(libs.flavored_libraries[LinkableFlavor("optimized")])
+                    fallback_to_default = False
+
+            if fallback_to_default:
+                libraries.extend(libs.libraries)
+
     return libraries
 
 # Helper to merge shlibs, throwing an error if more than one have the same SONAME.
@@ -204,7 +296,7 @@ def gen_shared_libs_action(
         out: str,
         shared_libs: list[SharedLibrary],
         gen_action: typing.Callable,
-        dir = False):
+        dir = False) -> Artifact:
     """
     Produce an action by first resolving all SONAME of the given shlibs and
     enforcing that each SONAME is unique.
@@ -267,7 +359,7 @@ def zip_shlibs(
 
     return zipped
 
-def create_shlib_symlink_tree(actions: AnalysisActions, out: str, shared_libs: list[SharedLibrary]):
+def create_shlib_symlink_tree(actions: AnalysisActions, out: str, shared_libs: list[SharedLibrary]) -> Artifact:
     """
     Merged shared libs into a symlink tree mapping the library's SONAME to
     it's artifact.

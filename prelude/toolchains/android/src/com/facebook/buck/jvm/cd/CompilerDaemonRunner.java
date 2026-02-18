@@ -1,25 +1,22 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.cd;
 
 import com.facebook.buck.core.build.execution.context.IsolatedExecutionContext;
 import com.facebook.buck.jvm.cd.workertool.MainUtils;
-import com.facebook.buck.jvm.cd.workertool.StepExecutionUtils;
 import com.facebook.buck.step.StepExecutionResult;
 import com.facebook.buck.step.isolatedsteps.IsolatedStep;
 import com.facebook.buck.step.isolatedsteps.IsolatedStepsRunner;
-import com.facebook.buck.util.Ansi;
 import com.facebook.buck.util.ClassLoaderCache;
 import com.facebook.buck.util.Console;
-import com.facebook.buck.util.DefaultProcessExecutor;
-import com.facebook.buck.util.ProcessExecutor;
 import com.facebook.buck.util.Verbosity;
 import com.google.common.collect.ImmutableList;
 import java.io.Closeable;
@@ -37,7 +34,6 @@ public class CompilerDaemonRunner implements Closeable {
   private final OutputStream eventsOutputStream;
   private final ClassLoaderCache classLoaderCache;
   private final Console console;
-  private final ProcessExecutor processExecutor;
 
   private static final List<String> COMPILER_ERRORS =
       List.of(
@@ -55,7 +51,6 @@ public class CompilerDaemonRunner implements Closeable {
     this.eventsOutputStream = eventsOutputStream;
     this.classLoaderCache = new ClassLoaderCache();
     this.console = console;
-    this.processExecutor = new DefaultProcessExecutor(console);
   }
 
   @Override
@@ -69,11 +64,8 @@ public class CompilerDaemonRunner implements Closeable {
 
     public CommandExecutionContext(JvmCDCommand command) {
       this.executionContext =
-          StepExecutionUtils.createExecutionContext(
-              classLoaderCache,
-              processExecutor,
-              console,
-              command.getBuildCommand().getRuleCellRoot());
+          IsolatedExecutionContext.of(
+              classLoaderCache, console, command.getBuildCommand().getRuleCellRoot());
     }
 
     @Override
@@ -92,9 +84,9 @@ public class CompilerDaemonRunner implements Closeable {
   }
 
   /** Create a new runner, execute a single build command, close it and return */
-  public static void run(JvmCDCommand command) {
+  public static void run(JvmCDCommand command) throws IOException {
     Verbosity verbosity = getVerbosityForLevel(command.getLoggingLevel());
-    Console console = new Console(verbosity, System.out, System.err, Ansi.withoutTty());
+    Console console = new Console(verbosity, System.out, System.err);
 
     Thread.setDefaultUncaughtExceptionHandler(
         (t, e) -> MainUtils.handleExceptionAndTerminate(t, console, e));
@@ -103,23 +95,21 @@ public class CompilerDaemonRunner implements Closeable {
       Executors.newSingleThreadScheduledExecutor()
           .scheduleAtFixedRate(MainUtils::logCurrentCDState, 1, 10, TimeUnit.SECONDS);
     }
-    try {
-      try (CompilerDaemonRunner runner =
-          new CompilerDaemonRunner(OutputStream.nullOutputStream(), console)) {
-        StepExecutionResult stepExecutionResult = runner.execute(command);
+    try (CompilerDaemonRunner runner =
+        new CompilerDaemonRunner(OutputStream.nullOutputStream(), console)) {
+      StepExecutionResult stepExecutionResult = runner.execute(command);
 
-        if (!stepExecutionResult.isSuccess()) {
-          String errorMessage = stepExecutionResult.getErrorMessage();
-          System.err.println(errorMessage);
-          // if there is a compiling error, we don't want to print buck stack trace
-          if (!CompilerDaemonRunner.isCompilerError(errorMessage)) {
-            stepExecutionResult.getCause().ifPresent(Throwable::printStackTrace);
-          }
-          System.exit(stepExecutionResult.getExitCode());
+      if (!stepExecutionResult.isSuccess()) {
+        String errorMessage = stepExecutionResult.getErrorMessage();
+        System.err.println(errorMessage);
+        // if there is a compiling error, we don't want to print buck stack trace
+        if (!CompilerDaemonRunner.isCompilerError(errorMessage)) {
+          stepExecutionResult.getCause().ifPresent(Throwable::printStackTrace);
         }
+        throw new RuntimeException(
+            "Compiler Daemon failed to execute command. Exit code: "
+                + stepExecutionResult.getExitCode());
       }
-    } catch (Exception e) {
-      MainUtils.handleExceptionAndTerminate(Thread.currentThread(), console, e);
     }
   }
 

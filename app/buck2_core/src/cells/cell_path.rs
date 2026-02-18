@@ -1,22 +1,24 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use dupe::Dupe;
+use pagable::Pagable;
 use relative_path::RelativePath;
 use strong_hash::StrongHash;
 
 use crate::cells::name::CellName;
 use crate::cells::paths::CellRelativePath;
 use crate::cells::paths::CellRelativePathBuf;
-use crate::fs::paths::forward_rel_path::ForwardRelativePath;
 
 #[derive(buck2_error::Error, Debug)]
 #[error("attempted to strip prefix of two CellPath with different cell names `{0}` and `{1}`")]
@@ -35,7 +37,8 @@ struct StripPrefixError(CellName, CellName);
     Ord,
     PartialOrd,
     Allocative,
-    StrongHash
+    StrongHash,
+    Pagable
 )]
 #[display("{}", self.as_ref())]
 pub struct CellPath {
@@ -68,7 +71,7 @@ impl CellPath {
     /// use buck2_core::cells::cell_path::CellPath;
     /// use buck2_core::cells::name::CellName;
     /// use buck2_core::cells::paths::CellRelativePathBuf;
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+    /// use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
     ///
     /// let path = CellPath::new(
     ///     CellName::testing_new("cell"),
@@ -113,7 +116,7 @@ impl CellPath {
     /// # buck2_error::Ok(())
     /// ```
     #[inline]
-    pub fn parent(&self) -> Option<CellPathRef> {
+    pub fn parent(&self) -> Option<CellPathRef<'_>> {
         self.as_ref().parent()
     }
 
@@ -147,7 +150,7 @@ impl CellPath {
     /// # buck2_error::Ok(())
     /// ```
     #[inline]
-    pub fn ancestors(&self) -> impl Iterator<Item = CellPathRef> {
+    pub fn ancestors(&self) -> impl Iterator<Item = CellPathRef<'_>> {
         self.as_ref().ancestors()
     }
 
@@ -161,7 +164,7 @@ impl CellPath {
     /// use buck2_core::cells::cell_path::CellPath;
     /// use buck2_core::cells::name::CellName;
     /// use buck2_core::cells::paths::CellRelativePathBuf;
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
+    /// use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
     ///
     /// let path = CellPath::new(
     ///     CellName::testing_new("cell"),
@@ -301,7 +304,7 @@ impl CellPath {
     }
 
     #[inline]
-    pub fn as_ref(&self) -> CellPathRef {
+    pub fn as_ref(&self) -> CellPathRef<'_> {
         CellPathRef {
             cell: self.cell,
             path: &self.path,
@@ -322,10 +325,10 @@ impl<'a> CellPathRef<'a> {
         CellPathRef { cell, path }
     }
 
-    pub fn testing_new(path: &str) -> CellPathRef {
+    pub fn testing_new(path: &str) -> CellPathRef<'_> {
         let (cell, path) = path
             .split_once("//")
-            .with_buck_error_context(|| format!("invalid path: `{}`", path))
+            .ok_or_else(|| internal_error!("invalid path: `{path}`"))
             .unwrap();
         CellPathRef {
             cell: CellName::testing_new(cell),
@@ -359,7 +362,7 @@ impl<'a> CellPathRef<'a> {
         self.path
     }
 
-    pub fn ancestors(&self) -> impl Iterator<Item = CellPathRef<'a>> + 'a {
+    pub fn ancestors(&self) -> impl Iterator<Item = CellPathRef<'a>> + use<'a> {
         struct Ancestors<'a>(Option<CellPathRef<'a>>);
         impl<'a> Iterator for Ancestors<'a> {
             type Item = CellPathRef<'a>;

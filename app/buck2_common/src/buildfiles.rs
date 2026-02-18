@@ -1,17 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future::Future;
 use std::sync::Arc;
 
 use buck2_core::cells::name::CellName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_fs::paths::file_name::FileNameBuf;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
@@ -48,7 +49,7 @@ pub fn parse_buildfile_name(
     })? {
         let mut buildfiles = Vec::new();
         for buildfile in buildfiles_value {
-            buildfiles.push(FileNameBuf::try_from(format!("{}.v2", buildfile))?);
+            buildfiles.push(FileNameBuf::try_from(format!("{buildfile}.v2"))?);
             buildfiles.push(FileNameBuf::try_from(buildfile)?);
         }
         buildfiles

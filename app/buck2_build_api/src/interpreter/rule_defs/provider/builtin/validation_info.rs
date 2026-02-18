@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -17,7 +18,6 @@ use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
-use starlark::values::FreezeResult;
 use starlark::values::Trace;
 use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
@@ -67,7 +67,7 @@ where
         .iter();
     let mut spec_names = HashSet::new();
     for value in values {
-        let wrong_type_error = || ValidationInfoError::WrongSpecType(format!("{}", value));
+        let wrong_type_error = || ValidationInfoError::WrongSpecType(format!("{value}"));
         let name = if let Some(frozen_value) = value.unpack_frozen() {
             let spec = frozen_value
                 .downcast_ref::<FrozenStarlarkValidationSpec>()

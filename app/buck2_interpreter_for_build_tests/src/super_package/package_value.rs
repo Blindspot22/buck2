@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Tests for `PACKAGE` files.
@@ -17,6 +18,7 @@ use buck2_interpreter_for_build::interpreter::dice_calculation_delegate::HasCalc
 use buck2_node::attrs::display::AttrDisplayWithContextExt;
 use buck2_node::attrs::inspect_options::AttrInspectOptions;
 use buck2_node::nodes::frontend::TargetGraphCalculation;
+use dice::CancellationContext;
 use indoc::indoc;
 
 use crate::tests::calculation;
@@ -37,7 +39,12 @@ async fn test_package_value_same_dir_package_file() {
     fs.write_file("rules.bzl", RULES);
     fs.write_file(
         "headphones/PACKAGE",
-        "write_package_value('aaa.bbb', 'ccc')",
+        indoc!(
+            r#"
+            write_package_value('aaa.bbb', 'ccc')
+            test_config_unification_rollout(enabled=True)
+            "#
+        ),
     );
     fs.write_file(
         "headphones/BUCK",
@@ -62,7 +69,11 @@ async fn test_package_value_same_dir_package_file() {
         .await
         .unwrap();
 
-    let result = interpreter.eval_build_file(package_label).await.1.unwrap();
+    let result = interpreter
+        .eval_build_file(package_label, &CancellationContext::testing())
+        .await
+        .1
+        .unwrap();
 
     let target_nodes: Vec<_> = result.targets().values().collect();
     assert_eq!(1, target_nodes.len());
@@ -77,6 +88,7 @@ async fn test_package_value_same_dir_package_file() {
             .as_display_no_ctx()
             .to_string()
     );
+    assert!(target_node.test_config_unification_rollout());
 }
 
 #[tokio::test]
@@ -84,7 +96,15 @@ async fn test_package_value_parent_dir_package_file() {
     let fs = ProjectRootTemp::new().unwrap();
 
     fs.write_file("rules.bzl", RULES);
-    fs.write_file("PACKAGE", "write_package_value('aaa.bbb', 'ccc')");
+    fs.write_file(
+        "PACKAGE",
+        indoc!(
+            r#"
+            write_package_value('aaa.bbb', 'ccc')
+            test_config_unification_rollout(enabled=True)
+            "#
+        ),
+    );
     fs.write_file(
         "trackpad/BUCK",
         indoc!(
@@ -108,7 +128,11 @@ async fn test_package_value_parent_dir_package_file() {
         .await
         .unwrap();
 
-    let result = interpreter.eval_build_file(package_label).await.1.unwrap();
+    let result = interpreter
+        .eval_build_file(package_label, &CancellationContext::testing())
+        .await
+        .1
+        .unwrap();
 
     let target_nodes: Vec<_> = result.targets().values().collect();
     assert_eq!(1, target_nodes.len());
@@ -123,6 +147,7 @@ async fn test_package_value_parent_dir_package_file() {
             .as_display_no_ctx()
             .to_string()
     );
+    assert!(target_node.test_config_unification_rollout());
 }
 
 #[tokio::test]
@@ -142,12 +167,14 @@ async fn test_overwrite_package_value_not_allowed_without_overwrite_flag() {
         ))
         .await
         .unwrap();
-    let err = interpreter.eval_build_file(package_label).await.1;
+    let err = interpreter
+        .eval_build_file(package_label, &CancellationContext::testing())
+        .await
+        .1;
     assert!(
-        format!("{:?}", err)
+        format!("{err:?}")
             .contains("key set in parent `PACKAGE` file, and overwrite flag is not set"),
-        "err = {:?}",
-        err
+        "err = {err:?}"
     );
 }
 
@@ -228,7 +255,11 @@ async fn test_read_parent_package_value() {
         .await
         .unwrap();
 
-    let result = interpreter.eval_build_file(package_label).await.1.unwrap();
+    let result = interpreter
+        .eval_build_file(package_label, &CancellationContext::testing())
+        .await
+        .1
+        .unwrap();
 
     let target_nodes: Vec<_> = result.targets().values().collect();
     assert_eq!(1, target_nodes.len());
@@ -292,7 +323,11 @@ async fn test_read_parent_package_value_from_bzl() {
         .await
         .unwrap();
 
-    let result = interpreter.eval_build_file(package_label).await.1.unwrap();
+    let result = interpreter
+        .eval_build_file(package_label, &CancellationContext::testing())
+        .await
+        .1
+        .unwrap();
 
     let target_nodes: Vec<_> = result.targets().values().collect();
     assert_eq!(1, target_nodes.len());
@@ -326,12 +361,14 @@ async fn test_read_parent_package_value_is_suggested_in_package_file() {
         ))
         .await
         .unwrap();
-    let err = interpreter.eval_build_file(package_label).await.1;
+    let err = interpreter
+        .eval_build_file(package_label, &CancellationContext::testing())
+        .await
+        .1;
     assert!(
-        format!("{:?}", err)
+        format!("{err:?}")
             .contains("In a Package context, consider using `read_parent_package_value`"),
-        "err = {:?}",
-        err
+        "err = {err:?}"
     );
 }
 
@@ -369,11 +406,62 @@ async fn test_read_parent_package_value_is_suggested_in_bzl_file() {
         ))
         .await
         .unwrap();
-    let err = interpreter.eval_build_file(package_label).await;
+    let err = interpreter
+        .eval_build_file(package_label, &CancellationContext::testing())
+        .await;
     assert!(
-        format!("{:?}", err)
+        format!("{err:?}")
             .contains("In a Package context, consider using `read_parent_package_value`"),
-        "err = {:?}",
-        err
+        "err = {err:?}"
     );
+}
+
+#[tokio::test]
+async fn test_config_unification_rollout_function_override() {
+    let fs = ProjectRootTemp::new().unwrap();
+    fs.write_file("rules.bzl", RULES);
+    fs.write_file(
+        "PACKAGE",
+        indoc!(
+            r#"
+            write_package_value('aaa.bbb', 'ccc')
+            test_config_unification_rollout(enabled=True)
+            "#
+        ),
+    );
+    fs.write_file(
+        "foo/PACKAGE",
+        "test_config_unification_rollout(enabled=False)",
+    );
+    fs.write_file(
+        "foo/BUCK",
+        indoc!(
+            r#"
+                load("//:rules.bzl", "rrr")
+                rrr(
+                    name = "foo",
+                    value = read_package_value("aaa.bbb"),
+                )
+        "#
+        ),
+    );
+    let package_label = PackageLabel::testing_parse("root//foo");
+    let mut ctx = calculation(&fs).await;
+    let mut interpreter = ctx
+        .get_interpreter_calculator(OwnedStarlarkPath::PackageFile(
+            PackageFilePath::package_file_for_dir(package_label.as_cell_path()),
+        ))
+        .await
+        .unwrap();
+
+    let result = interpreter
+        .eval_build_file(package_label, &CancellationContext::testing())
+        .await
+        .1
+        .unwrap();
+
+    let target_nodes: Vec<_> = result.targets().values().collect();
+    assert_eq!(1, target_nodes.len());
+    let target_node = &target_nodes[0];
+    assert!(!target_node.test_config_unification_rollout());
 }

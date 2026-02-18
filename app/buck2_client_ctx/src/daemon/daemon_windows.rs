@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ffi::OsStr;
@@ -123,7 +124,7 @@ pub(crate) fn spawn_background_process_on_windows<'a>(
             Err(buck2_error!(
                 buck2_error::ErrorTag::Input,
                 "{}",
-                format!("null byte found in provided data: {:?}", s)
+                format!("null byte found in provided data: {s:?}")
             ))
         } else {
             Ok(s)
@@ -148,16 +149,14 @@ pub(crate) fn spawn_background_process_on_windows<'a>(
             for (k, v) in env.into_iter() {
                 blk.extend(
                     ensure_no_nuls(&k)
-                        .with_buck_error_context(|| {
-                            format!("Reading environment variable {:?}", k)
-                        })?
+                        .with_buck_error_context(|| format!("Reading environment variable {k:?}"))?
                         .encode_wide(),
                 );
                 blk.push('=' as u16);
                 blk.extend(
                     ensure_no_nuls(&v)
                         .with_buck_error_context(|| {
-                            format!("Reading value {:?} of environment variable {:?}", v, k)
+                            format!("Reading value {v:?} of environment variable {k:?}")
                         })?
                         .encode_wide(),
                 );

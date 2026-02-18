@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # %INSERT_GENERATED_LINE%
 
@@ -98,7 +99,13 @@ __buck2_fix()
         if [[ $cur =~ ^- ]]; then
             _buck2 "$@"
         else
-            _buck2 "$@"
+            # The auto-generated completions have what is arguably a bug resulting where they don't
+            # correctly fix up `$cur` in the way we do above to deal with colons. As a result, skip
+            # flag completions if there's a colon in the current word - that wasn't going to be
+            # useful anyway.
+            if [[ ! $cur == *:* ]]; then
+                _buck2 "$@"
+            fi
             if ! __buck2_completions_queued; then
                 __buck2_add_target_completions "$cur"
             fi

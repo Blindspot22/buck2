@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 import os
 
@@ -33,12 +34,8 @@ if FLAVOR == "check_dependencies_test":  # noqa: C901
         )
         expect_failure_msg = os.environ["EXPECT_FAILURE_MSG"]
 
-        fbcode_build_mode = os.environ.get("CHECK_DEPENDENCIES_TEST_FBCODE_BUILD_MODE")
-        if fbcode_build_mode:
-            mode_argfile = get_mode_from_platform(
-                fbcode_build_mode, skip_validation_i_know_what_im_doing=True
-            )
-        else:
+        mode_argfile = os.environ.get("CHECK_DEPENDENCIES_TEST_FBCODE_BUILD_MODE")
+        if not mode_argfile:
             mode_argfile = get_mode_from_platform()
 
         additional_argfile = os.environ.get("EXTRA_BUCK_ARGS_FILE", None)
@@ -57,6 +54,8 @@ if FLAVOR == "check_dependencies_test":  # noqa: C901
             os.environ["VERIFICATION_MODE"],
             *allowlist_args,
             *blocklist_args,
+            "--target_deps",
+            os.environ["TARGET_DEPS"],
             env={
                 "BUCK2_TEST_DISABLE_LOG_UPLOAD": "false",
                 "BUCK2_RUNTIME_THREADS": "8",
@@ -117,6 +116,40 @@ elif FLAVOR == "assert_dependencies_test":
             *dep_list,
             env={
                 "BUCK2_TEST_DISABLE_LOG_UPLOAD": "false",
+            },
+        )
+        if expect_failure_msg == "":
+            await bxl_call
+        else:
+            await expect_failure(bxl_call, stderr_regex=expect_failure_msg)
+
+elif FLAVOR == "check_mutually_exclusive_dependencies_test":
+
+    @buck_test(inplace=True)
+    async def test_check_mutually_exclusive_dependencies_bxl(buck) -> None:
+        expect_failure_msg = os.environ["EXPECT_FAILURE_MSG"]
+
+        # Build mode argfile is passed directly to buck2 as an argfile
+        # e.g., "@fbsource//arvr/mode/android/linux/opt"
+        build_mode_argfile = os.environ.get("BUILD_MODE_ARGFILE", "")
+        additional_args = []
+        if build_mode_argfile:
+            additional_args.append(build_mode_argfile)
+
+        bxl_call = buck.bxl(
+            os.environ["BXL_MAIN"],
+            *additional_args,
+            "--",
+            "--target",
+            os.environ["TARGET"],
+            "--mutually_exclusive_group",
+            os.environ["MUTUALLY_EXCLUSIVE_GROUP"],
+            "--target_deps",
+            os.environ["TARGET_DEPS"],
+            env={
+                "BUCK2_TEST_DISABLE_LOG_UPLOAD": "false",
+                "BUCK2_RUNTIME_THREADS": "8",
+                "BUCK2_MAX_BLOCKING_THREADS": "8",
             },
         )
         if expect_failure_msg == "":

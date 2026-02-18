@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
 
-use buck2_error::__for_macro::AsDynError;
 use buck2_error::ErrorTag;
 use buck2_error::source_location::SourceLocation;
 use buck2_event_observer::display::TargetDisplayOptions;
@@ -26,20 +26,20 @@ pub struct ActionError {
     error_diagnostics: Option<buck2_data::ActionErrorDiagnostics>,
 }
 
-impl std::error::Error for ActionError {
-    fn provide<'a>(&'a self, request: &mut std::error::Request<'a>) {
-        let is_command_failure = self.last_command.as_ref().is_some_and(|c| {
+impl From<ActionError> for buck2_error::Error {
+    fn from(this: ActionError) -> buck2_error::Error {
+        let is_command_failure = this.last_command.as_ref().is_some_and(|c| {
             matches!(
                 c.status,
                 Some(buck2_data::command_execution::Status::Failure { .. })
             )
         });
 
-        let mut tags = vec![ErrorTag::AnyActionExecution];
+        let mut tags = vec![];
         let mut string_tags = vec![];
         let mut source_location = SourceLocation::new(std::file!()).with_type_name("ActionError");
-        match &self.execute_error {
-            ExecuteError::CommandExecutionError { error } => {
+        match &this.execute_error {
+            ExecuteError::CommandExecutionError { error, .. } => {
                 if let Some(err) = error {
                     tags.extend(err.tags());
                     string_tags.extend(err.string_tags());
@@ -47,7 +47,7 @@ impl std::error::Error for ActionError {
                 }
 
                 if is_command_failure {
-                    if let Some(diagnostic) = &self.error_diagnostics {
+                    if let Some(diagnostic) = &this.error_diagnostics {
                         if let Some(buck2_data::action_error_diagnostics::Data::SubErrors(
                             sub_errors,
                         )) = diagnostic.data.as_ref()
@@ -69,36 +69,29 @@ impl std::error::Error for ActionError {
             ExecuteError::MissingOutputs { .. } => tags.push(ErrorTag::ActionMissingOutputs),
             // Or if the action produced the wrong type
             ExecuteError::WrongOutputType { .. } => tags.push(ErrorTag::ActionWrongOutputType),
-            ExecuteError::Error { error } => {
-                tags.extend(error.tags());
-                string_tags.extend(error.string_tags());
-                source_location = error.source_location().clone();
-            }
+            ExecuteError::Error { .. } => (),
         };
 
-        buck2_error::provide_metadata(
-            request,
-            tags,
-            string_tags,
-            source_location,
-            Some(self.as_proto_event()),
-        );
-    }
-
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.execute_error {
-            ExecuteError::Error { error } => Some(error.as_dyn_error()),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for ActionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = display_action_error(&self.as_proto_event(), TargetDisplayOptions::for_log())
+        let msg = display_action_error(&this.as_proto_event(), TargetDisplayOptions::for_log())
             .expect("Action key is always present in `ActionError`")
             .simple_format_for_build_report();
-        write!(f, "{}", s)
+
+        let base_error = match this.execute_error {
+            ExecuteError::Error { error } => error.tag([ErrorTag::AnyActionExecution]).context(msg),
+            // FIXME(JakobDegen): What about `CommandExecutionError`?
+            _ => buck2_error::Error::new(
+                msg,
+                ErrorTag::AnyActionExecution,
+                source_location,
+                Some(this.as_proto_event()),
+            ),
+        };
+
+        let mut e = base_error.tag(tags);
+        for t in string_tags {
+            e = e.string_tag(&t);
+        }
+        e
     }
 }
 
@@ -139,7 +132,7 @@ impl ActionError {
                 ),
             }
             .into(),
-            ExecuteError::Error { error } => format!("{:#}", error).into(),
+            ExecuteError::Error { error } => format!("{error:#}").into(),
             ExecuteError::CommandExecutionError { .. } => buck2_data::CommandExecutionError {}.into(),
         }
     }
@@ -171,7 +164,7 @@ fn error_items<T: fmt::Display>(xs: &[T]) -> String {
         if i != 0 {
             res.push_str(", ");
         }
-        write!(res, "`{}`", x).unwrap();
+        write!(res, "`{x}`").unwrap();
     }
     res
 }
@@ -180,7 +173,6 @@ fn error_items<T: fmt::Display>(xs: &[T]) -> String {
 mod tests {
     use buck2_error::ErrorTag;
     use buck2_error::buck2_error;
-    use buck2_error::conversion::from_any_with_tag;
 
     use super::*;
 
@@ -188,9 +180,7 @@ mod tests {
     fn test_error_conversion() {
         let error = buck2_error!(ErrorTag::Http, "error");
 
-        let execute_error = ExecuteError::Error {
-            error: error.into(),
-        };
+        let execute_error = ExecuteError::Error { error };
 
         let action_error = ActionError::new(
             execute_error,
@@ -218,7 +208,7 @@ mod tests {
             None,
         );
 
-        let buck2_error = from_any_with_tag(action_error, ErrorTag::AnyActionExecution);
+        let buck2_error = buck2_error::Error::from(action_error);
 
         assert_eq!(
             buck2_error.tags(),

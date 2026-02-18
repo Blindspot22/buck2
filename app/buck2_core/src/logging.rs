@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -70,7 +71,7 @@ where
     let filter = match buck2_env!(ENV_VAR)? {
         Some(v) => EnvFilter::try_new(v)
             .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::LogFilter))
-            .with_buck_error_context(|| format!("Failed to parse ${} as a filter", ENV_VAR))?,
+            .with_buck_error_context(|| format!("Failed to parse ${ENV_VAR} as a filter"))?,
         // daemon_listener is all emitted before the client starts tailing, which is why we log
         // those by default.
         None => EnvFilter::new("warn,[daemon_listener]=info"),

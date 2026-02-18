@@ -21,6 +21,8 @@ use std::cmp::Ordering;
 use std::hash::Hash;
 
 use allocative::Allocative;
+#[cfg(feature = "pagable")]
+use pagable::Pagable;
 use serde::Deserialize;
 use serde::Serialize;
 use strong_hash::StrongHash;
@@ -31,6 +33,7 @@ use crate::small_map::SmallMap;
 
 /// Wrapper for `SmallMap` which considers map equal if iteration order is equal.
 #[derive(Debug, Clone, Allocative)]
+#[cfg_attr(feature = "pagable", derive(Pagable))]
 pub struct OrderedMap<K, V>(SmallMap<K, V>);
 
 impl<K, V> OrderedMap<K, V> {
@@ -60,13 +63,13 @@ impl<K, V> OrderedMap<K, V> {
 
     /// Iterate over the entries.
     #[inline]
-    pub fn iter(&self) -> small_map::Iter<K, V> {
+    pub fn iter(&self) -> small_map::Iter<'_, K, V> {
         self.0.iter()
     }
 
     /// Iterate over the entries, with mutable values.
     #[inline]
-    pub fn iter_mut(&mut self) -> small_map::IterMut<K, V> {
+    pub fn iter_mut(&mut self) -> small_map::IterMut<'_, K, V> {
         self.0.iter_mut()
     }
 
@@ -174,7 +177,7 @@ impl<K, V> OrderedMap<K, V> {
 
     /// Iterate over the map with hashes.
     #[inline]
-    pub fn iter_hashed(&self) -> small_map::IterHashed<K, V> {
+    pub fn iter_hashed(&self) -> small_map::IterHashed<'_, K, V> {
         self.0.iter_hashed()
     }
 }

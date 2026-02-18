@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Lock-free vector-like data structure.
@@ -53,8 +54,8 @@ impl<T> BucketAlloc<T> {
     #[inline]
     unsafe fn drop_data(&self, len: usize) {
         assert!(len <= self.cap);
-        let data: *mut [T] = unsafe { slice::from_raw_parts_mut(self.data, len) };
-        ptr::drop_in_place(data)
+        let data: *mut [T] = std::ptr::slice_from_raw_parts_mut(self.data, len);
+        unsafe { ptr::drop_in_place(data) };
     }
 
     #[inline]
@@ -69,7 +70,7 @@ impl<T> Drop for BucketAlloc<T> {
     fn drop(&mut self) {
         unsafe {
             let data: *mut MaybeUninit<T> = self.data as *mut MaybeUninit<T>;
-            let data: *mut [MaybeUninit<T>] = slice::from_raw_parts_mut(data, self.cap);
+            let data: *mut [MaybeUninit<T>] = std::ptr::slice_from_raw_parts_mut(data, self.cap);
             let data: Box<[MaybeUninit<T>]> = Box::from_raw(data);
             drop(data);
         }
@@ -201,20 +202,20 @@ impl<T, const BUCKETS: usize> LockFreeVec<T, BUCKETS> {
     #[inline]
     unsafe fn init_bucket(&self, bucket: usize) -> *mut T {
         let bucket_ptr_ptr: *mut *mut T = self.buckets[bucket].get();
-        let bucket_ptr = *bucket_ptr_ptr;
+        let bucket_ptr = unsafe { *bucket_ptr_ptr };
         if !bucket_ptr.is_null() {
             return bucket_ptr;
         }
-        self.init_bucket_slow(bucket)
+        unsafe { self.init_bucket_slow(bucket) }
     }
 
     #[cold]
     unsafe fn init_bucket_slow(&self, bucket: usize) -> *mut T {
         let bucket_ptr_ptr: *mut *mut T = self.buckets[bucket].get();
-        assert!((*bucket_ptr_ptr).is_null());
+        assert!(unsafe { *bucket_ptr_ptr }.is_null());
         let bucket_alloc = BucketAlloc::new(Self::bucket_capacity(bucket));
         let bucket_ptr = bucket_alloc.data;
-        *bucket_ptr_ptr = bucket_ptr;
+        unsafe { *bucket_ptr_ptr = bucket_ptr };
         mem::forget(bucket_alloc);
         bucket_ptr
     }
@@ -259,7 +260,7 @@ impl<T, const BUCKETS: usize> LockFreeVec<T, BUCKETS> {
     ///
     /// Iterates over snapshot of the vector, newly pushed elements may not be visible.
     #[inline]
-    pub fn iter(&self) -> Iter<T, BUCKETS> {
+    pub fn iter(&self) -> Iter<'_, T, BUCKETS> {
         let len = self.len();
         let slice = if len == 0 {
             &[]
@@ -563,7 +564,7 @@ mod tests {
     fn test_allocative() {
         let v = LockFreeVec::<String, 10>::new();
         for i in 0..100 {
-            v.push_at(v.len(), format!("{:<3}", i)).unwrap();
+            v.push_at(v.len(), format!("{i:<3}")).unwrap();
         }
 
         let mut builder = FlameGraphBuilder::default();
@@ -575,7 +576,7 @@ mod tests {
         // https://www.internalfb.com/intern/px/p/2GgX5
         // Alternatively we can set up a golden test.
         if false {
-            println!("{}", flame_graph);
+            println!("{flame_graph}");
         }
     }
 }

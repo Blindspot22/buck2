@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -61,7 +62,7 @@ use itertools::Itertools;
 use starlark_map::ordered_map::OrderedMap;
 
 #[tokio::test]
-async fn test_analysis_calculation() -> anyhow::Result<()> {
+async fn test_analysis_calculation() -> buck2_error::Result<()> {
     let bzlfile = ImportPath::testing_new("cell//pkg:foo.bzl");
     let resolver = CellResolver::testing_with_names_and_paths(&[
         (
@@ -155,7 +156,8 @@ async fn test_analysis_calculation() -> anyhow::Result<()> {
             data.data.set(EventDispatcher::null());
             data.spawner = Arc::new(BuckSpawner::current_runtime().unwrap());
             data
-        })?;
+        })
+        .unwrap();
     setup_interpreter_basic(
         &mut dice,
         resolver,

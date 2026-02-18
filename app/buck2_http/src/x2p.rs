@@ -1,23 +1,24 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_error::buck2_error;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::Uri;
-use hyper_proxy::Proxy;
+use hyper_http_proxy::Proxy;
 
 #[cfg(fbcode_build)]
 mod imp {
     use buck2_error::BuckErrorContext;
     use http::Uri;
-    use hyper_proxy::Intercept;
+    use hyper_http_proxy::Intercept;
 
     use super::*;
 
@@ -29,7 +30,7 @@ mod imp {
                 "Using x2pagent unix socket proxy client at: {}",
                 unix_socket
             );
-            let unix_uri = hyper_unix_connector::Uri::new(unix_socket, "/");
+            let unix_uri = hyperlocal::Uri::new(unix_socket, "/");
             Some(Proxy::new(Intercept::All, unix_uri.into()))
         } else {
             None
@@ -39,7 +40,7 @@ mod imp {
     pub(super) fn find_http_proxy() -> buck2_error::Result<Option<Proxy>> {
         if let Some(port) = cpe::x2p::http1_proxy_port() {
             tracing::debug!("Using x2pagent http proxy client on port: {}", port);
-            let uri: Uri = format!("http://localhost:{}", port)
+            let uri: Uri = format!("http://localhost:{port}")
                 .try_into()
                 .buck_error_context("Error converting x2pagent proxy address into URI")?;
             Ok(Some(Proxy::new(Intercept::All, uri)))

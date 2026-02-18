@@ -1,21 +1,22 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use derive_more::Display;
 use dice::DetectCycles;
 use dice::Dice;
 use dice::DiceComputations;
 use dice::InjectedKey;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 
 // dice graph storage needs to not reuse deps just because the value hasn't changed
@@ -54,7 +55,7 @@ async fn test_dice_recompute_doesnt_reuse_wrong_deps() -> anyhow::Result<()> {
         }
     }
 
-    let dice = Dice::modern().build(DetectCycles::Enabled);
+    let dice = Dice::builder().build(DetectCycles::Enabled);
 
     let mut updater = dice.updater();
     updater.changed_to([(Leaf(0), 1), (Leaf(1), 100), (Leaf(2), 200)])?;
@@ -105,7 +106,7 @@ async fn test_dice_clear_doesnt_break_ongoing_computation() -> anyhow::Result<()
         }
     }
 
-    let dice = Dice::modern().build(DetectCycles::Enabled);
+    let dice = Dice::builder().build(DetectCycles::Enabled);
     let updater = dice.updater();
     let mut ctx1 = updater.commit().await;
 
@@ -116,7 +117,7 @@ async fn test_dice_clear_doesnt_break_ongoing_computation() -> anyhow::Result<()
 
     let res = ctx1.compute(&Fib(10)).await;
 
-    assert!(res.is_err(), "Expected `Err(_)`, got `{:?}`", res);
+    assert!(res.is_err(), "Expected `Err(_)`, got `{res:?}`");
 
     Ok(())
 }
@@ -169,7 +170,7 @@ fn test_dice_clear_doesnt_cause_inject_compute() {
             }
         }
 
-        let dice = Dice::modern().build(DetectCycles::Enabled);
+        let dice = Dice::builder().build(DetectCycles::Enabled);
         let mut updater = dice.updater();
         drop(updater.changed_to([(Leaf, 1)]));
         let mut ctx1 = updater.commit().await;

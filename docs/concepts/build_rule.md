@@ -7,7 +7,7 @@ title: Build Rule
 
 A _build rule_ is a procedure for producing output files from a set of input
 files in the context of a specified build configuration. Build rules are
-specified in [build file](build_file.md)s—typically named BUCK.
+specified in [build files](build_file.md)—typically named BUCK.
 
 > **Note:** A build rule must explicitly specify, in its arguments, all of its
 > required inputs in order for Buck2 to be able to build the rule's output in a
@@ -19,16 +19,16 @@ Buck2 comes with a collection of built-in build rules for many common build
 procedures. For example:
 
 - Compiling Java code against the Android SDK is a common procedure, so Buck2
-  provides the [`android_library`](../../prelude/globals#android_library) build
-  rule
+  provides the [`android_library`](../../prelude/rules/android/android_library)
+  build rule
 - The final product of most Android development is an APK, so you can use the
-  [`android_binary`](../../prelude/globals#android_binary) build rule to create
-  an APK
+  [`android_binary`](../../prelude/rules/android/android_binary) build rule to
+  create an APK
 
 ## Source files as inputs to build rules
 
 Most build rules specify source files as inputs. For example, a
-[`cxx_library`](../../prelude/globals#cxx_library) rule would specify `.cpp`
+[`cxx_library`](../../prelude/rules/cxx/cxx_library) rule would specify `.cpp`
 files as inputs.
 
 To support specifying these files:
@@ -53,21 +53,19 @@ In Buck2, source files are organized within _packages_:
 Buck2 enforces these rules regarding source file access:
 
 1. **Basic Rule**: A build rule can only use source files from its own package
-
    - A rule in a BUCK file cannot specify source files from outside its package
 
 2. **Header File Exception**: A rule can access header files from another
    package if:
-
    - The other package explicitly _exports_ those header files
    - This is done using the `exported_headers` argument
-   - See the [`cxx_library`](../../prelude/globals#cxx_library) documentation
+   - See the [`cxx_library`](../../prelude/rules/cxx/cxx_library) documentation
      for details
 
 3. **Accessing Functionality**: To use code from other packages:
    - Use the artifacts produced by build rules in those packages
    - Specify those build rules as _dependencies_
-   - Example: A [`cxx_binary`](../../prelude/globals/#cxx_binary) can use a
+   - Example: A [`cxx_binary`](../../prelude/rules/cxx/cxx_binary) can use a
      `cxx_library` from another package by taking it as a dependency
 
 #### Using Symlinks (Not Recommended)
@@ -99,12 +97,12 @@ Dependencies are specified in several ways:
 
 ### Examples:
 
-The output of a [`java_library`](../../prelude/globals/#java_library) rule is a
-JAR file. If a `java_library` rule specifies another `java_library` rule as a
+The output of a [`java_library`](../../prelude/rules/java/java_library) rule is
+a JAR file. If a `java_library` rule specifies another `java_library` rule as a
 dependency, the JAR file produced by the specified rule is added to the
 classpath for the `java_library` that depends on it.
 
-If a [`java_binary`](../../prelude/globals/#java_binary) rule specifies a
+If a [`java_binary`](../../prelude/rules/java/java_binary) rule specifies a
 `java_library` rule as a dependency, the JAR file for the specified
 `java_library` is available on the classpath for the `java_binary`.
 
@@ -121,7 +119,7 @@ Buck2 guarantees that any dependencies that a rule lists that are required to
 build that rule are built successfully _before_ Buck2 builds the rule itself.
 
 Note that there can be special cases—such as
-[`apple_bundle`](../../prelude/globals/#apple_bundle)—where a rule's listed
+[`apple_bundle`](../../prelude/rules/apple/apple_bundle)—where a rule's listed
 dependencies do not actually need to be built before the rule.
 
 ### Visibility
@@ -150,11 +148,11 @@ category of generic build rules called _genrules_.
 With genrules, you can perform arbitrary operations using shell scripts. The
 genrules supported by Buck2 are:
 
-- [`genrule`](../../prelude/globals/#genrule)
-- [`apk_genrule`](../../prelude/globals/#apk_genrule)
-- [`cxx_genrule`](../../prelude/globals/#cxx_genrule)
-- [`jar_genrule`](../../prelude/globals/#jar_genrule)
-- [`js_bundle_genrule`](../../prelude/globals/#js_bundle_genrule)
+- [`genrule`](../../prelude/rules/core/genrule)
+- [`apk_genrule`](../../prelude/rules/android/apk_genrule)
+- [`cxx_genrule`](../../prelude/rules/cxx/cxx_genrule)
+- [`jar_genrule`](../../prelude/rules/java/jar_genrule)
+- [`js_bundle_genrule`](../../prelude/rules/js/js_bundle_genrule)
 
 ### Multiple output files with genrules
 

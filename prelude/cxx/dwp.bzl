@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load("@prelude//utils:arglike.bzl", "ArgLike")  # @unused Used as a type
@@ -22,15 +23,30 @@ def run_dwp_action(
         category_suffix: [str, None],
         referenced_objects: [ArgLike, list[Artifact]],
         dwp_output: Artifact,
-        local_only: bool):
+        local_only: bool,
+        from_exe = True):
     dwp = toolchain.binary_utilities_info.dwp
 
-    args = cmd_args(
-        [dwp, "-o", dwp_output.as_output(), "-e", obj],
-        # All object/dwo files referenced in the library/executable are implicitly
-        # processed by dwp.
-        hidden = referenced_objects,
-    )
+    if from_exe:
+        args = cmd_args(
+            [dwp, "-o", dwp_output.as_output(), "-e", obj] + getattr(ctx.attrs, "extra_dwp_flags", []),
+            # All object/dwo files referenced in the library/executable are implicitly
+            # processed by dwp.
+            hidden = referenced_objects,
+        )
+    else:
+        args = cmd_args(
+            [dwp, "-o", dwp_output.as_output()] + getattr(ctx.attrs, "extra_dwp_flags", []),
+        )
+        argsfile, _ = ctx.actions.write(
+            "dwp{}{}.argsfile".format(
+                "_" + category_suffix if category_suffix else "",
+                "_" + identifier if identifier else "",
+            ),
+            referenced_objects,
+            allow_args = True,
+        )
+        args.add(cmd_args(argsfile, format = "@{}", hidden = referenced_objects))
 
     category = "dwp"
     if category_suffix != None:
@@ -60,7 +76,8 @@ def dwp(
         # overspecification.
         referenced_objects: [ArgLike, list[Artifact]],
         name_suffix: str = "",
-        local_only: bool = False) -> Artifact:
+        local_only: bool = False,
+        from_exe = True) -> Artifact:
     # gdb/lldb expect to find a file named $file.dwp next to $file.
     output = ctx.actions.declare_output(obj.short_path + name_suffix + ".dwp")
     run_dwp_action(
@@ -72,5 +89,6 @@ def dwp(
         referenced_objects,
         output,
         local_only = local_only,
+        from_exe = from_exe,
     )
     return output

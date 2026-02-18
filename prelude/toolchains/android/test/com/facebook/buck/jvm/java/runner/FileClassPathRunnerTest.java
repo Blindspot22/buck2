@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java.runner;
 
 import com.facebook.buck.core.filesystems.AbsPath;
-import com.facebook.buck.jvm.java.version.utils.JavaVersionUtils;
 import com.facebook.buck.testutil.TemporaryPaths;
 import java.io.IOException;
 import java.net.URL;
@@ -23,7 +23,6 @@ import java.util.Arrays;
 import java.util.List;
 import org.junit.After;
 import org.junit.Assert;
-import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -56,14 +55,6 @@ public class FileClassPathRunnerTest {
       System.setProperty(
           FileClassPathRunner.CLASSPATH_FILE_PROPERTY, oldClassPathFilePropertyValue);
     }
-  }
-
-  @Test
-  public void mainThrowsIfNoTestRunnerPropertyOnJava8()
-      throws IOException, ReflectiveOperationException {
-    Assume.assumeTrue(JavaVersionUtils.getMajorVersion() <= 8);
-    thrown.expect(IllegalArgumentException.class);
-    FileClassPathRunner.main(new String[] {"one"});
   }
 
   @Test
@@ -173,15 +164,7 @@ public class FileClassPathRunnerTest {
   }
 
   @Test
-  public void getPlatformClassLoaderOnJava8() {
-    Assume.assumeTrue(JavaVersionUtils.getMajorVersion() <= 8);
-    thrown.expect(AssertionError.class);
-    FileClassPathRunner.findPlatformClassLoader();
-  }
-
-  @Test
   public void getPlatformClassLoaderOnJava9Plus() {
-    Assume.assumeTrue(JavaVersionUtils.getMajorVersion() >= 9);
     ClassLoader loader = FileClassPathRunner.findPlatformClassLoader();
     Assert.assertNotNull(loader);
   }

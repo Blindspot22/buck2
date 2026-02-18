@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Handles parsing macros out of an attrs.arg()
@@ -103,8 +104,7 @@ pub fn parse_macros(input: &str) -> buck2_error::Result<ParsedArg> {
         Ok((value, remaining)) => {
             assert!(
                 remaining.is_empty(),
-                "somehow had remaining stuff after a successful macro parse. Had `{}` remaining.",
-                remaining
+                "somehow had remaining stuff after a successful macro parse. Had `{remaining}` remaining."
             );
 
             Ok(value)
@@ -192,7 +192,7 @@ fn unescape(input: &str) -> String {
 // $(macro a(b(c(d)))) -> arg1 == "a(b(b(d))))"
 // ```
 // TODO: that second case seems like a bug in buckv1 and it should be just a single arg. We've preserved the v1 behavior.
-fn read_unquoted_arg(input: &str) -> Result<String> {
+fn read_unquoted_arg(input: &str) -> Result<'_, String> {
     let mut has_escapes = false;
     let mut paren_count = 0;
     let mut char_indices = input.char_indices();
@@ -238,7 +238,7 @@ fn read_unquoted_arg(input: &str) -> Result<String> {
 }
 
 // A quoted arg is simple, we will read until we find a matching un-escaped quote.
-fn read_quoted_arg(input: &str, quote: char) -> Result<String> {
+fn read_quoted_arg(input: &str, quote: char) -> Result<'_, String> {
     let mut has_escapes = false;
     let mut char_indices = input.char_indices();
     let mut pos = char_indices.next();
@@ -270,7 +270,7 @@ fn read_quoted_arg(input: &str, quote: char) -> Result<String> {
     }
 }
 
-fn read_macro_arg(input: &str) -> Result<String> {
+fn read_macro_arg(input: &str) -> Result<'_, String> {
     if let Some(rest) = input.strip_prefix('\'') {
         read_quoted_arg(rest, '\'')
     } else if let Some(rest) = input.strip_prefix('"') {
@@ -281,14 +281,14 @@ fn read_macro_arg(input: &str) -> Result<String> {
 }
 
 // This is much stricter than buckv1. v1 allows nearly any character in the macro type. We allow only alphanumeric, '-', and '_'.
-fn read_macro_type(input: &str) -> Result<String> {
+fn read_macro_type(input: &str) -> Result<'_, String> {
     match input.find(|c: char| c.is_whitespace() || c == ')') {
         None => Err((input, ArgParseError::MacroTypeUnfinished)),
         Some(0) => Err((input, ArgParseError::MacroTypeMissing)),
         Some(pos) => {
             let macro_type = &input[..pos];
             if let Some(pos) =
-                macro_type.find(|c: char| (!c.is_ascii_alphanumeric() && c != '_' && c != '-'))
+                macro_type.find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
             {
                 Err((&input[pos..], ArgParseError::MacroTypeInvalidChar))
             } else {
@@ -299,12 +299,11 @@ fn read_macro_type(input: &str) -> Result<String> {
 }
 
 // A macro consists of a macro name followed by any number of space separated macro args eventually terminated by a closing paren.
-fn read_macro(input: &str) -> Result<ParsedMacro> {
+fn read_macro(input: &str) -> Result<'_, ParsedMacro> {
     // We only take the leading `$(` so that error message point to that instead of the beginning of the type.
     let working = input.strip_prefix("$(").unwrap_or_else(|| {
         panic!(
-            "the caller should've ensure that we're actually at the start of a macro. Got `{}`",
-            input,
+            "the caller should've ensure that we're actually at the start of a macro. Got `{input}`",
         )
     });
     let (write_to_file, working) = match working.strip_prefix('@') {
@@ -335,7 +334,7 @@ fn read_macro(input: &str) -> Result<ParsedMacro> {
     Err((input, ArgParseError::UnfinishedMacroInvocation))
 }
 
-fn read_literal_opt(input: &str) -> Result<Option<Box<str>>> {
+fn read_literal_opt(input: &str) -> Result<'_, Option<Box<str>>> {
     // To match v1's approach to this is non-trivial. To start a macro requires a `$(` with an
     // even number of preceding `\` (as the first of each pair escapes the second). If there's
     // an odd number of preceding `\`, one of them should be removed.
@@ -348,7 +347,7 @@ fn read_literal_opt(input: &str) -> Result<Option<Box<str>>> {
     }
 }
 
-fn read_literal_opt_slow(input: &str, pos: usize) -> Result<Option<Box<str>>> {
+fn read_literal_opt_slow(input: &str, pos: usize) -> Result<'_, Option<Box<str>>> {
     let mut char_indices = input.bytes().enumerate().skip(pos);
 
     let mut indices_to_drop = Vec::new();
@@ -419,7 +418,7 @@ fn read_literal_opt_slow(input: &str, pos: usize) -> Result<Option<Box<str>>> {
     }
 }
 
-fn read(input: &str) -> Result<ParsedArg> {
+fn read(input: &str) -> Result<'_, ParsedArg> {
     let (literal, remaining) = read_literal_opt(input)?;
     let mut working = remaining;
 

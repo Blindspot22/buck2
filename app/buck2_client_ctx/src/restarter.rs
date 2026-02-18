@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use crate::daemon::client::BuckdClientConnector;
@@ -31,7 +32,7 @@ impl Restarter {
     /// Observe our BuckdClientConnector after execution to decide whether we should be
     /// restarting.
     pub fn observe(&mut self, client: &BuckdClientConnector, events_ctx: &mut EventsCtx) {
-        for obs in events_ctx.subscribers.error_observers() {
+        for obs in events_ctx.error_observers() {
             if obs.daemon_in_memory_state_is_corrupted() {
                 self.reject_daemon = Some(client.daemon_constraints().daemon_id.clone());
             }
@@ -50,7 +51,7 @@ impl Restarter {
         }
 
         if self.should_restart() {
-            events_ctx.subscribers.handle_should_restart();
+            events_ctx.handle_should_restart();
         }
     }
 

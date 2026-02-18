@@ -1,17 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::any::Any;
 
-use buck2_futures::owning_future::OwningFuture;
-use buck2_futures::spawn::spawn_dropcancel;
-use buck2_futures::spawner::Spawner;
+use dice_futures::owning_future::OwningFuture;
+use dice_futures::spawn::spawn_dropcancel;
+use dice_futures::spawner::Spawner;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future::BoxFuture;

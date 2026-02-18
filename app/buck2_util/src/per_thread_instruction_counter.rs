@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 /// Simple wrapper for perf-event to measure the number of instructions
@@ -26,12 +27,12 @@ impl PerThreadInstructionCounter {
 
     #[cfg(target_os = "linux")]
     fn init_impl() -> buck2_error::Result<Option<PerThreadInstructionCounter>> {
-        let mut counter = perf_event::Builder::new()
+        let mut builder = perf_event::Builder::new()
             .observe_self()
             .any_cpu()
-            .inherit(false)
-            .kind(perf_event::events::Hardware::INSTRUCTIONS)
-            .build()?;
+            .kind(perf_event::events::Hardware::INSTRUCTIONS);
+        builder.inherit(false);
+        let mut counter = builder.build()?;
         counter.enable()?;
         Ok(Some(PerThreadInstructionCounter { counter }))
     }

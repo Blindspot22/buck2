@@ -1,17 +1,21 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::RefCell;
 
 use allocative::Allocative;
-use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use starlark::any::ProvidesStaticType;
+use starlark::environment::Methods;
+use starlark::environment::MethodsBuilder;
+use starlark::environment::MethodsStatic;
+use starlark::starlark_module;
 use starlark::values::AllocValue;
 use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
@@ -27,7 +31,7 @@ use crate::dynamic::dynamic_actions_callable::FrozenStarlarkDynamicActionsCallab
 #[derive(Debug, Trace, Allocative)]
 pub(crate) struct StarlarkDynamicActionsData<'v> {
     pub(crate) callable: FrozenValueTyped<'v, FrozenStarlarkDynamicActionsCallable>,
-    pub(crate) attr_values: DynamicAttrValues<Value<'v>, OutputArtifact>,
+    pub(crate) attr_values: DynamicAttrValues<Value<'v>>,
 }
 
 #[derive(
@@ -43,13 +47,43 @@ pub(crate) struct StarlarkDynamicActions<'v> {
     pub(crate) data: RefCell<Option<StarlarkDynamicActionsData<'v>>>,
 }
 
+// TODO(nero): the type name is not aligan with the registered type `DynamicActions`, fix it.
 #[starlark_value(type = "DynamicAction")]
-impl<'v> StarlarkValue<'v> for StarlarkDynamicActions<'v> {}
+impl<'v> StarlarkValue<'v> for StarlarkDynamicActions<'v> {
+    // Used to add type documentation to the generated documentation
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(dynamic_actions_methods)
+    }
+}
 
 impl<'v> AllocValue<'v> for StarlarkDynamicActions<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         // No need to freeze: we unpack contents of this struct
         // in `ctx.actions.dynamic_output` call.
         heap.alloc_complex_no_freeze(self)
     }
 }
+
+/// A dynamic action ready to be passed to `ctx.actions.dynamic_output_new()`.
+///
+/// `DynamicActions` represents a deferred computation that will read artifact contents and produce
+/// outputs based on those contents. It is created by calling a `DynamicActionsCallable` (returned
+/// by `dynamic_actions()`) with concrete artifact values.
+///
+/// # Usage
+///
+/// ```python
+/// # `my_dynamic` is a `DynamicActionsCallable` created with `dynamic_actions()`
+/// dynamic_action = my_dynamic(
+///     config = config_file,
+///     out = output.as_output(),
+/// )
+///
+/// # Declare the dynamic action in the build's action graph
+/// ctx.actions.dynamic_output_new(dynamic_action)
+/// ```
+///
+/// See `dynamic_actions()` and `DynamicActionsCallable` for details on creating the factory function.
+#[starlark_module]
+fn dynamic_actions_methods(builder: &mut MethodsBuilder) {}

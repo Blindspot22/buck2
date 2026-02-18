@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -14,18 +15,18 @@ use std::sync::Mutex;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_common::dice::file_ops::FileChangeTracker;
+use buck2_common::file_ops::dice::FileChangeTracker;
 use buck2_common::ignores::ignore_set::IgnoreSet;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::name::CellName;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_data::FileWatcherEventType;
 use buck2_data::FileWatcherKind;
 use buck2_error::conversion::from_any_with_tag;
 use buck2_events::dispatch::span_async;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use dice::DiceTransactionUpdater;
 use dupe::Dupe;
 use notify::EventKind;
@@ -36,13 +37,14 @@ use notify::event::MetadataKind;
 use notify::event::ModifyKind;
 use notify::event::RemoveKind;
 use starlark_map::ordered_set::OrderedSet;
+use tracing::debug;
 use tracing::info;
 
 use crate::file_watcher::FileWatcher;
 use crate::mergebase::Mergebase;
 use crate::stats::FileWatcherStats;
 
-fn ignore_event_kind(event_kind: &EventKind) -> bool {
+fn ignore_event_kind(event_kind: EventKind) -> bool {
     match event_kind {
         EventKind::Access(_) => true,
         EventKind::Modify(ModifyKind::Metadata(MetadataKind::Ownership))
@@ -59,6 +61,8 @@ struct NotifyFileData {
     ignored: u64,
     #[allocative(skip)]
     events: OrderedSet<(CellPath, EventKind)>,
+    /// Whether file system changes were missed
+    missed_events: bool,
 }
 
 impl NotifyFileData {
@@ -66,6 +70,7 @@ impl NotifyFileData {
         Self {
             ignored: 0,
             events: OrderedSet::new(),
+            missed_events: false,
         }
     }
 
@@ -79,7 +84,7 @@ impl NotifyFileData {
         let event =
             event.map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::NotifyWatcher))?;
 
-        for path in event.paths {
+        for path in &event.paths {
             // Testing shows that we get absolute paths back from the `notify` library.
             // It's not documented though.
             let path = root.relativize(AbsNormPath::new(&path)?)?;
@@ -94,7 +99,7 @@ impl NotifyFileData {
                 continue;
             }
 
-            let cell_path = cells.get_cell_path(&path)?;
+            let cell_path = cells.get_cell_path(&path);
             let ignore = ignore_specs
                 .get(&cell_path.cell())
                 // See the comment on the analogous code in `watchman/interface.rs`
@@ -105,16 +110,21 @@ impl NotifyFileData {
                 path, &event.kind, ignore
             );
 
-            if ignore || ignore_event_kind(&event.kind) {
+            if event.need_rescan() {
+                self.missed_events = true;
+                debug!("FileWatcher: File change events were missed");
+            }
+
+            if ignore || ignore_event_kind(event.kind) {
                 self.ignored += 1;
             } else {
-                self.events.insert((cell_path, event.kind.clone()));
+                self.events.insert((cell_path, event.kind));
             }
         }
         Ok(())
     }
 
-    fn sync(self) -> (buck2_data::FileWatcherStats, FileChangeTracker) {
+    fn sync(self) -> (buck2_data::FileWatcherStats, Option<FileChangeTracker>) {
         // The changes that go into the DICE transaction
         let mut changed = FileChangeTracker::new();
         let mut stats = FileWatcherStats::new(Default::default(), self.events.len());
@@ -125,7 +135,7 @@ impl NotifyFileData {
             match event_kind {
                 EventKind::Create(create_kind) => match create_kind {
                     CreateKind::File => {
-                        changed.file_added(cell_path);
+                        changed.file_added_or_removed(cell_path);
                         stats.add(
                             cell_path_str,
                             FileWatcherEventType::Create,
@@ -133,7 +143,7 @@ impl NotifyFileData {
                         );
                     }
                     CreateKind::Folder => {
-                        changed.dir_added(cell_path);
+                        changed.dir_added_or_removed(cell_path);
                         stats.add(
                             cell_path_str,
                             FileWatcherEventType::Create,
@@ -141,13 +151,13 @@ impl NotifyFileData {
                         );
                     }
                     CreateKind::Any | CreateKind::Other => {
-                        changed.file_added(cell_path.clone());
+                        changed.file_added_or_removed(cell_path.clone());
                         stats.add(
                             cell_path_str.clone(),
                             FileWatcherEventType::Create,
                             FileWatcherKind::File,
                         );
-                        changed.dir_added(cell_path);
+                        changed.dir_added_or_removed(cell_path);
                         stats.add(
                             cell_path_str,
                             FileWatcherEventType::Create,
@@ -157,7 +167,7 @@ impl NotifyFileData {
                 },
                 EventKind::Modify(modify_kind) => match modify_kind {
                     ModifyKind::Data(_) | ModifyKind::Metadata(_) => {
-                        changed.file_changed(cell_path);
+                        changed.file_contents_changed(cell_path);
                         stats.add(
                             cell_path_str,
                             FileWatcherEventType::Modify,
@@ -191,7 +201,7 @@ impl NotifyFileData {
                 },
                 EventKind::Remove(remove_kind) => match remove_kind {
                     RemoveKind::File => {
-                        changed.file_removed(cell_path);
+                        changed.file_added_or_removed(cell_path);
                         stats.add(
                             cell_path_str,
                             FileWatcherEventType::Delete,
@@ -199,7 +209,7 @@ impl NotifyFileData {
                         );
                     }
                     RemoveKind::Folder => {
-                        changed.dir_removed(cell_path);
+                        changed.dir_added_or_removed(cell_path);
                         stats.add(
                             cell_path_str,
                             FileWatcherEventType::Delete,
@@ -207,13 +217,13 @@ impl NotifyFileData {
                         );
                     }
                     RemoveKind::Any | RemoveKind::Other => {
-                        changed.file_removed(cell_path.clone());
+                        changed.file_added_or_removed(cell_path.clone());
                         stats.add(
                             cell_path_str.clone(),
                             FileWatcherEventType::Delete,
                             FileWatcherKind::File,
                         );
-                        changed.dir_removed(cell_path);
+                        changed.dir_added_or_removed(cell_path);
                         stats.add(
                             cell_path_str,
                             FileWatcherEventType::Delete,
@@ -225,13 +235,22 @@ impl NotifyFileData {
             }
         }
 
-        (stats.finish(), changed)
+        let stats = stats.finish();
+        let changed = if self.missed_events {
+            None
+        } else {
+            Some(changed)
+        };
+
+        (stats, changed)
     }
 }
 
 #[derive(Allocative)]
 pub struct NotifyFileWatcher {
     #[allocative(skip)]
+    #[expect(unused)]
+    // FIXME(JakobDegen): Clarify if this just needs to be kept alive or can be removed?
     watcher: RecommendedWatcher,
     data: Arc<Mutex<buck2_error::Result<NotifyFileData>>>,
 }
@@ -267,7 +286,12 @@ impl NotifyFileWatcher {
         let mut guard = self.data.lock().unwrap();
         let old = mem::replace(&mut *guard, Ok(NotifyFileData::new()));
         let (stats, changes) = old?.sync();
-        changes.write_to_dice(&mut dice)?;
+        if let Some(changes) = changes {
+            changes.write_to_dice(&mut dice)?;
+        } else {
+            // We missed some file system notifications, so we drop everything
+            dice = dice.unstable_take();
+        }
         Ok((stats, dice))
     }
 }

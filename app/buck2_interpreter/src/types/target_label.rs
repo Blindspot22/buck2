@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::hash::Hash;
@@ -46,6 +47,7 @@ use crate::types::cell_path::StarlarkCellPath;
 use crate::types::configuration::StarlarkConfiguration;
 use crate::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use crate::types::configured_providers_label::StarlarkProvidersLabel;
+use crate::types::package_path::StarlarkPackagePath;
 
 #[derive(
     Clone,
@@ -111,7 +113,7 @@ fn label_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn package<'v>(
         this: &StarlarkTargetLabel,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<StringValue<'v>> {
         Ok(heap.alloc_str_intern(this.label.pkg().cell_relative_path().as_str()))
     }
@@ -129,6 +131,12 @@ fn label_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn path<'v>(this: &StarlarkTargetLabel) -> starlark::Result<StarlarkCellPath> {
         Ok(StarlarkCellPath(this.label.pkg().to_cell_path()))
+    }
+
+    /// Returns the PackagePath for this target label.
+    #[starlark(attribute)]
+    fn package_path<'v>(this: &StarlarkTargetLabel) -> starlark::Result<StarlarkPackagePath> {
+        Ok(StarlarkPackagePath::new(this.label.pkg().dupe()))
     }
 
     /// Converts a `TargetLabel` into its corresponding `ProvidersLabel` given the subtarget names,
@@ -223,7 +231,7 @@ fn configured_label_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn package<'v>(
         this: &StarlarkConfiguredTargetLabel,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<StringValue<'v>> {
         Ok(heap.alloc_str_intern(this.label.pkg().cell_relative_path().as_str()))
     }
@@ -241,6 +249,14 @@ fn configured_label_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn path<'v>(this: &StarlarkConfiguredTargetLabel) -> starlark::Result<StarlarkCellPath> {
         Ok(StarlarkCellPath(this.label.pkg().to_cell_path()))
+    }
+
+    /// Returns the PackagePath for this configured target label.
+    #[starlark(attribute)]
+    fn package_path<'v>(
+        this: &StarlarkConfiguredTargetLabel,
+    ) -> starlark::Result<StarlarkPackagePath> {
+        Ok(StarlarkPackagePath::new(this.label.pkg().dupe()))
     }
 
     fn config<'v>(this: &StarlarkConfiguredTargetLabel) -> starlark::Result<StarlarkConfiguration> {
@@ -311,6 +327,24 @@ fn value_to_providers_name(subtarget_name: SubtargetNameArg) -> buck2_error::Res
             buck2_util::arc_str::ArcSlice::from_iter(subtarget),
         )))
     })
+}
+
+#[derive(StarlarkTypeRepr, UnpackValue)]
+pub enum LabelArg<'v> {
+    Target(&'v StarlarkTargetLabel),
+    Providers(&'v StarlarkProvidersLabel),
+}
+
+impl<'v> LabelArg<'v> {
+    pub fn to_provider_label(&self) -> StarlarkProvidersLabel {
+        match self {
+            LabelArg::Target(t) => StarlarkProvidersLabel::new(ProvidersLabel::new(
+                t.label().dupe(),
+                ProvidersName::Default,
+            )),
+            LabelArg::Providers(t) => StarlarkProvidersLabel::new(t.label().dupe()),
+        }
+    }
 }
 
 #[starlark_module]

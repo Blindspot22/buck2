@@ -1,13 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//apple/user:apple_ipa_package.bzl", "make_apple_ipa_package_target")
+load("@prelude//utils:selects.bzl", "selects")
 load(":apple_bundle_config.bzl", "apple_bundle_config")
-load(":apple_dsym_config.bzl", "apple_dsym_config")
 load(":apple_info_plist_substitutions_parsing.bzl", "parse_codesign_entitlements")
 load(":apple_package_config.bzl", "apple_package_config")
 load(":apple_resource_bundle.bzl", "make_resource_bundle_rule")
@@ -89,9 +90,8 @@ def apple_macro_layer_set_bool_override_attrs_from_config(overrides: list[AppleB
     return attribs
 
 def apple_test_macro_impl(apple_test_rule, apple_resource_bundle_rule, **kwargs):
-    _transform_apple_minimum_os_version_to_propagated_target_sdk_version(kwargs)
+    _transform_propagated_target_sdk_version_to_minimum_os_version(kwargs)
     kwargs.update(apple_bundle_config())
-    kwargs.update(apple_dsym_config())
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config(_APPLE_TEST_LOCAL_EXECUTION_OVERRIDES))
 
     # `extension` is used both by `apple_test` and `apple_resource_bundle`, so provide default here
@@ -109,30 +109,45 @@ def apple_xcuitest_macro_impl(apple_xcuitest_rule, **kwargs):
     )
 
 def apple_bundle_macro_impl(apple_bundle_rule, apple_resource_bundle_rule, **kwargs):
-    _transform_apple_minimum_os_version_to_propagated_target_sdk_version(kwargs)
+    _transform_propagated_target_sdk_version_to_minimum_os_version(kwargs)
     info_plist_substitutions = kwargs.get("info_plist_substitutions")
     kwargs.update(apple_bundle_config())
-    kwargs.update(apple_dsym_config())
+    codesign_entitlements = selects.apply(info_plist_substitutions, parse_codesign_entitlements)
+
     apple_bundle_rule(
-        _codesign_entitlements = parse_codesign_entitlements(info_plist_substitutions),
+        _codesign_entitlements = codesign_entitlements,
         _resource_bundle = make_resource_bundle_rule(apple_resource_bundle_rule, **kwargs),
         **kwargs
     )
 
 def apple_library_macro_impl(apple_library_rule = None, **kwargs):
-    kwargs.update(apple_dsym_config())
+    _transform_propagated_target_sdk_version_to_minimum_os_version(kwargs)
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config(_APPLE_LIBRARY_LOCAL_EXECUTION_OVERRIDES))
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config([APPLE_STRIPPED_DEFAULT]))
     apple_library_rule(**kwargs)
+
+def apple_metal_library_macro_impl(apple_metal_library_rule = None, **kwargs):
+    if "exec_compatible_with" in kwargs:
+        fail("Cannot set `exec_compatible_with` for apple_metal_library()")
+    kwargs["exec_compatible_with"] = [
+        # It's possible a buck2 daemon host machine has the correct Xcode
+        # version selected but does not have the Metal toolchain installed.
+        # Because this would lead to a build failure, we have to send actions
+        # remotely where we it's guaranteed the Metal toolchain will be
+        # installed alongside Xcode.
+        "prelude//platforms:runs_only_remote",
+    ]
+    apple_metal_library_rule(**kwargs)
+
+def apple_library_for_distribution_macro_impl(apple_library_for_distribution_rule = None, **kwargs):
+    apple_library_macro_impl(apple_library_rule = apple_library_for_distribution_rule, **kwargs)
 
 def prebuilt_apple_framework_macro_impl(prebuilt_apple_framework_rule = None, **kwargs):
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config([APPLE_STRIPPED_DEFAULT]))
     prebuilt_apple_framework_rule(**kwargs)
 
 def apple_binary_macro_impl(apple_binary_rule = None, apple_universal_executable = None, **kwargs):
-    _transform_apple_minimum_os_version_to_propagated_target_sdk_version(kwargs)
-    dsym_args = apple_dsym_config()
-    kwargs.update(dsym_args)
+    _transform_propagated_target_sdk_version_to_minimum_os_version(kwargs)
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config(_APPLE_BINARY_EXECUTION_OVERRIDES))
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config([APPLE_STRIPPED_DEFAULT]))
 
@@ -147,7 +162,6 @@ def apple_binary_macro_impl(apple_binary_rule = None, apple_universal_executable
             labels = kwargs.get("labels"),
             visibility = kwargs.get("visibility"),
             default_target_platform = kwargs.get("default_target_platform"),
-            **dsym_args
         )
     else:
         binary_name = original_binary_name
@@ -162,23 +176,32 @@ def apple_package_macro_impl(apple_package_rule = None, apple_ipa_package_rule =
     )
 
 def apple_universal_executable_macro_impl(apple_universal_executable_rule = None, **kwargs):
-    kwargs.update(apple_dsym_config())
     apple_universal_executable_rule(
         **kwargs
     )
 
 # TODO: T197775809 Rename `target_sdk_version` to `minimum_os_version`
-def _move_attribute_value(new_name, old_name, kwargs):
-    if new_name in kwargs:
-        if old_name in kwargs:
-            fail("Cannot specify both `{}` and `{}`".format(old_name, new_name))
-        kwargs[old_name] = kwargs.pop(new_name)
+def _move_attribute_value(old_name, new_name, kwargs):
+    # `None` values can appear due to passing default/named args
+    old_value = kwargs.pop(old_name, None)
+    if old_value == None:
+        return
 
-def _transform_apple_minimum_os_version_to_propagated_target_sdk_version(kwargs):
+    new_value = kwargs.get(new_name, None)
+    if new_value != None and old_value != new_value:
+        fail("Cannot specify both `{old_name}={old_value}` and `{new_name}={new_value}`".format(
+            old_name = old_name,
+            old_value = old_value,
+            new_name = new_name,
+            new_value = new_value,
+        ))
+    kwargs[new_name] = old_value
+
+def _transform_propagated_target_sdk_version_to_minimum_os_version(kwargs):
     # During the transition periods, allow either `minimum_os_version` or
     # `propagated_target_sdk_version` to be used on targets.
-    # Under the hood, `propagated_target_sdk_version` is the actual field on rules.
+    # Under the hood, `minimum_os_version` is the actual field on rules.
     #
-    # At the end of the transition, `propagated_target_sdk_version` rule fields be renamed
+    # At the end of the transition, `propagated_target_sdk_version` BUCK + macro usages will be renamed
     # to `minimum_os_version` and this transformer removed.
-    _move_attribute_value("minimum_os_version", "propagated_target_sdk_version", kwargs)
+    _move_attribute_value("propagated_target_sdk_version", "minimum_os_version", kwargs)

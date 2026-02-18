@@ -1,17 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::BuckEvent;
 use buck2_events::span::SpanId;
 use derivative::Derivative;
@@ -33,10 +33,17 @@ enum SpanTrackerError<T: SpanTrackable> {
     NonSpanEvent(T),
 }
 
+/// Represents a timestamp relating to event handling.
+#[derive(Debug, Clone, Copy)]
+pub struct EventTimestamp(pub prost_types::Timestamp);
+
+// Manual impl because no impl for `prost_types::Timestamp`
+impl Dupe for EventTimestamp {}
+
 #[derive(Debug, Clone)]
 pub struct SpanInfo<T: SpanTrackable> {
     pub event: T,
-    pub start: Instant,
+    pub start: EventTimestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -108,10 +115,11 @@ impl<'a, T: SpanTrackable> SpanHandle<'a, T> {
                 .tracker
                 .all
                 .get(c.0)
-                .with_buck_error_context(|| {
-                    format!(
+                .ok_or_else(|| {
+                    internal_error!(
                         "Invariant violation: span `{:?}` references non-existent child `{}`",
-                        self.span.info.event, c.0
+                        self.span.info.event,
+                        c.0
                     )
                 })
                 .unwrap();
@@ -293,7 +301,7 @@ impl<T: SpanTrackable + Dupe> SpanTracker<T> {
         }
     }
 
-    pub fn start_at(&mut self, event: &T, at: Instant) -> buck2_error::Result<()> {
+    pub fn start_at(&mut self, event: &T) -> buck2_error::Result<()> {
         if !event.is_shown() {
             return Ok(());
         }
@@ -308,7 +316,7 @@ impl<T: SpanTrackable + Dupe> SpanTracker<T> {
             span_id,
             info: SpanInfo {
                 event: event.dupe(),
-                start: at,
+                start: event.timestamp(),
             },
             boringness: if is_boring { 1 } else { 0 },
             children: LinkedHashMap::new(),
@@ -411,6 +419,8 @@ pub trait SpanTrackable: std::fmt::Debug + Send + Sync + 'static {
 
     fn is_boring(&self) -> bool;
 
+    fn timestamp(&self) -> EventTimestamp;
+
     /// Report the DICE key type that contains this span. We use this to be able to tell how many
     /// spans we currently are reporting that map to a given DICE key type. The key types here
     /// should match the type we receive in the DiceStateSnapshot.
@@ -443,18 +453,15 @@ impl SpanTrackable for BuckEvent {
                     Some(Stage::Local(stage)) => {
                         use buck2_data::local_stage::Stage;
 
-                        match stage.stage.as_ref() {
-                            Some(Stage::Queued(..) | Stage::AcquireLocalResource(..)) => true,
-                            _ => false,
-                        }
+                        matches!(
+                            stage.stage.as_ref(),
+                            Some(Stage::Queued(..) | Stage::AcquireLocalResource(..))
+                        )
                     }
                     Some(Stage::Re(stage)) => {
                         use buck2_data::re_stage::Stage;
 
-                        match stage.stage.as_ref() {
-                            Some(Stage::Queue(..)) => true,
-                            _ => false,
-                        }
+                        matches!(stage.stage.as_ref(), Some(Stage::Queue(..)))
                     }
                     _ => false,
                 }
@@ -462,6 +469,10 @@ impl SpanTrackable for BuckEvent {
             Some(Data::BxlDiceInvocation(..)) => true,
             _ => false,
         }
+    }
+
+    fn timestamp(&self) -> EventTimestamp {
+        EventTimestamp(self.event().timestamp.unwrap())
     }
 
     fn dice_key_type(&self) -> Option<&'static str> {
@@ -492,6 +503,10 @@ impl<T: SpanTrackable> SpanTrackable for Arc<T> {
 
     fn is_boring(&self) -> bool {
         SpanTrackable::is_boring(self.as_ref())
+    }
+
+    fn timestamp(&self) -> EventTimestamp {
+        SpanTrackable::timestamp(self.as_ref())
     }
 
     fn dice_key_type(&self) -> Option<&'static str> {
@@ -555,13 +570,9 @@ pub type BuckEventSpanHandle<'a> = SpanHandle<'a, Arc<BuckEvent>>;
 pub type BuckEventSpanInfo = SpanInfo<Arc<BuckEvent>>;
 
 impl BuckEventSpanTracker {
-    pub fn handle_event(
-        &mut self,
-        receive_time: Instant,
-        event: &Arc<BuckEvent>,
-    ) -> buck2_error::Result<()> {
+    pub fn handle_event(&mut self, event: &Arc<BuckEvent>) -> buck2_error::Result<()> {
         if let Some(_start) = event.span_start_event() {
-            self.start_at(event, receive_time)?;
+            self.start_at(event)?;
         } else if let Some(_end) = event.span_end_event() {
             self.end(event)?;
         }
@@ -614,6 +625,10 @@ mod tests {
             self.boring
         }
 
+        fn timestamp(&self) -> EventTimestamp {
+            EventTimestamp(std::time::SystemTime::UNIX_EPOCH.into())
+        }
+
         fn dice_key_type(&self) -> Option<&'static str> {
             self.dice_key_type
         }
@@ -649,14 +664,12 @@ mod tests {
 
     #[test]
     fn test_boring_via_self() -> buck2_error::Result<()> {
-        let t0 = Instant::now();
-
         let boring = TestSpan::new().boring();
         let not_boring = TestSpan::new();
 
         let mut tracker = SpanTracker::new();
-        tracker.start_at(&boring, t0)?;
-        tracker.start_at(&not_boring, t0)?;
+        tracker.start_at(&boring)?;
+        tracker.start_at(&not_boring)?;
 
         let mut iter = tracker.iter_roots();
         {
@@ -673,8 +686,6 @@ mod tests {
 
     #[test]
     fn test_boring_via_child() -> buck2_error::Result<()> {
-        let t0 = Instant::now();
-
         let parent = TestSpan::new();
         let child = TestSpan::new().parent(parent).boring();
 
@@ -682,7 +693,7 @@ mod tests {
         let other2 = TestSpan::new();
 
         let mut tracker = SpanTracker::new();
-        tracker.start_at(&parent, t0)?;
+        tracker.start_at(&parent)?;
 
         {
             let mut iter = tracker.iter_roots();
@@ -691,7 +702,7 @@ mod tests {
             });
         }
 
-        tracker.start_at(&other, t0)?;
+        tracker.start_at(&other)?;
 
         {
             let mut iter = tracker.iter_roots();
@@ -703,7 +714,7 @@ mod tests {
             });
         }
 
-        tracker.start_at(&child, t0)?;
+        tracker.start_at(&child)?;
         {
             let mut iter = tracker.iter_roots();
             assert_matches!(iter.next(), Some(hdl) => {
@@ -715,7 +726,7 @@ mod tests {
         }
 
         tracker.end(&child)?;
-        tracker.start_at(&other2, t0)?;
+        tracker.start_at(&other2)?;
         {
             let mut iter = tracker.iter_roots();
             assert_matches!(iter.next(), Some(hdl) => {
@@ -734,16 +745,14 @@ mod tests {
 
     #[test]
     fn test_iter_roots_len() -> buck2_error::Result<()> {
-        let t0 = Instant::now();
-
         let e1 = TestSpan::new();
         let e2 = TestSpan::new().boring();
         let e3 = TestSpan::new();
 
         let mut tracker = SpanTracker::new();
-        tracker.start_at(&e1, t0)?;
-        tracker.start_at(&e2, t0)?;
-        tracker.start_at(&e3, t0)?;
+        tracker.start_at(&e1)?;
+        tracker.start_at(&e2)?;
+        tracker.start_at(&e3)?;
 
         {
             let mut iter = tracker.iter_roots();
@@ -767,14 +776,12 @@ mod tests {
 
     #[test]
     fn test_dice_counts() -> buck2_error::Result<()> {
-        let t0 = Instant::now();
-
         let foo = TestSpan::new().dice_key_type("foo");
         let bar = TestSpan::new().dice_key_type("bar");
 
         let mut tracker = SpanTracker::new();
-        tracker.start_at(&foo, t0)?;
-        tracker.start_at(&bar, t0)?;
+        tracker.start_at(&foo)?;
+        tracker.start_at(&bar)?;
 
         assert_eq!(tracker.roots.dice_counts["foo"], 1);
         assert_eq!(tracker.roots.dice_counts["bar"], 1);

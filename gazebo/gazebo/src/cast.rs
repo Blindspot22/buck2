@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Cast between types with no conversion.
@@ -72,7 +73,7 @@ pub unsafe fn transmute_unchecked<A, B>(x: A) -> B {
 /// `transmute!(from-type, to-type, value)` will do a [`transmute`](std::mem::transmute),
 /// but the original and result types must be specified.
 macro_rules! transmute {
-    ($from:ty, $to:ty, $e:expr_2021) => {
+    ($from:ty, $to:ty, $e:expr) => {
         std::mem::transmute::<$from, $to>($e)
     };
 }

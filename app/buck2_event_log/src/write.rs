@@ -1,24 +1,26 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::mem;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::SystemTime;
 
 use buck2_cli_proto::*;
 use buck2_common::argv::SanitizedArgv;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::BuckErrorContext;
 use buck2_events::BuckEvent;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::working_dir::AbsWorkingDir;
 use buck2_wrapper_common::invocation_id::TraceId;
 use futures::future::Future;
 use prost::Message;
@@ -57,9 +59,11 @@ pub struct WriteEventLog {
     sanitized_argv: SanitizedArgv,
     command_name: String,
     working_dir: AbsWorkingDir,
+    start_time: SystemTime,
     /// Allocation cache. Must be cleaned before use.
     buf: Vec<u8>,
     log_size_counter_bytes: Option<Arc<AtomicU64>>,
+    retained_event_logs: usize,
 }
 
 impl WriteEventLog {
@@ -70,7 +74,9 @@ impl WriteEventLog {
         extra_user_event_log_path: Option<AbsPathBuf>,
         sanitized_argv: SanitizedArgv,
         command_name: String,
+        start_time: SystemTime,
         log_size_counter_bytes: Option<Arc<AtomicU64>>,
+        retained_event_logs: usize,
     ) -> Self {
         Self {
             state: LogWriterState::Unopened {
@@ -81,8 +87,10 @@ impl WriteEventLog {
             sanitized_argv,
             command_name,
             working_dir,
+            start_time,
             buf: Vec::new(),
             log_size_counter_bytes,
+            retained_event_logs,
         }
     }
 
@@ -100,6 +108,7 @@ impl WriteEventLog {
             expanded_command_line_args,
             working_dir: self.working_dir.to_string(),
             trace_id,
+            start_time: Some(self.start_time),
         };
         self.write_ln(&[invocation]).await
     }
@@ -157,9 +166,9 @@ impl WriteEventLog {
         tokio::fs::create_dir_all(logdir)
             .await
             .with_buck_error_context(|| {
-                format!("Error creating event log directory: `{}`", logdir)
+                format!("Error creating event log directory: `{logdir}`")
             })?;
-        remove_old_logs(logdir).await;
+        remove_old_logs(logdir, self.retained_event_logs).await;
 
         let encoding = Encoding::PROTO_ZSTD;
         let file_name = &get_logfile_name(event, encoding, &self.command_name)?;
@@ -211,7 +220,7 @@ impl WriteEventLog {
         self.log_invocation(event.trace_id()?).await
     }
 
-    pub fn exit(&mut self) -> impl Future<Output = ()> + 'static + Send + Sync {
+    pub fn exit(&mut self) -> impl Future<Output = ()> + 'static + Send + Sync + use<> {
         // Shut down writers, flush all our files before exiting.
         let state = std::mem::replace(&mut self.state, LogWriterState::Closed);
 
@@ -381,23 +390,19 @@ impl WriteEventLog {
 
 impl SerializeForLog for Invocation {
     fn serialize_to_json(&self, buf: &mut Vec<u8>) -> buck2_error::Result<()> {
-        serde_json::to_writer(buf, &self).buck_error_context("Failed to serialize event")
+        serde_json::to_writer(buf, &self.clone().to_proto())
+            .buck_error_context("Failed to serialize event")
     }
 
     fn serialize_to_protobuf_length_delimited(&self, buf: &mut Vec<u8>) -> buck2_error::Result<()> {
-        let invocation = buck2_data::Invocation {
-            command_line_args: self.command_line_args.clone(),
-            expanded_command_line_args: self.expanded_command_line_args.clone(),
-            working_dir: self.working_dir.clone(),
-            trace_id: Some(self.trace_id.to_string()),
-        };
-        invocation.encode_length_delimited(buf)?;
+        self.clone().to_proto().encode_length_delimited(buf)?;
         Ok(())
     }
 
     // Always log invocation record to user event log for `buck2 log show` compatibility
     fn maybe_serialize_user_event(&self, buf: &mut Vec<u8>) -> buck2_error::Result<bool> {
-        serde_json::to_writer(buf, &self).buck_error_context("Failed to serialize event")?;
+        serde_json::to_writer(buf, &self.clone().to_proto())
+            .buck_error_context("Failed to serialize event")?;
         Ok(true)
     }
 }
@@ -476,6 +481,8 @@ mod tests {
                 working_dir: AbsWorkingDir::current_dir()?,
                 buf: Vec::new(),
                 log_size_counter_bytes: None,
+                start_time: SystemTime::UNIX_EPOCH,
+                retained_event_logs: 5,
             })
         }
     }
@@ -605,13 +612,12 @@ mod tests {
         assert_eq!(retrieved_event.data(), event.data());
 
         match encoding.compression {
-            Compression::Gzip => {
-                // TODO(nga): `tick` does not write gzip footer, so even after `tick`
-                //   generated file is not a valid gzip file.
-                // assert!(events.try_next().await.unwrap().is_none(), "expecting no more events");
-                assert!(events.try_next().await.is_err());
-            }
-            Compression::Zstd => {
+            Compression::Gzip | Compression::Zstd => {
+                // `tick` does not write compression footer, so even
+                // after `tick` the generated file is not a valid
+                // compressed file. However, the reader now gracefully
+                // handles truncated streams by treating them as
+                // end-of-stream.
                 assert!(
                     events.try_next().await.unwrap().is_none(),
                     "expecting no more events"

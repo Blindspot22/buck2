@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testrunner;
@@ -65,6 +66,12 @@ class JUnitSupport {
      * @return true if it's a valid class or method that represents a unit test.
      */
     boolean isTestClass(Class<?> clazz);
+
+    /**
+     * @param throwable to be checked
+     * @return true if the error has internal Assumption as its super class.
+     */
+    boolean isAssumption(Throwable throwable);
   }
 
   /**
@@ -80,6 +87,8 @@ class JUnitSupport {
         optionalAnnotation("org.junit.jupiter.api.Nested");
     static final Optional<Class<? extends Annotation>> DISABLED_ANN =
         optionalAnnotation("org.junit.jupiter.api.Disabled");
+    static final Optional<Class<?>> ASSUMPTION_EXCEPTION_CLASS =
+        optionalClass("org.opentest4j.TestAbortedException");
 
     static final List<Class<? extends Annotation>> METHOD_ANNOTATIONS;
 
@@ -117,6 +126,14 @@ class JUnitSupport {
         }
       }
       return false;
+    }
+
+    @Override
+    public boolean isAssumption(Throwable throwable) {
+      return throwable != null
+          && ASSUMPTION_EXCEPTION_CLASS
+              .filter(testCase -> testCase.isAssignableFrom(throwable.getClass()))
+              .isPresent();
     }
 
     private boolean isTestMethod(Method m) {
@@ -203,10 +220,7 @@ class JUnitSupport {
           && TEST_ANN.filter(m::isAnnotationPresent).isPresent();
     }
 
-    /**
-     * @param throwable to be checked
-     * @return true if the error has internal Assumption as its super class.
-     */
+    @Override
     public boolean isAssumption(Throwable throwable) {
       return throwable != null
           && ASSUMPTION_EXCEPTION_CLASS

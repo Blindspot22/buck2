@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
@@ -31,7 +32,6 @@ use starlark::coerce::Coerce;
 use starlark::eval::Evaluator;
 use starlark::starlark_complex_value;
 use starlark::values::Freeze;
-use starlark::values::FreezeResult;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
@@ -71,7 +71,7 @@ impl<'v, V: ValueLike<'v>> StarlarkProvidersArtifactIterableGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
-    fn iter(&self) -> impl Iterator<Item = &'v Artifact> {
+    fn iter(&self) -> impl Iterator<Item = &'v Artifact> + use<'v, V> {
         self.0
             .downcast_ref::<StarlarkBxlBuildResult>()
             .unwrap()
@@ -91,14 +91,14 @@ impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkProvidersArtifactIterab
 where
     Self: ProvidesStaticType<'v>,
 {
-    fn iterate_collect(&self, heap: &'v Heap) -> starlark::Result<Vec<Value<'v>>> {
+    fn iterate_collect(&self, heap: Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
         Ok(self
             .iter()
             .map(|artifact| heap.alloc(StarlarkArtifact::new(artifact.dupe())))
             .collect())
     }
 
-    fn at(&self, index: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn at(&self, index: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         let i = i32::unpack_value_err(index)?;
         if let Ok(i) = usize::try_from(i) {
             if let Some(artifact) = self.iter().nth(i) {
@@ -133,7 +133,7 @@ impl<'v, V: ValueLike<'v>> StarlarkFailedArtifactIterableGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
-    fn iter(&self) -> impl Iterator<Item = &'v buck2_error::Error> {
+    fn iter(&self) -> impl Iterator<Item = &'v buck2_error::Error> + use<'v, V> {
         self.0
             .downcast_ref::<StarlarkBxlBuildResult>()
             .unwrap()
@@ -152,15 +152,15 @@ impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkFailedArtifactIterableG
 where
     Self: ProvidesStaticType<'v>,
 {
-    fn iterate_collect(&self, heap: &'v Heap) -> starlark::Result<Vec<Value<'v>>> {
-        Ok(self.iter().map(|e| heap.alloc(format!("{}", e))).collect())
+    fn iterate_collect(&self, heap: Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
+        Ok(self.iter().map(|e| heap.alloc(format!("{e}"))).collect())
     }
 
-    fn at(&self, index: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn at(&self, index: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         let i = i32::unpack_value_err(index)?;
         if let Ok(i) = usize::try_from(i) {
             if let Some(e) = self.iter().nth(i) {
-                return Ok(heap.alloc(format!("{}", e)));
+                return Ok(heap.alloc(format!("{e}")));
             }
         }
         Err(ValueError::IndexOutOfBound(i).into())
@@ -177,16 +177,16 @@ pub(crate) fn build<'v>(
     target_platform: ValueAsStarlarkTargetLabel<'v>,
     materializations: Materializations,
     uploads: Uploads,
-    eval: &Evaluator<'v, '_, '_>,
+    eval: &mut Evaluator<'v, '_, '_>,
 ) -> buck2_error::Result<
     SmallMap<
         ValueTyped<'v, StarlarkConfiguredProvidersLabel>,
         ValueTyped<'v, StarlarkBxlBuildResult>,
     >,
 > {
-    let global_cfg_options = ctx.resolve_global_cfg_options(target_platform, vec![].into())?;
+    let global_cfg_options = ctx.resolve_global_cfg_options(target_platform, vec![])?;
 
-    let build_result = ctx.via_dice(|dice, ctx| {
+    let build_result = ctx.via_dice(eval, |dice| {
         dice.via(|dice| {
             async {
                 let build_spec = ProvidersExpr::<ConfiguredProvidersLabel>::unpack(
@@ -197,7 +197,7 @@ pub(crate) fn build<'v>(
                 )
                 .await?;
 
-                let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new();
+                let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new(None);
                 result_builder
                     .wait_for(
                         // TODO (torozco): support --fail-fast in BXL.
@@ -211,7 +211,7 @@ pub(crate) fn build<'v>(
                                     build_configured_label(
                                         &consumer,
                                         &ctx,
-                                        &(materializations, uploads).into(),
+                                        (materializations, uploads).into(),
                                         target,
                                         &ProvidersToBuild {
                                             default: true,
@@ -247,7 +247,7 @@ pub(crate) fn build<'v>(
         .chain(build_result.other_errors.values().flatten())
         .next()
     {
-        return Err(err.dupe().into());
+        return Err(err.dupe());
     }
 
     Ok(build_result

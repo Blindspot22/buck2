@@ -1,13 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_event_observer::test_state::TestState;
 use crossterm::style::Color;
 use crossterm::style::ContentStyle;
@@ -69,11 +70,24 @@ impl TestCounterColumn {
         get_from_test_state: |test_state| test_state.skipped,
         get_from_test_statues: |test_statuses| &test_statuses.skipped,
     };
+    pub const OMIT: TestCounterColumn = TestCounterColumn {
+        label: "Omit",
+        color: Some(Color::Magenta),
+        get_from_test_state: |test_state| test_state.omitted,
+        get_from_test_statues: |test_statuses| &test_statuses.omitted,
+    };
     const TIMEOUT: TestCounterColumn = TestCounterColumn {
         label: "Timeout",
         color: Some(Color::Yellow),
         get_from_test_state: |test_state| test_state.timeout,
         get_from_test_statues: |_test_statuses| &None,
+    };
+
+    pub const INFRA_FAILURE: TestCounterColumn = TestCounterColumn {
+        label: "Infra Failure",
+        color: Some(Color::Magenta),
+        get_from_test_state: |test_state| test_state.infra_failure,
+        get_from_test_statues: |test_statuses| &test_statuses.infra_failure,
     };
 
     fn to_span_from_test_state(&self, test_state: &TestState) -> Result<Span, SpanError> {
@@ -93,7 +107,7 @@ impl TestCounterColumn {
             label: self.label,
             count: (self.get_from_test_statues)(test_statuses)
                 .as_ref()
-                .with_buck_error_context(|| format!("Missing {} in TestStatuses", self.label))?
+                .ok_or_else(|| internal_error!("Missing {} in TestStatuses", self.label))?
                 .count,
             color: self.color,
         }
@@ -108,7 +122,7 @@ impl TestCounterComponent {
         test_state: &TestState,
         _dimensions: Dimensions,
         mode: DrawMode,
-    ) -> anyhow::Result<Lines> {
+    ) -> buck2_error::Result<Lines> {
         if matches!(mode, DrawMode::Final) {
             return Ok(Lines::new());
         }
@@ -130,7 +144,11 @@ impl TestCounterComponent {
         spans.push(". ".try_into()?);
         spans.push(TestCounterColumn::SKIP.to_span_from_test_state(test_state)?);
         spans.push(". ".try_into()?);
+        spans.push(TestCounterColumn::OMIT.to_span_from_test_state(test_state)?);
+        spans.push(". ".try_into()?);
         spans.push(TestCounterColumn::TIMEOUT.to_span_from_test_state(test_state)?);
+        spans.push(". ".try_into()?);
+        spans.push(TestCounterColumn::INFRA_FAILURE.to_span_from_test_state(test_state)?);
         Ok(Lines::from_iter([Line::from_iter(spans)]))
     }
 }
@@ -142,11 +160,13 @@ pub(crate) struct TestHeader<'a> {
 }
 
 impl Component for TestHeader<'_> {
+    type Error = buck2_error::Error;
+
     fn draw_unchecked(
         &self,
         dimensions: superconsole::Dimensions,
         mode: superconsole::DrawMode,
-    ) -> anyhow::Result<superconsole::Lines> {
+    ) -> buck2_error::Result<superconsole::Lines> {
         if self.session_info.test_session.is_some() {
             TestCounterComponent.draw_unchecked(self.test_state, dimensions, mode)
         } else {

@@ -1,6 +1,6 @@
 [package]
 description = "Buck2 query language parser"
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_query_parser"
 repository = { workspace = true }
@@ -10,6 +10,7 @@ version = "0.1.0"
 derive_more = { workspace = true }
 enum-map = { workspace = true }
 nom = { workspace = true }
+nom-language = { workspace = true }
 
 dupe = { workspace = true }
 gazebo = { workspace = true }

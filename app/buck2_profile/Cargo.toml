@@ -1,6 +1,6 @@
 [package]
 description = "common utitilies of buck2 profile"
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_profile"
 repository = { workspace = true }
@@ -14,4 +14,5 @@ starlark = { workspace = true }
 buck2_cli_proto = { workspace = true }
 buck2_core = { workspace = true }
 buck2_error = { workspace = true }
+buck2_fs = { workspace = true }
 buck2_interpreter = { workspace = true }

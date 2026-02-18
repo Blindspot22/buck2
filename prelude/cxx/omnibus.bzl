@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:local_only.bzl", "get_resolved_cxx_binary_link_execution_preference")
 load(
@@ -65,6 +66,7 @@ load(
     "get_ignore_undefined_symbols_flags",
     "get_no_as_needed_shared_libs_flags",
     "get_shared_library_name",
+    "sandbox_exported_linker_flags",
 )
 load(
     ":symbols.bzl",
@@ -173,21 +175,27 @@ def create_linkable_root(
         deps = linkable_deps(deps),
     )
 
-def _omnibus_soname(ctx):
+def _omnibus_soname(ctx, name: str):
     linker_info = get_cxx_toolchain_info(ctx).linker_info
-    return get_shared_library_name(linker_info, "omnibus", apply_default_prefix = True)
+    return get_shared_library_name(linker_info, name, apply_default_prefix = True)
 
-def create_dummy_omnibus(ctx: AnalysisContext, extra_ldflags: list[typing.Any] = []) -> Artifact:
+def create_dummy_omnibus(
+        ctx: AnalysisContext,
+        omnibus_lib_name: str,
+        extra_ldflags: list[typing.Any] = [],
+        anonymous: bool = False) -> Artifact:
     linker_info = get_cxx_toolchain_info(ctx).linker_info
     link_result = cxx_link_shared_library(
         ctx = ctx,
         output = get_shared_library_name(linker_info, "omnibus-dummy", apply_default_prefix = True),
-        name = _omnibus_soname(ctx),
+        name = _omnibus_soname(ctx, omnibus_lib_name),
         opts = link_options(
             links = [LinkArgs(flags = extra_ldflags)],
             category_suffix = "dummy_omnibus",
             link_execution_preference = LinkExecutionPreference("any"),
+            produce_shared_library_interface = False,
         ),
+        anonymous = anonymous,
     )
     return link_result.linked_object.output
 
@@ -217,7 +225,9 @@ def _create_root(
         pic_behavior: PicBehavior,
         extra_ldflags: list[typing.Any] = [],
         prefer_stripped_objects: bool = False,
-        allow_cache_upload: bool = False) -> OmnibusRootProduct:
+        allow_cache_upload: bool = False,
+        anonymous: bool = False,
+        hash_counter = 0) -> OmnibusRootProduct:
     """
     Link a root omnibus node.
     """
@@ -232,9 +242,7 @@ def _create_root(
     # to make sure the linker won't drop it from the link or complain about
     # missing symbols.
     inputs.append(LinkInfo(
-        pre_flags =
-            get_no_as_needed_shared_libs_flags(linker_type) +
-            get_ignore_undefined_symbols_flags(linker_type),
+        pre_flags = get_ignore_undefined_symbols_flags(linker_type),
     ))
 
     # add native target link input
@@ -247,7 +255,16 @@ def _create_root(
 
     # Link to Omnibus
     if spec.body:
-        inputs.append(LinkInfo(linkables = [SharedLibLinkable(lib = omnibus)]))
+        pre_flags, post_flags = sandbox_exported_linker_flags(
+            linker_info = linker_info,
+            flags = get_no_as_needed_shared_libs_flags(linker_type),
+            post_flags = [],
+        )
+        inputs.append(LinkInfo(
+            pre_flags = pre_flags,
+            linkables = [SharedLibLinkable(lib = omnibus)],
+            post_flags = post_flags,
+        ))
 
     # Add deps of the root to the link line.
     for dep in link_deps:
@@ -272,7 +289,7 @@ def _create_root(
             other_root = root_products[dep]
 
             # TODO(cjhopman): This should be passing structured linkables
-            inputs.append(LinkInfo(pre_flags = [cmd_args(other_root.shared_library.output)]))
+            inputs.append(LinkInfo(linkables = [SharedLibLinkable(lib = other_root.shared_library.output)]))
             continue
 
         # If this node is in omnibus, just add that to the link line.
@@ -302,7 +319,9 @@ def _create_root(
             identifier = root.name or output,
             link_execution_preference = LinkExecutionPreference("any"),
             allow_cache_upload = allow_cache_upload,
+            produce_shared_library_interface = False,
         ),
+        anonymous = anonymous,
     )
     shared_library = link_result.linked_object
 
@@ -314,8 +333,9 @@ def _create_root(
             output = shared_library.output,
             category_prefix = "omnibus",
             # Same as above.
-            prefer_local = True,
+            prefer_local = not anonymous,
             allow_cache_upload = allow_cache_upload,
+            anonymous = anonymous,
         ),
         undefined_syms = extract_undefined_syms(
             ctx,
@@ -326,8 +346,10 @@ def _create_root(
             weak = False,
             category_prefix = "omnibus",
             # Same as above.
-            prefer_local = True,
+            prefer_local = not anonymous,
             allow_cache_upload = allow_cache_upload,
+            hash_counter = hash_counter,
+            anonymous = anonymous,
         ),
     )
 
@@ -445,6 +467,7 @@ def _is_static_deps(info: LinkableNode) -> bool:
 def _create_omnibus(
         ctx: AnalysisContext,
         spec: OmnibusSpec,
+        omnibus_lib_name: str,
         root_products: dict[Label, OmnibusRootProduct],
         pic_behavior: PicBehavior,
         extra_ldflags: list[typing.Any] = [],
@@ -547,7 +570,7 @@ def _create_omnibus(
             "-Wl,--undefined-version",
         ]))
 
-    soname = _omnibus_soname(ctx)
+    soname = _omnibus_soname(ctx, omnibus_lib_name)
 
     return cxx_link_shared_library(
         ctx = ctx,
@@ -568,6 +591,7 @@ def _create_omnibus(
             enable_distributed_thinlto = enable_distributed_thinlto,
             identifier = soname,
             allow_cache_upload = allow_cache_upload,
+            produce_shared_library_interface = False,
         ),
     )
 
@@ -704,18 +728,27 @@ def create_omnibus_libraries(
         extra_ldflags: list[typing.Any] = [],
         extra_root_ldflags: dict[Label, list[typing.Any]] = {},
         prefer_stripped_objects: bool = False,
-        enable_distributed_thinlto = False) -> OmnibusSharedLibraries:
+        enable_distributed_thinlto = False,
+        omnibus_lib_name: str = "omnibus",
+        anonymous: bool = False) -> OmnibusSharedLibraries:
     spec = _build_omnibus_spec(ctx, graph)
     pic_behavior = get_cxx_toolchain_info(ctx).pic_behavior
 
     # Create dummy omnibus
-    dummy_omnibus = create_dummy_omnibus(ctx, extra_ldflags)
+    dummy_omnibus = create_dummy_omnibus(
+        ctx = ctx,
+        extra_ldflags = extra_ldflags,
+        omnibus_lib_name = omnibus_lib_name,
+        anonymous = anonymous,
+    )
 
     libraries = []
     root_products = {}
+    counter = 0  # counter to avoid hash collisions
 
     # Link all root nodes against the dummy libomnibus lib.
     for label, root, link_deps in _ordered_roots(spec, pic_behavior):
+        counter += 1
         product = _create_root(
             ctx,
             spec,
@@ -728,6 +761,8 @@ def create_omnibus_libraries(
             extra_ldflags + extra_root_ldflags.get(label, []),
             prefer_stripped_objects,
             allow_cache_upload = True,
+            hash_counter = counter,
+            anonymous = anonymous,
         )
         if root.name != None:
             libraries.append(
@@ -743,18 +778,19 @@ def create_omnibus_libraries(
     omnibus = None
     if spec.body:
         omnibus = _create_omnibus(
-            ctx,
-            spec,
-            root_products,
-            pic_behavior,
-            extra_ldflags,
-            prefer_stripped_objects,
+            ctx = ctx,
+            spec = spec,
+            omnibus_lib_name = omnibus_lib_name,
+            root_products = root_products,
+            pic_behavior = pic_behavior,
+            extra_ldflags = extra_ldflags,
+            prefer_stripped_objects = prefer_stripped_objects,
             enable_distributed_thinlto = enable_distributed_thinlto,
             allow_cache_upload = True,
         )
         libraries.append(
             create_shlib(
-                soname = _omnibus_soname(ctx),
+                soname = _omnibus_soname(ctx, omnibus_lib_name),
                 lib = omnibus.linked_object,
                 label = ctx.label,
             ),

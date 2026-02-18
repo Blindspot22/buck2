@@ -1,13 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//erlang:erlang_application.bzl", "StartTypeValues")
-load("@prelude//erlang:erlang_info.bzl", "ErlangAppIncludeInfo", "ErlangAppInfo")
-load(":common.bzl", "prelude_rule")
+load("@prelude//erlang:erlang_info.bzl", "ErlangAppIncludeInfo", "ErlangAppInfo", "ErlangAppOrTestInfo")
+load(":common.bzl", "buck", "prelude_rule")
 load(":re_test_common.bzl", "re_test_common")
 
 def re_test_args():
@@ -15,9 +16,7 @@ def re_test_args():
     args = re_test_common.test_args()
     return {"remote_execution": args["remote_execution"]}
 
-common_attributes = {
-    "contacts": attrs.list(attrs.string(), default = []),
-    "labels": attrs.list(attrs.string(), default = []),
+common_attributes = buck.labels_arg() | buck.contacts_arg() | {
     "os_env": attrs.option(attrs.dict(key = attrs.string(), value = attrs.string()), default = None, doc = """
                 This attribute allows to set additional values for the operating system environment for invocations to the
                 Erlang toolchain.
@@ -202,13 +201,13 @@ rules_attributes = {
         "_toolchain": attrs.toolchain_dep(default = "toolchains//:erlang-default"),
     },
     "erlang_otp_binaries": {
-        "erl": attrs.source(doc = """
+        "erl": attrs.arg(doc = """
                 Reference to `erl` binary
             """),
-        "erlc": attrs.source(doc = """
+        "erlc": attrs.arg(doc = """
                 Reference to `erlc` binary
             """),
-        "escript": attrs.source(doc = """
+        "escript": attrs.arg(doc = """
                 Reference to `escript` binary
             """),
     },
@@ -221,10 +220,6 @@ rules_attributes = {
         "include_erts": attrs.bool(default = False, doc = """
                 This field controls whether OTP applications and the Erlang runtime system should be included as part of the release.
                 Please note, that at the moment the erts folder is just `erts/`.
-            """),
-        "multi_toolchain": attrs.option(attrs.list(attrs.dep()), default = None, doc = """
-                This field controls whether the release should be built with a single toolchain, or multiple toolchains. In the
-                latter case, all output paths are prefixed with the toolchain name.
             """),
         "overlays": attrs.dict(key = attrs.string(), value = attrs.list(attrs.dep()), default = {}, doc = """
                 Overlays can be used to add files to the release. They are specified as mapping from path (from the release
@@ -248,7 +243,7 @@ rules_attributes = {
                 [OTP documentation](https://www.erlang.org/doc/man/config.html). These ones should consist of default_output of
                 some targets. In general, this field is filled with target coming from then `export_file` rule, as in the example below.
             """),
-        "deps": attrs.list(attrs.dep(), default = [], doc = """
+        "deps": attrs.list(attrs.dep(providers = [ErlangAppOrTestInfo]), default = [], doc = """
                 The set of dependencies needed for all suites included in the target
                 to compile and run. They could be either `erlang_app(lication)` or `erlang_test`
                 targets, although the latter is discouraged. If some suites need to access common methods,
@@ -267,10 +262,6 @@ rules_attributes = {
                 List of additional command line arguments given to the erl command invocation. These
                 arguments are added to the front of the argument list.
             """),
-        "preamble": attrs.string(default = read_root_config("erlang", "erlang_test_preamble", "test:info(),test:ensure_initialized(),test:start_shell()."), doc = """
-            """),
-        "property_tests": attrs.list(attrs.dep(), default = [], doc = """
-            """),
         "resources": attrs.list(attrs.dep(), default = [], doc = """
                 The `resources` field specifies targets whose default output are placed in the test `data_dir` directory for
                 all the suites present in the macro target. Additionally, if data directory are present in the directory along
@@ -288,10 +279,15 @@ rules_attributes = {
         "_artifact_annotation_mfa": attrs.string(default = "artifact_annotations:default_annotation/1"),
         "_cli_lib": attrs.dep(providers = [ErlangAppInfo], default = "prelude//erlang/common_test/test_cli_lib:test_cli_lib"),
         "_ct_opts": attrs.string(default = read_root_config("erlang", "erlang_test_ct_opts", "")),
+        "_inner_trampolines": attrs.list(attrs.dep(), default = [], doc = """
+            trampolines that are used for the test node
+        """),
         "_providers": attrs.string(default = ""),
         "_test_binary_lib": attrs.dep(providers = [ErlangAppInfo], default = "prelude//erlang/common_test/test_binary:test_binary"),
         "_toolchain": attrs.toolchain_dep(default = "toolchains//:erlang-default"),
-        "_trampolines": attrs.list(attrs.dep(), default = []),
+        "_trampolines": attrs.list(attrs.dep(), default = [], doc = """
+            trampolines that are used for the test binary
+        """),
     } | common_shell_attributes | re_test_args(),
 }
 

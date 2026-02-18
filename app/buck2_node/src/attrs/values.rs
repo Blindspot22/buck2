@@ -1,16 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
+use std::hash::Hash;
 use std::sync::Arc;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
 use starlark_map::vec2;
 use starlark_map::vec2::Vec2;
 
@@ -18,7 +21,7 @@ use super::attr_type::any_matches::AnyMatches;
 use crate::attrs::coerced_attr::CoercedAttr;
 use crate::attrs::spec::AttributeId;
 
-#[derive(Debug, Eq, PartialEq, Hash, Default, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Default, Allocative, Pagable)]
 pub struct AttrValues {
     sorted: Vec2<AttributeId, CoercedAttr>,
 }
@@ -80,7 +83,8 @@ impl<'a> IntoIterator for &'a AttrValues {
     Clone,
     Allocative,
     Default,
-    derive_more::Display
+    derive_more::Display,
+    Pagable
 )]
 #[display("{}", self.0.as_ref())]
 pub struct TargetModifiersValue(Arc<serde_json::Value>);

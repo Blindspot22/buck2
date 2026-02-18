@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Typically, rustc has access to a "sysroot," which is a directory tree with a known layout that
 # contains a number of pre-compiled rlibs that are available by default. This includes, for example,
@@ -38,6 +39,8 @@ rust_toolchain_attrs = {
     # Rustc target triple to use
     # https://doc.rust-lang.org/rustc/platform-support.html
     "rustc_target_triple": provider_field(str | None, default = None),
+    # Extra env variables that should be made available to the rustc executable.
+    "rustc_env": provider_field(dict[str, typing.Any], default = {}),
     # Baseline compiler config
     "rustc_flags": provider_field(list[typing.Any], default = []),
     # Rustc flags, except that they are applied on the command line after the
@@ -139,6 +142,8 @@ rust_toolchain_attrs = {
     "configuration_hash": provider_field(str | None, default = None),
     # Error handler used to categorize rust errors encountered by users
     "rust_error_handler": provider_field(typing.Any, default = None),
+    # LLVM remarks filter (e.g., "all", "inline") - used with -Cremark flag
+    "remarks": provider_field(str | None, default = None),
 }
 
 RustToolchainInfo = provider(fields = rust_toolchain_attrs)

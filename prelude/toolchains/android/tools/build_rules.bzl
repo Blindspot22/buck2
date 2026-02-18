@@ -1,17 +1,19 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """Module containing java macros."""
 
+load("@prelude//:is_full_meta_repo.bzl", "is_full_meta_repo")
 load("@prelude//:native.bzl", "native")
 # @oss-disable[end= ]: load("@prelude//android/meta_only:android_build_tools_cas_artifact.bzl", "android_build_tools_cas_artifact")
 load("@prelude//toolchains/android/tools/build_rules:fb_native.bzl", "fb_native")
-load("@prelude//toolchains/android/tools/build_rules:oss_utils.bzl", "is_oss_build")
 load("@prelude//toolchains/android/tools/build_rules:utils.bzl", "add_os_labels")
+load("@prelude//utils:selects.bzl", "selects")
 
 OPEN_JDK_COMPILER_ARGS = [
     "--add-exports=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED",
@@ -49,10 +51,6 @@ def _set_buck2_java_toolchain(**kwargs):
     kwargs["_java_toolchain"] = "toolchains//:java_bootstrap"
     return kwargs
 
-def _set_buck2_java_graalvm_toolchain(**kwargs):
-    kwargs["_java_toolchain"] = "toolchains//:java_graalvm_bootstrap"
-    return kwargs
-
 def _set_buck2_kotlin_toolchain(**kwargs):
     kwargs["_kotlin_toolchain"] = "toolchains//:kotlin_bootstrap"
     return kwargs
@@ -69,9 +67,17 @@ def _set_buck2_dex_toolchain(**kwargs):
 def _set_versioned_java_srcs(**kwargs):
     if not kwargs.pop("versioned_java_srcs", False):
         return kwargs
-    java_version = native.read_config("java", "buck2_java_version", "17")
-    versioned_srcs = native.glob(["java{}/*.java".format(java_version)])
-    kwargs["srcs"] = kwargs.get("srcs", []) + versioned_srcs
+    java_version = select({
+        "DEFAULT": native.read_config("java", "buck2_java_version", "21"),
+        # @oss-disable[end= ]: "fbsource//third-party/toolchains/jdk:constraint-value-version-11": "11",
+        # @oss-disable[end= ]: "fbsource//third-party/toolchains/jdk:constraint-value-version-17": "17",
+        # @oss-disable[end= ]: "fbsource//third-party/toolchains/jdk:constraint-value-version-21": "21",
+    })
+    versioned_srcs = selects.apply(
+        java_version,
+        lambda value: kwargs.get("srcs", []) + native.glob(["java{}/*.java".format(value)]),
+    )
+    kwargs["srcs"] = versioned_srcs
     return kwargs
 
 def _add_kotlin_deps(**kwargs):
@@ -85,6 +91,7 @@ def buck_kotlin_library(name, **kwargs):
     kwargs = _maybe_add_java_version(**kwargs)
     kwargs = _set_buck2_java_toolchain(**kwargs)
     kwargs = _set_buck2_kotlin_toolchain(**kwargs)
+    kwargs = _set_buck2_dex_toolchain(**kwargs)
     kwargs = _add_kotlin_deps(**kwargs)
     return fb_native.kotlin_library(
         name = name,
@@ -105,20 +112,6 @@ def buck_java_library(name, **kwargs):
 def buck_java_binary(name, **kwargs):
     kwargs = _add_labels(**kwargs)
     kwargs = _set_buck2_java_toolchain(**kwargs)
-    java_args = kwargs["java_args_for_run_info"] if "java_args_for_run_info" in kwargs else []
-
-    # Directs the VM to refrain from setting the file descriptor limit to the default maximum.
-    # https://stackoverflow.com/a/16535804/5208808
-    java_args += ["-XX:-MaxFDLimit", "-Xss2m"]
-    kwargs["java_args_for_run_info"] = java_args
-    return fb_native.java_binary(
-        name = name,
-        **kwargs
-    )
-
-def buck_java_graalvm_binary(name, **kwargs):
-    kwargs = _add_labels(**kwargs)
-    kwargs = _set_buck2_java_graalvm_toolchain(**kwargs)
     java_args = kwargs["java_args_for_run_info"] if "java_args_for_run_info" in kwargs else []
 
     # Directs the VM to refrain from setting the file descriptor limit to the default maximum.
@@ -178,7 +171,7 @@ def _buck_remote_file_with_wrapper(
         sha1,
         # @oss-disable[end= ]: internal_alias,
         **kwargs):
-    if is_oss_build():
+    if not is_full_meta_repo():
         return _oss_remote_file_with_wrapper(name, ext, url, sha1, **kwargs)
     # @oss-disable[end= ]: else:
         # @oss-disable: # deps are managed by Artificer internally - only relevant for OSS builds.
@@ -246,6 +239,7 @@ def buck_kotlin_test(**kwargs):
     kwargs["labels"] += extra_labels
 
     kwargs = _add_kotlin_deps(**kwargs)
+    kwargs = _maybe_add_java_version(**kwargs)
 
     fb_native.kotlin_test(**kwargs)
 
@@ -345,7 +339,6 @@ def standard_java_test(
     test_srcs = native.glob(["*Test.java"])
 
     if len(test_srcs) > 0:
-        # @lint-ignore BUCKLINT
         buck_java_test(
             name = name,
             srcs = test_srcs,
@@ -362,7 +355,7 @@ def buck_prebuilt_artifact(
         oss_url = None,
         oss_sha1 = None,
         **kwargs):
-    if is_oss_build() and oss_url:
+    if (not is_full_meta_repo()) and oss_url:
         return fb_native.remote_file(
             sha1 = oss_sha1,
             url = oss_url,

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -13,12 +14,14 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 
 use allocative::Allocative;
-use buck2_core::fs::paths::RelativePath;
-use buck2_core::fs::paths::RelativePathBuf;
+use buck2_artifact::artifact::artifact_type::Artifact;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_error::BuckErrorContext;
 use buck2_execute::artifact::fs::ExecutorFs;
+use buck2_fs::paths::RelativePath;
+use buck2_fs::paths::RelativePathBuf;
 use buck2_interpreter::types::cell_root::CellRoot;
 use buck2_interpreter::types::project_root::StarlarkProjectRoot;
 use buck2_interpreter::types::regex::StarlarkBuckRegex;
@@ -42,11 +45,14 @@ use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueOfUnchecked;
+use starlark::values::ValueTypedComplex;
 use starlark::values::string::StarlarkStr;
 use starlark::values::type_repr::StarlarkTypeRepr;
 use static_assertions::assert_eq_size;
 
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::CommandLineLocation;
 use crate::interpreter::rule_defs::cmd_args::regex::CmdArgsRegex;
@@ -150,7 +156,7 @@ impl<'v, 'a> OptionsReplacementsRef<'v, 'a> {
 
     pub(crate) fn iter(
         &self,
-    ) -> impl ExactSizeIterator<Item = (CmdArgsRegex<'v>, StringValue<'v>)> + 'a {
+    ) -> impl ExactSizeIterator<Item = (CmdArgsRegex<'v>, StringValue<'v>)> + use<'v, 'a> {
         match self {
             Self::Unfrozen(v) => Either::Left(v.iter().copied()),
             Self::Frozen(v) => Either::Right(v.iter().map(|(r, s)| {
@@ -310,7 +316,8 @@ impl<'v> CommandLineOptionsTrait<'v> for FrozenCommandLineOptions {
         for option in &*self.options {
             match option {
                 FrozenCommandLineOption::RelativeTo(value, parent) => {
-                    options.relative_to = Some((value.to_value(), *parent));
+                    let value = ValueOfUnchecked::new(value.get().to_value());
+                    options.relative_to = Some((value, *parent));
                 }
                 FrozenCommandLineOption::AbsolutePrefix(value) => {
                     options.absolute_prefix = Some(value.to_string_value());
@@ -382,8 +389,11 @@ impl<'v> Freeze for CommandLineOptions<'v> {
 
         let mut options = Vec::new();
         if let Some((relative_to, parent)) = relative_to {
-            let relative_to = relative_to.cast().freeze(freezer)?;
-            options.push(FrozenCommandLineOption::RelativeTo(relative_to, parent));
+            let relative_to = relative_to.get().freeze(freezer)?;
+            options.push(FrozenCommandLineOption::RelativeTo(
+                FrozenValueOfUnchecked::new(relative_to),
+                parent,
+            ));
         }
         if let Some(absolute_prefix) = absolute_prefix {
             let absolute_prefix = absolute_prefix.freeze(freezer)?;
@@ -432,7 +442,7 @@ where
     S: Serializer,
 {
     match v {
-        Some((v, u)) => s.serialize_some(&(format!("{}", v), u)),
+        Some((v, u)) => s.serialize_some(&(format!("{v}"), u)),
         None => s.serialize_none(),
     }
 }
@@ -441,23 +451,75 @@ where
 // because upcasting is not stable).
 #[derive(Display, StarlarkTypeRepr, UnpackValue)]
 pub(crate) enum RelativeOrigin<'v> {
-    Artifact(&'v dyn StarlarkArtifactLike),
+    OutputArtifact(ValueTypedComplex<'v, StarlarkOutputArtifact<'v>>),
+    Artifact(&'v dyn StarlarkInputArtifactLike<'v>),
     CellRoot(&'v CellRoot),
     /// Bit of a useless variant since this is simply the default, but we allow it for consistency.
     ProjectRoot(&'v StarlarkProjectRoot),
 }
 
+// If we have the actual path of the artifact (e.g. because it is an input to the action), then we
+// can use that to resolve the relative path. Otherwise, we use a constant value to resolve the path,
+// which still works, since the "form" of the path is the same, i.e. "<target_package>/<content hash>/<short_name>".
+// E.g.
+// - "a/b/hash1/c".relative_to("a/b/hash2/d") => "../../hash1/c"
+// - "a/b/hash1/c".relative_to("a/b/placeholder/d") => "../../hash1/c"
+pub struct RelativeOriginArtifactPathMapper<'a> {
+    artifact_path_mapping: &'a dyn ArtifactPathMapper,
+    relative_path_resolution: ContentBasedPathHash,
+}
+
+impl<'a> RelativeOriginArtifactPathMapper<'a> {
+    pub(crate) fn new(
+        artifact_path_mapping: &'a dyn ArtifactPathMapper,
+    ) -> RelativeOriginArtifactPathMapper<'a> {
+        RelativeOriginArtifactPathMapper {
+            artifact_path_mapping,
+            relative_path_resolution: ContentBasedPathHash::RelativePathResolution,
+        }
+    }
+}
+
+impl ArtifactPathMapper for RelativeOriginArtifactPathMapper<'_> {
+    fn get(&self, artifact: &Artifact) -> Option<&ContentBasedPathHash> {
+        if let Some(value) = self.artifact_path_mapping.get(artifact) {
+            Some(value)
+        } else {
+            Some(&self.relative_path_resolution)
+        }
+    }
+}
+
 impl<'v> RelativeOrigin<'v> {
-    pub(crate) fn resolve<C>(&self, ctx: &C) -> buck2_error::Result<RelativePathBuf>
+    pub(crate) fn resolve<C>(
+        &self,
+        ctx: &C,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
+    ) -> buck2_error::Result<RelativePathBuf>
     where
         C: CommandLineContext + ?Sized,
     {
         let loc = match self {
+            Self::OutputArtifact(artifact) => {
+                let value = match artifact.unpack() {
+                    Either::Right(value) => value,
+                    // FIXME(JakobDegen): This is not the only place where we do it, but it's
+                    // nonetheless an extremely non-local assertion
+                    Either::Left(_) => {
+                        return Err(buck2_error::internal_error!(
+                            "Non-frozen output artifacts can't be added to CLIs"
+                        ));
+                    }
+                };
+                ctx.resolve_output_artifact(&value.inner().artifact)?
+            }
             Self::Artifact(artifact) => {
                 // Shame we require the artifact to be bound here, we really just needs its
                 // path even if it is unbound.
                 let artifact = artifact.get_bound_artifact()?;
-                ctx.resolve_artifact(&artifact)?
+                let artifact_path_mapping =
+                    RelativeOriginArtifactPathMapper::new(artifact_path_mapping);
+                ctx.resolve_artifact(&artifact, &artifact_path_mapping)?
             }
             Self::CellRoot(cell_root) => ctx.resolve_cell_path(cell_root.cell_path())?,
             Self::ProjectRoot(_) => {
@@ -496,6 +558,7 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
             &'b mut dyn CommandLineBuilder,
             &'b mut dyn CommandLineContext,
         ) -> buck2_error::Result<R>,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<R> {
         struct ExtrasBuilder<'a, 'v> {
             builder: &'a mut dyn CommandLineBuilder,
@@ -516,7 +579,7 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
             fn resolve_project_path(
                 &self,
                 path: ProjectRelativePathBuf,
-            ) -> buck2_error::Result<CommandLineLocation> {
+            ) -> buck2_error::Result<CommandLineLocation<'_>> {
                 let Self {
                     ctx,
                     relative_to,
@@ -559,7 +622,7 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
                 ))
             }
 
-            fn fs(&self) -> &ExecutorFs {
+            fn fs(&self) -> &ExecutorFs<'_> {
                 self.ctx.fs()
             }
 
@@ -647,7 +710,7 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
         if !self.changes_builder() {
             f(builder, ctx)
         } else {
-            let relative_to = self.relative_to_path(ctx)?;
+            let relative_to = self.relative_to_path(ctx, artifact_path_mapping)?;
 
             let mut extras_builder = ExtrasBuilder {
                 builder,
@@ -674,6 +737,7 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
     pub(crate) fn relative_to_path<C>(
         &self,
         ctx: &C,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<Option<RelativePathBuf>>
     where
         C: CommandLineContext + ?Sized,
@@ -686,13 +750,13 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
         let origin = value
             .unpack()
             .internal_error("Must be a valid RelativeOrigin as this was checked in the setter")?;
-        let mut relative_path = origin.resolve(ctx)?;
+        let mut relative_path = origin
+            .resolve(ctx, artifact_path_mapping)
+            .internal_error("origin::resolve")?;
         for _ in 0..parent {
             if !relative_path.pop() {
-                return Err(CommandLineArgError::TooManyParentCalls).buck_error_context(format!(
-                    "Error accessing {}-th parent of {}",
-                    parent, origin
-                ));
+                return Err(CommandLineArgError::TooManyParentCalls)
+                    .buck_error_context(format!("Error accessing {parent}-th parent of {origin}"));
             }
         }
 
@@ -701,7 +765,8 @@ impl<'v, 'x> CommandLineOptionsRef<'v, 'x> {
 
     pub(crate) fn iter_fields_display(
         &self,
-    ) -> impl Iterator<Item = (&'static str, CommandLineOptionsIterItem<'v, 'x>)> {
+    ) -> impl Iterator<Item = (&'static str, CommandLineOptionsIterItem<'v, 'x>)> + use<'v, 'x>
+    {
         let CommandLineOptionsRef {
             relative_to,
             absolute_prefix,

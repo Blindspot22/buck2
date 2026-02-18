@@ -147,7 +147,7 @@ impl TypeCheck {
                 // Note we are using `:#` here instead of `:?` because
                 // `:?` includes rust backtrace.
                 // The issue: https://github.com/dtolnay/anyhow/issues/300
-                writeln!(output, "{}", format!("{:#}", error).trim_end()).unwrap();
+                writeln!(output, "{}", format!("{error:#}").trim_end()).unwrap();
             }
         }
 
@@ -155,7 +155,7 @@ impl TypeCheck {
             writeln!(output).unwrap();
             writeln!(output, "Approximations:").unwrap();
             for appox in approximations {
-                writeln!(output, "{}", appox).unwrap();
+                writeln!(output, "{appox}").unwrap();
             }
         }
 
@@ -165,9 +165,9 @@ impl TypeCheck {
             for k in &self.expect_types {
                 let types = typemap.find_bindings_by_name(k);
                 match types.as_slice() {
-                    [ty] => writeln!(output, "{}: {}", k, ty).unwrap(),
-                    [] => panic!("Type not found for {}", k),
-                    [_, _, ..] => panic!("Multiple types found for {}", k),
+                    [ty] => writeln!(output, "{k}: {ty}").unwrap(),
+                    [] => panic!("Type not found for {k}"),
+                    [_, _, ..] => panic!("Multiple types found for {k}"),
                 }
             }
         }
@@ -176,32 +176,34 @@ impl TypeCheck {
         let module = {
             writeln!(output).unwrap();
             writeln!(output, "Compiler typechecker (eval):").unwrap();
-            let module = Module::new();
-            let mut eval = Evaluator::new(&module);
+            Module::with_temp_heap(|module| {
+                let mut eval = Evaluator::new(&module);
 
-            eval.set_loader(&loader);
+                eval.set_loader(&loader);
 
-            eval.enable_static_typechecking(true);
-            let eval_result = eval.eval_module(ast, &globals);
-            if eval_result.is_ok() != errors.is_empty() {
-                writeln!(output, "Compiler typechecker and eval results mismatch.").unwrap();
-                writeln!(output).unwrap();
-            }
+                eval.enable_static_typechecking(true);
+                let eval_result = eval.eval_module(ast, &globals);
+                if eval_result.is_ok() != errors.is_empty() {
+                    writeln!(output, "Compiler typechecker and eval results mismatch.").unwrap();
+                    writeln!(output).unwrap();
+                }
 
-            // Additional writes must happen above this line otherwise it might be erased by trim_rust_backtrace
-            match &eval_result {
-                Ok(_) => writeln!(output, "No errors.").unwrap(),
-                Err(err) => writeln!(output, "{:?}", err).unwrap(),
-            }
+                // Additional writes must happen above this line otherwise it might be erased by trim_rust_backtrace
+                match &eval_result {
+                    Ok(_) => writeln!(output, "No errors.").unwrap(),
+                    Err(err) => writeln!(output, "{err:?}").unwrap(),
+                }
 
-            // Help borrow checker.
-            drop(eval);
+                // Help borrow checker.
+                drop(eval);
 
-            module.freeze().unwrap()
+                module.freeze()
+            })
+            .unwrap()
         };
 
         golden_test_template(
-            &format!("src/typing/tests/golden/{}.golden", test_name),
+            &format!("src/typing/tests/golden/{test_name}.golden"),
             trim_rust_backtrace(&output),
         );
 

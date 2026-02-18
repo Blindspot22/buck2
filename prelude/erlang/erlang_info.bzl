@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # This file contains the specification for all the providers the Erlang
 # integration uses.
@@ -18,9 +19,7 @@ ErlangAppCommonFields = [
     # path to include directory
     "include_dir",
     # deps files short_path -> artifact
-    "deps_files",
-    # input mapping
-    "input_mapping",
+    "header_deps_file",
 ]
 
 # target type to break circular dependencies
@@ -42,6 +41,7 @@ ErlangAppInfo = provider(
 
             # for tests we need to preserve the private includes
             "private_includes",
+            "private_include_dir",
             # mapping from name to dependency for all Erlang dependencies
             "dependencies",
             # Transitive Set for calculating the start order
@@ -53,11 +53,44 @@ ErlangAppInfo = provider(
             # the use-case for virtual apps are OTP applications that are shipeped
             # with the Erlang distribution
             "virtual",
-            # app folders for all toolchain
-            "app_folders",
-            # app_folder for primary toolchain
+            # app_folder
             "app_folder",
         ],
+)
+
+# mapping
+#   from include base name (e.g. "header.hrl")
+#   to artifact
+PathArtifactMapping = dict[str, Artifact]
+
+# mapping
+#   from application to includes in that application
+#   the artifacts are source .hrl files
+IncludesMapping = dict[str, PathArtifactMapping]
+
+# mapping
+#   from module name to beam file location
+ModuleArtifactMapping = dict[str, Artifact]
+
+# mapping
+#   from application to beam files it defines
+EbinMapping = dict[str, ModuleArtifactMapping]
+
+# mapping
+#   from application to merged deps files
+DepsMapping = dict[str, Artifact]
+
+ErlangDependencyInfo = provider(
+    fields = {
+        "beams": provider_field(EbinMapping, default = {}),
+        "code_path": provider_field(cmd_args),
+        "dependencies": provider_field(dict[str, Dependency], default = {}),
+        "header_deps_files": provider_field(DepsMapping, default = {}),
+        "include_dirs": provider_field(PathArtifactMapping, default = {}),
+        "includes": provider_field(IncludesMapping, default = {}),
+        "private_include_dirs": provider_field(PathArtifactMapping, default = {}),
+        "private_includes": provider_field(IncludesMapping, default = {}),
+    },
 )
 
 ErlangReleaseInfo = provider(
@@ -66,45 +99,89 @@ ErlangReleaseInfo = provider(
     },
 )
 
+# Marker provider to enforce what erlang tests can depend on
+ErlangAppOrTestInfo = provider(fields = {})
+
+Tool = cmd_args
+
+ErlangOTPBinariesInfo = provider(
+    fields = {
+        "erl": provider_field(Tool),
+        "erlc": provider_field(Tool),
+        "escript": provider_field(Tool),
+    },
+)
+
+Tools = record(
+    name = field(str),
+    erl = field(Tool),
+    erlc = field(Tool),
+    escript = field(Tool),
+    _tools_binaries = field(ErlangOTPBinariesInfo),
+)
+
+ErtsToolchainApplicationInfo = provider(
+    fields = {
+        "name": provider_field(str),
+        "version": provider_field(str),
+    },
+)
+
+ErtsToolchainInfo = provider(
+    fields = {
+        "applications": provider_field(list[ErtsToolchainApplicationInfo]),
+        "erts_version": provider_field(str),
+        "output": provider_field(Artifact),
+    },
+)
+
+ErlangErrorHandlers = record(
+    erlc = field(typing.Callable[[ActionErrorCtx], list[ActionSubError]]),
+    extract_otp_app = field(typing.Callable[[ActionErrorCtx], list[ActionSubError]]),
+)
+
 # toolchain provider
 ErlangToolchainInfo = provider(
     # @unsorted-dict-items
     fields = {
-        "name": provider_field(typing.Any, default = None),
+        "name": provider_field(str),
         # command line erlc options used when compiling
-        "erl_opts": provider_field(typing.Any, default = None),
+        "erl_opts": provider_field(list[str]),
         # emulator flags used when calling erl
-        "emu_flags": provider_field(typing.Any, default = None),
+        "emu_flags": provider_field(list[str]),
         # struct containing the binaries erlc, escript, and erl
         # this is further split into local and RE
-        "otp_binaries": provider_field(typing.Any, default = None),
+        "otp_binaries": provider_field(Tools),
         # utility scripts
         # building .app file
-        "app_file_script": provider_field(typing.Any, default = None),
+        "app_src_script": provider_field(Tool),
         # building escripts
-        "escript_builder": provider_field(typing.Any, default = None),
+        "escript_builder": provider_field(Tool),
         # analyzing .(h|e)rl dependencies
-        "dependency_analyzer": provider_field(typing.Any, default = None),
-        "dependency_finalizer": provider_field(typing.Any, default = None),
-        # trampoline rerouting stdout to stderr
-        "erlc_trampoline": provider_field(typing.Any, default = None),
-        "escript_trampoline": provider_field(typing.Any, default = None),
+        "dependency_analyzer": provider_field(Tool),
+        "dependency_finalizer": provider_field(Tool),
+        "dependency_merger": provider_field(Tool),
+        "escript_trampoline": provider_field(Artifact),
         # name to parse_transform artifacts mapping for core parse_transforms (that are always used) and
         # user defines ones
-        "core_parse_transforms": provider_field(typing.Any, default = None),
-        "parse_transforms": provider_field(typing.Any, default = None),
+        "core_parse_transforms": provider_field(dict[str, cmd_args]),
+        "parse_transforms": provider_field(dict[str, cmd_args]),
         # filter spec for parse transforms
-        "parse_transforms_filters": provider_field(typing.Any, default = None),
+        "parse_transforms_filters": provider_field(dict[str, list[str]]),
         # release boot script builder
-        "boot_script_builder": provider_field(typing.Any, default = None),
+        "boot_script_builder": provider_field(Tool),
         # build release_variables
-        "release_variables_builder": provider_field(typing.Any, default = None),
+        "release_variables_builder": provider_field(Tool),
         # copying erts
-        "include_erts": provider_field(typing.Any, default = None),
+        "extract_from_otp": provider_field(Tool),
         # beams we need for various reasons
-        "utility_modules": provider_field(typing.Any, default = None),
+        "utility_modules": provider_field(Artifact),
         # env to be set for toolchain invocations
-        "env": provider_field(typing.Any, default = None),
+        "env": provider_field(dict[str, str]),
+        # Erlang Runtime System (ERTS) toolchain metadata
+        "erts_toolchain_info": provider_field(ErtsToolchainInfo),
+        # error handler
+        "error_handler": provider_field(ErlangErrorHandlers),
     },
 )
 
@@ -112,19 +189,7 @@ ErlangToolchainInfo = provider(
 ErlangMultiVersionToolchainInfo = provider(
     # @unsorted-dict-items
     fields = {
-        # toolchains
-        "toolchains": provider_field(typing.Any, default = None),
-        # primary toolchain
-        "primary": provider_field(typing.Any, default = None),
-    },
-)
-
-# OTP Binaries
-ErlangOTPBinariesInfo = provider(
-    fields = {
-        "erl": provider_field(typing.Any, default = None),
-        "erlc": provider_field(typing.Any, default = None),
-        "escript": provider_field(typing.Any, default = None),
+        "toolchain": provider_field(ErlangToolchainInfo),
     },
 )
 
@@ -133,9 +198,9 @@ ErlangParseTransformInfo = provider(
     # @unsorted-dict-items
     fields = {
         # module implementing the parse_transform
-        "source": provider_field(typing.Any, default = None),
+        "source": provider_field(Artifact),
         # potential extra files placed in a resource folder
-        "extra_files": provider_field(typing.Any, default = None),
+        "extra_files": provider_field(list[Artifact]),
     },
 )
 
@@ -144,10 +209,10 @@ ErlangTestInfo = provider(
     fields =
         {
             # The name of the suite
-            "name": provider_field(typing.Any, default = None),
+            "name": provider_field(str),
             # mapping from name to dependency for all Erlang dependencies
-            "dependencies": provider_field(typing.Any, default = None),
+            "dependencies": provider_field(dict[str, Dependency]),
             # anchor to the output_dir
-            "output_dir": provider_field(typing.Any, default = None),
+            "output_dir": provider_field(Artifact),
         },
 )

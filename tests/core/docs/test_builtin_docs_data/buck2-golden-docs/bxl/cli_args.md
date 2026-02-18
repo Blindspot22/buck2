@@ -2,10 +2,13 @@
 
 # cli_args
 ## bool
+## configured\_target\_expr
+## configured\_target\_label
 ## enum
 ## float
 ## int
 ## json
+## json\_file
 ## list
 ## option
 ## string

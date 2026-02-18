@@ -1,14 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future::Future;
 
+use buck2_artifact::actions::key::ActionKey;
 use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_data::ComputeDetailedAggregatedMetricsEnd;
 use buck2_data::ComputeDetailedAggregatedMetricsStart;
@@ -21,8 +23,11 @@ use dice::UserComputationData;
 use crate::build::detailed_aggregated_metrics::events::DetailedAggregatedMetricsEventHandler;
 use crate::build::detailed_aggregated_metrics::events::DetailedAggregatedMetricsPerBuildEventsHolder;
 use crate::build::detailed_aggregated_metrics::types::ActionExecutionMetrics;
+use crate::build::detailed_aggregated_metrics::types::DetailedAggregatedMetrics;
 use crate::build::detailed_aggregated_metrics::types::PerBuildEvents;
 use crate::build::detailed_aggregated_metrics::types::TopLevelTargetSpec;
+use crate::build::graph_properties::GraphPropertiesOptions;
+use crate::build::sketch_impl::MergeableGraphSketch;
 use crate::deferred::calculation::DeferredHolder;
 
 pub trait HasDetailedAggregatedMetrics {
@@ -38,7 +43,12 @@ pub trait HasDetailedAggregatedMetrics {
     fn compute_detailed_metrics(
         &self,
         events: PerBuildEvents,
-    ) -> impl Future<Output = buck2_error::Result<buck2_data::DetailedAggregatedMetrics>> + Send;
+        graph_properties: GraphPropertiesOptions,
+    ) -> impl Future<Output = buck2_error::Result<DetailedAggregatedMetrics>> + Send;
+    fn compute_action_graph_sketch(
+        &self,
+        events: &PerBuildEvents,
+    ) -> impl Future<Output = buck2_error::Result<Option<MergeableGraphSketch<ActionKey>>>> + Send;
 }
 
 impl HasDetailedAggregatedMetrics for DiceComputations<'_> {
@@ -80,7 +90,8 @@ impl HasDetailedAggregatedMetrics for DiceComputations<'_> {
     async fn compute_detailed_metrics(
         &self,
         events: PerBuildEvents,
-    ) -> buck2_error::Result<buck2_data::DetailedAggregatedMetrics> {
+        graph_properties: GraphPropertiesOptions,
+    ) -> buck2_error::Result<DetailedAggregatedMetrics> {
         span_async_simple(
             ComputeDetailedAggregatedMetricsStart {},
             async move {
@@ -89,12 +100,26 @@ impl HasDetailedAggregatedMetrics for DiceComputations<'_> {
                     .ok_or_else(|| {
                         internal_error!("should have had a detailed aggreged metrics event holder")
                     })?
-                    .compute_metrics(events)
+                    .compute_metrics(events, graph_properties)
                     .await
             },
             ComputeDetailedAggregatedMetricsEnd {},
         )
         .await
+    }
+
+    async fn compute_action_graph_sketch(
+        &self,
+        events: &PerBuildEvents,
+    ) -> buck2_error::Result<Option<MergeableGraphSketch<ActionKey>>> {
+        let handler = get_detailed_aggregated_metrics_event_handler(self)?;
+        match handler.as_ref() {
+            Some(h) => {
+                h.compute_action_graph_sketch(events.top_level_targets.clone())
+                    .await
+            }
+            None => Ok(None),
+        }
     }
 }
 

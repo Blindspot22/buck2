@@ -1,0 +1,46 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
+ * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
+ */
+
+use std::fmt;
+
+pub(crate) struct SystemInfo {
+    pub(crate) username: Option<String>,
+    pub(crate) hostname: Option<String>,
+    pub(crate) os: String,
+    pub(crate) os_version: Option<String>,
+}
+
+impl fmt::Display for SystemInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "username: {}
+hostname: {}
+os: {}
+os_version: {}
+",
+            self.username.as_deref().unwrap_or(""),
+            self.hostname.as_deref().unwrap_or(""),
+            self.os,
+            self.os_version.as_deref().unwrap_or(""),
+        )
+    }
+}
+
+pub(crate) async fn get() -> buck2_error::Result<SystemInfo> {
+    let info = buck2_events::metadata::system_info();
+    let output = SystemInfo {
+        username: info.username,
+        hostname: info.hostname,
+        os: info.os,
+        os_version: info.os_version,
+    };
+    Ok(output)
+}

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_core::cells::CellAliasResolver;
@@ -12,6 +13,7 @@ use buck2_core::cells::CellResolver;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::pattern::pattern::ParsedPattern;
+use buck2_core::pattern::pattern::ParsedPatternWithModifiers;
 use buck2_core::pattern::pattern_type::PatternType;
 use buck2_core::pattern::unparsed::UnparsedPatterns;
 use dice::DiceComputations;
@@ -37,7 +39,7 @@ impl PatternParser {
     ) -> buck2_error::Result<Self> {
         let cell_resolver = ctx.get_cell_resolver().await?;
 
-        let cwd = cell_resolver.get_cell_path(&cwd)?;
+        let cwd = cell_resolver.get_cell_path(&cwd);
         let cell_name = cwd.cell();
 
         let target_alias_resolver = ctx.target_alias_resolver().await?;
@@ -63,6 +65,19 @@ impl PatternParser {
             &self.cell_alias_resolver,
         )
     }
+
+    fn parse_pattern_with_modifiers<T: PatternType>(
+        &self,
+        pattern: &str,
+    ) -> buck2_error::Result<ParsedPatternWithModifiers<T>> {
+        ParsedPatternWithModifiers::parse_relaxed(
+            &self.target_alias_resolver,
+            self.cwd.as_ref(),
+            pattern,
+            &self.cell_resolver,
+            &self.cell_alias_resolver,
+        )
+    }
 }
 
 /// Parse target patterns out of command line arguments.
@@ -80,6 +95,16 @@ pub async fn parse_patterns_from_cli_args<T: PatternType>(
     target_patterns.try_map(|value| parser.parse_pattern(&value))
 }
 
+pub async fn parse_patterns_with_modifiers_from_cli_args<T: PatternType>(
+    ctx: &mut DiceComputations<'_>,
+    target_patterns: &[String],
+    cwd: &ProjectRelativePath,
+) -> buck2_error::Result<Vec<ParsedPatternWithModifiers<T>>> {
+    let parser = PatternParser::new(ctx, cwd).await?;
+
+    target_patterns.try_map(|value| parser.parse_pattern_with_modifiers(&value))
+}
+
 pub async fn parse_patterns_from_cli_args_typed<T: PatternType>(
     ctx: &mut DiceComputations<'_>,
     patterns: &UnparsedPatterns<T>,
@@ -94,4 +119,13 @@ pub async fn parse_and_resolve_patterns_from_cli_args<T: PatternType>(
 ) -> buck2_error::Result<ResolvedPattern<T>> {
     let patterns = parse_patterns_from_cli_args(ctx, target_patterns, cwd).await?;
     ResolveTargetPatterns::resolve(ctx, &patterns).await
+}
+
+pub async fn parse_and_resolve_patterns_with_modifiers_from_cli_args<T: PatternType>(
+    ctx: &mut DiceComputations<'_>,
+    target_patterns: &[String],
+    cwd: &ProjectRelativePath,
+) -> buck2_error::Result<ResolvedPattern<T>> {
+    let patterns = parse_patterns_with_modifiers_from_cli_args(ctx, target_patterns, cwd).await?;
+    ResolveTargetPatterns::resolve_with_modifiers(ctx, &patterns).await
 }

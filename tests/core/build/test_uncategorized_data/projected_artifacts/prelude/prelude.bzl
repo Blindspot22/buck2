@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _declare_sub_targets(ctx: AnalysisContext) -> list[Provider]:
     out_dir = ctx.actions.declare_output("out_dir", dir = True)
@@ -11,7 +12,7 @@ def _declare_sub_targets(ctx: AnalysisContext) -> list[Provider]:
         name: [DefaultInfo(default_output = out_dir.project(name))]
         for name in ctx.attrs.sub_targets
     }
-    ctx.actions.run(["python3", ctx.attrs.command, out_dir.as_output()], category = "mkdirs")
+    ctx.actions.run(["fbpython", ctx.attrs.command, out_dir.as_output()], category = "mkdirs")
     return [DefaultInfo(default_output = out_dir, sub_targets = sub_targets)]
 
 declare_sub_targets = rule(
@@ -22,7 +23,7 @@ declare_sub_targets = rule(
 def _exists(ctx: AnalysisContext) -> list[Provider]:
     out = ctx.actions.declare_output("check")
     ctx.actions.run(
-        ["python3", ctx.attrs.command, out.as_output(), ctx.attrs.paths],
+        ["fbpython", ctx.attrs.command, out.as_output(), ctx.attrs.paths],
         category = "check",
         local_only = ctx.attrs.local,
     )

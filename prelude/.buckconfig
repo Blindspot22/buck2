@@ -13,14 +13,8 @@ config = ovr_config
 [not_buildfile] # @oss-enable
 name_v2 = TARGETS,BUCK
 
-[not_build]
-[build] # @oss-enable
-  is_oss = true
-
 # Some sort of defaults to make ovrsource macros stop complaining.
 [ovrsource]
-  build_host_compiler = clang
-  build_host_os = linux
 
 [java]
   bootclasspath_8 = fbsource//xplat/third-party/java/jdk8:jce-stub fbsource//xplat/third-party/java/jdk8:jsse-stub fbsource//xplat/third-party/java/jdk8:rt-stub
@@ -32,7 +26,6 @@ name_v2 = TARGETS,BUCK
 [kotlin]
   enable_incremental_compilation = true
   frontend_compiler = defined_by_target
-  kosabi_standalone = true
   kotlin_home = $(config fbsource.repo_relative_path)/xplat/toolchains/android/sdk/third-party/java/kotlin/$(config kotlin.kotlin_version)
   kotlin_version = 2.1.0
   kotlincd_dep_files = per_class

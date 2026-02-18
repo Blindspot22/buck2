@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin;
@@ -36,6 +37,8 @@ public class KosabiStubgenStep extends KotlincStep {
   private final RelPath stubgenDir;
   private final RelPath stubClassOutputDir;
 
+  private final String pluginPath;
+
   KosabiStubgenStep(
       BuildTargetValue invokingRule,
       Path outputDirectory,
@@ -59,7 +62,8 @@ public class KosabiStubgenStep extends KotlincStep {
       Optional<AbsPath> depTrackerPath,
       RelPath stubgenDir,
       @Nullable RelPath stubClassOutputDir,
-      KotlinCDAnalytics kotlinCDAnalytics) {
+      KotlinCDAnalytics kotlinCDAnalytics,
+      LanguageVersion languageVersion) {
 
     super(
         invokingRule,
@@ -73,7 +77,7 @@ public class KosabiStubgenStep extends KotlincStep {
         extraArguments,
         verboseModeOnlyExtraArguments,
         outputPaths,
-        trackClassUsage,
+        false, // trackClassUsage
         configuredBuckOut,
         resolvedKosabiPluginOptionPath,
         kosabiJvmAbiGenEarlyTerminationMessagePrefix,
@@ -84,9 +88,17 @@ public class KosabiStubgenStep extends KotlincStep {
         depTrackerPath,
         KotlincMode.NonIncremental.INSTANCE,
         kotlinCDAnalytics,
-        LanguageVersion.Companion.getK1());
+        languageVersion,
+        // Flag turning on/off K2 support for jvm-abi-gen actions
+        // not part of stubsgen, since jvm-abi-gen doesn't run on stubsgen steps
+        false);
     this.stubgenDir = stubgenDir;
     this.stubClassOutputDir = stubClassOutputDir;
+    this.pluginPath =
+        "plugin:"
+            + (languageVersion.getSupportsK2()
+                ? "com.facebook.kotlin.compilerplugins.kosabi.stubsgen_k2"
+                : "com.facebook.kotlin.compilerplugins.kosabi.stubsgen");
   }
 
   @Override
@@ -95,23 +107,17 @@ public class KosabiStubgenStep extends KotlincStep {
   }
 
   @Override
-  protected void configureSourceOnlyOptions(ImmutableList.Builder<String> builder) {
-    super.configureSourceOnlyOptions(builder);
+  protected void configureSourceOnlyOptions(
+      ImmutableList.Builder<String> builder,
+      LanguageVersion languageVersion,
+      AbsPath ruleCellRoot) {
+    super.configureSourceOnlyOptions(builder, languageVersion, ruleCellRoot);
     builder.add("-P");
-    builder.add(
-        "plugin:com.facebook.kotlin.compilerplugins.kosabi.stubsgen:stubsgen-dir="
-            + stubgenDir.toString());
+    builder.add(pluginPath + ":stubsgen-dir=" + stubgenDir.toString());
 
     if (stubClassOutputDir != null) {
       builder.add("-P");
-      builder.add(
-          "plugin:com.facebook.kotlin.compilerplugins.kosabi.stubsgen:stubs-class-dir="
-              + stubClassOutputDir.toString());
+      builder.add(pluginPath + ":stubs-class-dir=" + stubClassOutputDir.toString());
     }
-
-    builder.add("-P");
-    builder.add(
-        "plugin:com.facebook.kotlin.compilerplugins.kosabi.stubsgen:stubsgen-standalone-mode="
-            + "true");
   }
 }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_cli_proto::new_generic::ExplainRequest;
@@ -124,7 +125,7 @@ impl StreamingCommand for ExplainCommand {
         let target_cfg = build_args.target_cfg();
 
         // TODO iguridi: add option to turn manifold upload off for OSS
-        let manifold_path = Some(format!("flat/{}-explain.html", uuid));
+        let manifold_path = Some(format!("flat/{uuid}-explain.html"));
 
         let mut context = ctx.empty_client_context("explain")?;
         context.target_call_stacks = self.stack;

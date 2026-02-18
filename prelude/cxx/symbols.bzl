@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load(
@@ -11,7 +12,6 @@ load(
     "CxxToolchainInfo",
     "LinkerType",
 )
-load("@prelude//cxx:cxx_utility.bzl", "cxx_attrs_get_allow_cache_upload")
 load("@prelude//os_lookup:defs.bzl", "Os", "OsLookup")
 
 def _extract_symbol_names(
@@ -45,7 +45,7 @@ def _extract_symbol_names(
         fail("can only use undefined_weak with undefined_only")
 
     nm = cxx_toolchain.binary_utilities_info.nm
-    output = ctx.actions.declare_output(paths.join("__symbols__", name))
+    output = ctx.actions.declare_output(paths.join("__symbols__", name), has_content_based_path = True)
 
     # -A: Prepend all lines with the name of the input file to which it
     # corresponds.  Added only to make parsing the output a bit easier.
@@ -74,7 +74,7 @@ def _extract_symbol_names(
                 $lines = $lines | ForEach-Object {{ ($_ -split ' ')[1] }}
                 $lines = $lines | ForEach-Object {{ ($_ -split '@')[0] }}
                 $lines = $lines | Where-Object {{ $_ -notmatch '__odr_asan_gen_.*' }}
-                $lines = $lines | Sort-Object -Unique
+                $lines = $lines | Sort-Object -Unique -CaseSensitive
                 # Avoid a trailing newline for empty symbol lists
                 if ($lines.count -eq 0) {{
                     [IO.File]::WriteAllText('{{}}', $lines)
@@ -92,7 +92,7 @@ def _extract_symbol_names(
         script = (
             "set -euo pipefail; " +
             '"$1" {} "${{@:2}}"'.format(nm_flags) +
-            (" | grep -v \"\\sw\\s*$\"" if undefined_only and not undefined_weak else "") +
+            (" | (grep -v \"\\sw\\s*$\" || true)" if undefined_only and not undefined_weak else "") +
             # Grab only the symbol name field.
             ' | cut -d" " -f2 ' +
             # Strip off ABI Version (@...) when using llvm-nm to keep compat with buck1
@@ -109,6 +109,16 @@ def _extract_symbol_names(
             # of grep -v here to avoid an error exit code when there's no input
             # symbols, which is not an error for us.
             ' | sed "/__odr_asan_gen_.*/d"' +
+            # These symbols are meant to be weak locals in the binary, with
+            # definitions found on the platform. When using open source
+            # toolchain and declaring these symbols as weak, the symbols
+            # get promoted to global weak and thus failed to link due to
+            # undefined symbols.
+            ' | sed "/__gmon_start__/d"' +
+            ' | sed "/_ITM_deregisterTMCloneTable/d"' +
+            ' | sed "/_ITM_registerTMCloneTable/d"' +
+            ' | sed "/MallocExtension_Internal_GetNumericProperty/d"' +
+            ' | sed "/_ZTHN3c104impl26raw_local_dispatch_key_setE/d"' +
             # Sort and dedup symbols.  Use the `C` locale and do it in-memory to
             # make it significantly faster. CAUTION: if ten of these processes
             # run in parallel, they'll have cumulative allocations larger than RAM.
@@ -156,7 +166,7 @@ def _anon_extract_symbol_names_impl(ctx):
         prefer_local = ctx.attrs.prefer_local,
         undefined_only = ctx.attrs.undefined_only,
         undefined_weak = ctx.attrs.undefined_weak,
-        allow_cache_upload = cxx_attrs_get_allow_cache_upload(ctx.attrs),
+        allow_cache_upload = ctx.attrs.allow_cache_upload,
     )
     return [DefaultInfo(), _SymbolsInfo(artifact = output)]
 
@@ -205,6 +215,7 @@ def extract_symbol_names(
                 **kwargs
             ),
         ).artifact("symbols")
+        artifact = ctx.actions.assert_has_content_based_path(artifact)
 
         return ctx.actions.assert_short_path(artifact, short_path = paths.join("__symbols__", name))
     else:
@@ -246,8 +257,9 @@ def extract_undefined_syms(
         weak: bool = True,
         prefer_local: bool = False,
         anonymous: bool = False,
-        allow_cache_upload: bool = False) -> Artifact:
-    name = "extracted_symbol_names/{}.undefined_syms.txt".format(str(hash(output.short_path)))
+        allow_cache_upload: bool = False,
+        hash_counter = 0) -> Artifact:
+    name = "extracted_symbol_names/{}-{}.undefined_syms.txt".format(str(hash(output.short_path)), str(hash_counter))
     return extract_symbol_names(
         ctx = ctx,
         cxx_toolchain = cxx_toolchain,
@@ -302,7 +314,7 @@ def _create_symbols_file_from_script(
 
     all_symbol_files = actions.write(name + ".symbols", symbol_files)
     all_symbol_files = cmd_args(all_symbol_files, hidden = symbol_files)
-    output = actions.declare_output(name)
+    output = actions.declare_output(name, has_content_based_path = True)
     cmd = [
         "/usr/bin/env",
         "bash",

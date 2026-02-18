@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -13,11 +14,26 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import zipfile
 from types import TracebackType
-from typing import cast, Dict, List, Optional, Set, Tuple, Type
+from typing import cast, Optional
+
+
+def normalize_name(name: str) -> str:
+    """
+    Per:
+      * https://packaging.python.org/en/latest/specifications/recording-installed-packages/#the-dist-info-directory
+      * https://packaging.python.org/en/latest/specifications/name-normalization/
+    Normalize package names according to PEP503 then replace "-" with "_" as to not conflict with the "-" separating
+    the name of the package with the version specification.
+
+    Example: "torch-nightly" normalizes to "torch_nightly.dist-info/" and "torch_nightly.data/"
+    """
+    pep503_normalized_name = re.sub(r"[-_.]+", "-", name).lower()
+    return pep503_normalized_name.replace("-", "_")
 
 
 # pyre-fixme[24]: Generic type `AbstractContextManager` expects 1 type parameter.
@@ -28,37 +44,57 @@ class WheelBuilder(contextlib.AbstractContextManager):
         name: str,
         version: str,
         output: str,
-        entry_points: Optional[Dict[str, str]] = None,
-        metadata: Optional[List[Tuple[str, str]]] = None,
+        python_tag: str = "py3",
+        abi_tag: str = "none",
+        platform_tag: str = "any",
+        entry_points: Optional[dict[str, str]] = None,
+        metadata: Optional[list[tuple[str, str]]] = None,
     ) -> None:
         self._name = name
+
+        self._normalized_name: str = normalize_name(name)
+
+        # TODO normalize version like we normalized name above
+        #  can follow pypi/packaging.utils.canonicalize_version (see: https://fburl.com/code/amuvl3d2)
+        #  punted for later since it was not a clean copy/paste and
+        #  taking a dep to tp from toolchains is not straightforward
         self._version = version
+        self._python_tag = python_tag
+        self._abi_tag = abi_tag
+        self._platform_tag = platform_tag
         self._record: list[str] = []
         self._outf = zipfile.ZipFile(output, mode="w")
-        self._entry_points: Optional[Dict[str, str]] = entry_points
-        self._metadata: List[Tuple[str, str]] = []
+        self._entry_points: Optional[dict[str, str]] = entry_points
+        self._metadata: list[tuple[str, str]] = []
         self._metadata.append(("Name", name))
         self._metadata.append(("Version", version))
         if metadata is not None:
             self._metadata.extend(metadata)
 
     def _dist_info(self, *path: str) -> str:
-        return os.path.join(f"{self._name}-{self._version}.dist-info", *path)
+        return os.path.join(f"{self._normalized_name}-{self._version}.dist-info", *path)
 
     def _data(self, *path: str) -> str:
-        return os.path.join(f"{self._name}-{self._version}.data", *path)
+        return os.path.join(f"{self._normalized_name}-{self._version}.data", *path)
 
     def write(self, dst: str, src: str) -> None:
-        self._record.append(dst)
-        zinfo = zipfile.ZipInfo.from_file(
-            filename=src,
-            arcname=dst,
-            # Allow older timestamps, as we're gonna overwrite them below anyway.
-            strict_timestamps=False,
-        )
-        zinfo.date_time = (1980, 1, 1, 0, 0, 0)
-        with open(src, "rb") as fsrc, self._outf.open(zinfo, "w") as fdst:
-            shutil.copyfileobj(fsrc, fdst, 1024 * 8)
+        if os.path.isdir(src):
+            for root, _, files in os.walk(src):
+                for file in files:
+                    file_src = os.path.join(root, file)
+                    file_dst = os.path.join(dst, os.path.relpath(file_src, src))
+                    self.write(file_dst, file_src)
+        else:
+            self._record.append(dst)
+            zinfo = zipfile.ZipInfo.from_file(
+                filename=src,
+                arcname=dst,
+                # Allow older timestamps, as we're gonna overwrite them below anyway.
+                strict_timestamps=False,
+            )
+            zinfo.date_time = (1980, 1, 1, 0, 0, 0)
+            with open(src, "rb") as fsrc, self._outf.open(zinfo, "w") as fdst:
+                shutil.copyfileobj(fsrc, fdst, 1024 * 8)
 
     def write_data(self, dst: str, src: str) -> None:
         self.write(self._data(dst), src)
@@ -74,25 +110,33 @@ class WheelBuilder(contextlib.AbstractContextManager):
         record = self._dist_info("RECORD")
         self._outf.writestr(
             zinfo_or_arcname=zipfile.ZipInfo(filename=record),
-            data="".join(["{},,\n".format(f) for f in (self._record + [record])]),
+            data="".join([f"{f},,\n" for f in (self._record + [record])]),
         )
 
     def close(self) -> None:
         self.writestr(
             self._dist_info("METADATA"),
-            "".join(["{}: {}\n".format(key, val) for key, val in self._metadata]),
+            "".join([f"{key}: {val}\n" for key, val in self._metadata]),
         )
+
+        # Determine Root-Is-Purelib based on platform tag
+        # Pure Python wheels use platform "any", platform-specific wheels are not purelib
+        root_is_purelib = "true" if self._platform_tag == "any" else "false"
+
         self.writestr(
             self._dist_info("WHEEL"),
-            """\
+            f"""\
 Wheel-Version: 1.0
+Generator: buck2
+Root-Is-Purelib: {root_is_purelib}
+Tag: {self._python_tag}-{self._abi_tag}-{self._platform_tag}
 """,
         )
 
         # Write entry points.
         if self._entry_points is not None:
             config = configparser.ConfigParser()
-            config.read_dict(cast(Dict[str, Dict[str, str]], self._entry_points))
+            config.read_dict(cast(dict[str, dict[str, str]], self._entry_points))
             with io.TextIOWrapper(
                 self._outf.open(self._dist_info("entry_points.txt"), mode="w"),
                 encoding="utf-8",
@@ -104,18 +148,21 @@ Wheel-Version: 1.0
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
+        exc_type: Optional[type[BaseException]],
         exc_value: Optional[BaseException],
         exc_tb: Optional[TracebackType],
     ) -> None:
         self.close()
 
 
-def main(argv: List[str]) -> None:
+def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--python-tag", default="py3")
+    parser.add_argument("--abi-tag", default="none")
+    parser.add_argument("--platform-tag", default="any")
     parser.add_argument("--entry-points", default=None)
     parser.add_argument("--manifest", dest="manifests", action="append", default=[])
     parser.add_argument(
@@ -125,19 +172,25 @@ def main(argv: List[str]) -> None:
     parser.add_argument("--data", nargs=2, action="append", default=[])
     args = parser.parse_args(argv[1:])
 
-    pkgs: Set[str] = set()
+    pkgs: set[str] = set()
     pkgs_with_init = set()
 
     def _add_pkg(pkg: str) -> None:
+        # root (of 'site-packages/') should not be considered a pkg
+        if not pkg:
+            return
+
         pkgs.add(pkg)
         parent = os.path.dirname(pkg)
-        if parent:
-            _add_pkg(parent)
+        _add_pkg(parent)
 
     with WheelBuilder(
         name=args.name,
         version=args.version,
         output=args.output,
+        python_tag=args.python_tag,
+        abi_tag=args.abi_tag,
+        platform_tag=args.platform_tag,
         entry_points=(
             json.loads(args.entry_points) if args.entry_points is not None else None
         ),

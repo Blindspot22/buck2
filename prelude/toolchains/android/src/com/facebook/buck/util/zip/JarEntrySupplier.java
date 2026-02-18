@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.util.zip;
@@ -18,34 +19,25 @@ import java.io.InputStream;
  */
 public class JarEntrySupplier {
   private final CustomZipEntry entry;
-  private final String owner;
   private final ThrowingSupplier<InputStream, IOException> inputStreamSupplier;
   private final boolean readOnly;
 
   public JarEntrySupplier(
-      CustomZipEntry entry,
-      String owner,
-      ThrowingSupplier<InputStream, IOException> inputStreamSupplier) {
-    this(entry, owner, false, inputStreamSupplier);
+      CustomZipEntry entry, ThrowingSupplier<InputStream, IOException> inputStreamSupplier) {
+    this(entry, false, inputStreamSupplier);
   }
 
   public JarEntrySupplier(
       CustomZipEntry entry,
-      String owner,
       boolean readOnly,
       ThrowingSupplier<InputStream, IOException> inputStreamSupplier) {
     this.entry = entry;
-    this.owner = owner;
     this.readOnly = readOnly;
     this.inputStreamSupplier = inputStreamSupplier;
   }
 
   public CustomZipEntry getEntry() {
     return entry;
-  }
-
-  public String getEntryOwner() {
-    return owner;
   }
 
   public ThrowingSupplier<InputStream, IOException> getInputStreamSupplier() {

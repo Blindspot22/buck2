@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java
@@ -14,22 +15,19 @@ import com.facebook.buck.core.filesystems.RelPath
 import com.google.common.collect.ImmutableList
 import com.google.common.collect.ImmutableSortedSet
 import java.io.File
-import java.io.IOException
-import java.io.UncheckedIOException
-import java.util.Optional
-import java.util.function.Function
+import java.util.*
 import java.util.stream.Collectors
 
 /** Resolved JavacOptions used in [JavacPipelineState] */
 data class ResolvedJavacOptions(
-    val bootclasspath: Optional<String>,
     val bootclasspathList: ImmutableList<RelPath>,
     val languageLevelOptions: JavacLanguageLevelOptions,
     val debug: Boolean,
     val verbose: Boolean,
     val javaAnnotationProcessorParams: JavacPluginParams,
     val standardJavacPluginParams: JavacPluginParams,
-    val extraArguments: ImmutableList<String>
+    val extraArguments: ImmutableList<String>,
+    val systemImage: String? = null,
 ) {
   val isJavaAnnotationProcessorParamsPresent: Boolean
     get() = !javaAnnotationProcessorParams.isEmpty
@@ -41,31 +39,15 @@ data class ResolvedJavacOptions(
       return this
     }
     return ResolvedJavacOptions(
-        bootclasspath,
         bootclasspathList,
         languageLevelOptions,
         debug,
         verbose,
         javaAnnotationProcessorParams,
         standardJavacPluginParams,
-        extraArguments)
-  }
-
-  /** Validates classpath */
-  @Throws(IOException::class)
-  fun validateClasspath(classpathChecker: Function<String, Boolean>) {
-    if (bootclasspath.isEmpty) {
-      return
-    }
-    val bootClasspath = bootclasspath.get()
-    try {
-      if (!classpathChecker.apply(bootClasspath)) {
-        throw IOException(
-            String.format("Bootstrap classpath %s contains no valid entries", bootClasspath))
-      }
-    } catch (e: UncheckedIOException) {
-      throw e.cause!!
-    }
+        extraArguments,
+        systemImage,
+    )
   }
 
   companion object {
@@ -75,19 +57,19 @@ data class ResolvedJavacOptions(
     fun appendOptionsTo(
         optionsConsumer: OptionsConsumer,
         resolvedJavacOptions: ResolvedJavacOptions,
-        rootCellRoot: AbsPath
+        rootCellRoot: AbsPath,
     ) {
       appendOptionsTo(
           rootCellRoot,
           optionsConsumer,
-          getBootclasspathString(
-              resolvedJavacOptions.bootclasspath, resolvedJavacOptions.bootclasspathList),
+          getBootclasspathString(resolvedJavacOptions.bootclasspathList),
           resolvedJavacOptions.languageLevelOptions,
           resolvedJavacOptions.debug,
           resolvedJavacOptions.verbose,
           resolvedJavacOptions.javaAnnotationProcessorParams,
           resolvedJavacOptions.standardJavacPluginParams,
-          resolvedJavacOptions.extraArguments)
+          resolvedJavacOptions.extraArguments,
+      )
     }
 
     private fun appendOptionsTo(
@@ -99,14 +81,14 @@ data class ResolvedJavacOptions(
         isVerbose: Boolean,
         javaAnnotationProcessorParams: JavacPluginParams,
         standardJavacPluginParams: JavacPluginParams,
-        extraArguments: List<String?>
+        extraArguments: List<String?>,
     ) {
       // Add some standard options.
 
-      val sourceLevel = languageLevelOptions.sourceLevelValue.version
-      val targetLevel = languageLevelOptions.targetLevelValue.version
-      optionsConsumer.addOptionValue("source", sourceLevel)
-      optionsConsumer.addOptionValue("target", targetLevel)
+      val sourceLevel = languageLevelOptions.sourceLevelValue
+      val targetLevel = languageLevelOptions.targetLevelValue
+      optionsConsumer.addOptionValue("source", sourceLevel.toString())
+      optionsConsumer.addOptionValue("target", targetLevel.toString())
 
       // Set the sourcepath to stop us reading source files out of jars by mistake.
       optionsConsumer.addOptionValue("sourcepath", "")
@@ -120,8 +102,10 @@ data class ResolvedJavacOptions(
       }
 
       // Override the bootclasspath if Buck is building Java code for Android.
-      bootclasspathString.ifPresent { bootclasspath: String? ->
-        optionsConsumer.addOptionValue("bootclasspath", bootclasspath)
+      if (languageLevelOptions.targetLevelValue <= 8) {
+        bootclasspathString.ifPresent { bootclasspath: String? ->
+          optionsConsumer.addOptionValue("bootclasspath", bootclasspath)
+        }
       }
 
       val allPluginsBuilder = ImmutableList.builder<ResolvedJavacPluginProperties>()
@@ -137,7 +121,8 @@ data class ResolvedJavacOptions(
                 .stream()
                 .map { obj: ResolvedJavacPluginProperties -> obj.processorNames }
                 .flatMap { obj: ImmutableSortedSet<String> -> obj.stream() }
-                .collect(Collectors.joining(",")))
+                .collect(Collectors.joining(",")),
+        )
 
         // Add processor parameters.
         for (parameter in javaAnnotationProcessorParams.parameters) {
@@ -178,21 +163,15 @@ data class ResolvedJavacOptions(
       if (!allPlugins.isEmpty()) {
         optionsConsumer.addOptionValue(
             "processorpath",
-            ResolvedJavacPluginProperties.getJoinedClasspath(allPlugins, ruleCellRoot))
+            ResolvedJavacPluginProperties.getJoinedClasspath(allPlugins, ruleCellRoot),
+        )
       }
 
       // Add extra arguments.
       optionsConsumer.addExtras(extraArguments)
     }
 
-    private fun getBootclasspathString(
-        bootclasspathOptional: Optional<String>,
-        bootclasspathList: ImmutableList<RelPath>
-    ): Optional<String> {
-      if (bootclasspathOptional.isPresent) {
-        return bootclasspathOptional
-      }
-
+    fun getBootclasspathString(bootclasspathList: ImmutableList<RelPath>): Optional<String> {
       if (bootclasspathList.isEmpty()) {
         return Optional.empty()
       }
@@ -201,7 +180,8 @@ data class ResolvedJavacOptions(
           bootclasspathList
               .stream()
               .map(RelPath::toString)
-              .collect(Collectors.joining(File.pathSeparator)))
+              .collect(Collectors.joining(File.pathSeparator))
+      )
     }
   }
 }

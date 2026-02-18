@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.bundle;
@@ -364,11 +365,14 @@ public class AndroidBundleUtils {
    */
   private static boolean checkFolderForPackaging(String folderName) {
     return !folderName.equalsIgnoreCase("nonJvmMain")
-        && // nonJvmMain is only useful when build multiplatform and we are building an APK here
-        !folderName.equalsIgnoreCase("commonMain")
-        && // commonMain folder is part of multiple AndroidX libraries, exclude it to avoid
+        // nonJvmMain is only useful when build multiplatform and we are building an APK here
+        // commonMain folder is part of multiple AndroidX libraries, exclude it to avoid
         // duplicate file error
-        !folderName.startsWith("_");
+        && !folderName.equalsIgnoreCase("commonMain")
+        // nativeMain holds platform-specific code for native environments like iOS and macOS,
+        // exclude it to avoid duplicate file error
+        // see https://kotlinlang.org/docs/multiplatform-discover-project.html
+        && !folderName.equalsIgnoreCase("nativeMain");
   }
 
   /**

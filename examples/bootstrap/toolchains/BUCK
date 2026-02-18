@@ -3,6 +3,8 @@ load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain", "sy
 load("@prelude//toolchains:rust.bzl", "system_rust_toolchain")
 load(":rust_toolchain.bzl", "rust_toolchain")
 
+oncall("build_infra")
+
 ### Toolchains for Cxx/Python/etc. ###
 system_cxx_toolchain(
     name = "cxx",

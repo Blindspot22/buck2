@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_toolchain_types.bzl", "LinkerType")
 load("@prelude//os_lookup:defs.bzl", "ScriptLanguage")
@@ -42,25 +43,25 @@ def _find_msvc_tools_impl(ctx: AnalysisContext) -> list[Provider]:
         cvtres_exe_script = "cvtres.exe"
     else:
         cl_exe_script = cmd_script(
-            ctx = ctx,
+            actions = ctx.actions,
             name = "cl",
             cmd = cmd_args(run_msvc_tool, cl_exe_json),
             language = ScriptLanguage("bat"),
         )
         cvtres_exe_script = cmd_script(
-            ctx = ctx,
+            actions = ctx.actions,
             name = "cvtres",
             cmd = cmd_args(run_msvc_tool, cvtres_exe_json),
             language = ScriptLanguage("bat"),
         )
         ml64_exe_script = cmd_script(
-            ctx = ctx,
+            actions = ctx.actions,
             name = "ml64",
             cmd = cmd_args(run_msvc_tool, ml64_exe_json),
             language = ScriptLanguage("bat"),
         )
         rc_exe_script = cmd_script(
-            ctx = ctx,
+            actions = ctx.actions,
             name = "rc",
             cmd = cmd_args(run_msvc_tool, rc_exe_json),
             language = ScriptLanguage("bat"),
@@ -71,13 +72,13 @@ def _find_msvc_tools_impl(ctx: AnalysisContext) -> list[Provider]:
         link_exe_script = "link.exe"
     else:
         lib_exe_script = cmd_script(
-            ctx = ctx,
+            actions = ctx.actions,
             name = "lib",
             cmd = cmd_args(run_msvc_tool, lib_exe_json),
             language = ScriptLanguage("bat"),
         )
         link_exe_script = cmd_script(
-            ctx = ctx,
+            actions = ctx.actions,
             name = "link",
             cmd = cmd_args(run_msvc_tool, link_exe_json),
             language = ScriptLanguage("bat"),
@@ -153,7 +154,7 @@ def _windows_linker_wrapper(ctx: AnalysisContext, linker: [cmd_args, str]) -> cm
     #
     # We wrap the linker to flatten @file arguments down to 1 level of nesting.
     return cmd_script(
-        ctx = ctx,
+        actions = ctx.actions,
         name = "windows_linker",
         cmd = cmd_args(
             ctx.attrs.linker_wrapper[RunInfo],

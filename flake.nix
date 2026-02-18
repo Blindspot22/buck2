@@ -31,21 +31,24 @@
 
     in {
       devShells.default = pkgs.mkShell {
-        buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin.apple_sdk.frameworks; [
-          CoreFoundation
-          CoreServices
-          IOKit
-          Security
-        ]);
-        packages = [ pkgs.cargo-bloat my-rust-bin pkgs.mold-wrapped pkgs.reindeer pkgs.lld_16 pkgs.clang_16 ];
-        shellHook = 
+        buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux ([
+          pkgs.mold-wrapped
+        ]) ++ [
+          # NOTE (aseipp): needed on aarch64-linux, so that the linker can
+          # properly find libatomic.so, but harmless elsewhere
+          pkgs.stdenv.cc.cc
+        ];
+        packages = [ my-rust-bin pkgs.dotslash pkgs.python3 pkgs.lld_20 pkgs.clang_20 pkgs.yarn ];
+        shellHook =
           ''
             export BUCK2_BUILD_PROTOC=${pkgs.protobuf}/bin/protoc
             export BUCK2_BUILD_PROTOC_INCLUDE=${pkgs.protobuf}/include
           ''
           # enable mold for linux users, for more tolerable link times
+          # we have to specify tokio_unstable in the RUSTFLAGS here since they override
+          # .cargo/config.toml that is the reasonable place to specify it
           + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-            export RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=mold $RUSTFLAGS"
+            export RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=mold --cfg=tokio_unstable $RUSTFLAGS"
           '';
       };
     });

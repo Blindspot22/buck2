@@ -1,11 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//python:python.bzl", "PythonLibraryInfo")
+# @oss-disable[end= ]: load("@prelude//python/meta_only:config.bzl", "DEFAULT_PY_VERSION")
 load(
     ":manifest.bzl",
     "ManifestInfo",  # @unused Used as a type
@@ -13,7 +15,7 @@ load(
 )
 load(":python.bzl", "PythonLibraryManifestsTSet")
 
-DEFAULT_PY_VERSION = "3.10"
+DEFAULT_PY_VERSION = "3.12" # @oss-enable
 
 # Best-effort guess on what the host sys.platform is
 def get_default_sys_platform() -> str | None:

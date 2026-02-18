@@ -1,25 +1,27 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use anyhow::Context;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_build_api::actions::impls::json::JsonUnpack;
 use buck2_build_api::actions::impls::json::SerializeValue;
 use buck2_build_api::actions::impls::json::visit_json_artifacts;
 use buck2_build_api::artifact_groups::ArtifactGroup;
-use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
 use buck2_build_api::interpreter::rule_defs::artifact_tagging::ArtifactTag;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_interpreter_for_build::interpreter::testing::Tester;
 use dupe::Dupe;
+use fxhash::FxHashMap;
 use indoc::indoc;
 use starlark::environment::GlobalsBuilder;
 use starlark::starlark_module;
@@ -30,19 +32,26 @@ use crate::interpreter::rule_defs::artifact::testing::artifactory;
 use crate::interpreter::rule_defs::artifact_tagging::testing::artifact_tag_factory;
 
 #[test]
-fn test_tagging() -> anyhow::Result<()> {
+fn test_tagging() -> buck2_error::Result<()> {
     struct AssertVisitor {
         tag: ArtifactTag,
         artifact: Artifact,
     }
 
-    impl CommandLineArtifactVisitor for AssertVisitor {
-        fn visit_input(&mut self, input: ArtifactGroup, tag: Option<&ArtifactTag>) {
-            assert_eq!(tag, Some(&self.tag));
+    impl<'v> CommandLineArtifactVisitor<'v> for AssertVisitor {
+        fn visit_input(&mut self, input: ArtifactGroup, tags: Vec<&ArtifactTag>) {
+            assert_eq!(tags, vec![&self.tag]);
             assert_eq!(input, ArtifactGroup::Artifact(self.artifact.dupe()));
         }
 
-        fn visit_output(&mut self, _artifact: OutputArtifact, _tag: Option<&ArtifactTag>) {}
+        fn visit_declared_output(
+            &mut self,
+            _artifact: OutputArtifact<'v>,
+            _tags: Vec<&ArtifactTag>,
+        ) {
+        }
+
+        fn visit_frozen_output(&mut self, _artifact: Artifact, _tags: Vec<&ArtifactTag>) {}
     }
 
     #[starlark_module]
@@ -50,9 +59,11 @@ fn test_tagging() -> anyhow::Result<()> {
         fn check_artifact_is_tagged<'v>(
             tagged: Value<'v>,
             tag: Value<'v>,
-            artifact: ValueAsArtifactLike<'v>,
-        ) -> anyhow::Result<Value<'v>> {
-            let tag = ArtifactTag::from_value(tag).context("Invalid tag")?.dupe();
+            artifact: ValueAsInputArtifactLike<'v>,
+        ) -> starlark::Result<Value<'v>> {
+            let tag = ArtifactTag::from_value(tag)
+                .ok_or_else(|| internal_error!("Invalid tag"))?
+                .dupe();
 
             let artifact = artifact
                 .0
@@ -72,6 +83,7 @@ fn test_tagging() -> anyhow::Result<()> {
                 value: JsonUnpack::unpack_value_err(tagged)?,
                 fs: None,
                 absolute: false,
+                artifact_path_mapping: &FxHashMap::default(),
             })
             .map_err(buck2_error::Error::from)?;
 
@@ -79,6 +91,7 @@ fn test_tagging() -> anyhow::Result<()> {
                 value: JsonUnpack::unpack_value_err(value)?,
                 fs: None,
                 absolute: false,
+                artifact_path_mapping: &FxHashMap::default(),
             })
             .map_err(buck2_error::Error::from)?;
 

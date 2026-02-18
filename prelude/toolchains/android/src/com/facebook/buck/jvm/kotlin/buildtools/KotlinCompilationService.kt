@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin.buildtools
@@ -20,7 +21,7 @@ import org.jetbrains.kotlin.buildtools.api.ProjectId
 @OptIn(ExperimentalBuildToolsApi::class)
 internal class KotlinCompilationService(
     private val compilationService: CompilationService,
-    kotlinCDLoggingContext: KotlinCDLoggingContext
+    kotlinCDLoggingContext: KotlinCDLoggingContext,
 ) {
 
   private val jvmCompilationConfigurationFactory =
@@ -30,7 +31,7 @@ internal class KotlinCompilationService(
       projectId: ProjectId,
       arguments: List<String>,
       mode: KotlincMode,
-      logger: KotlinLogger? = null
+      logger: KotlinLogger? = null,
   ): CompilationResult {
     val compilerExecutionStrategyConfiguration =
         compilationService.makeCompilerExecutionStrategyConfiguration()
@@ -47,6 +48,7 @@ internal class KotlinCompilationService(
         compilerExecutionStrategyConfiguration,
         jvmCompilationConfiguration,
         emptyList(),
-        arguments)
+        arguments,
+    )
   }
 }

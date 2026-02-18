@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io;
@@ -115,6 +116,20 @@ fn run(
     tempdir: &Option<String>,
     shell: Shell,
 ) -> io::Result<Vec<String>> {
+    #[cfg(unix)]
+    {
+        use nix::sys::resource;
+        use nix::sys::resource::Resource;
+
+        let (_, hard_limit) = resource::getrlimit(Resource::RLIMIT_NOFILE)?;
+        if hard_limit >= 100_000 {
+            // `ptyprocess`, which we depend on, does a fairly clowny thing of attempting to close
+            // *all* file descriptors. When there's too many of them, that takes forever, so limit
+            // the number to something more sensible
+            resource::setrlimit(Resource::RLIMIT_NOFILE, 100_000, 100_000)?;
+        }
+    }
+
     let real_tempdir;
     let tempdir = match tempdir {
         Some(tempdir) => tempdir.as_ref(),
@@ -163,7 +178,7 @@ fn main() -> io::Result<()> {
     let input = std::io::read_to_string(io::stdin())?;
 
     for option in run(&args.name, &script, &input, &args.tempdir, args.shell)? {
-        println!("{}", option);
+        println!("{option}");
     }
 
     Ok(())
@@ -193,7 +208,7 @@ compdef _impl find
         let actual = run(
             "find",
             BASH_SCRIPT,
-            &format!("find {}", input),
+            &format!("find {input}"),
             &None,
             Shell::Bash,
         )
@@ -205,7 +220,7 @@ compdef _impl find
             let actual = run(
                 "find",
                 FISH_SCRIPT,
-                &format!("find {}", input),
+                &format!("find {input}"),
                 &None,
                 Shell::Fish,
             )
@@ -217,7 +232,7 @@ compdef _impl find
         let actual = run(
             "find",
             ZSH_SCRIPT,
-            &format!("find {}", input),
+            &format!("find {input}"),
             &None,
             Shell::Zsh,
         )
@@ -232,11 +247,10 @@ compdef _impl find
             .unwrap()
             .arg("--version")
             .output()
-            .expect(format!("Failed to run {:?}", shell).as_str());
+            .expect(format!("Failed to run {shell:?}").as_str());
         assert!(
             output.status.success(),
-            "checking that `{:?}` is available",
-            shell,
+            "checking that `{shell:?}` is available",
         );
     }
 

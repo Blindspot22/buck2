@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::net::IpAddr;
@@ -15,8 +16,8 @@ use http::Uri;
 use http::uri::InvalidUri;
 use http::uri::PathAndQuery;
 use http::uri::Scheme;
-use hyper_proxy::Intercept;
-use hyper_proxy::Proxy;
+use hyper_http_proxy::Intercept;
+use hyper_http_proxy::Proxy;
 use ipnetwork::IpNetwork;
 
 /// Lookup environment variable and return string value. Checks first for uppercase
@@ -39,13 +40,13 @@ fn noproxy_from_env(scheme: Scheme) -> buck2_error::Result<Option<NoProxy>> {
     Ok(env_to_string("NO_PROXY")?.map(|no_proxy| NoProxy::new(scheme, no_proxy)))
 }
 
-/// Returns a hyper_proxy::Proxy struct that proxies connections to the uri at
+/// Returns a hyper_http_proxy::Proxy struct that proxies connections to the uri at
 /// $HTTPS_PROXY (or $https_proxy if the former is unset). Respects $NO_PROXY.
 pub(super) fn https_proxy_from_env() -> buck2_error::Result<Option<Proxy>> {
     if let Some(https_proxy) = env_to_string("HTTPS_PROXY")? {
         let uri: DefaultSchemeUri = https_proxy
             .parse()
-            .with_buck_error_context(|| format!("Invalid HTTPS_PROXY uri: {}", https_proxy))?;
+            .with_buck_error_context(|| format!("Invalid HTTPS_PROXY uri: {https_proxy}"))?;
         if let Some(no_proxy) = noproxy_from_env(Scheme::HTTPS)? {
             Ok(Some(Proxy::new(
                 no_proxy.into_proxy_intercept(),
@@ -59,13 +60,13 @@ pub(super) fn https_proxy_from_env() -> buck2_error::Result<Option<Proxy>> {
     }
 }
 
-/// Returns a hyper_proxy::Proxy struct that proxies connections to the uri at
+/// Returns a hyper_http_proxy::Proxy struct that proxies connections to the uri at
 /// $HTTP_PROXY (or $http_proxy if the former is unset). Respects $NO_PROXY.
 pub(super) fn http_proxy_from_env() -> buck2_error::Result<Option<Proxy>> {
     if let Some(http_proxy) = env_to_string("HTTP_PROXY")? {
         let uri: DefaultSchemeUri = http_proxy
             .parse()
-            .with_buck_error_context(|| format!("Invalid HTTP_PROXY uri: {}", http_proxy))?;
+            .with_buck_error_context(|| format!("Invalid HTTP_PROXY uri: {http_proxy}"))?;
         if let Some(no_proxy) = noproxy_from_env(Scheme::HTTP)? {
             Ok(Some(Proxy::new(
                 no_proxy.into_proxy_intercept(),
@@ -178,9 +179,7 @@ impl NoProxy {
     fn should_bypass_proxy_for_host<S: AsRef<str>>(&self, host: S) -> bool {
         let host = host.as_ref();
         if let Ok(host_address) = host.parse::<IpAddr>() {
-            self.addresses
-                .iter()
-                .any(|address| host_address == *address)
+            self.addresses.contains(&host_address)
                 || self
                     .networks
                     .iter()
@@ -190,11 +189,11 @@ impl NoProxy {
         }
     }
 
-    /// Converts this NoProxy spec into a hyper_proxy::Intercept::Custom closure
-    /// so it can be used to build a new hyper_proxy::Proxy.
+    /// Converts this NoProxy spec into a hyper_http_proxy::Intercept::Custom closure
+    /// so it can be used to build a new hyper_http_proxy::Proxy.
     ///
     /// Note: There's a tricky bit of logic below. We explicitly *negate* the return
-    /// condition of the closure because of the way hyper_proxy::Intercept::Custom's
+    /// condition of the closure because of the way hyper_http_proxy::Intercept::Custom's
     /// closure works; if it returns `true`, the connection is proxied.
     ///
     /// For NoProxy, we want to *negate* this logic - if a (scheme, host) pair

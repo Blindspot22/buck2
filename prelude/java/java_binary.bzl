@@ -1,13 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//java:java_toolchain.bzl", "JavaToolchainInfo")
 load("@prelude//java:proguard.bzl", "get_proguard_output")
-load("@prelude//java/utils:java_utils.bzl", "get_class_to_source_map_info", "get_classpath_subtarget")
+load("@prelude//java/utils:java_utils.bzl", "get_class_to_source_map_info", "get_classpath_subtargets")
 load(
     "@prelude//linking:shared_libraries.bzl",
     "SharedLibrary",  # @unused used as type
@@ -147,7 +148,7 @@ def _get_run_cmd(
     else:
         return cmd_args([java_toolchain.java[RunInfo]] + attrs.java_args_for_run_info + ["-jar", main_artifact])
 
-def _get_java_tool_artifacts(java_toolchain: JavaToolchainInfo) -> list[Artifact]:
+def _get_java_tool_artifacts(java_toolchain: JavaToolchainInfo) -> list:
     default_info = java_toolchain.java[DefaultInfo]
     return default_info.default_outputs + default_info.other_outputs
 
@@ -176,7 +177,7 @@ def java_binary_impl(ctx: AnalysisContext) -> list[Provider]:
         ctx.actions,
         deps = filter(None, [x.get(SharedLibraryInfo) for x in ctx.attrs.deps]),
     )
-    native_deps = traverse_shared_library_info(shared_library_info)
+    native_deps = traverse_shared_library_info(shared_library_info, transformation_provider = None)
 
     base_dep = ctx.attrs.base_dep
     java_toolchain = ctx.attrs._java_toolchain[JavaToolchainInfo]
@@ -281,7 +282,7 @@ def java_binary_impl(ctx: AnalysisContext) -> list[Provider]:
         ]))
         other_outputs = [classpath_file] + [packaging_jar_args] + _get_java_tool_artifacts(java_toolchain)
 
-    sub_targets = get_classpath_subtarget(ctx.actions, packaging_info)
+    sub_targets = get_classpath_subtargets(ctx.actions, packaging_info)
 
     class_to_src_map, _, _ = get_class_to_source_map_info(
         ctx,

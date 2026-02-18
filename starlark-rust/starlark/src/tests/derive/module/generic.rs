@@ -38,6 +38,7 @@ where
     const MY_STR: &str = &U::default().to_string();
 }
 
+#[allow(dead_code)]
 struct CustomNone<T>(PhantomData<T>);
 
 impl<T> StarlarkTypeRepr for CustomNone<T> {
@@ -50,7 +51,7 @@ impl<T> StarlarkTypeRepr for CustomNone<T> {
 }
 
 impl<'v, T> AllocValue<'v> for CustomNone<T> {
-    fn alloc_value(self, _heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, _heap: Heap<'v>) -> Value<'v> {
         Value::new_none()
     }
 }

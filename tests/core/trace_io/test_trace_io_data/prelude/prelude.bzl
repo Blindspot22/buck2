@@ -1,13 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _http_archive_impl(ctx: AnalysisContext):
     download = ctx.actions.declare_output("download")
-    ctx.actions.download_file(download, ctx.attrs.urls[0], sha1 = ctx.attrs.sha1, is_deferrable = True)
+    ctx.actions.download_file(download, ctx.attrs.urls[0], sha1 = ctx.attrs.sha1)
 
     output = ctx.actions.declare_output("output")
     ctx.actions.run(["cp", download, output.as_output()], category = "cp")
@@ -38,4 +39,23 @@ cas_artifact = rule(impl = _cas_artifact_impl, attrs = {
     "is_directory": attrs.bool(default = False),
     "is_tree": attrs.bool(default = False),
     "use_case": attrs.string(),
+})
+
+def _genrule_impl(ctx: AnalysisContext):
+    out = ctx.actions.declare_output(ctx.attrs.out)
+
+    # Use environment variable to pass output path
+    ctx.actions.run(
+        cmd_args("sh", "-c", ctx.attrs.cmd, hidden = ctx.attrs.srcs),
+        category = "genrule",
+        env = {"OUT": out.as_output()},
+        allow_offline_output_cache = ctx.attrs.allow_offline_output_cache,
+    )
+    return [DefaultInfo(default_output = out)]
+
+genrule = rule(impl = _genrule_impl, attrs = {
+    "allow_offline_output_cache": attrs.bool(default = False),
+    "cmd": attrs.string(),
+    "out": attrs.string(),
+    "srcs": attrs.list(attrs.source(), default = []),
 })

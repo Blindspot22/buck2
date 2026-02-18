@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -19,7 +20,6 @@ use starlark::environment::GlobalsBuilder;
 use starlark::values::Coerce;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
-use starlark::values::FreezeResult;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::ValueLifetimeless;
@@ -30,7 +30,8 @@ use starlark::values::dict::DictRef;
 use starlark::values::dict::DictType;
 
 use crate as buck2_build_api;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueIsInputArtifactAnnotation;
 
 // Provider that signals a rule is installable (ex. android_binary)
 
@@ -55,7 +56,7 @@ pub struct InstallInfoGen<V: ValueLifetimeless> {
     // Label for the installer
     installer: ValueOfUncheckedGeneric<V, StarlarkConfiguredProvidersLabel>,
     // list of files that need to be installed
-    files: ValueOfUncheckedGeneric<V, DictType<String, ValueAsArtifactLike<'static>>>,
+    files: ValueOfUncheckedGeneric<V, DictType<String, ValueIsInputArtifactAnnotation>>,
 }
 
 impl<'v, V: ValueLike<'v>> InstallInfoGen<V> {
@@ -78,14 +79,15 @@ impl<'v, V: ValueLike<'v>> InstallInfoGen<V> {
 
     fn get_files_iter<'a>(
         files: &'a DictRef<'v>,
-    ) -> impl Iterator<Item = buck2_error::Result<(&'v str, ValueAsArtifactLike<'v>)>> + 'a {
+    ) -> impl Iterator<Item = buck2_error::Result<(&'v str, ValueAsInputArtifactLike<'v>)>> + 'a
+    {
         files.iter().map(|(k, v)| {
             let k = k
                 .unpack_str()
                 .ok_or_else(|| InstallInfoProviderErrors::ExpectedStringKey(k.to_string()))?;
             Ok((
                 k,
-                ValueAsArtifactLike::unpack_value(v)?.ok_or_else(|| {
+                ValueAsInputArtifactLike::unpack_value(v)?.ok_or_else(|| {
                     InstallInfoProviderErrors::ExpectedArtifact {
                         key: k.to_owned(),
                         got: v.get_type().to_owned(),
@@ -113,7 +115,7 @@ impl<'v, V: ValueLike<'v>> InstallInfoGen<V> {
 fn install_info_creator(globals: &mut GlobalsBuilder) {
     fn InstallInfo<'v>(
         installer: ValueOf<'v, &'v StarlarkConfiguredProvidersLabel>,
-        files: ValueOf<'v, DictType<&'v str, ValueAsArtifactLike<'v>>>,
+        files: ValueOf<'v, DictType<&'v str, ValueIsInputArtifactAnnotation>>,
     ) -> starlark::Result<InstallInfo<'v>> {
         let info = InstallInfo {
             installer: installer.as_unchecked().cast(),

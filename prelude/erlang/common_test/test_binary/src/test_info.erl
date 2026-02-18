@@ -1,5 +1,6 @@
+%% @format
 -module(test_info).
--eqwalizer(ignore).
+-compile(warn_missing_spec_all).
 
 -export([load_from_file/1, write_to_file/2]).
 -include_lib("common/include/buck_ct_records.hrl").
@@ -7,9 +8,11 @@
 -type test_info() :: #test_info{}.
 -export_type([test_info/0]).
 
+-import(common_util, [unicode_characters_to_list/1, unicode_characters_to_binary/1]).
+
 -spec load_from_file(file:filename_all()) -> test_info().
 load_from_file(TestInfoFile) ->
-    {ok, Content} = file:read_file(TestInfoFile),
+    {ok, Content} = file:read_file(TestInfoFile, [raw]),
     #{
         <<"dependencies">> := Dependencies,
         <<"test_suite">> := SuiteName,
@@ -22,29 +25,31 @@ load_from_file(TestInfoFile) ->
         <<"extra_flags">> := ExtraFlags,
         <<"artifact_annotation_mfa">> := ArtifactAnnotationMFA,
         <<"common_app_env">> := CommonAppEnv,
-        <<"raw_target">> := RawTarget
+        <<"raw_target">> := RawTarget,
+        <<"trampolines">> := Trampolines
     } = json:decode(Content),
     Providers1 = buck_ct_parser:parse_str(Providers),
     CtOpts1 = make_ct_opts(
         buck_ct_parser:parse_str(CtOpts),
         [buck_ct_parser:parse_str(CTH) || CTH <- ExtraCtHooks]
     ),
-
+    {ok, ParsedArtifactAnnotationMFA} = parse_mfa(ArtifactAnnotationMFA),
     #test_info{
-        dependencies = [unicode:characters_to_list(make_path_absolute(Dep)) || Dep <- Dependencies],
+        dependencies = [unicode_characters_to_list(make_path_absolute(Dep)) || Dep <- Dependencies],
         test_suite = filename:join((TestDir), [SuiteName, ".beam"]),
         config_files = [make_path_absolute(ConfigFile) || ConfigFile <- ConfigFiles],
         providers = Providers1,
-        artifact_annotation_mfa = parse_mfa(ArtifactAnnotationMFA),
+        artifact_annotation_mfa = ParsedArtifactAnnotationMFA,
         ct_opts = CtOpts1,
-        erl_cmd = [make_path_absolute(ErlExec) | ErlFlags],
+        erl_cmd = [unicode_characters_to_binary(normalize_erl_cmd(ErlExec)) | ErlFlags],
         extra_flags = ExtraFlags,
         common_app_env = CommonAppEnv,
-        raw_target = RawTarget
+        raw_target = RawTarget,
+        trampolines = [unicode_characters_to_binary(make_path_absolute(Trampoline)) || [Trampoline] <- Trampolines]
     }.
 
 -spec write_to_file(file:filename_all(), test_info()) -> ok | {error, Reason :: term()}.
-write_to_file(FileName, TestInfo ) ->
+write_to_file(FileName, TestInfo) ->
     #test_info{
         dependencies = Dependencies,
         test_suite = SuiteBeamPath,
@@ -55,9 +60,10 @@ write_to_file(FileName, TestInfo ) ->
         erl_cmd = [ErlCmd | ErlFlags],
         extra_flags = ExtraFlags,
         common_app_env = CommonAppEnv,
-        raw_target = RawTarget
+        raw_target = RawTarget,
+        trampolines = Trampolines
     } = TestInfo,
-    ErlTermToStr = fun(Term) -> list_to_binary(lists:flatten(io_lib:format("~p", [Term]))) end,
+    ErlTermToStr = fun(Term) -> unicode_characters_to_binary(lists:flatten(io_lib:format("~tp", [Term]))) end,
     Json = #{
         <<"dependencies">> => [try_make_path_relative(Dep) || Dep <- Dependencies],
         <<"test_suite">> => filename:basename(SuiteBeamPath, ".beam"),
@@ -70,10 +76,17 @@ write_to_file(FileName, TestInfo ) ->
         <<"extra_flags">> => ExtraFlags,
         <<"artifact_annotation_mfa">> => ErlTermToStr(ArtifactAnnotationMFA),
         <<"common_app_env">> => CommonAppEnv,
-        <<"raw_target">> => RawTarget
+        <<"raw_target">> => RawTarget,
+        <<"trampolines">> => Trampolines
     },
-    file:write_file(FileName, json:encode(Json)).
+    file:write_file(FileName, json:encode(Json), [raw, binary]).
 
+-spec normalize_erl_cmd(file:filename_all()) -> file:filename_all().
+normalize_erl_cmd(ErlCmd) when is_binary(ErlCmd) ->
+    case os:find_executable(binary_to_list(ErlCmd)) of
+        false -> make_path_absolute(ErlCmd);
+        AbsolutePath -> AbsolutePath
+    end.
 
 -spec make_path_absolute(file:filename_all()) -> file:filename_all().
 make_path_absolute(Path) ->
@@ -85,26 +98,28 @@ make_path_absolute(Path) ->
 -spec try_make_path_relative(file:filename_all()) -> file:filename_all().
 try_make_path_relative(Path) ->
     case filename:pathtype(Path) of
-        relative -> Path;
+        relative ->
+            Path;
         _ ->
-               BaseDir = case os:getenv("REPO_ROOT") of
+            BaseDir =
+                case os:getenv("REPO_ROOT") of
                     false ->
                         {ok, CWD} = file:get_cwd(),
                         CWD;
-                    RepoRoot -> RepoRoot
-               end,
-               BaseDirParts = filename:split(BaseDir),
-               PathParts = filename:split(Path),
-               case lists:split(length(BaseDirParts), PathParts) of
-                   {BaseDirParts, RelativeParts} -> filename:join(RelativeParts);
-                   _ -> Path
-               end
+                    RepoRoot ->
+                        RepoRoot
+                end,
+            BaseDirParts = filename:split(BaseDir),
+            PathParts = filename:split(Path),
+            case lists:split(length(BaseDirParts), PathParts) of
+                {BaseDirParts, RelativeParts} -> filename:join(RelativeParts);
+                _ -> Path
+            end
     end.
 
-
--spec parse_mfa(binary()) -> artifact_annotations:annotation_function() | {error, term()}.
+-spec parse_mfa(binary()) -> {ok, artifact_annotations:annotation_function()} | {error, term()}.
 parse_mfa(MFA) ->
-    case erl_scan:string(unicode:characters_to_list(MFA)) of
+    case erl_scan:string(unicode_characters_to_list(MFA)) of
         {ok,
             [
                 {'fun', _},
@@ -114,8 +129,8 @@ parse_mfa(MFA) ->
                 {'/', _},
                 {integer, _, 1}
             ],
-            _} ->
-            fun Module:Function/1;
+            _} when is_atom(Module), is_atom(Function) ->
+            {ok, fun Module:Function/1};
         {ok,
             [
                 {atom, _, Module},
@@ -124,8 +139,8 @@ parse_mfa(MFA) ->
                 {'/', _},
                 {integer, _, 1}
             ],
-            _} ->
-            fun Module:Function/1;
+            _} when is_atom(Module), is_atom(Function) ->
+            {ok, fun Module:Function/1};
         Reason ->
             {error, Reason}
     end.

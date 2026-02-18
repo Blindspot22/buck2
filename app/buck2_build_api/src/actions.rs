@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! This module contains support for running actions and asynchronous providers
@@ -31,14 +32,16 @@ use std::sync::Arc;
 use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_artifact::actions::key::ActionKey;
+use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_build_signals::env::WaitingData;
 use buck2_common::io::IoProvider;
 use buck2_core::category::Category;
 use buck2_core::category::CategoryRef;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::digest_config::DigestConfig;
@@ -53,11 +56,14 @@ use buck2_execute::execute::request::ExecutorPreference;
 use buck2_execute::execute::result::CommandExecutionResult;
 use buck2_execute::materialize::materializer::Materializer;
 use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
+use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
 use buck2_file_watcher::mergebase::Mergebase;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_http::HttpClient;
 use derivative::Derivative;
 use derive_more::Display;
+use dice_futures::cancellation::CancellationContext;
+use fxhash::FxHashMap;
 use indexmap::IndexMap;
 use indexmap::IndexSet;
 use indexmap::indexmap;
@@ -77,6 +83,7 @@ use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::ArtifactGroupValues;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_value::StarlarkArtifactValue;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 
 pub mod artifact;
 pub mod box_slice_set;
@@ -91,12 +98,11 @@ pub mod registry;
 /// Represents an unregistered 'Action' that will be registered into the 'Actions' module.
 /// The 'UnregisteredAction' is not executable until it is registered, upon which it becomes an
 /// 'Action' that is executable.
-pub trait UnregisteredAction: Allocative {
+pub trait UnregisteredAction: Allocative + Send {
     /// consumes the self and becomes a registered 'Action'. The 'Action' will be executable
     /// and no longer bindable to any other 'Artifact's.
     fn register(
         self: Box<Self>,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         starlark_data: Option<OwnedFrozenValue>,
         error_handler: Option<OwnedFrozenValue>,
@@ -129,6 +135,7 @@ pub trait Action: Allocative + Debug + Send + Sync + 'static {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
+        waiting_data: WaitingData,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError>;
 
     /// A machine-readable category for this action, intended to be used when analyzing actions outside of buck2 itself.
@@ -136,7 +143,7 @@ pub trait Action: Allocative + Debug + Send + Sync + 'static {
     /// A category provides a namespace for identifiers within the rule that produced this action. Examples of
     /// categories would be things such as `cxx_compile`, `cxx_link`, and so on. Categories are user-specified in the
     /// rule implementation; however, buck2 enforces some restrictions on category names.
-    fn category(&self) -> CategoryRef;
+    fn category(&self) -> CategoryRef<'_>;
 
     /// A machine-readable identifier for this action. Required (but as of now, not yet enforced) to be unique within
     /// a category within a single invocation of a rule. Like categories, identifiers are also user-specified and buck2
@@ -161,22 +168,61 @@ pub trait Action: Allocative + Debug + Send + Sync + 'static {
         }
     }
 
-    fn aquery_attributes(&self, _fs: &ExecutorFs) -> IndexMap<String, String> {
+    fn aquery_attributes(
+        &self,
+        _fs: &ExecutorFs,
+        _artifact_path_mapping: &dyn ArtifactPathMapper,
+    ) -> IndexMap<String, String> {
         indexmap! {}
     }
 
-    /// error handler
-    fn error_handler(&self) -> Option<OwnedFrozenValue> {
+    fn error_handler(&self) -> Option<&OwnedFrozenValue> {
         None
     }
 
     fn failed_action_output_artifacts<'v>(
         &self,
         _artifact_fs: &ArtifactFs,
-        _heap: &'v Heap,
+        _heap: Heap<'v>,
+        _outputs: Option<&ActionOutputs>,
     ) -> buck2_error::Result<ValueOfUnchecked<'v, DictType<StarlarkArtifact, StarlarkArtifactValue>>>
     {
         Ok(ValueOfUnchecked::new(starlark::values::Value::new_none()))
+    }
+
+    fn all_outputs_are_content_based(&self) -> bool {
+        for output in self.outputs().iter() {
+            if !output.get_path().is_content_based_path() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn all_inputs_are_eligible_for_dedupe(&self) -> bool {
+        self.all_ineligible_for_dedup_inputs().is_empty()
+    }
+
+    fn all_ineligible_for_dedup_inputs(&self) -> Vec<String> {
+        let target_platform = if let BaseDeferredKey::TargetLabel(configured_label) =
+            self.first_output().key().owner()
+        {
+            Some(configured_label.cfg())
+        } else {
+            None
+        };
+
+        let mut ineligible_inputs = Vec::new();
+        for ag in self.inputs().unwrap_or_default().iter() {
+            if !ag.is_eligible_for_dedupe(target_platform) {
+                ineligible_inputs.push(ag.to_string());
+            }
+        }
+        ineligible_inputs
+    }
+
+    fn is_expected_eligible_for_dedupe(&self) -> Option<bool> {
+        None
     }
 
     // TODO this probably wants more data for execution, like printing a short_name and the target
@@ -190,20 +236,21 @@ pub trait ActionExecutionCtx: Send + Sync {
     /// An 'ArtifactFs' to be used for managing 'Artifact's
     fn fs(&self) -> &ArtifactFs;
 
-    fn executor_fs(&self) -> ExecutorFs;
+    fn executor_fs(&self) -> ExecutorFs<'_>;
 
     /// A `Materializer` used for expensive materializations
     fn materializer(&self) -> &dyn Materializer;
 
     fn events(&self) -> &EventDispatcher;
 
-    fn command_execution_manager(&self) -> CommandExecutionManager;
+    fn command_execution_manager(&self, waiting_data: WaitingData) -> CommandExecutionManager;
 
     fn mergebase(&self) -> &Mergebase;
 
     fn prepare_action(
         &mut self,
         request: &CommandExecutionRequest,
+        re_outputs_required: bool,
     ) -> buck2_error::Result<PreparedAction>;
 
     async fn action_cache(
@@ -244,6 +291,7 @@ pub trait ActionExecutionCtx: Send + Sync {
         allows_cache_upload: bool,
         allows_dep_file_cache_upload: bool,
         input_files_bytes: Option<u64>,
+        incremental_kind: buck2_data::IncrementalKind,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError>;
 
     /// Clean up all the output directories for this action. This requires a mutable reference
@@ -255,6 +303,11 @@ pub trait ActionExecutionCtx: Send + Sync {
     /// as an input to the associated action or a panic will be raised.
     fn artifact_values(&self, input: &ArtifactGroup) -> &ArtifactGroupValues;
 
+    fn artifact_path_mapping(
+        &self,
+        filter: Option<IndexSet<ArtifactGroup>>,
+    ) -> FxHashMap<&Artifact, ContentBasedPathHash>;
+
     fn blocking_executor(&self) -> &dyn BlockingExecutor;
 
     fn re_client(&self) -> UnconfiguredRemoteExecutionClient;
@@ -264,7 +317,7 @@ pub trait ActionExecutionCtx: Send + Sync {
     fn digest_config(&self) -> DigestConfig;
 
     /// Obtain per-command knobs for RunAction.
-    fn run_action_knobs(&self) -> RunActionKnobs;
+    fn run_action_knobs(&self) -> &RunActionKnobs;
 
     fn cancellation_context(&self) -> &CancellationContext;
 
@@ -274,6 +327,8 @@ pub trait ActionExecutionCtx: Send + Sync {
 
     /// Http client used for fetching and downloading remote artifacts.
     fn http_client(&self) -> HttpClient;
+
+    fn output_trees_download_config(&self) -> &OutputTreesDownloadConfig;
 }
 
 #[derive(buck2_error::Error, Debug)]
@@ -357,12 +412,16 @@ impl RegisteredAction {
         &self.executor_config
     }
 
-    pub fn category(&self) -> CategoryRef {
+    pub fn category(&self) -> CategoryRef<'_> {
         self.action.category()
     }
 
     pub fn identifier(&self) -> Option<&str> {
         self.action.identifier()
+    }
+
+    pub fn is_expected_eligible_for_dedupe(&self) -> Option<bool> {
+        self.action.is_expected_eligible_for_dedupe()
     }
 }
 
@@ -379,7 +438,6 @@ impl Deref for RegisteredAction {
 #[derive(Allocative)]
 struct ActionToBeRegistered {
     key: ActionKey,
-    inputs: IndexSet<ArtifactGroup>,
     outputs: IndexSet<BuildArtifact>,
     action: Box<dyn UnregisteredAction>,
 }
@@ -387,13 +445,11 @@ struct ActionToBeRegistered {
 impl ActionToBeRegistered {
     fn new<A: UnregisteredAction + 'static>(
         key: ActionKey,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         a: A,
     ) -> Self {
         Self {
             key,
-            inputs,
             outputs,
             action: Box::new(a),
         }
@@ -409,6 +465,6 @@ impl ActionToBeRegistered {
         error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         self.action
-            .register(self.inputs, self.outputs, starlark_data, error_handler)
+            .register(self.outputs, starlark_data, error_handler)
     }
 }

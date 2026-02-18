@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.util.zip;
 
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.util.io.IoUtil;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -117,8 +117,8 @@ public class ZipOutputStreams {
         impl = new OverwritingZipOutputStreamImpl(out);
         break;
       default:
-        throw new HumanReadableException(
-            "Unable to determine which zip output mode to use: %s", mode);
+        throw new RuntimeException(
+            String.format("Unable to determine which zip output mode to use: %s", mode));
     }
 
     return impl;

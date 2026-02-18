@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! A task stored by Dice that is shared for all transactions at the same version
@@ -17,9 +18,9 @@ use std::task::Poll;
 
 use allocative::Allocative;
 use allocative::Visitor;
-use buck2_futures::cancellation::CancellationHandle;
 use dice_error::result::CancellableResult;
 use dice_error::result::CancellationReason;
+use dice_futures::cancellation::CancellationHandle;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
 use futures::FutureExt;
@@ -158,7 +159,7 @@ impl DiceTask {
                     .read_value()
                     .expect("invalid state where deps are taken before state is ready")
                     .map(DicePromise::ready),
-                Some(ref mut wakers) => {
+                Some(wakers) => {
                     let waker = Arc::new(AtomicWaker::new());
                     let id = wakers.insert((k, waker.dupe()));
 
@@ -208,7 +209,7 @@ impl DiceTask {
 
                 TerminationObserver::Done
             }
-            Some(ref mut wakers) => {
+            Some(wakers) => {
                 let waker = Arc::new(AtomicWaker::new());
                 let id = wakers.insert(waker.dupe());
 

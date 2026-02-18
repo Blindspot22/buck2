@@ -1,6 +1,8 @@
 load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
 load("@prelude//toolchains/cxx/zig:defs.bzl", "cxx_zig_toolchain", "download_zig_distribution")
 
+oncall("build_infra")
+
 download_zig_distribution(
     name = "zig",
     version = "0.11.0",

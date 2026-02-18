@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::str::FromStr;
@@ -16,8 +17,9 @@ use buck2_client_ctx::path_arg::PathArg;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
 use buck2_common::invocation_roots::find_invocation_roots;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::working_dir::AbsWorkingDir;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::working_dir::AbsWorkingDir;
 
 #[derive(Debug, Clone, clap::ValueEnum)]
 enum RootKind {
@@ -76,7 +78,7 @@ impl RootCommand {
                     // Note: While `canonicalize` is usually wrong, in this case it's necessary
                     // because our definition of where the project root is doesn't make sense for
                     // non-normalized paths
-                    let base_dir = fs_util::canonicalize(&base_dir)?;
+                    let base_dir = fs_util::canonicalize(&base_dir).categorize_internal()?;
                     working_dir_data = AbsWorkingDir::unchecked_new(base_dir);
                     let roots = find_invocation_roots(&working_dir_data)?;
                     imm_ctx_data = ImmediateConfigContext::new(&working_dir_data);

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 
 """
@@ -66,18 +67,26 @@ def _replace_template_values(
             string=script_template,
         )
 
-    # user_ghci_path has to be handled separately because it needs to be passed
-    # with the ghci_lib_path as the `-B` argument.
-    ghci_lib_canonical_path = os.path.realpath(
-        rel_toolchain_paths["ghci_lib_path"],
-    )
     if user_ghci_path is not None:
-        script_template = re.sub(
-            pattern="<user_ghci_path>",
-            repl="${{DIR}}/{user_ghci_path} -B{ghci_lib_path}".format(
+        # user_ghci_path has to be handled separately because it needs to be passed
+        # with the ghci_lib_path as the `-B` argument.
+        ghci_lib_path = rel_toolchain_paths["ghci_lib_path"]
+
+        if ghci_lib_path:
+            ghci_lib_canonical_path = os.path.realpath(ghci_lib_path)
+
+            replacement = "${{DIR}}/{user_ghci_path} -B{ghci_lib_path}".format(
                 user_ghci_path=user_ghci_path,
                 ghci_lib_path=ghci_lib_canonical_path,
-            ),
+            )
+        else:
+            replacement = "${{DIR}}/{user_ghci_path}".format(
+                user_ghci_path=user_ghci_path,
+            )
+
+        script_template = re.sub(
+            pattern="<user_ghci_path>",
+            repl=replacement,
             string=script_template,
         )
 

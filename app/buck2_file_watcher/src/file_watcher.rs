@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -18,7 +19,6 @@ use buck2_common::legacy_configs::key::BuckconfigKeyRef;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::name::CellName;
 use buck2_core::fs::project::ProjectRoot;
-use buck2_core::is_open_source;
 #[cfg(fbcode_build)]
 use buck2_core::soft_error;
 use buck2_error::BuckErrorContext;
@@ -52,22 +52,49 @@ impl dyn FileWatcher {
         cells: CellResolver,
         ignore_specs: HashMap<CellName, IgnoreSet>,
     ) -> buck2_error::Result<Arc<dyn FileWatcher>> {
-        let default = if is_open_source() {
-            "notify"
+        #[cfg(fbcode_build)]
+        let default = if detect_eden::is_eden(project_root.root().to_path_buf())? {
+            "edenfs"
         } else {
-            // TODO: On EdenFS mount use "edenfs", on non-EdenFS use "watchman"
             "watchman"
         };
 
+        #[cfg(not(fbcode_build))]
+        let default = "notify";
+
         let _allow_unused = fb;
 
-        match root_config
+        let watcher_conf = root_config
             .get(BuckconfigKeyRef {
                 section: "buck2",
                 property: "file_watcher",
             })
-            .unwrap_or(default)
-        {
+            .unwrap_or(default);
+
+        let watcher_conf = if let "edenfs" = watcher_conf {
+            #[cfg(fbcode_build)]
+            match EdenFsFileWatcher::new(
+                fb,
+                project_root,
+                root_config,
+                cells.clone(),
+                ignore_specs.clone(),
+            ) {
+                Ok(edenfs) => return Ok(Arc::new(edenfs)),
+                Err(EdenFsWatcherError::EdenConnectionError(e)) => {
+                    soft_error!("edenfs_watcher_creation_failure", e)?;
+                    // fallback to watchman if failed to create edenfs watcher
+                    "watchman"
+                }
+                Err(e) => return Err(e.into()),
+            }
+            #[cfg(not(fbcode_build))]
+            default
+        } else {
+            watcher_conf
+        };
+
+        match watcher_conf {
             "watchman" => Ok(Arc::new(
                 WatchmanFileWatcher::new(project_root.root(), root_config, cells, ignore_specs)
                     .buck_error_context("Creating watchman file watcher")?,
@@ -80,36 +107,6 @@ impl dyn FileWatcher {
                 FsHashCrawler::new(project_root, cells, ignore_specs)
                     .buck_error_context("Creating fs_crawler file watcher")?,
             )),
-            #[cfg(fbcode_build)]
-            "edenfs" => {
-                match EdenFsFileWatcher::new(
-                    fb,
-                    project_root,
-                    root_config,
-                    cells.clone(),
-                    ignore_specs.clone(),
-                ) {
-                    Ok(edenfs) => Ok(Arc::new(edenfs)),
-                    Err(EdenFsWatcherError::NoEden) => {
-                        soft_error!(
-                            "edenfs_watcher_creation_failure",
-                            EdenFsWatcherError::NoEden.into()
-                        )?;
-                        // fallback to watchman if failed to create edenfs watcher
-                        Ok(Arc::new(
-                            WatchmanFileWatcher::new(
-                                project_root.root(),
-                                root_config,
-                                cells,
-                                ignore_specs,
-                            )
-                            .buck_error_context("Creating watchman file watcher")?,
-                        ))
-                    }
-                    Err(e) => Err(e.into()),
-                }
-            }
-
             other => Err(buck2_error!(
                 buck2_error::ErrorTag::Tier0,
                 "Invalid buck2.file_watcher: {}",

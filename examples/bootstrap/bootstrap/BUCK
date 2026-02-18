@@ -1,3 +1,5 @@
+oncall("build_infra")
+
 constraint_setting(
     name = "bootstrap",
     visibility = ["PUBLIC"],

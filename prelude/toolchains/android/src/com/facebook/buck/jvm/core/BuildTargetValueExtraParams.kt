@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.core
@@ -24,7 +25,7 @@ data class BuildTargetValueExtraParams(
     val basePathForBaseName: RelPath,
     val shortNameAndFlavorPostfix: String,
     val shortName: String,
-    val scratchDir: RelPath
+    val scratchDir: RelPath,
 ) {
   val moduleName: String
     get() {
@@ -38,11 +39,14 @@ data class BuildTargetValueExtraParams(
   val kspAnnotationGenPath: RelPath
     get() = genPath.resolveRel("__ksp_generated__")
 
+  val annotationOutputBasePath: RelPath =
+      scratchDir.resolveRel("annotation").resolve(basePathForBaseName)
+
   /** Returns annotation path for the given `target` and `format` */
-  fun getAnnotationPath(format: String): RelPath {
-    Preconditions.checkArgument(
-        !format.startsWith("/"), "format string should not start with a slash")
-    return getRelativePath(format, scratchDir.resolveRel("annotation"))
+  fun getAnnotationOutputPath(format: String): RelPath {
+    require(!format.startsWith("/")) { "format string should not start with a slash" }
+
+    return annotationOutputBasePath.resolveRel(formatLastSegment(format, shortNameAndFlavorPostfix))
   }
 
   val genPath: RelPath
@@ -55,14 +59,18 @@ data class BuildTargetValueExtraParams(
   /** Returns `gen` directory path for the given `target` and `format` */
   fun getGenPath(format: String): RelPath {
     Preconditions.checkArgument(
-        !format.startsWith("/"), "format string should not start with a slash")
+        !format.startsWith("/"),
+        "format string should not start with a slash",
+    )
     return getRelativePath(format, scratchDir.resolveRel("gen"))
   }
 
   /** Returns `gen` directory path for the given `target` and `format` */
   fun getScratchPath(format: String): RelPath {
     Preconditions.checkArgument(
-        !format.startsWith("/"), "format string should not start with a slash")
+        !format.startsWith("/"),
+        "format string should not start with a slash",
+    )
     return getRelativePath(format, scratchDir.resolveRel("bin"))
   }
 
@@ -72,7 +80,9 @@ data class BuildTargetValueExtraParams(
 
   fun getBasePath(format: String): RelPath {
     Preconditions.checkArgument(
-        !format.startsWith("/"), "format string should not start with a slash")
+        !format.startsWith("/"),
+        "format string should not start with a slash",
+    )
     return basePathForBaseName.resolveRel(formatLastSegment(format, shortNameAndFlavorPostfix))
   }
 
@@ -84,20 +94,22 @@ data class BuildTargetValueExtraParams(
         basePathForBaseName: RelPath,
         shortNameAndFlavorPostfix: String,
         shortName: String,
-        scratchDir: RelPath
+        scratchDir: RelPath,
     ): BuildTargetValueExtraParams {
       Preconditions.checkArgument(
           shortNameAndFlavorPostfix.startsWith(shortName),
           "shortNameAndFlavorPostfix:%s should start with shortName:%s",
           shortNameAndFlavorPostfix,
-          shortName)
+          shortName,
+      )
       return BuildTargetValueExtraParams(
           cellRelativeBasePath,
           flavored,
           basePathForBaseName,
           shortNameAndFlavorPostfix,
           shortName,
-          scratchDir)
+          scratchDir,
+      )
     }
 
     @JvmStatic
@@ -111,7 +123,8 @@ data class BuildTargetValueExtraParams(
       if (!matcher.matches()) {
         throw RuntimeException(
             "Can't reconstruct extra params from fullyQualifiedName: " +
-                buildTargetValue.fullyQualifiedName)
+                buildTargetValue.fullyQualifiedName
+        )
       }
       val basePath = matcher.group(2)
       val targetName = matcher.group(3)
@@ -128,7 +141,8 @@ data class BuildTargetValueExtraParams(
           RelPathSerializer.deserialize(basePath),
           shortNameAndFlavorPostfix,
           targetName,
-          buckOut)
+          buckOut,
+      )
     }
 
     /**
@@ -144,7 +158,9 @@ data class BuildTargetValueExtraParams(
     private fun formatLastSegment(format: String, arg: String): String {
       var format = format
       Preconditions.checkArgument(
-          !format.startsWith("/"), "format string should not start with a slash")
+          !format.startsWith("/"),
+          "format string should not start with a slash",
+      )
 
       if (Platform.detect() == Platform.WINDOWS) {
         // TODO(nga): prohibit backslashes in format

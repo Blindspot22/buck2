@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -15,16 +16,18 @@ use buck2_cli_proto::BuildTarget;
 use buck2_cli_proto::build_target::BuildOutput;
 use buck2_client_ctx::exit_result::ClientIoError;
 use buck2_client_ctx::output_destination_arg::OutputDestinationArg;
-use buck2_core::fs::async_fs_util;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project::ProjectRoot;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
+use buck2_error::internal_error;
+use buck2_fs::async_fs_util;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::working_dir::AbsWorkingDir;
 use futures::TryStreamExt;
 
 #[derive(Clone)]
@@ -135,7 +138,9 @@ pub(super) async fn copy_to_out(
     for to_be_copied in outputs_to_be_copied {
         match out {
             OutputDestinationArg::Stream => {
-                let mut file = async_fs_util::open(&to_be_copied.from_path).await?;
+                let mut file = async_fs_util::open(&to_be_copied.from_path)
+                    .await
+                    .categorize_internal()?;
                 tokio::io::copy(&mut file, &mut tokio::io::stdout())
                     .await
                     .map_err(convert_broken_pipe_error)?;
@@ -144,7 +149,8 @@ pub(super) async fn copy_to_out(
                 let path = path.resolve(working_dir);
                 if to_be_copied.is_dir {
                     let context = CopyContext {
-                        relative_symlink_boundary: fs_util::canonicalize(&to_be_copied.from_path)?,
+                        relative_symlink_boundary: fs_util::canonicalize(&to_be_copied.from_path)
+                            .categorize_internal()?,
                     };
                     copy_directory(&to_be_copied.from_path, &path, &context).await?;
                 } else {
@@ -163,32 +169,41 @@ fn copy_symlink<P: AsRef<AbsPath>, Q: AsRef<AbsPath>>(
     context: &CopyContext,
 ) -> buck2_error::Result<()> {
     // Make symlinks overwrite items which were already present at destination path
-    fs_util::remove_all(&dst_path).buck_error_context(format!(
-        "Removing pre-existing item at path {:?}",
-        src_path.as_ref()
-    ))?;
-    let symlink_target_abs_path = fs_util::canonicalize(src_path.as_ref()).buck_error_context(
-        format!("Resolving symlink to be copied {:?}", src_path.as_ref()),
-    )?;
+    fs_util::remove_all(&dst_path)
+        .categorize_internal()
+        .buck_error_context(format!(
+            "Removing pre-existing item at path {:?}",
+            src_path.as_ref()
+        ))?;
+    let symlink_target_abs_path = fs_util::canonicalize(src_path.as_ref())
+        .categorize_internal()
+        .buck_error_context(format!(
+            "Resolving symlink to be copied {:?}",
+            src_path.as_ref()
+        ))?;
     // Now recreate the symlink
     let symlink_target = {
         if symlink_target_abs_path.starts_with(&context.relative_symlink_boundary) {
             // Symlink is not pointing outside the original output we are copying.
             // Just keep it as it is.
-            fs_util::read_link(&src_path).buck_error_context(format!(
-                "Reading value of a symlink to be copied {:?}",
-                src_path.as_ref()
-            ))?
+            fs_util::read_link(&src_path)
+                .categorize_internal()
+                .buck_error_context(format!(
+                    "Reading value of a symlink to be copied {:?}",
+                    src_path.as_ref()
+                ))?
         } else {
             // Force "copied" symlink to be absolute as it points outside of original output we are copying.
             symlink_target_abs_path.into_path_buf()
         }
     };
-    fs_util::symlink(&symlink_target, &dst_path).buck_error_context(format!(
-        "Creating symlink at {:?} pointing to {:?}",
-        dst_path.as_ref(),
-        &symlink_target
-    ))?;
+    fs_util::symlink(&symlink_target, &dst_path)
+        .categorize_internal()
+        .buck_error_context(format!(
+            "Creating symlink at {:?} pointing to {:?}",
+            dst_path.as_ref(),
+            &symlink_target
+        ))?;
 
     Ok(())
 }
@@ -246,7 +261,7 @@ async fn copy_file(src: &Path, dst: &Path) -> buck2_error::Result<()> {
         true => Cow::Owned(
             dst.join(
                 src.file_name()
-                    .buck_error_context("Failed getting output name")?,
+                    .ok_or_else(|| internal_error!("Failed getting output name"))?,
             ),
         ),
         false => Cow::Borrowed(dst),
@@ -259,10 +274,10 @@ async fn copy_file(src: &Path, dst: &Path) -> buck2_error::Result<()> {
         Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
             let dir = dest_path
                 .parent()
-                .buck_error_context("Output path has no parent")?;
+                .ok_or_else(|| internal_error!("Output path has no parent"))?;
             let mut tmp_name = dest_path
                 .file_name()
-                .buck_error_context("Output path has no file name")?
+                .ok_or_else(|| internal_error!("Output path has no file name"))?
                 .to_owned();
             tmp_name.push(".buck2.tmp");
             let tmp_path = dir.join(tmp_name);
@@ -284,6 +299,7 @@ mod tests {
     #[cfg(unix)]
     use std::path::PathBuf;
 
+    use buck2_fs::fs_util::uncategorized as fs_util;
     use tempfile::TempDir;
 
     use super::*;

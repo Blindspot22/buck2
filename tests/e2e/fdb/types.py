@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -30,7 +31,7 @@ def _inner_dataclass_from_dict(
 
 def _dataclass_from_dict(klass: Type[T], dikt: Dict[str, Any]) -> T:
     fieldtypes = klass.__annotations__
-    result = {}
+    result: dict[str, Any] = {}
     for f, ftype in fieldtypes.items():
         if hasattr(ftype, "__origin__"):
             if ftype.__origin__ is list:
@@ -50,7 +51,7 @@ def _dataclass_from_dict(klass: Type[T], dikt: Dict[str, Any]) -> T:
             else:
                 result[f] = dikt.get(f)
         else:
-            result[f] = _inner_dataclass_from_dict(ftype, dikt.get(f))
+            result[f] = _inner_dataclass_from_dict(ftype, dikt.get(f, {}))
     return klass(**result)
 
 
@@ -84,9 +85,9 @@ class ExecInfo:
 
     def read_class_map(self, root: str) -> list[ClassMapEntry]:
         classmap_file = self.data["java"]["classmap_file"]
-        assert not os.path.isabs(
-            classmap_file
-        ), f"{classmap_file} should be relative to {root}"
+        assert not os.path.isabs(classmap_file), (
+            f"{classmap_file} should be relative to {root}"
+        )
 
         with open(_resolve_relative(root, classmap_file)) as classmap_file:
             return [

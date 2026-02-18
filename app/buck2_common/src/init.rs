@@ -1,25 +1,28 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::str::FromStr;
 use std::time::Duration;
 
 use allocative::Allocative;
-use anyhow::Context;
 use buck2_core::buck2_env;
 use buck2_error::BuckErrorContext;
-use buck2_error::conversion::from_any_with_tag;
+#[cfg(unix)]
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::legacy_configs::configs::LegacyBuckConfig;
 use crate::legacy_configs::key::BuckconfigKeyRef;
+
+pub const DEFAULT_RETAINED_EVENT_LOGS: usize = 12;
 
 /// Helper enum to categorize the kind of timeout we get from the startup config.
 #[derive(Clone, Debug)]
@@ -58,6 +61,7 @@ pub struct HttpConfig {
     write_timeout_ms: Option<u64>,
     pub http2: bool,
     pub max_redirects: Option<usize>,
+    pub max_concurrent_requests: Option<usize>,
 }
 
 impl HttpConfig {
@@ -84,6 +88,10 @@ impl HttpConfig {
                 property: "http2",
             })?
             .unwrap_or(true);
+        let max_concurrent_requests = config.parse(BuckconfigKeyRef {
+            section: "http",
+            property: "max_concurrent_requests",
+        })?;
 
         Ok(Self {
             connect_timeout_ms,
@@ -91,6 +99,7 @@ impl HttpConfig {
             write_timeout_ms,
             max_redirects,
             http2,
+            max_concurrent_requests,
         })
     }
 
@@ -206,37 +215,73 @@ impl SystemWarningConfig {
     }
 }
 
-#[derive(
-    Allocative,
-    Clone,
-    Debug,
-    Default,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq
-)]
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceControlConfig {
     /// A config to determine if the resource control should be activated or not.
     /// The corresponding buckconfig is `buck2_resource_control.status` that can take
     /// one of `{off | if_available | required}`.
     pub status: ResourceControlStatus,
-    /// A memory threshold that buck2 daemon and workers are allowed to allocate. The units
-    /// like `M` and `G` may be used (e.g. 64G,) or also `%` is accepted in this field (e.g. 90%.)
-    /// The behavior when the combined amount of memory usage of the daemon and workers exceeds this
-    /// is that all the processes are killed by OOMKiller.
+    /// If resource control is enabled, buck needs to get a cgroup to run in from somewhere - this is
+    /// where.
+    pub init: ResourceControlInit,
+    /// Maximum allowed memory usage for all work buck2 manages.
+    ///
+    /// Accepts either a number of bytes or a percentage of the available resources.
+    ///
     /// The corresponding buckconfig is `buck2_resource_control.memory_max`.
     pub memory_max: Option<String>,
+    /// Like `memory_max`, but controls cgroupv2's `memory.high`
+    ///
+    /// The corresponding buckconfig is `buck2_resource_control.memory_high`.
+    pub memory_high: Option<String>,
     /// A memory threshold that any action is allowed to allocate.
     pub memory_max_per_action: Option<String>,
-    /// If provided and above the threshold, hybrid executor will stop scheduling local actions.
-    /// The corresponding buckconfig is `buck2_resource_control.hybrid_execution_memory_limit_gibibytes`.
-    pub hybrid_execution_memory_limit_gibibytes: Option<u64>,
+    /// A memory threshold that any action is allowed to reach before being throttled.
+    pub memory_high_per_action: Option<String>,
+    /// Memory high limit for all actions.
+    ///
+    /// Mainly for testing purpose.
+    pub memory_high_actions: Option<String>,
+    /// Memory max limit for all actions.
+    ///
+    /// Mainly for testing purpose.
+    pub memory_max_actions: Option<String>,
+    /// Enable suspension when memory pressure is high.
+    pub enable_suspension: bool,
+    pub preferred_action_suspend_strategy: ActionSuspendStrategy,
+}
+
+impl ResourceControlConfig {
+    pub fn testing_default() -> Self {
+        Self::from_config(&LegacyBuckConfig::empty()).unwrap()
+    }
+}
+
+#[derive(Allocative, Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ActionSuspendStrategy {
+    CgroupFreeze,
+    KillAndRetry,
+}
+
+impl FromStr for ActionSuspendStrategy {
+    type Err = buck2_error::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "kill_and_retry" => Ok(Self::KillAndRetry),
+            "cgroup_freeze" => Ok(Self::CgroupFreeze),
+            _ => Err(buck2_error::buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "Invalid suspend strategy: `{}`",
+                s
+            )),
+        }
+    }
 }
 
 #[derive(
     Allocative,
     Clone,
+    Copy,
     Debug,
     Default,
     Serialize,
@@ -271,6 +316,40 @@ impl FromStr for ResourceControlStatus {
     }
 }
 
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ResourceControlInit {
+    Systemd,
+    #[cfg(unix)]
+    Cgroup(AbsNormPathBuf),
+}
+
+impl FromStr for ResourceControlInit {
+    type Err = buck2_error::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "systemd" {
+            return Ok(ResourceControlInit::Systemd);
+        }
+        #[cfg(unix)]
+        if let Some(p) = s.strip_prefix("cgroup:") {
+            return Ok(ResourceControlInit::Cgroup(AbsNormPathBuf::from(
+                p.to_owned(),
+            )?));
+        }
+        Err(buck2_error::buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Unknown resource control initializer: `{}`",
+            s
+        ))
+    }
+}
+
+/// The current version of the resource control algorithm. Say you have some important change to the
+/// algo that fixes a bug. Incrementing this to `N + 1` and setting the
+/// `buck2_resource_control.enable_suspension_if_min_algo_version` buckconfig to `N + 1` enables
+/// suspension only if your bug fix is actually included in the version of buck in use
+const RESOURCE_CONTROL_ALGO_VERSION: u32 = 4;
+
 impl ResourceControlConfig {
     pub fn from_config(config: &LegacyBuckConfig) -> buck2_error::Result<Self> {
         if let Some(env_conf) = buck2_env!(
@@ -278,7 +357,6 @@ impl ResourceControlConfig {
             applicability = testing,
         )? {
             Self::deserialize(env_conf)
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
         } else {
             let status = config
                 .parse(BuckconfigKeyRef {
@@ -286,23 +364,65 @@ impl ResourceControlConfig {
                     property: "status",
                 })?
                 .unwrap_or(ResourceControlStatus::Off);
+            let init = config
+                .parse(BuckconfigKeyRef {
+                    section: "buck2_resource_control",
+                    property: "init",
+                })?
+                .unwrap_or(ResourceControlInit::Systemd);
             let memory_max = config.parse(BuckconfigKeyRef {
                 section: "buck2_resource_control",
                 property: "memory_max",
+            })?;
+            let memory_high = config.parse(BuckconfigKeyRef {
+                section: "buck2_resource_control",
+                property: "memory_high",
             })?;
             let memory_max_per_action = config.parse(BuckconfigKeyRef {
                 section: "buck2_resource_control",
                 property: "memory_max_per_action",
             })?;
-            let hybrid_execution_memory_limit_gibibytes = config.parse(BuckconfigKeyRef {
+            let memory_high_per_action = config.parse(BuckconfigKeyRef {
                 section: "buck2_resource_control",
-                property: "hybrid_execution_memory_limit_gibibytes",
+                property: "memory_high_per_action",
             })?;
+            let memory_high_actions = config.parse(BuckconfigKeyRef {
+                section: "buck2_resource_control",
+                property: "memory_high_actions",
+            })?;
+            let memory_max_actions = config.parse(BuckconfigKeyRef {
+                section: "buck2_resource_control",
+                property: "memory_max_actions",
+            })?;
+            let enable_suspension = config.parse(BuckconfigKeyRef {
+                section: "buck2_resource_control",
+                property: "enable_suspension",
+            })?;
+            let enable_suspension_if_min_algo_version: Option<u32> =
+                config.parse(BuckconfigKeyRef {
+                    section: "buck2_resource_control",
+                    property: "enable_suspension_if_min_algo_version",
+                })?;
+            let enable_suspension = enable_suspension.unwrap_or(false)
+                || enable_suspension_if_min_algo_version
+                    .is_some_and(|min_version| RESOURCE_CONTROL_ALGO_VERSION >= min_version);
+            let preferred_action_suspend_strategy = config
+                .parse(BuckconfigKeyRef {
+                    section: "buck2_resource_control",
+                    property: "preferred_action_suspend_strategy",
+                })?
+                .unwrap_or(ActionSuspendStrategy::KillAndRetry);
             Ok(Self {
                 status,
+                init,
                 memory_max,
+                memory_high,
                 memory_max_per_action,
-                hybrid_execution_memory_limit_gibibytes,
+                memory_high_per_action,
+                memory_high_actions,
+                memory_max_actions,
+                enable_suspension,
+                preferred_action_suspend_strategy,
             })
         }
     }
@@ -311,8 +431,9 @@ impl ResourceControlConfig {
         serde_json::to_string(&self).buck_error_context("Error serializing ResourceControlConfig")
     }
 
-    pub fn deserialize(s: &str) -> anyhow::Result<Self> {
-        serde_json::from_str::<Self>(s).context("Error deserializing ResourceControlConfig")
+    pub fn deserialize(s: &str) -> buck2_error::Result<Self> {
+        serde_json::from_str::<Self>(s)
+            .buck_error_context("Error deserializing ResourceControlConfig")
     }
 }
 
@@ -369,6 +490,7 @@ impl HealthCheckConfig {
 /// before parsing DaemonStartupConfig).
 #[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStartupConfig {
+    pub num_tokio_workers: Option<usize>,
     pub daemon_buster: Option<String>,
     pub digest_algorithms: Option<String>,
     pub source_digest_algorithm: Option<String>,
@@ -378,6 +500,7 @@ pub struct DaemonStartupConfig {
     pub resource_control: ResourceControlConfig,
     pub log_download_method: LogDownloadMethod,
     pub health_check_config: HealthCheckConfig,
+    pub retained_event_logs: usize,
 }
 
 impl DaemonStartupConfig {
@@ -418,6 +541,12 @@ impl DaemonStartupConfig {
         }?;
 
         Ok(Self {
+            num_tokio_workers: config
+                .parse(BuckconfigKeyRef {
+                    section: "build",
+                    property: "num_tokio_workers",
+                })
+                .unwrap_or(Some(0)),
             daemon_buster: config
                 .get(BuckconfigKeyRef {
                     section: "buck2",
@@ -447,6 +576,13 @@ impl DaemonStartupConfig {
             resource_control: ResourceControlConfig::from_config(config)?,
             log_download_method,
             health_check_config: HealthCheckConfig::from_config(config)?,
+            retained_event_logs: config
+                .get(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "retained_event_logs",
+                })
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_RETAINED_EVENT_LOGS),
         })
     }
 
@@ -454,25 +590,28 @@ impl DaemonStartupConfig {
         serde_json::to_string(&self).buck_error_context("Error serializing DaemonStartupConfig")
     }
 
-    pub fn deserialize(s: &str) -> anyhow::Result<Self> {
-        serde_json::from_str::<Self>(s).context("Error deserializing DaemonStartupConfig")
+    pub fn deserialize(s: &str) -> buck2_error::Result<Self> {
+        serde_json::from_str::<Self>(s)
+            .buck_error_context("Error deserializing DaemonStartupConfig")
     }
 
     pub fn testing_empty() -> Self {
         Self {
+            num_tokio_workers: None,
             daemon_buster: None,
             digest_algorithms: None,
             source_digest_algorithm: None,
             paranoid: false,
             materializations: None,
             http: HttpConfig::default(),
-            resource_control: ResourceControlConfig::default(),
+            resource_control: ResourceControlConfig::testing_default(),
             log_download_method: if cfg!(fbcode_build) {
                 LogDownloadMethod::Manifold
             } else {
                 LogDownloadMethod::None
             },
             health_check_config: HealthCheckConfig::default(),
+            retained_event_logs: DEFAULT_RETAINED_EVENT_LOGS,
         }
     }
 }

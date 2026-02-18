@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -31,10 +32,10 @@ impl FileIgnoreReason {
     pub fn describe(&self) -> String {
         match self {
             FileIgnoreReason::IgnoredByPattern { pattern, .. } => {
-                format!("config project.ignore contains `{}`", pattern)
+                format!("config project.ignore contains `{pattern}`")
             }
             FileIgnoreReason::IgnoredByCell { cell_name, .. } => {
-                format!("path is contained in cell `{}`", cell_name)
+                format!("path is contained in cell `{cell_name}`")
             }
         }
     }
@@ -56,12 +57,12 @@ impl FileIgnoreResult {
             FileIgnoreResult::Ignored(FileIgnoreReason::IgnoredByPattern { path, pattern }) => {
                 Err(FileOpsError::ReadIgnoredDir(
                     path,
-                    format!("file is matched by pattern `{}`", pattern),
+                    format!("file is matched by pattern `{pattern}`"),
                 )
                 .into())
             }
             FileIgnoreResult::Ignored(FileIgnoreReason::IgnoredByCell { path, cell_name }) => Err(
-                FileOpsError::ReadIgnoredDir(path, format!("file is part of cell `{}`", cell_name))
+                FileOpsError::ReadIgnoredDir(path, format!("file is part of cell `{cell_name}`"))
                     .into(),
             ),
         }
@@ -69,10 +70,7 @@ impl FileIgnoreResult {
 
     /// Returns true if the file is ignored, false otherwise.
     pub fn is_ignored(&self) -> bool {
-        match self {
-            FileIgnoreResult::Ok => false,
-            _ => true,
-        }
+        !matches!(self, FileIgnoreResult::Ok)
     }
 }
 
@@ -152,8 +150,7 @@ mod tests {
             true,
         )?;
 
-        assert_eq!(
-            true,
+        assert!(
             ignores
                 .check(UncheckedCellRelativePath::unchecked_new(
                     "some/long/path/Class.java"
@@ -161,15 +158,13 @@ mod tests {
                 .is_ignored()
         );
 
-        assert_eq!(
-            true,
+        assert!(
             ignores
                 .check(UncheckedCellRelativePath::unchecked_new("other_cell"))
                 .is_ignored()
         );
 
-        assert_eq!(
-            true,
+        assert!(
             ignores
                 .check(UncheckedCellRelativePath::unchecked_new(
                     "other_cell/some/lib"
@@ -177,22 +172,19 @@ mod tests {
                 .is_ignored()
         );
 
-        assert_eq!(
-            false,
-            ignores
+        assert!(
+            !ignores
                 .check(UncheckedCellRelativePath::unchecked_new("third"))
                 .is_ignored()
         );
 
-        assert_eq!(
-            false,
-            ignores
+        assert!(
+            !ignores
                 .check(UncheckedCellRelativePath::unchecked_new("one/two/three"))
                 .is_ignored()
         );
 
-        assert_eq!(
-            true,
+        assert!(
             ignores
                 .check(UncheckedCellRelativePath::unchecked_new(
                     "recursive/two/three"
@@ -200,8 +192,7 @@ mod tests {
                 .is_ignored()
         );
 
-        assert_eq!(
-            true,
+        assert!(
             ignores
                 .check(UncheckedCellRelativePath::unchecked_new(
                     "trailing_slash/BUCK"

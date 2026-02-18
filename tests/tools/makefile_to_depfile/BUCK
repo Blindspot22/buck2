@@ -1,5 +1,7 @@
 load("@fbsource//tools/build_defs:cram_test.bzl", "cram_test")
 
+oncall("build_infra")
+
 cram_test(
     name = "integration",
     srcs = glob([

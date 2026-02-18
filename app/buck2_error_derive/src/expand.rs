@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 // This code is adapted from https://github.com/dtolnay/thiserror licensed under Apache-2.0 or MIT.
@@ -108,7 +109,7 @@ fn impl_struct(input: Struct) -> TokenStream {
     } else if let Some(display) = &input.attrs.display {
         display_implied_bounds = display.implied_bounds.clone();
         Some(quote! {
-            #[allow(unused_variables, deprecated)]
+            #[allow(unused_assignments, unused_variables, deprecated)]
             let Self #pat = self;
             #display
         })
@@ -141,7 +142,7 @@ fn impl_struct(input: Struct) -> TokenStream {
         impl #impl_generics From<#ty #ty_generics> for buck2_error::Error #error_where_clause
         {
             #[cold]
-            #[allow(unused_variables, deprecated)]
+            #[allow(unused_assignments, unused_variables, deprecated)]
             fn from(#arg_token: #ty #ty_generics) -> buck2_error::Error {
                 #content
             }
@@ -203,16 +204,10 @@ fn impl_enum(mut input: Enum) -> TokenStream {
             #[allow(unused_qualifications)]
             impl #impl_generics std::fmt::Display for #ty #ty_generics #display_where_clause {
                 fn fmt(&self, __formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    #[allow(unused_variables, deprecated, clippy::used_underscore_binding)]
+                    #[allow(unused_assignments, unused_variables, deprecated, clippy::used_underscore_binding)]
                     match #void_deref self {
                         #(#arms,)*
                     }
-                }
-            }
-
-            impl #impl_generics From<#ty #ty_generics> for buck2_error::__for_macro::ContextValue #display_where_clause  {
-                fn from(#arg_token: #ty #ty_generics) -> buck2_error::__for_macro::ContextValue {
-                    format!("{}", #arg_token).into()
                 }
             }
         })
@@ -266,7 +261,7 @@ fn impl_enum(mut input: Enum) -> TokenStream {
         let ident = &variant.ident;
         let pat = fields_pat(&variant.fields);
         quote! {
-            #[allow(unused_variables, deprecated)]
+            #[allow(unused_assignments, unused_variables, deprecated)]
             #ty::#ident #pat => {
                 #content
             },

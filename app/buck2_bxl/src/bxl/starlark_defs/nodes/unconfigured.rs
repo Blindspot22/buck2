@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::convert::Infallible;
@@ -78,7 +79,7 @@ fn target_node_value_methods(builder: &mut MethodsBuilder) {
     ///     ctx.output.print(target_node.attrs.my_attr)
     /// ```
     #[starlark(attribute)]
-    fn attrs<'v>(this: StarlarkTargetNode, heap: &Heap) -> starlark::Result<Value<'v>> {
+    fn attrs<'v>(this: StarlarkTargetNode, heap: Heap<'_>) -> starlark::Result<Value<'v>> {
         let attrs_iter = this.0.attrs(AttrInspectOptions::All);
         let special_attrs_iter = this.0.special_attrs();
         let attrs = attrs_iter
@@ -109,12 +110,12 @@ fn target_node_value_methods(builder: &mut MethodsBuilder) {
     fn get_attr<'v>(
         this: &StarlarkTargetNode,
         #[starlark(require=pos)] key: &str,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<NoneOr<Value<'v>>> {
         Ok(NodeAttributeGetter::get_attr(this, key, heap)?)
     }
 
-    /// Gets the all attributes (not include speical attributes) from the unconfigured target node.
+    /// Gets all the attributes (excluding special attributes) from the unconfigured target node.
     /// For attributes that are not explicitly set, the default value is returned.
     ///
     /// Sample usage:
@@ -125,7 +126,7 @@ fn target_node_value_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn get_attrs<'v>(
         this: &StarlarkTargetNode,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<SmallMap<StringValue<'v>, Value<'v>>> {
         Ok(NodeAttributeGetter::get_attrs(this, heap)?)
     }
@@ -188,7 +189,7 @@ fn target_node_value_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn rule_type<'v>(
         this: &'v StarlarkTargetNode,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<StringValue<'v>> {
         Ok(heap.alloc_str_intern(this.0.rule_type().to_string().as_str()))
     }
@@ -207,7 +208,7 @@ fn target_node_value_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn rule_kind<'v>(
         this: &'v StarlarkTargetNode,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<StringValue<'v>> {
         Ok(heap.alloc_str_intern(this.0.rule_kind().as_str()))
     }
@@ -223,7 +224,7 @@ fn target_node_value_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn oncall<'v>(
         this: &'v StarlarkTargetNode,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<NoneOr<StringValue<'v>>> {
         match this.0.oncall() {
             None => Ok(NoneOr::None),
@@ -246,8 +247,7 @@ fn target_node_value_methods(builder: &mut MethodsBuilder) {
         Ok(AllocList(
             this.0
                 .deps()
-                .map(|label| StarlarkTargetLabel::new(label.dupe()))
-                .into_iter(),
+                .map(|label| StarlarkTargetLabel::new(label.dupe())),
         ))
     }
 

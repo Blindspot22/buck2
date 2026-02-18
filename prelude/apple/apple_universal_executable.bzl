@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifact_tset.bzl",
@@ -40,7 +41,7 @@ def apple_universal_executable_impl(ctx: AnalysisContext) -> list[Provider]:
 
     debug_info = project_artifacts(
         actions = ctx.actions,
-        tsets = [binary_outputs.debuggable_info.debug_info_tset],
+        tsets = binary_outputs.debuggable_info.debug_info_tset,
     )
 
     sub_targets = {}

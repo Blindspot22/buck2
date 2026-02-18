@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -253,11 +254,10 @@ async fn get_watchman_eden_error_logs() -> Option<String> {
 
     match (watchman_cmd, eden_cmd) {
         (Some(watchman_cmd), Some(eden_cmd)) => Some(format!(
-            "Watchman and Eden rage logs:\n{}\n{}",
-            watchman_cmd, eden_cmd
+            "Watchman and Eden rage logs:\n{watchman_cmd}\n{eden_cmd}"
         )),
-        (Some(watchman_cmd), None) => Some(format!("Watchman rage logs:\n{}", watchman_cmd)),
-        (None, Some(eden_cmd)) => Some(format!("Eden rage logs:\n{}", eden_cmd)),
+        (Some(watchman_cmd), None) => Some(format!("Watchman rage logs:\n{watchman_cmd}")),
+        (None, Some(eden_cmd)) => Some(format!("Eden rage logs:\n{eden_cmd}")),
         (None, None) => None,
     }
 }
@@ -489,7 +489,7 @@ where
     ) -> buck2_error::Result<WatchmanSyncResult> {
         let client = client
             .as_mut()
-            .buck_error_context("No Watchman connection")?;
+            .ok_or_else(|| internal_error!("No Watchman connection"))?;
 
         let make_query = |last_clock, last_mergebase| {
             let mut query = self.query.clone();
@@ -587,10 +587,7 @@ fn unpack_clock(clock: Clock) -> (Option<String>, ClockSpec) {
                     ..
                 }),
         }) => (Some(mergebase), clock_spec),
-        clock => panic!(
-            "requested watchman query, got unexpected clock `{:?}`",
-            clock
-        ),
+        clock => panic!("requested watchman query, got unexpected clock `{clock:?}`"),
     }
 }
 
@@ -603,7 +600,7 @@ where
     pub(crate) fn sync(
         &self,
         dice: P,
-    ) -> impl Future<Output = buck2_error::Result<(T, P)>> + Send + 'static {
+    ) -> impl Future<Output = buck2_error::Result<(T, P)>> + Send + 'static + use<T, P> {
         let (sync_done_tx, sync_done_rx) = tokio::sync::oneshot::channel();
         let tx_res = self
             .control_tx
@@ -612,7 +609,7 @@ where
         async move {
             tx_res
                 .ok()
-                .buck_error_context("SyncableQueryHandler has exited")?;
+                .ok_or_else(|| internal_error!("SyncableQueryHandler has exited"))?;
 
             let out = sync_done_rx
                 .await

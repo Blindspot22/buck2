@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Execute a previously deferred link action. The inputs to this script are expected to come from
-# a previous invocation of `extract_link_action.py`. The main special processing here is to handle
-# the optional version script argument, and pass the objects located in the provided directory
-# as individual inputs to the linker command.
+# a previous invocation of `extract_link_action.py`.
 
 import argparse
 import asyncio
 import os
 import sys
 import tempfile
-from pathlib import Path
-from typing import Any, List, NamedTuple
+from typing import Any, NamedTuple
 
 
 def eprint(*args: Any, **kwargs: Any) -> None:
@@ -25,23 +23,11 @@ def eprint(*args: Any, **kwargs: Any) -> None:
 
 
 class Args(NamedTuple):
-    objects: Path
-    version_script: Path
-    linker: List[str]
+    linker: list[str]
 
 
 def arg_parse() -> Args:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--objects",
-        type=Path,
-        required=True,
-    )
-    parser.add_argument(
-        "--version-script",
-        type=Path,
-        required=True,
-    )
     parser.add_argument(
         "linker",
         nargs=argparse.REMAINDER,
@@ -52,31 +38,18 @@ def arg_parse() -> Args:
     return Args(**vars(parser.parse_args()))
 
 
-def unpack_objects(objects: Path) -> List[str]:
-    return [os.path.join(objects, x) for x in os.listdir(objects) if x.endswith(".o")]
-
-
 async def main() -> int:
     args = arg_parse()
 
     linker_cmd = args.linker[:1]
-
-    objects = unpack_objects(args.objects)
 
     with tempfile.NamedTemporaryFile(
         mode="wb",
         prefix="real-linker-args-",
         suffix=".txt",
         delete=False,
+        dir=os.environ.get("BUCK_SCRATCH_PATH"),
     ) as args_file:
-        # Some platforms do not use version-scripts. For those platforms we simply
-        # do not pass the version-script to the linker.
-        if os.path.getsize(args.version_script) > 0:
-            args_file.write(
-                b"-Wl,--version-script=" + str(args.version_script).encode() + b"\n"
-            )
-
-        args_file.write("\n".join(objects).encode() + b"\n")
         args_file.write("\n".join(args.linker[1:]).encode() + b"\n")
         args_file.flush()
 

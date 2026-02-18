@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Utilities for interacting with the jemalloc heap used by buck2.
@@ -50,7 +51,7 @@ mod imp {
             ));
         }
 
-        eprintln!("dumping heap to: {:?}", filename);
+        eprintln!("dumping heap to: {filename:?}");
         memory::mallctl_write("prof.dump", filename)
             .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Mallctl))?;
         Ok(())

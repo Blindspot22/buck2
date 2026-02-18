@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Write;
 use std::time::Duration;
-use std::time::Instant;
 
 use buck2_event_observer::display;
 use buck2_event_observer::display::TargetDisplayOptions;
@@ -63,7 +63,6 @@ impl TimedListBody<'_> {
         remaining_children: usize,
         display_platform: bool,
     ) -> buck2_error::Result<TimedRow> {
-        let time_speed = self.state.time_speed;
         let info = root.info();
         let child_info = single_child.info();
 
@@ -80,20 +79,19 @@ impl TimedListBody<'_> {
             )?
         );
 
-        let now = Instant::now();
-        let child_info_elapsed = now - child_info.start;
-        let info_elapsed = now - info.start;
+        let child_info_elapsed = self.state.timekeeper.duration_since(child_info.start);
+        let info_elapsed = self.state.timekeeper.duration_since(info.start);
         let subaction_ratio = child_info_elapsed.as_secs_f64() / info_elapsed.as_secs_f64();
 
         // but only display the time of the subaction if it differs significantly.
         if subaction_ratio < DISPLAY_SUBACTION_CUTOFF {
-            let subaction_time = fmt_duration::fmt_duration(child_info_elapsed, time_speed.speed());
+            let subaction_time = fmt_duration::fmt_duration(child_info_elapsed);
             event_string.push(' ');
             event_string.push_str(&subaction_time);
         }
 
         if remaining_children > 0 {
-            write!(event_string, " + {}", remaining_children)
+            write!(event_string, " + {remaining_children}")
                 .expect("Write to String is not fallible");
         }
 
@@ -102,14 +100,14 @@ impl TimedListBody<'_> {
         TimedRow::text(
             0,
             event_string,
-            fmt_duration::fmt_duration(info_elapsed, time_speed.speed()),
-            info_elapsed.mul_f64(time_speed.speed()),
+            fmt_duration::fmt_duration(info_elapsed),
+            info_elapsed,
             self.cutoffs,
         )
     }
 
     fn draw_root(&self, root: &BuckEventSpanHandle) -> buck2_error::Result<Vec<TimedRow>> {
-        let time_speed = self.state.time_speed;
+        let timekeeper = &self.state.timekeeper;
         let config = &self.state.config;
         let two_lines = config.two_lines;
         let display_platform = config.display_platform;
@@ -129,7 +127,7 @@ impl TimedListBody<'_> {
                 rows.push(TimedRow::span(
                     0,
                     info,
-                    time_speed.speed(),
+                    timekeeper,
                     self.cutoffs,
                     display_platform,
                 )?);
@@ -138,7 +136,7 @@ impl TimedListBody<'_> {
                     rows.push(TimedRow::span(
                         2,
                         child.info(),
-                        time_speed.speed(),
+                        timekeeper,
                         self.cutoffs,
                         display_platform,
                     )?);
@@ -150,7 +148,9 @@ impl TimedListBody<'_> {
 }
 
 impl Component for TimedListBody<'_> {
-    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = buck2_error::Error;
+
+    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> buck2_error::Result<Lines> {
         let config = &self.state.config;
         let max_lines = config.max_lines;
 
@@ -179,7 +179,7 @@ impl Component for TimedListBody<'_> {
         let more = roots.len() as u64 + first_not_rendered.map_or(0, |_| 1);
 
         if more > 0 {
-            let remaining = format!("... and {} more currently executing", more);
+            let remaining = format!("... and {more} more currently executing");
             builder.rows.push(
                 std::iter::once(Span::new_styled(remaining.italic())?)
                     .collect::<Line>()
@@ -195,7 +195,13 @@ impl Component for TimedListBody<'_> {
 struct TimedListHeader;
 
 impl Component for TimedListHeader {
-    fn draw_unchecked(&self, dimensions: Dimensions, _mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = buck2_error::Error;
+
+    fn draw_unchecked(
+        &self,
+        dimensions: Dimensions,
+        _mode: DrawMode,
+    ) -> buck2_error::Result<Lines> {
         Ok(Lines(vec![Line::unstyled(&"-".repeat(dimensions.width))?]))
     }
 }
@@ -214,7 +220,9 @@ impl<'a> TimedList<'a> {
 }
 
 impl Component for TimedList<'_> {
-    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = buck2_error::Error;
+
+    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> buck2_error::Result<Lines> {
         let span_tracker: &BuckEventSpanTracker = self.state.simple_console.observer().spans();
 
         match mode {
@@ -239,12 +247,12 @@ impl Component for TimedList<'_> {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::UNIX_EPOCH;
+    use std::time::SystemTime;
 
     use buck2_data::FakeStart;
     use buck2_data::SpanStartEvent;
-    use buck2_error::conversion::from_any_with_tag;
     use buck2_event_observer::action_stats::ActionStats;
+    use buck2_event_observer::span_tracker::EventTimestamp;
     use buck2_event_observer::verbosity::Verbosity;
     use buck2_events::BuckEvent;
     use buck2_events::span::SpanId;
@@ -253,9 +261,10 @@ mod tests {
     use itertools::Itertools;
 
     use super::*;
-    use crate::subscribers::subscriber::Tick;
     use crate::subscribers::superconsole::SuperConsoleConfig;
-    use crate::subscribers::superconsole::TimeSpeed;
+    use crate::subscribers::superconsole::timekeeper::RealtimeClock;
+    use crate::subscribers::superconsole::timekeeper::Timekeeper;
+    use crate::ticker::Tick;
 
     const CUTOFFS: Cutoffs = Cutoffs {
         inform: Duration::from_secs(2),
@@ -263,41 +272,33 @@ mod tests {
         _notable: Duration::from_millis(200),
     };
 
-    const TIME_DILATION: u64 = 10;
-
-    fn fake_time_speed() -> TimeSpeed {
+    fn fake_timekeeper(tick: Tick) -> Timekeeper {
         // We run time 10x slower so that any time occurring due to the
         // test running on an overloaded server is ignored.
         //
         // Note that going to 100x slower causes Windows CI to fail, because
         // the `Instant` can't go below the time when the VM was booted, or you get an
         // underflow of `Instant`.
-        TimeSpeed::new(Some(1.0 / (TIME_DILATION as f64))).unwrap()
+        Timekeeper::new(
+            Box::new(RealtimeClock),
+            EventTimestamp(tick.current_realtime.into()),
+        )
     }
 
-    fn fake_time(tick: &Tick, secs: u64) -> Instant {
-        tick.start_time
-            .checked_sub(Duration::from_secs(secs * TIME_DILATION))
-            .unwrap_or_else(|| {
-                panic!(
-                    "Instant went too low: {:?} - ({secs} * {TIME_DILATION}",
-                    tick.start_time
-                )
-            })
-            // We add 50ms to give us a 100ms window where we round down correctly
-            .checked_add(Duration::from_millis(50 * TIME_DILATION))
-            .unwrap()
+    fn fake_time(tick: &Tick, secs: u64) -> SystemTime {
+        tick.current_realtime
+            .checked_sub(Duration::from_secs(secs))
+            .expect("System time went too low")
     }
 
     fn super_console_state_for_test(
         span_tracker: BuckEventSpanTracker,
         action_stats: ActionStats,
-        tick: Tick,
-        time_speed: TimeSpeed,
+        timekeeper: Timekeeper,
         timed_list_state: SuperConsoleConfig,
     ) -> SuperConsoleState {
         let mut state = SuperConsoleState::new(
-            None,
+            timekeeper,
             TraceId::null(),
             Verbosity::default(),
             false,
@@ -307,8 +308,6 @@ mod tests {
         .unwrap();
         state.simple_console.observer.span_tracker = span_tracker;
         state.simple_console.observer.action_stats = action_stats;
-        state.current_tick = tick;
-        state.time_speed = time_speed;
         state
     }
 
@@ -317,7 +316,7 @@ mod tests {
         let tick = Tick::now();
 
         let label = Arc::new(BuckEvent::new(
-            UNIX_EPOCH,
+            fake_time(&tick, 3),
             TraceId::new(),
             Some(SpanId::next()),
             None,
@@ -329,7 +328,7 @@ mod tests {
         ));
 
         let module = Arc::new(BuckEvent::new(
-            UNIX_EPOCH,
+            fake_time(&tick, 1),
             TraceId::new(),
             Some(SpanId::next()),
             None,
@@ -341,10 +340,10 @@ mod tests {
         ));
 
         let mut state = BuckEventSpanTracker::new();
-        state.start_at(&label, fake_time(&tick, 3)).unwrap();
-        state.start_at(&module, fake_time(&tick, 1)).unwrap();
+        state.start_at(&label).unwrap();
+        state.start_at(&module).unwrap();
 
-        let time_speed = fake_time_speed();
+        let timekeeper = fake_timekeeper(tick);
         let action_stats = ActionStats {
             local_actions: 0,
             remote_actions: 0,
@@ -361,7 +360,7 @@ mod tests {
 
         let output = TimedList::new(
             &CUTOFFS,
-            &super_console_state_for_test(state, action_stats, tick, time_speed, timed_list_state),
+            &super_console_state_for_test(state, action_stats, timekeeper, timed_list_state),
         )
         .draw(
             Dimensions {
@@ -369,14 +368,13 @@ mod tests {
                 height: 10,
             },
             DrawMode::Normal,
-        )
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
+        )?;
         let expected = [
 
             "----------------------------------------",
             "<span fg=dark_yellow>test -- speak of the devil</span>          <span fg=dark_yellow>3.0s</span>",
             "foo -- speak of the devil           1.0s",
-        ].iter().map(|l| format!("{}\n", l)).join("");
+        ].iter().map(|l| format!("{l}\n")).join("");
 
         pretty_assertions::assert_eq!(output.fmt_for_test().to_string(), expected);
 
@@ -388,7 +386,7 @@ mod tests {
         let tick = Tick::now();
 
         let e1 = BuckEvent::new(
-            UNIX_EPOCH,
+            fake_time(&tick, 1),
             TraceId::new(),
             Some(SpanId::next()),
             None,
@@ -400,7 +398,7 @@ mod tests {
         );
 
         let e2 = BuckEvent::new(
-            UNIX_EPOCH,
+            fake_time(&tick, 1),
             TraceId::new(),
             Some(SpanId::next()),
             None,
@@ -412,7 +410,7 @@ mod tests {
         );
 
         let e3 = BuckEvent::new(
-            UNIX_EPOCH,
+            fake_time(&tick, 1),
             TraceId::new(),
             Some(SpanId::next()),
             None,
@@ -426,12 +424,10 @@ mod tests {
         let mut state = BuckEventSpanTracker::new();
 
         for e in [e1, e2, e3] {
-            state
-                .start_at(&Arc::new(e.clone()), fake_time(&tick, 1))
-                .unwrap();
+            state.start_at(&Arc::new(e.clone())).unwrap();
         }
 
-        let time_speed = fake_time_speed();
+        let time_speed = fake_timekeeper(tick);
         let action_stats = ActionStats {
             local_actions: 0,
             remote_actions: 0,
@@ -448,7 +444,7 @@ mod tests {
 
         let output = TimedList::new(
             &CUTOFFS,
-            &super_console_state_for_test(state, action_stats, tick, time_speed, timed_list_state),
+            &super_console_state_for_test(state, action_stats, time_speed, timed_list_state),
         )
         .draw(
             Dimensions {
@@ -456,15 +452,14 @@ mod tests {
                 height: 10,
             },
             DrawMode::Normal,
-        )
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
+        )?;
         let expected = [
             "----------------------------------------",
             "e1 -- speak of the devil            1.0s",
             "<span italic>... and 2 more currently executing</span>",
         ]
         .iter()
-        .map(|l| format!("{}\n", l))
+        .map(|l| format!("{l}\n"))
         .join("");
 
         pretty_assertions::assert_eq!(output.fmt_for_test().to_string(), expected);
@@ -477,7 +472,7 @@ mod tests {
         let tick = Tick::now();
 
         let mut state = SuperConsoleState::new(
-            None,
+            fake_timekeeper(tick),
             TraceId::null(),
             Verbosity::default(),
             false,
@@ -488,36 +483,31 @@ mod tests {
             None,
         )?;
 
-        state.time_speed = fake_time_speed();
-        state.current_tick = tick.clone();
-
         state
             .simple_console
             .observer
-            .observe(fake_time(&tick, 10), &span_start_event(None))
+            .observe(&span_start_event(None, fake_time(&tick, 10)))
             .await?;
 
         state
             .simple_console
             .observer
-            .observe(fake_time(&tick, 1), &dice_snapshot())
+            .observe(&dice_snapshot(fake_time(&tick, 1)))
             .await?;
 
         {
-            let output = TimedList::new(&CUTOFFS, &state)
-                .draw(
-                    Dimensions {
-                        width: 60,
-                        height: 10,
-                    },
-                    DrawMode::Normal,
-                )
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
+            let output = TimedList::new(&CUTOFFS, &state).draw(
+                Dimensions {
+                    width: 60,
+                    height: 10,
+                },
+                DrawMode::Normal,
+            )?;
 
             let expected = [
                 "------------------------------------------------------------",
                 "<span fg=dark_red>pkg:target -- action (category identifier)</span>             <span fg=dark_red>10.0s</span>",
-            ].iter().map(|l| format!("{}\n", l)).join("");
+            ].iter().map(|l| format!("{l}\n")).join("");
 
             pretty_assertions::assert_eq!(output.fmt_for_test().to_string(), expected);
         }
@@ -525,22 +515,20 @@ mod tests {
         {
             state.config.max_lines = 1; // With fewer lines now
 
-            let output = TimedList::new(&CUTOFFS, &state)
-                .draw(
-                    Dimensions {
-                        width: 60,
-                        height: 10,
-                    },
-                    DrawMode::Normal,
-                )
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
+            let output = TimedList::new(&CUTOFFS, &state).draw(
+                Dimensions {
+                    width: 60,
+                    height: 10,
+                },
+                DrawMode::Normal,
+            )?;
 
             let expected = [
                 "------------------------------------------------------------",
                 "<span italic>... and 1 more currently executing</span>",
             ]
             .iter()
-            .map(|l| format!("{}\n", l))
+            .map(|l| format!("{l}\n"))
             .join("");
 
             pretty_assertions::assert_eq!(output.fmt_for_test().to_string(), expected);
@@ -556,7 +544,7 @@ mod tests {
         let parent = SpanId::next();
 
         let prepare = Arc::new(BuckEvent::new(
-            UNIX_EPOCH,
+            fake_time(&tick, 5),
             TraceId::new(),
             Some(SpanId::next()),
             Some(parent),
@@ -573,11 +561,9 @@ mod tests {
 
         let mut state = BuckEventSpanTracker::new();
         state
-            .start_at(&span_start_event(Some(parent)), fake_time(&tick, 10))
+            .start_at(&span_start_event(Some(parent), fake_time(&tick, 10)))
             .unwrap();
-        state.start_at(&prepare, fake_time(&tick, 5)).unwrap();
-
-        let time_speed = fake_time_speed();
+        state.start_at(&prepare).unwrap();
 
         let action_stats = ActionStats {
             local_actions: 0,
@@ -598,8 +584,7 @@ mod tests {
             &super_console_state_for_test(
                 state.clone(),
                 action_stats.dupe(),
-                tick.dupe(),
-                time_speed,
+                fake_timekeeper(tick),
                 timed_list_state.clone(),
             ),
         )
@@ -609,12 +594,11 @@ mod tests {
                 height: 10,
             },
             DrawMode::Normal,
-        )
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
+        )?;
         let expected = [
             "--------------------------------------------------------------------------------",
             "<span fg=dark_red>pkg:target -- action (category identifier) [prepare 5.0s]</span>                  <span fg=dark_red>10.0s</span>",
-        ].iter().map(|l| format!("{}\n", l)).join("");
+        ].iter().map(|l| format!("{l}\n")).join("");
 
         pretty_assertions::assert_eq!(output.fmt_for_test().to_string(), expected);
 
@@ -622,7 +606,7 @@ mod tests {
         // concurrently but this is a test!
 
         let re_download = Arc::new(BuckEvent::new(
-            UNIX_EPOCH,
+            fake_time(&tick, 2),
             TraceId::new(),
             Some(SpanId::next()),
             Some(parent),
@@ -642,11 +626,16 @@ mod tests {
             .into(),
         ));
 
-        state.start_at(&re_download, fake_time(&tick, 2)).unwrap();
+        state.start_at(&re_download).unwrap();
 
         let output = TimedList::new(
             &CUTOFFS,
-            &super_console_state_for_test(state, action_stats, tick, time_speed, timed_list_state),
+            &super_console_state_for_test(
+                state,
+                action_stats,
+                fake_timekeeper(tick),
+                timed_list_state,
+            ),
         )
         .draw(
             Dimensions {
@@ -654,21 +643,20 @@ mod tests {
                 height: 10,
             },
             DrawMode::Normal,
-        )
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::SuperConsole))?;
+        )?;
         let expected = [
             "--------------------------------------------------------------------------------",
             "<span fg=dark_red>pkg:target -- action (category identifier) [prepare 5.0s + 1]</span>              <span fg=dark_red>10.0s</span>",
-        ].iter().map(|l| format!("{}\n", l)).join("");
+        ].iter().map(|l| format!("{l}\n")).join("");
 
         pretty_assertions::assert_eq!(output.fmt_for_test().to_string(), expected);
 
         Ok(())
     }
 
-    fn dice_snapshot() -> Arc<BuckEvent> {
+    fn dice_snapshot(time: SystemTime) -> Arc<BuckEvent> {
         Arc::new(BuckEvent::new(
-            UNIX_EPOCH,
+            time,
             TraceId::new(),
             None,
             None,
@@ -698,10 +686,10 @@ mod tests {
         ))
     }
 
-    fn span_start_event(parent_span: Option<SpanId>) -> Arc<BuckEvent> {
+    fn span_start_event(parent_span: Option<SpanId>, time: SystemTime) -> Arc<BuckEvent> {
         let span_id = Some(parent_span.unwrap_or(SpanId::next()));
         Arc::new(BuckEvent::new(
-            UNIX_EPOCH,
+            time,
             TraceId::new(),
             span_id,
             None,

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::str::FromStr;
@@ -19,20 +20,6 @@ use crate::legacy_configs::configs::LegacyBuckConfigSection;
 use crate::legacy_configs::configs::LegacyBuckConfigValue;
 use crate::legacy_configs::key::BuckconfigKeyRef;
 use crate::legacy_configs::view::LegacyBuckConfigView;
-
-#[derive(buck2_error::Error, Debug)]
-#[buck2(tag = Input)]
-enum ConfigValueError {
-    #[error(
-        "Invalid value for buckconfig `{section}.{key}`: conversion to {ty} failed, value as `{value}`"
-    )]
-    ParseFailed {
-        section: String,
-        key: String,
-        value: String,
-        ty: &'static str,
-    },
-}
 
 impl LegacyBuckConfigView for &LegacyBuckConfig {
     fn get(&mut self, key: BuckconfigKeyRef) -> buck2_error::Result<Option<Arc<str>>> {
@@ -52,7 +39,7 @@ impl LegacyBuckConfigSection {
         )
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, LegacyBuckConfigValue)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, LegacyBuckConfigValue<'_>)> {
         self.values
             .iter()
             .map(move |(key, value)| (key.as_str(), LegacyBuckConfigValue { value }))
@@ -62,7 +49,7 @@ impl LegacyBuckConfigSection {
         self.values.keys()
     }
 
-    pub fn get(&self, key: &str) -> Option<LegacyBuckConfigValue> {
+    pub fn get(&self, key: &str) -> Option<LegacyBuckConfigValue<'_>> {
         self.values
             .get(key)
             .map(move |value| LegacyBuckConfigValue { value })
@@ -103,11 +90,14 @@ impl LegacyBuckConfig {
         value
             .parse()
             .map_err(buck2_error::Error::from)
-            .with_buck_error_context(|| ConfigValueError::ParseFailed {
-                section: section.to_owned(),
-                key: property.to_owned(),
-                value: value.to_owned(),
-                ty: std::any::type_name::<T>(),
+            .with_buck_error_context(|| {
+                format!(
+                    "Invalid value for buckconfig `{}.{}`: conversion to {} failed, value as `{}`",
+                    section.to_owned(),
+                    property.to_owned(),
+                    std::any::type_name::<T>(),
+                    value.to_owned(),
+                )
             })
     }
 

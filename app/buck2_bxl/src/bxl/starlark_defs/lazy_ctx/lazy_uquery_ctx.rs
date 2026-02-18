@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -19,12 +20,16 @@ use starlark::starlark_simple_value;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
+use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 
+use crate::bxl::starlark_defs::file_set::FileSetExpr;
+use crate::bxl::starlark_defs::file_set::OwnedFileSetExpr;
 use crate::bxl::starlark_defs::lazy_ctx::operation::StarlarkLazy;
 use crate::bxl::starlark_defs::lazy_ctx::operation::uquery::LazyUqueryOperation;
-use crate::bxl::starlark_defs::target_list_expr::OwnedTargetNodeArg;
-use crate::bxl::starlark_defs::target_list_expr::TargetNodeOrTargetLabelOrStr;
+use crate::bxl::starlark_defs::target_list_expr::OwnedTargetListExprArg;
+use crate::bxl::starlark_defs::target_list_expr::TargetListExprArg;
+use crate::bxl::starlark_defs::uquery::UnpackUnconfiguredQueryArgs;
 
 #[derive(
     ProvidesStaticType,
@@ -56,8 +61,169 @@ impl<'v> StarlarkValue<'v> for StarlarkLazyUqueryCtx {
 
 /// The context for performing lazy `uquery` operations in bxl. The functions offered on this ctx are
 /// the same behaviour as the query functions available within uquery command.
+///
+/// An instance may be obtained with [`bxl.LazyContext.uquery()`](../LazyContext#lazycontextuquery).
 #[starlark_module]
 fn lazy_uquery_methods(builder: &mut MethodsBuilder) {
+    /// Computes all dependency paths from `from` to `to`, with optional filter.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().allpaths("//:foo", "//:bar", filter = "attrfilter('name', 'some_name', target_deps()")).catch().resolve()
+    /// ```
+    fn allpaths<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] from: TargetListExprArg<'v>,
+        #[starlark(require = pos)] to: TargetListExprArg<'v>,
+        #[starlark(require = named, default = NoneOr::None)] filter: NoneOr<&'v str>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let from = OwnedTargetListExprArg::from_ref(&from);
+        let to = OwnedTargetListExprArg::from_ref(&to);
+        let filter = filter.into_option().map(|s| s.to_owned());
+        let op = LazyUqueryOperation::AllPaths { from, to, filter };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Computes some dependency path from `from` to `to`, with optional filter.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().somepath("//:foo", "//:bar", filter = "attrfilter('name', 'some_name', target_deps()")).catch().resolve()
+    /// ```
+    fn somepath<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] from: TargetListExprArg<'v>,
+        #[starlark(require = pos)] to: TargetListExprArg<'v>,
+        #[starlark(require = named, default = NoneOr::None)] filter: NoneOr<&'v str>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let from = OwnedTargetListExprArg::from_ref(&from);
+        let to = OwnedTargetListExprArg::from_ref(&to);
+        let filter = filter.into_option().map(|s| s.to_owned());
+        let op = LazyUqueryOperation::SomePath { from, to, filter };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Filters targets by attribute value.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().attrfilter("name", "some_name", "//:foo").catch().resolve()
+    /// ```
+    fn attrfilter<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] attr: &'v str,
+        #[starlark(require = pos)] value: &'v str,
+        #[starlark(require = pos)] targets: TargetListExprArg<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let attr = attr.to_owned();
+        let value = value.to_owned();
+        let targets = OwnedTargetListExprArg::from_ref(&targets);
+        let op = LazyUqueryOperation::AttrFilter {
+            attr,
+            value,
+            targets,
+        };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Finds input files for the given targets.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().inputs("//:foo").catch().resolve()
+    /// ```
+    fn inputs<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] targets: TargetListExprArg<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let targets = OwnedTargetListExprArg::from_ref(&targets);
+        let op = LazyUqueryOperation::Inputs(targets);
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Filters targets by rule type using a regex pattern.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().kind("cpp.*", "//:foo").catch().resolve()
+    /// ```
+    fn kind<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] regex: &'v str,
+        #[starlark(require = pos)] targets: TargetListExprArg<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let regex = regex.to_owned();
+        let targets = OwnedTargetListExprArg::from_ref(&targets);
+        let op = LazyUqueryOperation::Kind { regex, targets };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Finds the [transitive closure](https://en.wikipedia.org/wiki/Transitive_closure) of dependencies.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().deps("//:foo", 1, filter = "attrfilter('name', 'some_name', target_deps())").catch().resolve()
+    /// ```
+    fn deps<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] universe: TargetListExprArg<'v>,
+        #[starlark(require = pos, default = NoneOr::None)] depth: NoneOr<i32>,
+        #[starlark(require = named, default = NoneOr::None)] filter: NoneOr<&'v str>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let universe = OwnedTargetListExprArg::from_ref(&universe);
+        let depth = depth.into_option();
+        let filter = filter.into_option().map(|s| s.to_owned());
+        let op = LazyUqueryOperation::Deps {
+            universe,
+            depth,
+            filter,
+        };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Finds the [transitive closure](https://en.wikipedia.org/wiki/Transitive_closure) of reverse dependencies.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().rdeps("//:universe", "//:from", 1, filter = "attrfilter('name', 'some_name', target_deps())").catch().resolve()
+    /// ```
+    fn rdeps<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] universe: TargetListExprArg<'v>,
+        #[starlark(require = pos)] from: TargetListExprArg<'v>,
+        #[starlark(require = pos, default = NoneOr::None)] depth: NoneOr<i32>,
+        #[starlark(require = named, default = NoneOr::None)] filter: NoneOr<&'v str>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let universe = OwnedTargetListExprArg::from_ref(&universe);
+        let from = OwnedTargetListExprArg::from_ref(&from);
+        let depth = depth.into_option();
+        let filter = filter.into_option().map(|s| s.to_owned());
+        let op = LazyUqueryOperation::Rdeps {
+            universe,
+            from,
+            depth,
+            filter,
+        };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Filters targets by name using a regex pattern.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().filter(".*the_binary", "//:foo").catch().resolve()
+    /// ```
+    fn filter<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] regex: &'v str,
+        #[starlark(require = pos)] targets: TargetListExprArg<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let regex = regex.to_owned();
+        let targets = OwnedTargetListExprArg::from_ref(&targets);
+        let op = LazyUqueryOperation::Filter { regex, targets };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
     /// Querying the test targets of the given target.
     /// It returns `UnconfiguredTargetSet`
     ///
@@ -74,10 +240,103 @@ fn lazy_uquery_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn testsof<'v>(
         #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
-        #[starlark(require = pos)] expr: TargetNodeOrTargetLabelOrStr<'v>,
-    ) -> anyhow::Result<StarlarkLazy> {
-        let expr = OwnedTargetNodeArg::from_ref(&expr);
+        #[starlark(require = pos)] expr: TargetListExprArg<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let expr = OwnedTargetListExprArg::from_ref(&expr);
         let op = LazyUqueryOperation::TestsOf(expr);
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Finds the build file(s) that define the given targets.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().buildfile("//:foo").catch().resolve()
+    /// ```
+    fn buildfile<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] targets: TargetListExprArg<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let targets = OwnedTargetListExprArg::from_ref(&targets);
+        let op = LazyUqueryOperation::Buildfile(targets);
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Finds targets that own the specified files.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().owner("bin/TARGETS.fixture").catch().resolve()
+    /// res = ctx.lazy.uquery().owner(["bin/TARGET", "bin/kind"]).catch().resolve()
+    /// ```
+    fn owner<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] files: FileSetExpr<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let files = OwnedFileSetExpr::from_ref(&files);
+        let op = LazyUqueryOperation::Owner { files };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Finds targets defined in the specified build files.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().targets_in_buildfile("bin/TARGETS.fixture").catch().resolve()
+    /// res = ctx.lazy.uquery().targets_in_buildfile(["bin/TARGETS", "lib/TARGETS"]).catch().resolve()
+    /// ```
+    fn targets_in_buildfile<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] files: FileSetExpr<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let files = OwnedFileSetExpr::from_ref(&files);
+        let op = LazyUqueryOperation::TargetsInBuildfile { files };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Filters targets by attribute value using regex matching.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().attrregexfilter("name", "he.*lo", "//:foo").catch().resolve()
+    /// ```
+    fn attrregexfilter<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] attr: &'v str,
+        #[starlark(require = pos)] value: &'v str,
+        #[starlark(require = pos)] targets: TargetListExprArg<'v>,
+    ) -> starlark::Result<StarlarkLazy> {
+        let attr = attr.to_owned();
+        let value = value.to_owned();
+        let targets = OwnedTargetListExprArg::from_ref(&targets);
+        let op = LazyUqueryOperation::AttrRegexFilter {
+            attr,
+            value,
+            targets,
+        };
+        Ok(StarlarkLazy::new_uquery(op))
+    }
+
+    /// Evaluates a general query string with optional query arguments.
+    ///
+    /// Example:
+    /// ```python
+    /// res = ctx.lazy.uquery().eval("inputs(cell//path/to/file:target)").catch().resolve()
+    /// res = ctx.lazy.uquery().eval("inputs(%s)", query_args = ["cell//path/to/file:target"]).catch().resolve()
+    /// ```
+    fn eval<'v>(
+        #[starlark(this)] _this: &'v StarlarkLazyUqueryCtx,
+        #[starlark(require = pos)] query: &'v str,
+        #[starlark(require = named, default = NoneOr::None)] query_args: NoneOr<
+            UnpackUnconfiguredQueryArgs<'v>,
+        >,
+    ) -> starlark::Result<StarlarkLazy> {
+        let query = query.to_owned();
+        let query_args = match query_args {
+            NoneOr::None => Vec::new(),
+            NoneOr::Other(query_args) => query_args.into_strings(),
+        };
+        let op = LazyUqueryOperation::Eval { query, query_args };
         Ok(StarlarkLazy::new_uquery(op))
     }
 }

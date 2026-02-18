@@ -1,23 +1,21 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::env;
-use std::fs;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
 use std::process::Command;
 
 use anyhow::Context as _;
 use buck2_miniperf_proto::MiniperfCounter;
 use buck2_miniperf_proto::MiniperfCounters;
 use buck2_miniperf_proto::MiniperfOutput;
-use buck2_util::cgroup_info::CGroupInfo;
 use perf_event::Builder;
 use perf_event::events::Hardware;
 use smallvec::SmallVec;
@@ -37,27 +35,24 @@ struct CounterError {
 impl Counters {
     fn open() -> Result<Self, CounterError> {
         // NOTE: Kernel is not enabled here: we want to report only userspace cycles.
-        let user_counter = Builder::new()
-            .kind(Hardware::INSTRUCTIONS)
-            .inherit(true)
-            .enable_on_exec()
-            .build()
-            .map_err(|error| CounterError {
-                stage: "open user",
-                error: error.into(),
-            })?;
+        let mut user_counter_builder = Builder::new().kind(Hardware::INSTRUCTIONS);
+        user_counter_builder.inherit(true).enable_on_exec(true);
+        let user_counter = user_counter_builder.build().map_err(|error| CounterError {
+            stage: "open user",
+            error: error.into(),
+        })?;
 
-        let kernel_counter = Builder::new()
-            .kind(Hardware::INSTRUCTIONS)
+        let mut kernel_counter = Builder::new().kind(Hardware::INSTRUCTIONS);
+        kernel_counter
             .include_kernel()
-            .exclude_user()
+            .exclude_user(true)
             .inherit(true)
-            .enable_on_exec()
-            .build()
-            .map_err(|error| CounterError {
-                stage: "open kernel",
-                error: error.into(),
-            })?;
+            .enable_on_exec(true);
+
+        let kernel_counter = kernel_counter.build().map_err(|error| CounterError {
+            stage: "open kernel",
+            error: error.into(),
+        })?;
 
         Ok(Self {
             user_counter,
@@ -82,17 +77,6 @@ impl Counters {
                     error: error.into(),
                 })?;
 
-        let memory_peak = if let Ok(s) = env::var("MINIPERF_READ_CGROUP")
-            && s == "1"
-        {
-            Some(read_memory_peak().map_err(|error| CounterError {
-                stage: "collect memory peak",
-                error,
-            })?)
-        } else {
-            None
-        };
-
         Ok(MiniperfCounters {
             user_instructions: MiniperfCounter {
                 count: user_value.count,
@@ -104,21 +88,8 @@ impl Counters {
                 time_enabled: kernel_value.time_enabled,
                 time_running: kernel_value.time_running,
             },
-            memory_peak,
         })
     }
-}
-
-fn read_memory_peak() -> anyhow::Result<u64> {
-    let cgroup_info = CGroupInfo::read()?;
-    let cgroup_path = Path::new(&cgroup_info.path).join("memory.peak");
-    fs::read_to_string(&cgroup_path)
-        .context("Failed to read memory.peak")?
-        .lines()
-        .next()
-        .context("Failed to get first line from memory.peak")?
-        .parse()
-        .context("Failed to parse memory.peak")
 }
 
 /// First argument is an output path to write output data into. The rest is the command to execute.
@@ -138,6 +109,7 @@ pub fn main() -> anyhow::Result<()> {
     let counters = Counters::open();
 
     let status = args.next().context("No process to run").and_then(|bin| {
+        // @patternlint-disable-next-line buck2-no-command-new
         Command::new(bin)
             .args(args)
             .status()
@@ -155,9 +127,9 @@ pub fn main() -> anyhow::Result<()> {
     let mut buff = SmallVec::<[u8; MiniperfOutput::EXPECTED_SIZE]>::new();
 
     bincode::serialize_into(&mut buff, &output)
-        .with_context(|| format!("Failed to write to `{:?}`", out))?;
+        .with_context(|| format!("Failed to write to `{out:?}`"))?;
 
-    std::fs::write(&out, &buff).with_context(|| format!("Failed to write to `{:?}`", out))?;
+    std::fs::write(&out, &buff).with_context(|| format!("Failed to write to `{out:?}`"))?;
 
     Ok(())
 }

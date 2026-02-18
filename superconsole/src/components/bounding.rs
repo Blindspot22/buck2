@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use crate::Component;
@@ -14,7 +15,7 @@ use crate::Lines;
 
 /// Component that ensures its child component has at most `max_size` render space.
 #[derive(Debug)]
-pub struct Bounded<C: Component = Box<dyn Component>> {
+pub struct Bounded<C: Component> {
     child: C,
     max_size: Dimensions,
 }
@@ -32,7 +33,9 @@ impl<C: Component> Bounded<C> {
 }
 
 impl<C: Component> Component for Bounded<C> {
-    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = C::Error;
+
+    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> Result<Lines, C::Error> {
         let output = self.child.draw(dimensions.intersect(self.max_size), mode)?;
         Ok(output)
     }

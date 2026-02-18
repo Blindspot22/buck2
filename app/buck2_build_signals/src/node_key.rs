@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -24,18 +25,23 @@ pub trait BuildSignalsNodeKeyImpl:
     fn critical_path_entry_proto(&self) -> Option<buck2_data::critical_path_entry2::Entry> {
         None
     }
+
+    fn kind(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 pub trait BuildSignalsNodeKeyDyn: Send + Sync + 'static {
-    fn eq_token(&self) -> PartialEqAny;
+    fn eq_token(&self) -> PartialEqAny<'_>;
     fn dislpay(&self) -> &dyn Display;
     fn debug(&self) -> &dyn Debug;
     fn critical_path_entry_proto(&self) -> Option<buck2_data::critical_path_entry2::Entry>;
     fn hash(&self) -> u64;
+    fn kind(&self) -> &'static str;
 }
 
 impl<T: BuildSignalsNodeKeyImpl> BuildSignalsNodeKeyDyn for T {
-    fn eq_token(&self) -> PartialEqAny {
+    fn eq_token(&self) -> PartialEqAny<'_> {
         PartialEqAny::new(self)
     }
 
@@ -56,6 +62,10 @@ impl<T: BuildSignalsNodeKeyImpl> BuildSignalsNodeKeyDyn for T {
         self.hash(&mut hasher);
         hasher.finish()
     }
+
+    fn kind(&self) -> &'static str {
+        BuildSignalsNodeKeyImpl::kind(self)
+    }
 }
 
 #[derive(Clone, Dupe)]
@@ -68,6 +78,10 @@ impl BuildSignalsNodeKey {
 
     pub fn critical_path_entry_proto(&self) -> Option<buck2_data::critical_path_entry2::Entry> {
         self.0.critical_path_entry_proto()
+    }
+
+    pub fn kind(&self) -> &'static str {
+        self.0.kind()
     }
 }
 

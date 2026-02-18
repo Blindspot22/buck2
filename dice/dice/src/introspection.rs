@@ -1,19 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
 //! Interfaces for introspection of the DICE graph
 
-use crate::Dice;
-use crate::DiceImplementation;
 use crate::introspection::graph::AnyKey;
-use crate::introspection::graph::GraphIntrospectable;
 
 pub mod graph;
 pub(crate) mod introspect;
@@ -21,31 +19,21 @@ pub(crate) mod introspect;
 pub use crate::introspection::introspect::serialize_dense_graph;
 pub use crate::introspection::introspect::serialize_graph;
 
-impl Dice {
-    pub fn to_introspectable(&self) -> GraphIntrospectable {
-        match &self.implementation {
-            DiceImplementation::Modern(_) => {
-                unimplemented!("todo")
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use allocative::Allocative;
     use anyhow::Context as _;
     use async_trait::async_trait;
-    use buck2_futures::cancellation::CancellationContext;
     use derive_more::Display;
+    use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
 
     use crate::HashMap;
     use crate::api::computations::DiceComputations;
     use crate::api::cycles::DetectCycles;
     use crate::api::key::Key;
-    use crate::impls::dice::DiceModern;
-    use crate::introspection::graph::SerializedGraphNodesForKey;
+    use crate::impls::dice::Dice;
+    use crate::introspection::graph::SerializedGraphNodeForKey;
     use crate::introspection::serialize_graph;
 
     #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
@@ -96,7 +84,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_serialization() -> anyhow::Result<()> {
-        let dice = DiceModern::builder().build(DetectCycles::Disabled);
+        let dice = Dice::builder().build(DetectCycles::Disabled);
         let mut ctx = dice.updater().commit().await;
         ctx.compute(&KeyA(3)).await?;
 
@@ -151,13 +139,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_serialization_dense() -> anyhow::Result<()> {
-        let dice = DiceModern::builder().build(DetectCycles::Disabled);
+        let dice = Dice::builder().build(DetectCycles::Disabled);
         let mut ctx = dice.updater().commit().await;
         ctx.compute(&KeyA(3)).await?;
 
         let node = bincode::serialize(&dice.to_introspectable())?;
 
-        let _out: Vec<SerializedGraphNodesForKey> = bincode::deserialize(&node)?;
+        let _out: Vec<SerializedGraphNodeForKey> = bincode::deserialize(&node)?;
         Ok(())
     }
 }

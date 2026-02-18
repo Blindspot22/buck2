@@ -1,15 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 import json
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from dataclasses_json import config, dataclass_json
 
@@ -20,6 +21,7 @@ from .utils import execute_generic_text_producing_command
 @dataclass
 class XCSimDevice:
     name: str
+    identifier: str
     product_family: str = field(metadata=config(field_name="productFamily"))
 
 
@@ -27,8 +29,9 @@ class XCSimDevice:
 @dataclass
 class XCSimRuntime:
     name: str
+    platform: str
     version: str
-    supported_device_types: List[XCSimDevice] = field(
+    supported_device_types: list[XCSimDevice] = field(
         metadata=config(field_name="supportedDeviceTypes")
     )
 
@@ -36,22 +39,21 @@ class XCSimRuntime:
 @dataclass_json
 @dataclass
 class _XCSimRuntimes:
-    runtimes: List[XCSimRuntime]
+    runtimes: list[XCSimRuntime]
 
 
-def _list_ios_runtimes_command() -> List[str]:
+def _list_runtimes_command() -> list[str]:
     return [
         "xcrun",
         "simctl",
         "list",
         "runtimes",
-        "iOS",
         "available",
         "--json",
     ]
 
 
-def _simctl_runtimes_from_stdout(stdout: Optional[str]) -> List[XCSimRuntime]:
+def _simctl_runtimes_from_stdout(stdout: Optional[str]) -> list[XCSimRuntime]:
     if not stdout:
         return []
     data = json.loads(stdout)
@@ -59,8 +61,8 @@ def _simctl_runtimes_from_stdout(stdout: Optional[str]) -> List[XCSimRuntime]:
     return _XCSimRuntimes.from_dict(data).runtimes
 
 
-async def list_ios_runtimes() -> List[XCSimRuntime]:
+async def list_runtimes() -> list[XCSimRuntime]:
     stdout = await execute_generic_text_producing_command(
-        name="list iOS runtimes", cmd=_list_ios_runtimes_command()
+        name="list runtimes", cmd=_list_runtimes_command()
     )
     return _simctl_runtimes_from_stdout(stdout)

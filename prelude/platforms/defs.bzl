@@ -1,9 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+load("@prelude//cfg/exec_platform:marker.bzl", "get_exec_platform_marker")
 
 def _execution_platform_impl(ctx: AnalysisContext) -> list[Provider]:
     constraints = dict()
@@ -26,7 +29,10 @@ def _execution_platform_impl(ctx: AnalysisContext) -> list[Provider]:
         DefaultInfo(),
         platform,
         PlatformInfo(label = str(name), configuration = cfg),
-        ExecutionPlatformRegistrationInfo(platforms = [platform]),
+        ExecutionPlatformRegistrationInfo(
+            platforms = [platform],
+            exec_marker_constraint = get_exec_platform_marker(),
+        ),
     ]
 
 execution_platform = rule(
@@ -46,6 +52,8 @@ def _host_cpu_configuration() -> str:
         return "prelude//cpu:arm32"
     elif arch.is_i386:
         return "prelude//cpu:x86_32"
+    elif arch.is_riscv64:
+        return "prelude//cpu:riscv64"
     else:
         return "prelude//cpu:x86_64"
 

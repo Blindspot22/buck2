@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::any::Any;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_interpreter::file_type::StarlarkFileType;
 use buck2_node::metadata::key::MetadataKey;
 use buck2_node::metadata::key::MetadataKeyRef;
@@ -53,13 +55,18 @@ pub struct SuperPackageValuesImpl {
 }
 
 impl SuperPackageValuesImpl {
-    pub(crate) fn get(
-        values: &dyn SuperPackageValues,
-    ) -> buck2_error::Result<&SuperPackageValuesImpl> {
+    pub fn get(values: &dyn SuperPackageValues) -> buck2_error::Result<&SuperPackageValuesImpl> {
         values
             .as_any()
             .downcast_ref::<SuperPackageValuesImpl>()
-            .internal_error("Expecting SuperPackageValuesImpl")
+            .ok_or_else(|| internal_error!("Expecting SuperPackageValuesImpl"))
+    }
+
+    pub fn get_package_value(
+        &self,
+        key: &MetadataKeyRef,
+    ) -> Option<&OwnedFrozenStarlarkPackageValue> {
+        self.values.get(key)
     }
 
     pub(crate) fn merge(
@@ -119,7 +126,7 @@ pub(crate) struct StarlarkPackageValue<'v>(Value<'v>);
 pub(crate) struct FrozenStarlarkPackageValue(FrozenValue);
 
 #[derive(Debug, Allocative, Clone, Dupe)]
-pub(crate) struct OwnedFrozenStarlarkPackageValue(OwnedFrozenValue);
+pub struct OwnedFrozenStarlarkPackageValue(OwnedFrozenValue);
 
 impl<'v> StarlarkPackageValue<'v> {
     pub(crate) fn new(value: Value<'v>) -> buck2_error::Result<StarlarkPackageValue<'v>> {
@@ -154,7 +161,7 @@ impl OwnedFrozenStarlarkPackageValue {
         owner: FrozenHeapRef,
         value: FrozenStarlarkPackageValue,
     ) -> OwnedFrozenStarlarkPackageValue {
-        OwnedFrozenStarlarkPackageValue(OwnedFrozenValue::new(owner, value.0))
+        OwnedFrozenStarlarkPackageValue(unsafe { OwnedFrozenValue::new(owner, value.0) })
     }
 
     pub(crate) fn to_json_value(&self) -> buck2_error::Result<serde_json::Value> {
@@ -165,7 +172,7 @@ impl OwnedFrozenStarlarkPackageValue {
             .internal_error("Not valid JSON, should have been validated at construction")
     }
 
-    pub(crate) fn owned_frozen_value(&self) -> &OwnedFrozenValue {
+    pub fn owned_frozen_value(&self) -> &OwnedFrozenValue {
         &self.0
     }
 }
@@ -243,7 +250,9 @@ pub(crate) fn read_parent_package_value_impl<'v>(
         .values
         .get(key)
     {
-        Some(value) => Ok(value.owned_frozen_value().owned_value(eval.frozen_heap())),
+        Some(value) => Ok(eval
+            .heap()
+            .access_owned_frozen_value(value.owned_frozen_value())),
         None => Ok(Value::new_none()),
     }
 }
@@ -279,7 +288,9 @@ pub(crate) fn register_read_package_value(globals: &mut GlobalsBuilder) {
             .values
             .get(key)
         {
-            Some(value) => Ok(value.owned_frozen_value().owned_value(eval.frozen_heap())),
+            Some(value) => Ok(eval
+                .heap()
+                .access_owned_frozen_value(value.owned_frozen_value())),
             None => Ok(Value::new_none()),
         }
     }

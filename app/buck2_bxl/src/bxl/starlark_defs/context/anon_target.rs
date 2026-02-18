@@ -1,14 +1,13 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use buck2_analysis::analysis::calculation::get_loaded_module;
@@ -16,38 +15,36 @@ use buck2_analysis::analysis::env::get_rule_impl;
 use buck2_analysis::analysis::env::promise_artifact_mappings;
 use buck2_analysis::analysis::env::transitive_validations;
 use buck2_build_api::analysis::AnalysisResult;
+use buck2_build_api::analysis::anon_promises_dyn::RunAnonPromisesAccessor;
 use buck2_build_api::analysis::registry::AnalysisRegistry;
 use buck2_build_api::anon_target::AnonTargetDependentAnalysisResults;
 use buck2_build_api::anon_target::AnonTargetDyn;
 use buck2_build_api::bxl::anon_target::EVAL_BXL_FOR_ANON_TARGET;
 use buck2_build_api::bxl::types::BxlFunctionLabel;
+use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_build_api::interpreter::rule_defs::provider::collection::ProviderCollection;
 use buck2_build_api::interpreter::rule_defs::provider::ty::abstract_provider::AbstractProvider;
 use buck2_common::events::HasEvents;
 use buck2_common::scope::scope_and_collect_with_dice;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
-use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
-use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_execute::digest_config::HasDigestConfig;
-use buck2_futures::cancellation::CancellationObserver;
-use buck2_interpreter::dice::starlark_provider::with_starlark_eval_provider;
-use buck2_interpreter::from_freeze::from_freeze_error;
+use buck2_interpreter::factory::BuckStarlarkModule;
+use buck2_interpreter::factory::StarlarkEvaluatorProvider;
 use buck2_interpreter::print_handler::EventDispatcherPrintHandler;
 use buck2_interpreter::soft_error::Buck2StarlarkSoftErrorHandler;
-use buck2_interpreter::starlark_profiler::profiler::StarlarkProfilerOpt;
 use buck2_interpreter_for_build::attrs::StarlarkAttribute;
 use buck2_interpreter_for_build::rule::StarlarkRuleCallable;
 use buck2_node::bzl_or_bxl_path::BzlOrBxlPath;
 use dice::DiceComputations;
+use dice_futures::cancellation::CancellationObserver;
 use dupe::Dupe;
-use futures::FutureExt;
 use itertools::Itertools;
 use starlark::collections::SmallMap;
 use starlark::environment::FrozenModule;
 use starlark::environment::GlobalsBuilder;
-use starlark::environment::Module;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::ParamIsRequired;
@@ -73,7 +70,7 @@ use crate::bxl::eval::LIMITED_EXECUTOR;
 use crate::bxl::key::BxlKey;
 use crate::bxl::starlark_defs::context::BxlContext;
 use crate::bxl::starlark_defs::context::BxlContextCoreData;
-use crate::bxl::starlark_defs::context::BxlSafeDiceComputations;
+use crate::bxl::starlark_defs::context::BxlDiceComputations;
 use crate::bxl::starlark_defs::eval_extra::BxlEvalExtra;
 
 struct BxlAnonCallbackParamSpec;
@@ -119,7 +116,7 @@ pub(crate) fn register_anon_rule(globals: &mut GlobalsBuilder) {
             StarlarkCallable<'v, (FrozenValue,), UnpackList<FrozenValue>>,
         >,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<StarlarkRuleCallable<'v>> {
+    ) -> starlark::Result<StarlarkRuleCallable<'v>> {
         StarlarkRuleCallable::new_bxl_anon(
             StarlarkCallable::unchecked_new(r#impl.0),
             attrs,
@@ -258,119 +255,138 @@ async fn eval_bxl_for_anon_target_inner(
     let anon_impl = AnonImpl::new(dice, anon_target.dupe()).await?;
 
     let eval_kind = anon_target.dupe().eval_kind();
-    let (
-        num_declared_actions,
-        num_declared_artifacts,
-        recorded_values,
-        fulfilled_artifact_mappings,
-    ) = with_starlark_eval_provider(
-        dice,
-        &mut StarlarkProfilerOpt::disabled(),
-        &eval_kind,
-        |provider, dice| {
-            let env = Module::new();
+    let provider = StarlarkEvaluatorProvider::new(dice, eval_kind).await?;
 
-            let (analysis_registry, fulfilled_artifact_mappings) = {
-                let bxl_dice = Rc::new(RefCell::new(BxlSafeDiceComputations::new(dice, liveness)));
+    BuckStarlarkModule::with_profiling(|env| {
+        let bxl_dice = BxlDiceComputations::new(dice, liveness.dupe());
+        let bxl_ctx_core_data = Arc::new(bxl_ctx_core_data);
+        let mut extra = BxlEvalExtra::new_anon(bxl_dice, bxl_ctx_core_data.dupe());
 
-                let bxl_ctx_core_data = Rc::new(bxl_ctx_core_data);
+        let mut reentrant_eval = provider.make_reentrant_evaluator(&env, liveness.into())?;
+        let (bxl_ctx, list_res) = reentrant_eval.with_evaluator(|eval| {
+            eval.set_print_handler(&print);
+            eval.set_soft_error_handler(&Buck2StarlarkSoftErrorHandler);
+            eval.extra_mut = Some(&mut extra);
 
-                let extra = BxlEvalExtra::new_anon(bxl_dice.dupe(), bxl_ctx_core_data.dupe());
-                let (mut eval, _) = provider.make(&env)?;
+            let analysis_registry = AnalysisRegistry::new_from_owner(
+                anon_target.dupe().base_deferred_key(),
+                execution_platform.clone(),
+            )?;
 
-                eval.set_print_handler(&print);
-                eval.set_soft_error_handler(&Buck2StarlarkSoftErrorHandler);
-                eval.extra = Some(&extra);
+            let attributes =
+                anon_target.resolve_attrs(&env, dependents_analyses, execution_platform.clone())?;
 
-                let analysis_registry = AnalysisRegistry::new_from_owner(
-                    anon_target.dupe().base_deferred_key(),
-                    execution_platform.clone(),
-                )?;
+            let bxl_anon_ctx = BxlContext::new_anon(
+                env.heap(),
+                bxl_ctx_core_data,
+                digest_config,
+                analysis_registry,
+                attributes,
+            )?;
+            let bxl_ctx = ValueTyped::<BxlContext>::new_err(env.heap().alloc(bxl_anon_ctx))?;
 
-                let attributes = anon_target.resolve_attrs(
-                    &env,
-                    dependents_analyses,
-                    execution_platform.clone(),
-                )?;
+            let list_res = tokio::task::block_in_place(|| -> buck2_error::Result<Value<'_>> {
+                anon_impl.invoke(eval, bxl_ctx, attributes)
+            })?;
 
-                let bxl_anon_ctx = BxlContext::new_anon(
-                    env.heap(),
-                    bxl_ctx_core_data,
-                    bxl_dice,
-                    digest_config,
-                    analysis_registry,
-                    attributes,
-                )?;
-                let bxl_ctx = ValueTyped::<BxlContext>::new_err(env.heap().alloc(bxl_anon_ctx))?;
+            Ok((bxl_ctx, list_res))
+        })?;
 
-                let action_factory = bxl_ctx.state;
+        let action_factory = bxl_ctx.state;
 
-                let list_res = tokio::task::block_in_place(|| -> anyhow::Result<Value<'_>> {
-                    let invoke_res = anon_impl.invoke(&mut eval, bxl_ctx, attributes)?;
-                    bxl_ctx.via_dice(|dice, _| {
-                        dice.via(|dice| {
-                            action_factory
-                                .run_promises(dice, &mut eval, &eval_kind)
-                                .boxed_local()
-                        })
-                    })?;
-                    Ok(invoke_res)
-                })
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
+        tokio::task::block_in_place(|| {
+            reentrant_eval
+                .with_evaluator(|eval| run_anon_target_promises(action_factory, &bxl_ctx, eval))
+        })?;
 
-                let res_typed = ProviderCollection::try_from_value(list_res)?;
-                let res = env.heap().alloc(res_typed);
+        let res_typed = ProviderCollection::try_from_value(list_res)?;
+        let res = env.heap().alloc(res_typed);
 
-                let fulfilled_artifact_mappings = {
-                    let promise_artifact_mappings =
-                        anon_impl.promise_artifact_mappings(&mut eval)?;
+        let fulfilled_artifact_mappings = reentrant_eval.with_evaluator(|eval| {
+            let promise_artifact_mappings = anon_impl.promise_artifact_mappings(eval)?;
 
-                    anon_target.dupe().get_fulfilled_promise_artifacts(
-                        promise_artifact_mappings,
-                        res,
-                        &mut eval,
-                    )?
-                };
+            anon_target
+                .dupe()
+                .get_fulfilled_promise_artifacts(promise_artifact_mappings, res, eval)
+        })?;
 
-                let res = ValueTypedComplex::new(res)
-                    .internal_error("Just allocated the provider collection")?;
+        let res = ValueTypedComplex::new(res)
+            .ok_or_else(|| internal_error!("Just allocated the provider collection"))?;
 
-                let analysis_registry = bxl_ctx.take_state_anon()?;
-                analysis_registry
-                    .analysis_value_storage
-                    .set_result_value(res)?;
+        let analysis_registry = bxl_ctx.take_state_anon()?;
+        analysis_registry
+            .analysis_value_storage
+            .set_result_value(res)?;
 
-                (analysis_registry, fulfilled_artifact_mappings)
-            };
+        let finished_eval = reentrant_eval.finish_evaluation();
+        std::mem::drop(extra);
 
-            let num_declared_actions = analysis_registry.num_declared_actions();
-            let num_declared_artifacts = analysis_registry.num_declared_artifacts();
-            let registry_finalizer = analysis_registry.finalize(&env)?;
-            let frozen_env = env.freeze().map_err(from_freeze_error)?;
-            let recorded_values = registry_finalizer(&frozen_env)?;
-            Ok((
+        let num_declared_actions = analysis_registry.num_declared_actions();
+        let num_declared_artifacts = analysis_registry.num_declared_artifacts();
+        let registry_finalizer = analysis_registry.finalize(&env)?;
+        let (token, frozen_env, _) = finished_eval.freeze_and_finish(env)?;
+        let recorded_values = registry_finalizer(&frozen_env)?;
+
+        let validations = transitive_validations(
+            validations_from_deps,
+            recorded_values.provider_collection()?,
+        );
+
+        Ok((
+            token,
+            AnalysisResult::new(
+                recorded_values,
+                None,
+                fulfilled_artifact_mappings,
                 num_declared_actions,
                 num_declared_artifacts,
-                recorded_values,
-                fulfilled_artifact_mappings,
-            ))
-        },
-    )
-    .await?;
+                validations,
+            ),
+        ))
+    })
+}
 
-    let validations = transitive_validations(
-        validations_from_deps,
-        recorded_values.provider_collection()?,
-    );
+struct BxlAnonPromisesAccessor<'me, 'v, 'a, 'e>(
+    &'me mut Evaluator<'v, 'a, 'e>,
+    &'me BxlContext<'v>,
+);
 
-    Ok(AnalysisResult::new(
-        recorded_values,
-        None,
-        fulfilled_artifact_mappings,
-        num_declared_actions,
-        num_declared_artifacts,
-        validations,
-    ))
+impl<'me, 'v, 'a, 'e> RunAnonPromisesAccessor<'v, 'a, 'e>
+    for BxlAnonPromisesAccessor<'me, 'v, 'a, 'e>
+{
+    fn with_evaluator(
+        &mut self,
+        closure: &mut dyn FnMut(&mut Evaluator<'v, 'a, 'e>) -> buck2_error::Result<()>,
+    ) -> buck2_error::Result<()> {
+        closure(self.0)
+    }
+
+    fn via_dice_impl<'s: 'b, 'b>(
+        &'s mut self,
+        f: Box<dyn for<'d> FnOnce(&'s mut DiceComputations<'d>) + 'b>,
+    ) {
+        self.1.via_dice(self.0, |dice| dice.with_inner_less_safe(f))
+    }
+}
+
+pub(crate) fn run_anon_target_promises<'v, 'a, 'e>(
+    actions: ValueTyped<'v, AnalysisActions<'v>>,
+    ctx: &BxlContext<'v>,
+    eval: &mut Evaluator<'v, 'a, 'e>,
+) -> buck2_error::Result<()> {
+    let mut accessor = BxlAnonPromisesAccessor(eval, ctx);
+    // TODO(cjhopman): The approach here is pretty against the general model that we want. Ideally
+    // we'd like to split this into two steps:
+    //  1. Get values needed for running promises from dice
+    //  2. Run promise mappings here
+    //
+    // But the weirdness of the promise mappings means we can't really do that.
+    //
+    // Doing this and using `with_inner_less_safe` above is a practical workaround, but it comes
+    // with disadvantages, basically that it does not respect the "safety" of the standard
+    // `via_dice` thing. Concretely, that means it doesn't respect cancellations and fails to report
+    // a proper span for dice access.
+    tokio::runtime::Handle::current().block_on(actions.run_promises(&mut accessor))
 }
 
 pub(crate) fn init_eval_bxl_for_anon_target() {

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![cfg(test)]
@@ -13,6 +14,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use buck2_error::internal_error;
 use buck2_query::query::traversal::NodeLookup;
 use buck2_query::query::traversal::async_depth_first_postorder_traversal;
 use buck2_query::query::traversal::async_depth_limited_traversal;
@@ -58,11 +60,11 @@ impl QueryTarget for TestTarget {
         unimplemented!()
     }
 
-    fn rule_type(&self) -> Cow<str> {
+    fn rule_type(&self) -> Cow<'_, str> {
         unimplemented!()
     }
 
-    fn name(&self) -> Cow<str> {
+    fn name(&self) -> Cow<'_, str> {
         unimplemented!()
     }
 
@@ -136,7 +138,7 @@ impl NodeLookup<TestTarget> for TestEnv {
         self.graph
             .get(label)
             .duped()
-            .with_buck_error_context(|| format!("Invalid node: {:?}", label))
+            .ok_or_else(|| internal_error!("Invalid node: {label:?}"))
     }
 }
 
@@ -149,7 +151,7 @@ impl AsyncNodeLookup<TestTarget> for TestEnv {
         self.graph
             .get(label)
             .duped()
-            .with_buck_error_context(|| format!("Invalid node: {:?}", label))
+            .ok_or_else(|| internal_error!("Invalid node: {label:?}"))
     }
 }
 

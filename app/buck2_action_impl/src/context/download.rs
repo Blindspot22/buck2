@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -20,7 +21,6 @@ use buck2_execute::execute::request::OutputType;
 use buck2_execute::materialize::http::Checksum;
 use chrono::TimeZone;
 use chrono::Utc;
-use indexmap::IndexSet;
 use indexmap::indexset;
 use starlark::environment::MethodsBuilder;
 use starlark::eval::Evaluator;
@@ -36,8 +36,6 @@ use crate::actions::impls::download_file::UnregisteredDownloadFileAction;
 #[derive(buck2_error::Error, Debug)]
 #[buck2(tag = Tier0)]
 enum CasArtifactError {
-    #[error("Not a valid RE digest: `{0}`")]
-    InvalidDigest(String),
     #[error("is_tree and is_directory are mutually exclusive")]
     TreeAndDirectory,
 }
@@ -58,17 +56,20 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] sha256: NoneOr<&str>,
         #[starlark(require = named, default = NoneOr::None)] size_bytes: NoneOr<u64>,
         #[starlark(require = named, default = false)] is_executable: bool,
-        #[starlark(require = named, default = false)] is_deferrable: bool,
+        #[starlark(require = named, default = NoneOr::None)] has_content_based_path: NoneOr<bool>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<ValueTyped<'v, StarlarkDeclaredArtifact>> {
+    ) -> starlark::Result<ValueTyped<'v, StarlarkDeclaredArtifact<'v>>> {
         let mut this = this.state()?;
-        let (declaration, output_artifact) =
-            this.get_or_declare_output(eval, output, OutputType::File)?;
+        let (declaration, output_artifact) = this.get_or_declare_output(
+            eval,
+            output,
+            OutputType::File,
+            has_content_based_path.into_option(),
+        )?;
 
         let checksum = Checksum::new(sha1.into_option(), sha256.into_option())?;
 
         this.register_action(
-            IndexSet::new(),
             indexset![output_artifact],
             UnregisteredDownloadFileAction::new(
                 checksum,
@@ -76,7 +77,6 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
                 Arc::from(url),
                 vpnless_url.into_option().map(Arc::from),
                 is_executable,
-                is_deferrable,
             ),
             None,
             None,
@@ -107,12 +107,13 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] is_executable: bool,
         #[starlark(require = named, default = false)] is_tree: bool,
         #[starlark(require = named, default = false)] is_directory: bool,
+        #[starlark(require = named, default = NoneOr::None)] has_content_based_path: NoneOr<bool>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<ValueTyped<'v, StarlarkDeclaredArtifact>> {
+    ) -> starlark::Result<ValueTyped<'v, StarlarkDeclaredArtifact<'v>>> {
         let mut registry = this.state()?;
 
         let digest = CasDigest::parse_digest(digest, this.digest_config.cas_digest_config())
-            .with_buck_error_context(|| CasArtifactError::InvalidDigest(digest.to_owned()))?
+            .with_buck_error_context(|| format!("Not a valid RE digest: `{}`", digest))?
             .0;
 
         let use_case = RemoteExecutorUseCase::new(use_case.to_owned());
@@ -132,11 +133,14 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
             ArtifactKind::Directory(_) => OutputType::Directory,
             ArtifactKind::File => OutputType::File,
         };
-        let (output_value, output_artifact) =
-            registry.get_or_declare_output(eval, output, output_type)?;
+        let (output_value, output_artifact) = registry.get_or_declare_output(
+            eval,
+            output,
+            output_type,
+            has_content_based_path.into_option(),
+        )?;
 
         registry.register_action(
-            IndexSet::new(),
             indexset![output_artifact],
             UnregisteredCasArtifactAction {
                 digest,

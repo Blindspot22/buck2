@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -13,10 +14,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use allocative::Allocative;
-use buck2_common::file_ops::SimpleDirEntry;
+use buck2_common::file_ops::metadata::SimpleDirEntry;
 use buck2_core::cells::cell_path::CellPath;
-use buck2_core::soft_error;
-use buck2_error::buck2_error;
 use buck2_query::query::syntax::simple::eval::file_set::FileNode;
 use buck2_query::query::syntax::simple::eval::file_set::FileSet;
 use derive_more::Display;
@@ -40,7 +39,8 @@ use starlark::values::list_or_tuple::UnpackListOrTuple;
 use starlark::values::starlark_value;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
-use crate::bxl::starlark_defs::context::BxlContextNoDice;
+use crate::bxl::starlark_defs::context::BxlContext;
+use crate::bxl::starlark_defs::context::BxlContextCoreData;
 
 /// FileSetExpr is just a simple type that can be used in starlark_module
 /// functions for arguments that should be file sets. It will accept either a
@@ -54,10 +54,7 @@ pub(crate) enum FileSetExpr<'v> {
 }
 
 impl<'a> FileSetExpr<'a> {
-    pub(crate) async fn get(
-        self,
-        bxl: &BxlContextNoDice<'_>,
-    ) -> buck2_error::Result<Cow<'a, FileSet>> {
+    pub(crate) async fn get(self, bxl: &BxlContext<'_>) -> buck2_error::Result<Cow<'a, FileSet>> {
         let set = match self {
             FileSetExpr::Literal(val) => Cow::Owned(FileSet::from_iter([FileNode(
                 bxl.parse_query_file_literal(val)?,
@@ -75,6 +72,45 @@ impl<'a> FileSetExpr<'a> {
     }
 }
 
+#[derive(Debug, Clone, Allocative)]
+pub(crate) enum OwnedFileSetExpr {
+    Literal(String),
+    Literals(Vec<String>),
+    FileSet(FileSet),
+}
+
+impl OwnedFileSetExpr {
+    pub(crate) fn from_ref(expr: &FileSetExpr) -> Self {
+        match expr {
+            FileSetExpr::Literal(val) => Self::Literal(val.to_string()),
+            FileSetExpr::Literals(val) => {
+                Self::Literals(val.items.iter().map(|s| s.to_string()).collect())
+            }
+            FileSetExpr::FileSet(val) => Self::FileSet(val.0.clone()),
+        }
+    }
+
+    pub(crate) fn get<'a>(
+        &'a self,
+        core_data: &BxlContextCoreData,
+    ) -> buck2_error::Result<Cow<'a, FileSet>> {
+        let set = match self {
+            OwnedFileSetExpr::Literal(val) => Cow::Owned(FileSet::from_iter([FileNode(
+                core_data.parse_query_file_literal(val)?,
+            )])),
+            OwnedFileSetExpr::Literals(val) => {
+                let mut file_set = FileSet::new(IndexSet::new());
+                for arg in val {
+                    file_set.insert(FileNode(core_data.parse_query_file_literal(arg)?));
+                }
+                Cow::Owned(file_set)
+            }
+            OwnedFileSetExpr::FileSet(val) => Cow::Borrowed(val),
+        };
+        Ok(set)
+    }
+}
+
 #[derive(Debug, Display, ProvidesStaticType, Allocative)]
 #[derive(NoSerialize)] // TODO maybe this should be
 pub(crate) struct StarlarkFileSet(
@@ -86,7 +122,7 @@ starlark_simple_value!(StarlarkFileSet);
 
 #[starlark_value(type = "bxl.FileSet")]
 impl<'v> StarlarkValue<'v> for StarlarkFileSet {
-    fn iterate_collect(&self, heap: &'v Heap) -> starlark::Result<Vec<Value<'v>>> {
+    fn iterate_collect(&self, heap: Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
         Ok(self
             .0
             .iter()
@@ -94,37 +130,11 @@ impl<'v> StarlarkValue<'v> for StarlarkFileSet {
             .collect())
     }
 
-    fn at(&self, index: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
-        soft_error!(
-            "bxl_using_file_set_index",
-            buck2_error!(buck2_error::ErrorTag::Input, "We are going to replace file_set with native set, but native set don't have [](index) method"),
-            quiet: true
-        )?;
-        let i = i32::unpack_value_err(index)?;
-        if let Ok(i) = usize::try_from(i) {
-            if let Some(cell_path) = self.0.get_index(i) {
-                return Ok(heap.alloc(StarlarkFileNode(cell_path.clone())));
-            }
-        }
-        Err(ValueError::IndexOutOfBound(i).into())
-    }
-
     fn length(&self) -> starlark::Result<i32> {
         i32::try_from(self.0.len()).map_err(starlark::Error::new_other)
     }
 
-    fn add(&self, other: Value<'v>, heap: &'v Heap) -> Option<starlark::Result<Value<'v>>> {
-        soft_error!(
-            "bxl_using_file_set_add",
-            buck2_error!(buck2_error::ErrorTag::Input, "We are going to replace file_set with native set, but native set don't have +(add) method"),
-            quiet: true
-        ).ok()?;
-        let other = other.downcast_ref::<Self>()?;
-        let union = self.0.union(&other.0);
-        Some(Ok(heap.alloc(Self(union))))
-    }
-
-    fn sub(&self, other: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn sub(&self, other: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         let Some(other) = other.downcast_ref::<Self>() else {
             return ValueError::unsupported_with(self, "-", other);
         };
@@ -139,13 +149,13 @@ impl<'v> StarlarkValue<'v> for StarlarkFileSet {
         }
     }
 
-    fn bit_or(&self, other: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn bit_or(&self, other: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         let other = other.downcast_ref_err::<Self>()?;
         let union = self.0.union(&other.0);
         Ok(heap.alloc(Self(union)))
     }
 
-    fn bit_and(&self, other: Value<'v>, heap: &'v Heap) -> starlark::Result<Value<'v>> {
+    fn bit_and(&self, other: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         let Some(other) = other.downcast_ref::<Self>() else {
             return ValueError::unsupported_with(self, "&", other);
         };
@@ -241,14 +251,14 @@ impl fmt::Display for StarlarkReadDirSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.children() {
             Ok(children) => fmt_container(f, "[", "]", children),
-            Err(e) => write!(f, "<Error: {}>", e),
+            Err(e) => write!(f, "<Error: {e}>"),
         }
     }
 }
 
 #[starlark_value(type = "bxl.ReadDirSet")]
 impl<'v> StarlarkValue<'v> for StarlarkReadDirSet {
-    fn iterate_collect(&self, heap: &'v Heap) -> starlark::Result<Vec<Value<'v>>> {
+    fn iterate_collect(&self, heap: Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
         Ok(self
             .children()?
             .into_map(|cell_path| heap.alloc(StarlarkFileNode(cell_path))))

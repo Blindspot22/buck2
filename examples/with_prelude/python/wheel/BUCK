@@ -1,6 +1,8 @@
 load("@prelude//python:python_wheel.bzl", "python_wheel")
 load("//:test_utils.bzl", "assert_output")
 
+oncall("build_infra")
+
 python_wheel(
     name = "wheel",
     libraries = ["//python/library:printlib"],

@@ -1,32 +1,38 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
+use std::str::FromStr;
+use std::time::SystemTime;
+
 use buck2_error::BuckErrorContext;
+use buck2_fs::paths::abs_path::AbsPathBuf;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
 use itertools::Itertools;
-use serde::Deserialize;
-use serde::Serialize;
 
 #[derive(Debug, buck2_error::Error)]
-#[buck2(tag = EventLog)]
 pub(crate) enum EventLogErrors {
     #[error(
         "Trying to write to logfile that hasn't been opened yet - this is an internal error, please report. Unwritten event: {serialized_event}"
     )]
+    #[buck2(tag = EventLogNotOpen)]
     LogNotOpen { serialized_event: String },
-
     #[error("Reached End of File before reading BuckEvent in log `{0}`")]
+    #[buck2(tag = EventLogEof)]
     EndOfFile(String),
     #[error("No event log available for {idx}th last command (have latest {num_logfiles})")]
+    #[buck2(tag = EventLogIndexOutOfBounds)]
     RecentIndexOutOfBounds { idx: usize, num_logfiles: usize },
+    #[buck2(tag = Input)]
+    #[error("Can't parse a timestamp from `{0}`")]
+    InvalidTimestamp(String),
 }
 
 #[derive(Copy, Clone, Dupe, Debug)]
@@ -128,17 +134,17 @@ pub(crate) enum Compression {
     Zstd,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Invocation {
     pub command_line_args: Vec<String>,
     /// Command line args with expanded `@` args.
-    #[serde(default)] // For backwards compatibility. Delete after 2023-08-01.
     pub expanded_command_line_args: Vec<String>,
     /// This is `String` not `AbsPathBuf` because event log is cross-platform
     /// and `AbsPathBuf` is not.
     pub working_dir: String,
-    #[serde(default = "TraceId::null")]
     pub trace_id: TraceId,
+    /// Optional to support event logs from before this field was added
+    pub start_time: Option<SystemTime>,
 }
 
 impl Invocation {
@@ -153,8 +159,82 @@ impl Invocation {
     }
 
     pub(crate) fn parse_json_line(json: &str) -> buck2_error::Result<Invocation> {
-        serde_json::from_str::<Invocation>(json)
-            .with_buck_error_context(|| format!("Invalid header: {}", json.trim_end()))
+        let i = serde_json::from_str::<buck2_data::Invocation>(json)
+            .with_buck_error_context(|| format!("Invalid header: {}", json.trim_end()))?;
+        Ok(Invocation::from_proto(i))
+    }
+
+    pub fn to_proto(self) -> buck2_data::Invocation {
+        buck2_data::Invocation {
+            command_line_args: self.command_line_args.clone(),
+            expanded_command_line_args: self.expanded_command_line_args.clone(),
+            working_dir: self.working_dir.clone(),
+            trace_id: Some(self.trace_id.to_string()),
+            start_time: self.start_time.map(Into::into),
+        }
+    }
+
+    pub(crate) fn from_proto(proto: buck2_data::Invocation) -> Self {
+        Invocation {
+            command_line_args: proto.command_line_args,
+            expanded_command_line_args: proto.expanded_command_line_args,
+            working_dir: proto.working_dir,
+            trace_id: proto
+                .trace_id
+                .and_then(|s| TraceId::from_str(&s).ok())
+                .unwrap_or(TraceId::null()),
+            start_time: proto.start_time.and_then(|t| t.try_into().ok()),
+        }
+    }
+}
+
+pub mod timestamp {
+    use chrono::DateTime;
+    use chrono::Utc;
+    use prost_types::Timestamp;
+
+    use super::EventLogErrors;
+
+    pub fn parse_as_unixtime_float(time: &str) -> Option<DateTime<Utc>> {
+        let (ipart, fpart) = time.split_once(".")?;
+
+        let ipart = ipart.parse::<i64>().ok()?;
+        // The fractional part needs to be truncated to 9 places or right-padded (*10^pad)
+        // to nine places to be nanoseconds.
+        let fpart = if fpart.len() > 9 { &fpart[..9] } else { fpart };
+        let fmult = 10u32.pow(0i64.max(9i64 - (fpart.len() as i64)) as u32);
+        let fpart = fpart.parse::<u32>().ok()?;
+
+        DateTime::from_timestamp(ipart, fpart * fmult)
+    }
+
+    pub fn parse_as_unixtime_seconds(time: &str) -> Option<DateTime<Utc>> {
+        let ipart = time.parse::<i64>().ok()?;
+        DateTime::from_timestamp(ipart, 0)
+    }
+
+    pub fn parse_as_unixtime_nanoseconds(time: &str) -> Option<DateTime<Utc>> {
+        // Perfetto lets you copy the "raw value" of timestamps as billions of nanoseconds
+        if time.len() < 19 {
+            return None;
+        }
+        let ipart = time[..time.len() - 9].parse::<i64>().ok()?;
+        let fpart = time[time.len() - 9..].parse::<u32>().ok()?;
+        DateTime::from_timestamp(ipart, fpart)
+    }
+
+    pub fn parse(time: &str) -> buck2_error::Result<DateTime<Utc>> {
+        parse_as_unixtime_float(time)
+            .or_else(|| parse_as_unixtime_seconds(time))
+            .or_else(|| parse_as_unixtime_nanoseconds(time))
+            .ok_or(EventLogErrors::InvalidTimestamp(time.to_owned()).into())
+    }
+
+    pub fn to_protobuf_timestamp(dt: DateTime<Utc>) -> Timestamp {
+        Timestamp {
+            seconds: dt.timestamp(),
+            nanos: dt.timestamp_subsec_nanos() as i32,
+        }
     }
 }
 
@@ -181,6 +261,7 @@ mod tests {
             working_dir: "/Users/nga/dir45".to_owned(),
             expanded_command_line_args: Vec::new(),
             trace_id: TraceId::from_str("281d1c16-8930-40cd-8fc1-7d71355c20f5").unwrap(),
+            start_time: None,
         };
         assert_eq!(expected, line);
     }

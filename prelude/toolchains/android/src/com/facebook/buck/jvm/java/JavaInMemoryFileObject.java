@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
@@ -91,12 +92,11 @@ public class JavaInMemoryFileObject extends JarFileObject {
   }
 
   @Override
-  public void writeToJar(JarBuilder jarBuilder, String owner) {
+  public void writeToJar(JarBuilder jarBuilder) {
     if (!isWritten) {
       // Nothing was written to this file, so it doesn't really exist.
       return;
     }
-    jarBuilder.addEntry(
-        new JarEntrySupplier(new CustomZipEntry(getName()), owner, this::openInputStream));
+    jarBuilder.addEntry(new JarEntrySupplier(new CustomZipEntry(getName()), this::openInputStream));
   }
 }

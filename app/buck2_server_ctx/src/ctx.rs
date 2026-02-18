@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -17,15 +18,15 @@ use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_build_signals::env::BuildSignalsContext;
 use buck2_build_signals::env::DeferredBuildSignals;
-use buck2_build_signals::env::EarlyCommandEntry;
+use buck2_build_signals::env::EarlyCommandTimingBuilder;
 use buck2_build_signals::env::HasCriticalPathBackend;
 use buck2_certs::validate::CertState;
+use buck2_cli_proto::client_context::ExitWhen;
 use buck2_cli_proto::client_context::PreemptibleWhen;
-use buck2_core::fs::paths::file_name::FileName;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_core::pattern::pattern::ParsedPattern;
+use buck2_core::pattern::pattern::ParsedPatternWithModifiers;
 use buck2_core::pattern::pattern_type::ConfiguredProvidersPatternExtra;
 use buck2_data::CommandCriticalEnd;
 use buck2_data::CommandCriticalStart;
@@ -33,17 +34,17 @@ use buck2_data::DiceCriticalSectionEnd;
 use buck2_data::DiceCriticalSectionStart;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_execute::materialize::materializer::Materializer;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::working_dir::AbsWorkingDir;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dice::DiceComputations;
 use dice::DiceTransaction;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 
 use crate::concurrency::ConcurrencyHandler;
 use crate::concurrency::DiceUpdater;
 use crate::stderr_output_guard::StderrOutputGuard;
-
-const TIME_SPENT_SYNCHRONIZING_AND_WAITING: &str = "synchronizing-and-waiting";
 
 #[derive(Allocative, Debug)]
 pub struct PreviousCommandDataInternal {
@@ -127,6 +128,11 @@ pub trait ServerCommandContextTrait: Send + Sync {
 
     fn stderr(&self) -> buck2_error::Result<StderrOutputGuard<'_>>;
 
+    async fn command_start_event(
+        &self,
+        data: buck2_data::command_start::Data,
+    ) -> buck2_error::Result<buck2_data::CommandStart>;
+
     async fn request_metadata(&self) -> buck2_error::Result<HashMap<String, String>>;
 
     async fn config_metadata(
@@ -139,7 +145,16 @@ pub trait ServerCommandContextTrait: Send + Sync {
         providers_patterns: &[ParsedPattern<ConfiguredProvidersPatternExtra>],
     );
 
+    fn log_target_pattern_with_modifiers(
+        &self,
+        providers_patterns_with_modifiers: &[ParsedPatternWithModifiers<
+            ConfiguredProvidersPatternExtra,
+        >],
+    );
+
     fn cancellation_context(&self) -> &CancellationContext;
+
+    fn command_start(&self) -> Instant;
 }
 
 pub struct PrivateStruct(());
@@ -149,9 +164,9 @@ pub struct DiceAccessor<'a> {
     pub setup: Box<dyn DiceUpdater + 'a>,
     pub is_nested_invocation: bool,
     pub sanitized_argv: Vec<String>,
-    pub exit_when_different_state: bool,
     pub preemptible: PreemptibleWhen,
     pub build_signals: Box<dyn DeferredBuildSignals>,
+    pub exit_when: ExitWhen,
 }
 
 #[async_trait]
@@ -166,7 +181,6 @@ pub trait ServerCommandDiceContext {
         &'v self,
         exec: F,
         exclusive_cmd: Option<String>,
-        command_start: Option<Instant>,
     ) -> buck2_error::Result<R>
     where
         F: FnOnce(&'v dyn ServerCommandContextTrait, DiceTransaction) -> Fut + Send,
@@ -183,14 +197,13 @@ impl ServerCommandDiceContext for dyn ServerCommandContextTrait + '_ {
         Fut: Future<Output = buck2_error::Result<R>> + Send,
         R: Send,
     {
-        self.with_dice_ctx_maybe_exclusive(exec, None, None).await
+        self.with_dice_ctx_maybe_exclusive(exec, None).await
     }
 
     async fn with_dice_ctx_maybe_exclusive<'v, F, Fut, R>(
         &'v self,
         exec: F,
         exclusive_cmd: Option<String>,
-        command_start: Option<Instant>,
     ) -> buck2_error::Result<R>
     where
         F: FnOnce(&'v dyn ServerCommandContextTrait, DiceTransaction) -> Fut + Send,
@@ -202,10 +215,12 @@ impl ServerCommandDiceContext for dyn ServerCommandContextTrait + '_ {
             setup,
             is_nested_invocation,
             sanitized_argv,
-            exit_when_different_state,
             preemptible,
             build_signals,
+            exit_when,
         } = self.dice_accessor(PrivateStruct(())).await?;
+
+        let early_command_timing = EarlyCommandTimingBuilder::new(self.command_start());
 
         let events = self.events().dupe();
         events
@@ -215,7 +230,7 @@ impl ServerCommandDiceContext for dyn ServerCommandContextTrait + '_ {
                         .enter(
                             self.events().dupe(),
                             &*setup,
-                            |mut dice| async move {
+                            |mut dice, early_command_timing| async move {
                                 let events = self.events().dupe();
 
                                 let request_metadata = self.request_metadata().await?;
@@ -227,17 +242,6 @@ impl ServerCommandDiceContext for dyn ServerCommandContextTrait + '_ {
                                             dice_version: dice.equality_token().to_string(),
                                         },
                                         async move {
-                                            let early_command_entries =
-                                                command_start.map_or(vec![], |t| {
-                                                    // The period of time between CommandStart and CommandCriticalStart is
-                                                    // the time spent synchronizing changes and waiting for concurrent commands to
-                                                    // finish.
-                                                    vec![EarlyCommandEntry {
-                                                        kind: TIME_SPENT_SYNCHRONIZING_AND_WAITING
-                                                            .to_owned(),
-                                                        duration: t.elapsed(),
-                                                    }]
-                                                });
                                             let res = buck2_build_signals::env::scope(
                                                 build_signals,
                                                 self.events().dupe(),
@@ -256,7 +260,8 @@ impl ServerCommandDiceContext for dyn ServerCommandContextTrait + '_ {
                                                     isolation_prefix: self
                                                         .isolation_prefix()
                                                         .to_owned(),
-                                                    early_command_entries,
+                                                    early_command_timing: early_command_timing
+                                                        .finish_early_command_timing(),
                                                 },
                                                 || exec(self, dice),
                                             )
@@ -275,11 +280,12 @@ impl ServerCommandDiceContext for dyn ServerCommandContextTrait + '_ {
                             is_nested_invocation,
                             sanitized_argv,
                             exclusive_cmd,
-                            exit_when_different_state,
                             self.cancellation_context(),
                             preemptible,
-                            self.previous_command_data().into(),
+                            self.previous_command_data(),
                             self.project_root(),
+                            exit_when,
+                            early_command_timing,
                         )
                         .await,
                     DiceCriticalSectionEnd {},

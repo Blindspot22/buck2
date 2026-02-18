@@ -13,6 +13,12 @@ cxx_internal_tools(
 )
 
 prelude.python_bootstrap_binary(
+    name = "check_nonempty_output",
+    main = "check_nonempty_output.py",
+    visibility = ["PUBLIC"],
+)
+
+prelude.python_bootstrap_binary(
     name = "hmap_wrapper.py",
     main = "hmap_wrapper.py",
 )
@@ -79,6 +85,18 @@ prelude.python_bootstrap_binary(
 prelude.python_bootstrap_binary(
     name = "stderr_to_file",
     main = "stderr_to_file.py",
+    visibility = ["PUBLIC"],
+)
+
+prelude.sh_binary(
+    name = "serialized_diagnostics_to_json_wrapper",
+    main = "serialized_diagnostics_to_json_wrapper.sh",
+    visibility = ["PUBLIC"],
+)
+
+prelude.python_bootstrap_binary(
+    name = "filter_argsfile",
+    main = "filter_argsfile.py",
     visibility = ["PUBLIC"],
 )
 

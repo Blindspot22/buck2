@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Command line arguments definition for bxl functions
@@ -12,21 +13,32 @@
 use std::collections::HashSet;
 use std::fmt::Formatter;
 use std::hash::Hash;
+use std::path::Path;
 use std::sync::Arc;
 
 use allocative::Allocative;
+use buck2_build_api::configure_targets::load_compatible_patterns_with_modifiers;
+use buck2_common::dice::data::HasIoProvider;
+use buck2_core::fs::project_rel_path::ProjectRelativePath;
+use buck2_core::global_cfg_options::GlobalCfgOptions;
+use buck2_core::pattern::pattern::ModifiersError;
 use buck2_core::pattern::pattern::ParsedPattern;
+use buck2_core::pattern::pattern::ParsedPatternWithModifiers;
 use buck2_core::pattern::pattern::lex_target_pattern;
 use buck2_core::pattern::pattern_type::ProvidersPatternExtra;
 use buck2_core::pattern::pattern_type::TargetPatternExtra;
 use buck2_core::provider::label::ProvidersLabel;
+use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_core::target::label::label::TargetLabel;
-use buck2_error::BuckErrorContext;
+use buck2_error::conversion::clap::buck_error_clap_parser;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_interpreter::types::configured_providers_label::StarlarkProvidersLabel;
+use buck2_interpreter::types::target_label::StarlarkConfiguredTargetLabel;
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
 use buck2_node::load_patterns::MissingTargetBehavior;
 use buck2_node::load_patterns::load_patterns;
+use buck2_node::target_calculation::ConfiguredTargetCalculation;
 use clap::ArgAction;
 use derive_more::Display;
 use dupe::Dupe;
@@ -184,7 +196,7 @@ pub(crate) enum JsonCliArgValueData {
     List(Vec<JsonCliArgValueData>),
     #[display(
         "{}",
-        _0.iter().map(|(k, v)| format!("(k={},v={})", k, v)).join(",")
+        _0.iter().map(|(k, v)| format!("(k={k},v={v})")).join(",")
     )]
     Object(OrderedMap<String, JsonCliArgValueData>),
 }
@@ -221,7 +233,7 @@ impl JsonCliArgValueData {
         }
     }
 
-    pub(crate) fn as_starlark<'v>(&self, heap: &'v Heap) -> Value<'v> {
+    pub(crate) fn as_starlark<'v>(&self, heap: Heap<'v>) -> Value<'v> {
         match self {
             Self::Bool(b) => Value::new_bool(*b),
             // Verified when we constructed these from the `serde_json::Value`s
@@ -271,6 +283,7 @@ pub(crate) enum CliArgValue {
     List(Vec<CliArgValue>),
     None,
     TargetLabel(TargetLabel),
+    ConfiguredTargetLabel(ConfiguredTargetLabel),
     ProvidersLabel(ProvidersLabel),
     // For json CLI arg, we do not allow defaults, and we only allow primitives that can be
     // deserialized into a `serde_json::Value`.
@@ -278,7 +291,7 @@ pub(crate) enum CliArgValue {
 }
 
 impl CliArgValue {
-    pub(crate) fn as_starlark<'v>(&self, heap: &'v Heap) -> Value<'v> {
+    pub(crate) fn as_starlark<'v>(&self, heap: Heap<'v>) -> Value<'v> {
         match self {
             CliArgValue::Bool(b) => Value::new_bool(*b),
             CliArgValue::Int(i) => heap.alloc(i.clone()),
@@ -287,6 +300,9 @@ impl CliArgValue {
             CliArgValue::List(l) => heap.alloc(AllocList(l.iter().map(|v| v.as_starlark(heap)))),
             CliArgValue::None => Value::new_none(),
             CliArgValue::TargetLabel(t) => heap.alloc(StarlarkTargetLabel::new(t.dupe())),
+            CliArgValue::ConfiguredTargetLabel(c) => {
+                heap.alloc(StarlarkConfiguredTargetLabel::new(c.dupe()))
+            }
             CliArgValue::ProvidersLabel(p) => heap.alloc(StarlarkProvidersLabel::new(p.clone())),
             CliArgValue::Json(j) => heap.alloc(j.as_starlark(heap)),
         }
@@ -304,9 +320,12 @@ pub(crate) enum CliArgType {
     Option(Arc<CliArgType>),
     TargetLabel,
     TargetExpr,
+    ConfiguredTargetLabel,
+    ConfiguredTargetExpr,
     SubTarget,
     SubTargetExpr,
     Json,
+    JsonFile,
 }
 
 impl Display for CliArgType {
@@ -364,6 +383,14 @@ impl CliArgType {
         CliArgType::TargetExpr
     }
 
+    fn configured_target_label() -> Self {
+        CliArgType::ConfiguredTargetLabel
+    }
+
+    fn configured_target_expr() -> Self {
+        CliArgType::ConfiguredTargetExpr
+    }
+
     fn sub_target() -> Self {
         CliArgType::SubTarget
     }
@@ -378,6 +405,10 @@ impl CliArgType {
 
     fn json() -> Self {
         CliArgType::Json
+    }
+
+    fn json_file() -> Self {
+        CliArgType::JsonFile
     }
 }
 
@@ -462,6 +493,14 @@ impl CliArgType {
                 })?;
                 CliArgValue::TargetLabel(label.label().dupe())
             }
+            CliArgType::ConfiguredTargetLabel => {
+                let configured_label = value
+                    .downcast_ref::<StarlarkConfiguredTargetLabel>()
+                    .ok_or_else(|| {
+                        CliArgError::DefaultValueTypeError(self.dupe(), value.get_type().to_owned())
+                    })?;
+                CliArgValue::ConfiguredTargetLabel(configured_label.label().dupe())
+            }
             CliArgType::SubTarget => {
                 let label = value
                     .downcast_ref::<StarlarkProvidersLabel>()
@@ -473,11 +512,19 @@ impl CliArgType {
             CliArgType::TargetExpr => {
                 return Err(CliArgError::NoDefaultsAllowed(CliArgType::TargetExpr).into());
             }
+            CliArgType::ConfiguredTargetExpr => {
+                return Err(
+                    CliArgError::NoDefaultsAllowed(CliArgType::ConfiguredTargetExpr).into(),
+                );
+            }
             CliArgType::SubTargetExpr => {
                 return Err(CliArgError::NoDefaultsAllowed(CliArgType::SubTargetExpr).into());
             }
             CliArgType::Json => {
                 return Err(CliArgError::NoDefaultsAllowed(CliArgType::Json).into());
+            }
+            CliArgType::JsonFile => {
+                return Err(CliArgError::NoDefaultsAllowed(CliArgType::JsonFile).into());
             }
         })
     }
@@ -499,35 +546,65 @@ impl CliArgType {
                 .value_parser(variants.iter().cloned().collect::<Vec<_>>()),
             CliArgType::List(inner) => inner.to_clap(clap).num_args(0..).action(ArgAction::Append),
             CliArgType::Option(inner) => inner.to_clap(clap).required(false),
-            CliArgType::TargetLabel => clap.num_args(1).value_parser(|x: &str| {
-                anyhow::Ok(
-                    lex_target_pattern::<TargetPatternExtra>(x, false)
-                        .and_then(|parsed| parsed.pattern.infer_target())
-                        .map(|parsed| {
-                            parsed
-                                .target()
-                                .buck_error_context(CliArgError::NotALabel(x.to_owned(), "target"))
-                                .map(|_| ())
-                        })
-                        .map(|_| x.to_owned())?,
-                )
-            }),
-            CliArgType::SubTarget => clap.num_args(1).value_parser(|x: &str| {
-                anyhow::Ok(
-                    lex_target_pattern::<ProvidersPatternExtra>(x, false)
-                        .and_then(|parsed| parsed.pattern.infer_target())
-                        .map(|parsed| {
-                            parsed
-                                .target()
-                                .buck_error_context(CliArgError::NotALabel(x.to_owned(), "target"))
-                                .map(|_| ())
-                        })
-                        .map(|_| x.to_owned())?,
-                )
-            }),
+            CliArgType::TargetLabel => {
+                clap.num_args(1)
+                    .value_parser(buck_error_clap_parser(|x: &str| {
+                        buck2_error::Ok(
+                            lex_target_pattern::<TargetPatternExtra>(x, false)
+                                .and_then(|parsed| parsed.pattern.infer_target())
+                                .map(|parsed| {
+                                    parsed
+                                        .target()
+                                        .ok_or_else(|| {
+                                            CliArgError::NotALabel(x.to_owned(), "target")
+                                        })
+                                        .map(|_| ())
+                                })
+                                .map(|_| x.to_owned())?,
+                        )
+                    }))
+            }
+            CliArgType::ConfiguredTargetLabel => {
+                clap.num_args(1)
+                    .value_parser(buck_error_clap_parser(|x: &str| {
+                        buck2_error::Ok(
+                            lex_target_pattern::<TargetPatternExtra>(x, false)
+                                .and_then(|parsed| parsed.pattern.infer_target())
+                                .map(|parsed| {
+                                    parsed
+                                        .target()
+                                        .ok_or_else(|| {
+                                            CliArgError::NotALabel(x.to_owned(), "target")
+                                        })
+                                        .map(|_| ())
+                                })
+                                .map(|_| x.to_owned())?,
+                        )
+                    }))
+            }
+            CliArgType::SubTarget => {
+                clap.num_args(1)
+                    .value_parser(buck_error_clap_parser(|x: &str| {
+                        buck2_error::Ok(
+                            lex_target_pattern::<ProvidersPatternExtra>(x, false)
+                                .and_then(|parsed| parsed.pattern.infer_target())
+                                .map(|parsed| {
+                                    parsed
+                                        .target()
+                                        .ok_or_else(|| {
+                                            CliArgError::NotALabel(x.to_owned(), "target")
+                                        })
+                                        .map(|_| ())
+                                })
+                                .map(|_| x.to_owned())?,
+                        )
+                    }))
+            }
             CliArgType::TargetExpr => clap.num_args(1),
+            CliArgType::ConfiguredTargetExpr => clap.num_args(1),
             CliArgType::SubTargetExpr => clap.num_args(1),
             CliArgType::Json => clap.num_args(1),
+            CliArgType::JsonFile => clap.num_args(1),
         }
     }
 
@@ -539,7 +616,9 @@ impl CliArgType {
         async move {
             Ok(match self {
                 CliArgType::Bool => clap.value_of().map_or(Ok(None), |x| {
-                    let r: buck2_error::Result<_> = try { CliArgValue::Bool(x.parse::<bool>()?) };
+                    let r: buck2_error::Result<_> = try {
+                        CliArgValue::Bool(x.parse::<bool>().map_err(buck2_error::Error::from)?)
+                    };
                     r.map(Some)
                 })?,
                 CliArgType::Int => clap.value_of().map_or(Ok(None), |x| {
@@ -554,7 +633,7 @@ impl CliArgType {
                 CliArgType::Float => clap.value_of().map_or(Ok(None), |x| {
                     let r: buck2_error::Result<_> = try {
                         CliArgValue::Float({
-                            x.parse::<f64>()?;
+                            x.parse::<f64>().map_err(buck2_error::Error::from)?;
                             x.to_owned()
                         })
                     };
@@ -604,6 +683,46 @@ impl CliArgType {
                     };
                     r.map(Some)
                 })?,
+                CliArgType::ConfiguredTargetLabel => {
+                    let x = clap.value_of().unwrap_or("");
+
+                    let ParsedPatternWithModifiers {
+                        parsed_pattern,
+                        modifiers,
+                    } = ParsedPatternWithModifiers::<TargetPatternExtra>::parse_relaxed(
+                        &ctx.target_alias_resolver,
+                        ctx.relative_dir.as_cell_path(),
+                        x,
+                        &ctx.cell_resolver,
+                        &ctx.cell_alias_resolver,
+                    )?;
+
+                    let global_cfg_options = &ctx.global_cfg_options;
+                    let local_cfg_options = match modifiers.as_slice() {
+                        Some(modifiers) => {
+                            if !ctx.global_cfg_options.cli_modifiers.is_empty() {
+                                return Err(
+                                    ModifiersError::PatternModifiersWithGlobalModifiers.into()
+                                );
+                            }
+                            &GlobalCfgOptions {
+                                target_platform: global_cfg_options.target_platform.dupe(),
+                                cli_modifiers: modifiers.to_vec().into(),
+                            }
+                        }
+                        None => global_cfg_options,
+                    };
+
+                    Some(CliArgValue::ConfiguredTargetLabel(
+                        ctx.dice
+                            .clone()
+                            .get_configured_target(
+                                &parsed_pattern.as_target_label(x)?,
+                                local_cfg_options,
+                            )
+                            .await?,
+                    ))
+                }
                 CliArgType::SubTarget => clap.value_of().map_or(Ok(None), |x| {
                     let r: buck2_error::Result<_> = try {
                         CliArgValue::ProvidersLabel(
@@ -641,6 +760,32 @@ impl CliArgType {
                             .collect::<buck2_error::Result<_>>()?,
                     ))
                 }
+                CliArgType::ConfiguredTargetExpr => {
+                    let arg = clap.value_of().unwrap_or("");
+                    let pattern_with_modifiers =
+                        ParsedPatternWithModifiers::<TargetPatternExtra>::parse_relaxed(
+                            &ctx.target_alias_resolver,
+                            ctx.relative_dir.as_cell_path(),
+                            arg,
+                            &ctx.cell_resolver,
+                            &ctx.cell_alias_resolver,
+                        )?;
+                    let result = load_compatible_patterns_with_modifiers(
+                        &mut ctx.dice.clone(),
+                        vec![pattern_with_modifiers],
+                        &ctx.global_cfg_options,
+                        MissingTargetBehavior::Fail,
+                        false,
+                    )
+                    .await?;
+                    Some(CliArgValue::List(
+                        result
+                            .compatible_targets
+                            .iter()
+                            .map(|t| CliArgValue::ConfiguredTargetLabel(t.label().dupe()))
+                            .collect(),
+                    ))
+                }
                 CliArgType::SubTargetExpr => {
                     let x = clap.value_of().unwrap_or("");
                     let pattern = ParsedPattern::<ProvidersPatternExtra>::parse_relaxed(
@@ -660,14 +805,15 @@ impl CliArgType {
                     Some(CliArgValue::List(
                         loaded
                             .into_iter()
-                            .flat_map(|(pkg, result)| match result {
+                            .flat_map(|(package_with_modifiers, result)| match result {
                                 Ok(res) => res
                                     .keys()
                                     .map(|(target, pattern)| {
                                         Ok(CliArgValue::ProvidersLabel(
-                                            pattern
-                                                .to_owned()
-                                                .into_providers_label(pkg.dupe(), target.as_ref()),
+                                            pattern.to_owned().into_providers_label(
+                                                package_with_modifiers.package.dupe(),
+                                                target.as_ref(),
+                                            ),
                                         ))
                                     })
                                     .collect::<Vec<_>>(),
@@ -680,6 +826,33 @@ impl CliArgType {
                     None => None,
                     Some(value) => {
                         let json: serde_json::Value = serde_json::from_str(value)?;
+                        let data = JsonCliArgValueData::from_serde_value(&json);
+                        if let JsonCliArgValueData::Object(_) = data {
+                            Some(CliArgValue::Json(data))
+                        } else {
+                            return Err(CliArgError::NotAJsonObject(json.to_string()).into());
+                        }
+                    }
+                },
+                CliArgType::JsonFile => match clap.value_of() {
+                    None => None,
+                    Some(path) => {
+                        let path = Path::new(path);
+                        let abs_path = if path.is_absolute() {
+                            AbsNormPathBuf::new(path.to_path_buf())?
+                        } else {
+                            let project_root = ctx
+                                .dice
+                                .global_data()
+                                .get_io_provider()
+                                .project_root()
+                                .dupe();
+                            let project_rel_path = ProjectRelativePath::new(path)?;
+                            project_root.resolve(project_rel_path)
+                        };
+
+                        let contents = std::fs::read_to_string(abs_path)?;
+                        let json: serde_json::Value = serde_json::from_str(&contents)?;
                         let data = JsonCliArgValueData::from_serde_value(&json);
                         if let JsonCliArgValueData::Object(_) = data {
                             Some(CliArgValue::Json(data))
@@ -788,6 +961,20 @@ pub(crate) fn cli_args_module(registry: &mut GlobalsBuilder) {
         Ok(CliArgs::new(None, doc, CliArgType::target_label(), short)?)
     }
 
+    /// Takes an arg from cli, and gets a parsed `ConfiguredTargetLabel` in bxl.
+    /// The target can be configured using either ?modifier syntax or --modifier flag, in addition to --target-platforms flag.
+    fn configured_target_label<'v>(
+        #[starlark(default = "")] doc: &str,
+        #[starlark(require = named)] short: Option<Value<'v>>,
+    ) -> starlark::Result<CliArgs> {
+        Ok(CliArgs::new(
+            None,
+            doc,
+            CliArgType::configured_target_label(),
+            short,
+        )?)
+    }
+
     /// Takes an arg from cli, and gets a parsed `ProvidersLabel` in bxl.
     ///
     /// **Note**: this will not check if the target is valid.
@@ -807,6 +994,21 @@ pub(crate) fn cli_args_module(registry: &mut GlobalsBuilder) {
         Ok(CliArgs::new(None, doc, CliArgType::target_expr(), short)?)
     }
 
+    /// Takes an arg from the cli, and treats it as a target pattern, e.g. "cell//foo:bar", "cell//foo:", or "cell//foo/..."
+    /// The target can be configured using either ?modifier syntax or --modifier flag, in addition to --target-platforms flag.
+    /// We will get a list of `ConfiguredTargetLabel` in bxl.
+    fn configured_target_expr<'v>(
+        #[starlark(default = "")] doc: &str,
+        #[starlark(require = named)] short: Option<Value<'v>>,
+    ) -> starlark::Result<CliArgs> {
+        Ok(CliArgs::new(
+            None,
+            doc,
+            CliArgType::configured_target_expr(),
+            short,
+        )?)
+    }
+
     /// Takes an arg from cli, and would be treated as a sub target pattern. We will get a list of `ProvidersLabel` in bxl.
     fn sub_target_expr<'v>(
         #[starlark(default = "")] doc: &str,
@@ -822,12 +1024,21 @@ pub(crate) fn cli_args_module(registry: &mut GlobalsBuilder) {
 
     /// Takes an arg from cli, and would be treated as a json string, and return a json object in bxl.
     ///
-    /// **Note**: It will not accept a json file path, if you want to pass a json file path, you can use like in cli `--flag "$(cat foo.json)"`
+    /// **Note**: It will not accept a json file path, if you want to pass a json file path, you can use `cli_args.json_file()`
     fn json<'v>(
         #[starlark(default = "")] doc: &str,
         #[starlark(require = named)] short: Option<Value<'v>>,
     ) -> starlark::Result<CliArgs> {
         Ok(CliArgs::new(None, doc, CliArgType::json(), short)?)
+    }
+
+    /// Takes an arg from cli, and would be treated as a json file, and return a json object in bxl.
+    /// It support both relative and absolute path. If it's a relative path, it will be resolved relative to the buck project root.
+    fn json_file<'v>(
+        #[starlark(default = "")] doc: &str,
+        #[starlark(require = named)] short: Option<Value<'v>>,
+    ) -> starlark::Result<CliArgs> {
+        Ok(CliArgs::new(None, doc, CliArgType::json_file(), short)?)
     }
 }
 
@@ -865,10 +1076,13 @@ impl<'a> ArgAccessor<'a> {
 mod tests {
     use std::collections::HashSet;
 
+    use buck2_core::configuration::data::ConfigurationData;
     use buck2_core::provider::label::ProvidersLabel;
     use buck2_core::provider::label::testing::ProvidersLabelTestExt;
+    use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
     use buck2_core::target::label::label::TargetLabel;
     use buck2_interpreter::types::configured_providers_label::StarlarkProvidersLabel;
+    use buck2_interpreter::types::target_label::StarlarkConfiguredTargetLabel;
     use buck2_interpreter::types::target_label::StarlarkTargetLabel;
     use num_bigint::BigInt;
     use starlark::values::Heap;
@@ -888,7 +1102,7 @@ mod tests {
         ];
 
         let cli_arg = CliArgValue::List(args);
-        let printed = format!("{}", cli_arg);
+        let printed = format!("{cli_arg}");
         assert_eq!(printed, "true,test,1");
 
         Ok(())
@@ -927,81 +1141,94 @@ mod tests {
 
     #[test]
     fn coerce_starlark() -> buck2_error::Result<()> {
-        let heap = Heap::new();
+        Heap::temp(|heap| {
+            assert_eq!(
+                CliArgType::bool().coerce_value(Value::new_bool(true))?,
+                CliArgValue::Bool(true)
+            );
 
-        assert_eq!(
-            CliArgType::bool().coerce_value(Value::new_bool(true))?,
-            CliArgValue::Bool(true)
-        );
+            assert_eq!(
+                CliArgType::int().coerce_value(heap.alloc(42))?,
+                CliArgValue::Int(BigInt::from(42))
+            );
 
-        assert_eq!(
-            CliArgType::int().coerce_value(heap.alloc(42))?,
-            CliArgValue::Int(BigInt::from(42))
-        );
+            assert_eq!(
+                CliArgType::float().coerce_value(heap.alloc(4.2))?,
+                CliArgValue::Float("4.2".to_owned())
+            );
 
-        assert_eq!(
-            CliArgType::float().coerce_value(heap.alloc(4.2))?,
-            CliArgValue::Float("4.2".to_owned())
-        );
+            assert_eq!(
+                CliArgType::string().coerce_value(heap.alloc("foobar"))?,
+                CliArgValue::String("foobar".to_owned())
+            );
 
-        assert_eq!(
-            CliArgType::string().coerce_value(heap.alloc("foobar"))?,
-            CliArgValue::String("foobar".to_owned())
-        );
+            assert_eq!(
+                CliArgType::enumeration(HashSet::from_iter([
+                    "a".to_owned(),
+                    "b".to_owned(),
+                    "c".to_owned()
+                ]))
+                .coerce_value(heap.alloc("a"))?,
+                CliArgValue::String("a".to_owned())
+            );
 
-        assert_eq!(
-            CliArgType::enumeration(HashSet::from_iter([
-                "a".to_owned(),
-                "b".to_owned(),
-                "c".to_owned()
-            ]))
-            .coerce_value(heap.alloc("a"))?,
-            CliArgValue::String("a".to_owned())
-        );
+            assert_eq!(
+                CliArgType::option(CliArgType::int()).coerce_value(Value::new_none())?,
+                CliArgValue::None
+            );
 
-        assert_eq!(
-            CliArgType::option(CliArgType::int()).coerce_value(Value::new_none())?,
-            CliArgValue::None
-        );
+            assert_eq!(
+                CliArgType::option(CliArgType::bool()).coerce_value(Value::new_bool(true))?,
+                CliArgValue::Bool(true)
+            );
 
-        assert_eq!(
-            CliArgType::option(CliArgType::bool()).coerce_value(Value::new_bool(true))?,
-            CliArgValue::Bool(true)
-        );
+            assert_eq!(
+                CliArgType::bool().coerce_value(Value::new_bool(false))?,
+                CliArgValue::Bool(false)
+            );
 
-        assert_eq!(
-            CliArgType::bool().coerce_value(Value::new_bool(false))?,
-            CliArgValue::Bool(false)
-        );
+            assert_eq!(
+                CliArgType::list(CliArgType::int()).coerce_value(heap.alloc(vec![1, 4, 2]))?,
+                CliArgValue::List(vec![
+                    CliArgValue::Int(BigInt::from(1)),
+                    CliArgValue::Int(BigInt::from(4)),
+                    CliArgValue::Int(BigInt::from(2))
+                ])
+            );
 
-        assert_eq!(
-            CliArgType::list(CliArgType::int()).coerce_value(heap.alloc(vec![1, 4, 2]))?,
-            CliArgValue::List(vec![
-                CliArgValue::Int(BigInt::from(1)),
-                CliArgValue::Int(BigInt::from(4)),
-                CliArgValue::Int(BigInt::from(2))
-            ])
-        );
+            assert_eq!(
+                CliArgType::target_label().coerce_value(heap.alloc(StarlarkTargetLabel::new(
+                    TargetLabel::testing_parse("root//foo:bar")
+                )))?,
+                CliArgValue::TargetLabel(TargetLabel::testing_parse("root//foo:bar"))
+            );
 
-        assert_eq!(
-            CliArgType::target_label().coerce_value(heap.alloc(StarlarkTargetLabel::new(
-                TargetLabel::testing_parse("root//foo:bar")
-            )))?,
-            CliArgValue::TargetLabel(TargetLabel::testing_parse("root//foo:bar"))
-        );
+            assert_eq!(
+                CliArgType::configured_target_label().coerce_value(heap.alloc(
+                    StarlarkConfiguredTargetLabel::new(ConfiguredTargetLabel::testing_parse(
+                        "root//foo:bar",
+                        ConfigurationData::testing_new(),
+                    ))
+                ))?,
+                CliArgValue::ConfiguredTargetLabel(ConfiguredTargetLabel::testing_parse(
+                    "root//foo:bar",
+                    ConfigurationData::testing_new(),
+                ))
+            );
 
-        assert_eq!(
-            CliArgType::sub_target().coerce_value(heap.alloc(StarlarkProvidersLabel::new(
-                ProvidersLabel::testing_new("foo", "pkg", "bar", Some(&["a", "b"]))
-            )))?,
-            CliArgValue::ProvidersLabel(ProvidersLabel::testing_new(
-                "foo",
-                "pkg",
-                "bar",
-                Some(&["a", "b"])
-            ))
-        );
+            assert_eq!(
+                CliArgType::sub_target().coerce_value(heap.alloc(StarlarkProvidersLabel::new(
+                    ProvidersLabel::testing_new("foo", "pkg", "bar", Some(&["a", "b"]))
+                )))?,
+                CliArgValue::ProvidersLabel(ProvidersLabel::testing_new(
+                    "foo",
+                    "pkg",
+                    "bar",
+                    Some(&["a", "b"])
+                ))
+            );
 
-        Ok(())
+            Ok(())
+        })
     }
 }

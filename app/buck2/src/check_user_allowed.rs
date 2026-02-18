@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #[cfg(windows)]
@@ -70,10 +71,11 @@ pub(crate) fn check_user_allowed() -> buck2_error::Result<()> {
 pub(crate) fn check_user_allowed() -> buck2_error::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    use buck2_core::fs::fs_util;
-    use buck2_core::fs::paths::abs_path::AbsPath;
     use buck2_core::soft_error;
-    use buck2_error::BuckErrorContext;
+    use buck2_error::internal_error;
+    use buck2_fs::error::IoResultExt;
+    use buck2_fs::fs_util;
+    use buck2_fs::paths::abs_path::AbsPath;
 
     #[derive(Debug, buck2_error::Error)]
     #[error("buck2 is not allowed to run as root (unless home dir is owned by root)")]
@@ -81,9 +83,9 @@ pub(crate) fn check_user_allowed() -> buck2_error::Result<()> {
     struct RootError;
 
     if nix::unistd::geteuid().is_root() {
-        let home_dir = dirs::home_dir().buck_error_context("home dir not found")?;
+        let home_dir = dirs::home_dir().ok_or_else(|| internal_error!("home dir not found"))?;
         if let Ok(home_dir) = AbsPath::new(&home_dir) {
-            let home_dir_metadata = fs_util::metadata(home_dir)?;
+            let home_dir_metadata = fs_util::metadata(home_dir).categorize_internal()?;
             if home_dir_metadata.uid() != 0 {
                 soft_error!("root_not_allowed", RootError.into())?;
             }

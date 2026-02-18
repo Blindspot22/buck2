@@ -1,23 +1,33 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
+use std::hash::Hash;
 use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_common::external_symlink::ExternalSymlink;
-use buck2_common::file_ops::FileDigest;
-use buck2_common::file_ops::FileMetadata;
+use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_core::content_hash::ContentBasedPathHash;
+use buck2_util::strong_hasher::Blake3StrongHasher;
 use dupe::Dupe;
 
 use crate::directory::ActionDirectoryEntry;
 use crate::directory::ActionDirectoryMember;
 use crate::directory::ActionSharedDirectory;
+
+#[derive(Clone, Dupe, Debug, PartialEq, Eq, Allocative)]
+pub enum UnderlyingContentBasedPathHash {
+    Inferred,
+    Explicit(Arc<ContentBasedPathHash>),
+}
 
 /// `ArtifactValue` stores enough information about an artifact such that, if
 /// it's in the CAS, we don't have to read anything from disk. In summary:
@@ -38,12 +48,9 @@ pub struct ArtifactValue {
     /// `entry` above, which is rooted at this artifact's path, `deps` is
     /// always rooted at the project root.
     deps: Option<ActionSharedDirectory>,
-}
-
-impl From<ActionDirectoryEntry<ActionSharedDirectory>> for ArtifactValue {
-    fn from(entry: ActionDirectoryEntry<ActionSharedDirectory>) -> Self {
-        Self::new(entry, None)
-    }
+    /// The content-based path hash of the artifact. This is usually inferred,
+    /// but in some cases (e.g. projected artifacts) it is explicitly provided.
+    content_based_path_hash: UnderlyingContentBasedPathHash,
 }
 
 impl ArtifactValue {
@@ -51,13 +58,18 @@ impl ArtifactValue {
         entry: ActionDirectoryEntry<ActionSharedDirectory>,
         deps: Option<ActionSharedDirectory>,
     ) -> Self {
-        Self { entry, deps }
+        Self {
+            entry,
+            deps,
+            content_based_path_hash: UnderlyingContentBasedPathHash::Inferred,
+        }
     }
 
     pub fn file(meta: FileMetadata) -> Self {
         Self {
             entry: ActionDirectoryEntry::Leaf(ActionDirectoryMember::File(meta)),
             deps: None,
+            content_based_path_hash: UnderlyingContentBasedPathHash::Inferred,
         }
     }
 
@@ -65,6 +77,7 @@ impl ArtifactValue {
         Self {
             entry: ActionDirectoryEntry::Dir(dir),
             deps: None,
+            content_based_path_hash: UnderlyingContentBasedPathHash::Inferred,
         }
     }
 
@@ -76,6 +89,7 @@ impl ArtifactValue {
         Self {
             entry: ActionDirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(symlink)),
             deps: None,
+            content_based_path_hash: UnderlyingContentBasedPathHash::Inferred,
         }
     }
 
@@ -94,5 +108,43 @@ impl ArtifactValue {
             ActionDirectoryEntry::Leaf(ActionDirectoryMember::Symlink(..)) => None,
             ActionDirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(..)) => None,
         }
+    }
+
+    pub fn with_content_based_path_hash(
+        self,
+        content_based_path_hash: ContentBasedPathHash,
+    ) -> Self {
+        Self {
+            content_based_path_hash: UnderlyingContentBasedPathHash::Explicit(Arc::new(
+                content_based_path_hash,
+            )),
+            ..self
+        }
+    }
+
+    pub fn content_based_path_hash(&self) -> ContentBasedPathHash {
+        if let UnderlyingContentBasedPathHash::Explicit(hash) = &self.content_based_path_hash {
+            return (**hash).clone();
+        }
+
+        match &self.entry {
+            ActionDirectoryEntry::Dir(d) => {
+                ContentBasedPathHash::new(d.fingerprint().data().raw_digest().as_bytes())
+            }
+            ActionDirectoryEntry::Leaf(ActionDirectoryMember::File(f)) => {
+                ContentBasedPathHash::new(f.digest.data().raw_digest().as_bytes())
+            }
+            ActionDirectoryEntry::Leaf(ActionDirectoryMember::Symlink(s)) => {
+                let mut hasher = Blake3StrongHasher::new();
+                s.target().hash(&mut hasher);
+                ContentBasedPathHash::new(hasher.finalize().as_bytes())
+            }
+            ActionDirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(s)) => {
+                let mut hasher = Blake3StrongHasher::new();
+                s.hash(&mut hasher);
+                ContentBasedPathHash::new(hasher.finalize().as_bytes())
+            }
+        }
+        .expect("Constructed valid content-based path hash")
     }
 }

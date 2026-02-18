@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -15,7 +16,6 @@ from dataclasses import dataclass
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test
 from buck2.tests.e2e_util.helper.golden import golden
-
 from buck2.tests.e2e_util.helper.utils import filter_events
 
 
@@ -34,18 +34,26 @@ class CriticalPathLog:
 async def do_critical_path(buck: Buck) -> None:
     await buck.build("//:step_3", "--no-remote-cache")
 
-    critical_path = (await buck.log("critical-path")).stdout.strip().splitlines()
+    critical_path = (
+        (await buck.log("critical-path", "--format=tabulated"))
+        .stdout.strip()
+        .splitlines()
+    )
     critical_path = [e.split("\t") for e in critical_path]
 
     trimmed_critical_path = [
         CriticalPathLog(e[0], e[1].split(" ")[0], e[2], e[3], e[4], e[5], e[6], e[7])
         for e in critical_path
+        if e[0] not in ("waiting")
     ]
 
     expected = [
-        ("synchronizing-and-waiting", ""),
+        ("buckd_command_init", ""),
+        ("file-watcher-wait", ""),
+        ("other-command-start-overhead", ""),
         ("listing", "root//"),
         ("load", "root//"),
+        ("configure_target", ""),
         ("analysis", "root//:step_0"),
         ("analysis", "root//:step_1"),
         ("analysis", "root//:step_2"),
@@ -53,11 +61,14 @@ async def do_critical_path(buck: Buck) -> None:
         ("action", "root//:step_0"),
         ("action", "root//:step_1"),
         ("action", "root//:step_2"),
+        ("build_key", ""),
         ("action", "root//:step_3"),
         ("materialization", "root//:step_3"),
         ("compute-critical-path", ""),
     ]
-    assert len(critical_path) == len(expected)
+
+    # List of n.kind gives better failure messages
+    assert [n.kind for n in trimmed_critical_path] == [e[0] for e in expected]
 
     for s, e in zip(reversed(trimmed_critical_path), reversed(expected)):
         if s.kind == "action":
@@ -90,10 +101,15 @@ async def test_critical_path_json(buck: Buck) -> None:
     )
     critical_path = [json.loads(e) for e in critical_path]
 
+    trimmed_critical_path = [e for e in critical_path if e["kind"] not in ("waiting")]
+
     expected = [
-        ("synchronizing-and-waiting", None),
+        ("buckd_command_init", None),
+        ("file-watcher-wait", None),
+        ("other-command-start-overhead", None),
         ("listing", "root//"),
         ("load", "root//"),
+        ("configure_target", None),
         ("analysis", "root//:step_0"),
         ("analysis", "root//:step_1"),
         ("analysis", "root//:step_2"),
@@ -101,19 +117,27 @@ async def test_critical_path_json(buck: Buck) -> None:
         ("action", "root//:step_0"),
         ("action", "root//:step_1"),
         ("action", "root//:step_2"),
+        ("build_key", None),
         ("action", "root//:step_3"),
         ("materialization", "root//:step_3"),
         ("compute-critical-path", None),
     ]
-    assert len(critical_path) == len(expected)
 
-    for critical, exp in zip(reversed(critical_path), reversed(expected)):
+    # List of n.kind gives better failure messages
+    assert [n["kind"] for n in trimmed_critical_path] == [e[0] for e in expected]
+
+    for critical, exp in zip(reversed(trimmed_critical_path), reversed(expected)):
         assert "kind" in critical
         assert critical["kind"] == exp[0]
 
-        if (
-            critical["kind"] == "compute-critical-path"
-            or critical["kind"] == "synchronizing-and-waiting"
+        if critical["kind"] in (
+            "waiting",
+            "compute-critical-path",
+            "file-watcher-wait",
+            "other-command-start-overhead",
+            "buckd_command_init",
+            "build_key",
+            "configure_target",
         ):
             assert "name" not in critical
         else:
@@ -153,6 +177,9 @@ async def test_dynamic_input_events(buck: Buck) -> None:
         for ev in events
         if ev["key"] == "critical_path_logging_node"
     ]
+    for ev in events:
+        if "time_span" in ev:
+            ev["time_span"] = [None, None]
 
     golden(
         output=json.dumps(events, sort_keys=True, indent=2),
@@ -177,9 +204,16 @@ async def test_dynamic_input(buck: Buck) -> None:
         assert "kind" in critical
         t = critical["kind"]
 
-        if (
-            critical["kind"] == "compute-critical-path"
-            or critical["kind"] == "synchronizing-and-waiting"
+        if t in ("waiting"):
+            continue
+
+        if critical["kind"] in (
+            "compute-critical-path",
+            "file-watcher-wait",
+            "other-command-start-overhead",
+            "buckd_command_init",
+            "configure_target",
+            "build_key",
         ):
             assert "name" not in critical
         else:
@@ -213,8 +247,8 @@ async def test_critical_path_metadata(buck: Buck) -> None:
     await buck.build(
         "//:step_0",
         "--no-remote-cache",
-        "-c",
-        "client.id=myclient",
+        "--client-metadata",
+        "id=myclient",
         "--oncall=myoncall",
     )
 
@@ -338,3 +372,31 @@ async def test_critical_path_top_level_targets(buck: Buck) -> None:
         == 0
     )
     assert total_duration == d2
+
+
+@buck_test()
+async def test_critical_path_test_entries(buck: Buck) -> None:
+    await buck.test(
+        "//:long_running_test",
+    )
+
+    critical_path_actions = await critical_path_helper(buck)
+
+    # Should have exactly 1 TestListing.
+    test_listing_actions = [
+        action for action in critical_path_actions if "TestListing" in action["entry"]
+    ]
+    assert len(test_listing_actions) == 1
+
+    # Assert there is 1 TestExecution with the correct data.
+    test_execution_actions = [
+        action for action in critical_path_actions if "TestExecution" in action["entry"]
+    ]
+
+    assert len(test_execution_actions) == 1
+    test_execution_action = test_execution_actions[0]
+    assert (
+        test_execution_action["entry"]["TestExecution"]["suite"]
+        == "root//:long_running_test"
+    )
+    assert test_execution_action["duration_us"] > 100000  # 100ms

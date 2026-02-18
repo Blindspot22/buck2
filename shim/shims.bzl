@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@prelude//utils:buckconfig.bzl", "read_bool")
@@ -113,11 +114,13 @@ def _update_headers_with_src_headers(src_headers, out_headers):
     return out_headers
 
 def prebuilt_cpp_library(
+        name,
         headers = None,
         linker_flags = None,
         private_linker_flags = None,
         **kwargs):
     prelude.prebuilt_cxx_library(
+        name = name,
         exported_headers = headers,
         exported_linker_flags = linker_flags,
         linker_flags = private_linker_flags,
@@ -134,9 +137,7 @@ def cpp_library(
         undefined_symbols = None,
         visibility = ["PUBLIC"],
         auto_headers = None,
-        arch_preprocessor_flags = None,
         modular_headers = None,
-        os_deps = [],
         arch_compiler_flags = None,
         labels = None,
         linker_flags = None,
@@ -145,6 +146,8 @@ def cpp_library(
         headers = None,
         private_headers = None,
         propagated_pp_flags = (),
+        feature = None,
+        preferred_linkage = None,
         **kwargs):
     base_path = native.package_name()
     oss_depends_on_folly = read_bool("oss_depends_on", "folly", False)
@@ -152,9 +155,7 @@ def cpp_library(
     if oss_depends_on_folly and header_base_path.startswith("folly"):
         header_base_path = header_base_path.replace("folly/", "", 1)
 
-    _unused = (undefined_symbols, arch_preprocessor_flags, modular_headers, arch_compiler_flags, labels, propagated_pp_flags)  # @unused
-    if os_deps:
-        deps += _select_os_deps(_fix_dict_deps(os_deps))
+    _unused = (undefined_symbols, modular_headers, arch_compiler_flags, labels, propagated_pp_flags, feature, preferred_linkage)  # @unused
     if headers == None:
         headers = []
     if labels != None and "oss_dependency" in labels:
@@ -196,6 +197,7 @@ def cpp_library(
     )
 
 def cpp_unittest(
+        name,
         deps = [],
         external_deps = [],
         visibility = ["PUBLIC"],
@@ -209,8 +211,9 @@ def cpp_unittest(
         default_strip_mode = None,
         resources = {},
         test_main = None,
+        versions = None,
         **kwargs):
-    _unused = (supports_static_listing, allocator, owner, labels, emails, extract_helper_lib, compiler_specific_flags, default_strip_mode)  # @unused
+    _unused = (supports_static_listing, allocator, owner, labels, emails, extract_helper_lib, compiler_specific_flags, default_strip_mode, versions)  # @unused
     if test_main != None:
         deps = deps + [test_main]
     elif read_bool("oss", "folly_cxx_tests", True):
@@ -219,6 +222,7 @@ def cpp_unittest(
         deps = deps + CPP_UNITTEST_DEPS
 
     prelude.cxx_test(
+        name = name,
         deps = _fix_deps(deps + external_deps_to_targets(external_deps)),
         visibility = visibility,
         resources = _fix_resources(resources),
@@ -226,6 +230,7 @@ def cpp_unittest(
     )
 
 def cpp_binary(
+        name,
         deps = [],
         external_deps = [],
         visibility = ["PUBLIC"],
@@ -237,34 +242,50 @@ def cpp_binary(
         **kwargs):
     _unused = (dlopen_enabled, compiler_specific_flags, os_linker_flags, allocator, modules)  # @unused
     prelude.cxx_binary(
+        name = name,
         deps = _fix_deps(deps + external_deps_to_targets(external_deps)),
         visibility = visibility,
         **kwargs
     )
 
+def java_binary(
+        name,
+        jar_style = None,
+        runtime = None,
+        *args,
+        **kwargs):
+    _unused = (jar_style, runtime)  # @unused
+    return prelude.java_binary(
+        name = name,
+        *args,
+        **kwargs
+    )
+
 def rust_library(
+        name,
+        edition = None,
         rustc_flags = [],
         deps = [],
         named_deps = None,
-        os_deps = None,
         test_deps = None,
         test_env = None,
-        test_os_deps = None,
         autocargo = None,
         unittests = None,
         mapped_srcs = {},
+        cpp_deps = None,
+        cxx_bridge = None,
         visibility = ["PUBLIC"],
         **kwargs):
-    _unused = (test_deps, test_env, test_os_deps, named_deps, autocargo, unittests, visibility)  # @unused
+    _unused = (test_deps, test_env, named_deps, autocargo, unittests, visibility, cpp_deps, cxx_bridge)  # @unused
     deps = _fix_deps(deps)
     mapped_srcs = _maybe_select_map(mapped_srcs, _fix_mapped_srcs)
-    if os_deps:
-        deps += _select_os_deps(_fix_dict_deps(os_deps))
 
     # Reset visibility because internal and external paths are different.
     visibility = ["PUBLIC"]
 
     prelude.rust_library(
+        name = name,
+        edition = edition or _default_rust_edition(),
         rustc_flags = rustc_flags + [_CFG_BUCK_BUILD],
         deps = deps,
         visibility = visibility,
@@ -273,6 +294,8 @@ def rust_library(
     )
 
 def rust_binary(
+        name,
+        edition = None,
         rustc_flags = [],
         deps = [],
         autocargo = None,
@@ -286,6 +309,8 @@ def rust_binary(
 
     # @lint-ignore BUCKLINT: avoid "Direct usage of native rules is not allowed."
     prelude.rust_binary(
+        name = name,
+        edition = edition or _default_rust_edition(),
         rustc_flags = rustc_flags + [_CFG_BUCK_BUILD],
         deps = deps,
         visibility = visibility,
@@ -293,6 +318,8 @@ def rust_binary(
     )
 
 def rust_unittest(
+        name,
+        edition = None,
         rustc_flags = [],
         deps = [],
         visibility = ["PUBLIC"],
@@ -300,6 +327,8 @@ def rust_unittest(
     deps = _fix_deps(deps)
 
     prelude.rust_test(
+        name = name,
+        edition = edition or _default_rust_edition(),
         rustc_flags = rustc_flags + [_CFG_BUCK_BUILD],
         deps = deps,
         visibility = visibility,
@@ -310,21 +339,90 @@ def rust_protobuf_library(
         name,
         srcs,
         build_script,
-        protos,
-        build_env = None,
-        deps = [],
+        protos = None,  # Pass a list of files. They'll be placed in the cwd. Prefer using proto_srcs.
+        deps = None,
         test_deps = None,
-        doctests = True):
+        doctests = True,
+        build_env = None,
+        proto_srcs = None,
+        crate_name = None):  # Use a proto_srcs() target, path is exposed as BUCK_PROTO_SRCS.
+    _rust_protobuf_library(
+        name,
+        srcs,
+        build_script,
+        "buck2_protoc_dev",
+        "prost",
+        "prost-types",
+        "tonic",
+        protos,
+        deps,
+        test_deps,
+        doctests,
+        build_env,
+        proto_srcs,
+        crate_name,
+    )
+
+def rust_protobuf_library_prost_0134(
+        name,
+        srcs,
+        build_script,
+        protos = None,  # Pass a list of files. They'll be placed in the cwd. Prefer using proto_srcs.
+        deps = None,
+        test_deps = None,
+        doctests = True,
+        build_env = None,
+        proto_srcs = None,
+        crate_name = None):
+    # Use a proto_srcs() target, path is exposed as BUCK_PROTO_SRCS.
+    _rust_protobuf_library(
+        name,
+        srcs,
+        build_script,
+        "buck2_protoc_dev-tonic-0-12-3",
+        "prost-0-13-4",
+        "prost-types-0-13-4",
+        "tonic-0-12-3",
+        protos,
+        deps,
+        test_deps,
+        doctests,
+        build_env,
+        proto_srcs,
+        crate_name,
+    )
+
+def _rust_protobuf_library(
+        name,
+        srcs,
+        build_script,
+        buck2_protoc_dev,
+        versioned_prost_target,
+        versioned_prost_types_target,
+        versioned_tonic_target,
+        protos,  # Pass a list of files. They'll be placed in the cwd. Prefer using proto_srcs.
+        deps,
+        test_deps,
+        doctests,
+        build_env,
+        proto_srcs,
+        crate_name):  # Use a proto_srcs() target, path is exposed as BUCK_PROTO_SRCS.
     build_name = name + "-build"
     proto_name = name + "-proto"
+
+    deps = (deps or []) + [
+        "fbsource//third-party/rust:" + versioned_prost_target,
+        "fbsource//third-party/rust:" + versioned_prost_types_target,
+        "fbsource//third-party/rust:" + versioned_tonic_target,
+    ]
 
     rust_binary(
         name = build_name,
         srcs = [build_script],
         crate_root = build_script,
         deps = [
-            "fbsource//third-party/rust:tonic-build",
-            "//buck2/app/buck2_protoc_dev:buck2_protoc_dev",
+            "fbsource//third-party/rust:" + versioned_tonic_target,
+            "//buck2/app/buck2_protoc_dev:" + buck2_protoc_dev,
         ],
     )
 
@@ -335,10 +433,12 @@ def rust_protobuf_library(
             "PROTOC_INCLUDE": "$(location shim//third-party/proto:google_protobuf)",
         },
     )
+    if proto_srcs:
+        build_env["BUCK_PROTO_SRCS"] = "$(location {})".format(proto_srcs)
 
     prelude.genrule(
         name = proto_name,
-        srcs = protos + [
+        srcs = (protos or []) + [
             "shim//third-party/proto:google_protobuf",
         ],
         out = ".",
@@ -355,19 +455,39 @@ def rust_protobuf_library(
             "OUT_DIR": "$(location :{})".format(proto_name),
         },
         test_deps = test_deps,
-        deps = [
-            "fbsource//third-party/rust:prost",
-            "fbsource//third-party/rust:prost-types",
-        ] + (deps or []),
+        deps = deps,
+        crate = crate_name or name,
     )
 
+ProtoSrcsInfo = provider(fields = ["srcs"])
+
+def _proto_srcs_impl(ctx):
+    srcs = {src.basename: src for src in ctx.attrs.srcs}
+    for dep in ctx.attrs.deps:
+        for src in dep[ProtoSrcsInfo].srcs:
+            if src.basename in srcs:
+                fail("Duplicate src:", src.basename)
+            srcs[src.basename] = src
+    out = ctx.actions.copied_dir(ctx.attrs.name, srcs)
+    return [DefaultInfo(default_output = out), ProtoSrcsInfo(srcs = srcs.values())]
+
+proto_srcs = rule(
+    impl = _proto_srcs_impl,
+    attrs = {
+        "deps": attrs.list(attrs.dep(), default = []),
+        "srcs": attrs.list(attrs.source(), default = []),
+    },
+)
+
 def ocaml_binary(
+        name,
         deps = [],
         visibility = ["PUBLIC"],
         **kwargs):
     deps = _fix_deps(deps)
 
     prelude.ocaml_binary(
+        name = name,
         deps = deps,
         visibility = visibility,
         **kwargs
@@ -379,20 +499,6 @@ def _maybe_select_map(v, mapper):
     if is_select(v):
         return select_map(v, mapper)
     return mapper(v)
-
-def _select_os_deps(xss) -> Select:
-    d = {
-        "prelude//os:" + os: xs
-        for os, xs in xss
-    }
-    d["DEFAULT"] = []
-    return select(d)
-
-def _fix_dict_deps(xss):
-    return [
-        (k, _fix_deps(xs))
-        for k, xs in xss
-    ]
 
 def _fix_mapped_srcs(xs: dict[str, str]):
     # For reasons, this is source -> file path, which is the opposite of what
@@ -412,6 +518,41 @@ def _fix_resources(resources):
         return {k: translate_target(v) for k, v in resources.items()}
 
     fail("Unexpected type {} for resources".format(type(resources)))
+
+def _default_rust_edition():
+    package = native.package_name()
+
+    # Parse buckconfig entries in the following form:
+    #
+    #     [rust]
+    #     default_edition = 2024
+    #     default_edition:buck2 = 2021
+    #     default_edition:buck2/dice = 2024
+    #
+    if package:
+        split = package.split("/")
+        for i in range(len(split)):
+            parent_directory = "/".join(split[:len(split) - i])
+            edition = read_config("rust", "default_edition:" + parent_directory)
+            if edition != None:
+                return edition
+
+    return read_config("rust", "default_edition")
+
+def thrift_library(
+        name,
+        thrift_srcs,
+        languages,
+        deps = [],
+        py_base_module = None,
+        rust_deps = [],
+        thrift_rust_options = [],
+        **kwargs):
+    for l in languages:
+        if False:
+            pass
+        else:
+            print("FIXME(buck2-shims-meta): unsupported thrift language: {}".format(l))
 
 # Do a nasty conversion of e.g. ("supercaml", None, "ocaml-dev") to
 # 'fbcode//third-party-buck/platform010/build/supercaml:ocaml-dev'

@@ -1,28 +1,31 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
 use std::time::Instant;
 
 use async_recursion::async_recursion;
-use buck2_common::file_ops::FileDigest;
-use buck2_common::file_ops::FileDigestConfig;
-use buck2_common::file_ops::FileMetadata;
-use buck2_common::file_ops::FileType;
-use buck2_common::file_ops::TrackedFileDigest;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::RelativePath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::FileDigestConfig;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::FileType;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::RelativePath;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_util::future::try_join_all;
 use derive_more::Add;
 use faccess::PathExt;
@@ -114,7 +117,11 @@ async fn build_dir_from_disk(
     let mut file_futures: Vec<_> = Vec::new();
 
     let files = blocking_executor
-        .execute_io_inline(|| fs_util::read_dir(&disk_path).map_err(Into::into))
+        .execute_io_inline(|| {
+            fs_util::read_dir(&disk_path)
+                .categorize_internal()
+                .map_err(Into::into)
+        })
         .await?;
     for file in files {
         let file = file?;
@@ -123,7 +130,7 @@ async fn build_dir_from_disk(
 
         let filename = filename
             .to_str()
-            .buck_error_context("Filename is not UTF-8")
+            .ok_or_else(|| internal_error!("Filename is not UTF-8"))
             .and_then(|f| FileNameBuf::try_from(f.to_owned()))
             .with_buck_error_context(|| {
                 format!("Invalid filename: {}", disk_path.clone().display())
@@ -195,7 +202,7 @@ fn build_file_metadata(
         let _permit = SEMAPHORE.acquire().await.unwrap();
         let hashing_start = Instant::now();
         let file_digest = file_digest.await??;
-        let hashing_duration = HashingInfo::new(hashing_start.elapsed(), 1);
+        let hashing_duration = HashingInfo::new(Instant::now() - hashing_start, 1);
         let file_metadata = FileMetadata {
             digest: TrackedFileDigest::new(file_digest, digest_config.as_cas_digest_config()),
             is_executable: executable.await?,
@@ -209,26 +216,28 @@ fn create_symlink(
     path: &AbsNormPathBuf,
     project_root: &AbsNormPath,
 ) -> buck2_error::Result<ActionDirectoryMember> {
-    let mut symlink_target = fs_util::read_link(path)?;
+    let mut symlink_target = fs_util::read_link(path).categorize_internal()?;
     if cfg!(windows) && symlink_target.is_relative() {
         let directory_path = path
             .parent()
-            .buck_error_context(format!("failed to get parent of {}", path.display()))?;
-        let canonical_path = fs_util::canonicalize(directory_path).buck_error_context(format!(
-            "failed to get canonical path of {}",
-            directory_path.display()
-        ))?;
+            .ok_or_else(|| internal_error!("failed to get parent of {}", path.display()))?;
+        let canonical_path = fs_util::canonicalize(directory_path)
+            .categorize_internal()
+            .buck_error_context(format!(
+                "failed to get canonical path of {}",
+                directory_path.display()
+            ))?;
         if !canonical_path.starts_with(project_root) {
             let normalized_target = symlink_target
                 .to_str()
-                .buck_error_context("can't convert path to str")?
+                .ok_or_else(|| internal_error!("can't convert path to str"))?
                 .replace('\\', "/");
             let target_abspath =
                 canonical_path.join_normalized(RelativePath::from_path(&normalized_target)?)?;
             // Recalculate symlink target if it points from symlinked buck-out to the files inside project root.
             if target_abspath.starts_with(project_root) {
                 symlink_target = diff_paths(target_abspath, directory_path)
-                    .buck_error_context("can't calculate relative path")?;
+                    .ok_or_else(|| internal_error!("can't calculate relative path"))?;
             }
         }
     }

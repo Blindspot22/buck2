@@ -1,3 +1,6 @@
 load(":defs.bzl", "dynamic_output")
 
-dynamic_output(name = "dynamic_output")
+dynamic_output(
+    name = "dynamic_output",
+    has_content_based_path = read_config("test", "has_content_based_path", "False") in ["True", "true"],
+)

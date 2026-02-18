@@ -22,8 +22,8 @@ matter how many times an operation is performed, it yields the same result) and
 hermeticity (code is sealed off from the world), giving the right results,
 reliably.
 
-Buck2 multi-language support includes C++, Python, Java, Go, Rust, Erlang,
-OCaml, and more.
+Buck2 multi-language support includes C++, Python, Java, Kotlin, Go, Rust,
+Erlang, OCaml, and more.
 
 The following sub-sections contain a list of links to key points in the Buck2
 Documentation website that explain the advantages of using Buck2 for you and
@@ -33,7 +33,7 @@ your team.
 
 ### For end users
 
-- [Getting Started](about/getting_started.md) - how to get started with using
+- [Getting Started](getting_started/index.md) - how to get started with using
   Buck2.
 - [Benefits](about/benefits/compared_to_buck1.md) - the benefits of using Buck2.
 
@@ -55,6 +55,8 @@ your team.
   new languages.
 - [Build APIs](api/build) - documentation for the APIs available when writing
   rules.
+- [Loading Data](users/loading_data.md) - How to load static data from JSON and
+  TOML files in rules.
 - [Starlark Types](https://github.com/facebook/starlark-rust/blob/main/docs/types.md) -
   rules are written in Starlark (which is approximately Python), but our version
   adds types.
@@ -110,7 +112,7 @@ your team.
   dependency features.
 - [Building Erlang with Buck2](https://www.youtube.com/watch?v=4ALgsBqNBhQ)
   Andreas talks about building WhatsApp with Buck2.
-- [antlir2: Deterministic image bulids with Buck2](https://www.youtube.com/watch?v=Wv-ilbckSx4)
+- [antlir2: Deterministic image builds with Buck2](https://www.youtube.com/watch?v=Wv-ilbckSx4)
   talks about layering a packaging system over Buck2.
 
 ### External projects using Buck2

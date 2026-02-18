@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future::Future;
@@ -25,7 +26,10 @@ pub enum AuditOutputResult {
     Match(ActionQueryNode),
     /// If the platform configuration of the buck-out path doesn't match the platform used when calling
     /// audit output, then we return the unconfigured target label.
-    MaybeRelevant(TargetLabel),
+    MaybeRelevantForConfigurationHashPath(TargetLabel),
+    /// If we were given a content-based path, we cannot tell which configured node(s) it came from,
+    /// so just return the unconfigured target label.
+    MatchContentBasedPath(TargetLabel),
 }
 
 pub static AUDIT_OUTPUT: LateBinding<

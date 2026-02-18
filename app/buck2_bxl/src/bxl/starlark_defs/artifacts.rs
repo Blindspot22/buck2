@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! bxl additional artifact types
@@ -22,7 +23,7 @@ use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::artifact_groups::ResolvedArtifactGroup;
 use buck2_build_api::artifact_groups::calculation::ArtifactGroupCalculation;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
-use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
+use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_declared_artifact::StarlarkDeclaredArtifact;
 use buck2_execute::path::artifact_path::ArtifactPath;
 use derive_more::Display;
@@ -53,15 +54,9 @@ use starlark::values::type_repr::StarlarkTypeRepr;
 
 #[derive(Clone, Debug, Dupe, Trace, ProvidesStaticType, Allocative)]
 #[repr(C)]
-pub(crate) enum EnsuredArtifact {
-    Artifact {
-        artifact: StarlarkArtifact,
-        abs: bool,
-    },
-    DeclaredArtifact {
-        artifact: StarlarkDeclaredArtifact,
-        abs: bool,
-    },
+pub(crate) struct EnsuredArtifact {
+    pub(crate) artifact: StarlarkArtifact,
+    pub(crate) abs: bool,
 }
 
 #[derive(Clone, Debug, Trace, ProvidesStaticType, Allocative)]
@@ -115,7 +110,7 @@ pub(crate) struct EnsuredArtifactGroup<'v> {
 }
 
 impl<'v> EnsuredArtifactGroup<'v> {
-    pub(crate) fn new(ags: Vec<ArtifactGroup>, abs: bool, heap: &'v Heap) -> Self {
+    pub(crate) fn new(ags: Vec<ArtifactGroup>, abs: bool, heap: Heap<'v>) -> Self {
         EnsuredArtifactGroup {
             inner: heap.alloc(EnsuredArtifactGroupInner { ags }),
 
@@ -185,46 +180,35 @@ impl Eq for EnsuredArtifact {}
 #[derive(StarlarkTypeRepr, UnpackValue, Display)]
 pub(crate) enum ArtifactArg<'v> {
     Artifact(&'v StarlarkArtifact),
-    DeclaredArtifact(&'v StarlarkDeclaredArtifact),
+    DeclaredArtifact(&'v StarlarkDeclaredArtifact<'v>),
 }
 
 impl<'v> ArtifactArg<'v> {
-    pub(crate) fn into_ensured_artifact(self) -> EnsuredArtifact {
+    pub(crate) fn into_ensured_artifact(self) -> buck2_error::Result<EnsuredArtifact> {
         match self {
-            ArtifactArg::Artifact(artifact) => EnsuredArtifact::Artifact {
+            ArtifactArg::Artifact(artifact) => Ok(EnsuredArtifact {
                 artifact: artifact.dupe(),
                 abs: false,
-            },
-            ArtifactArg::DeclaredArtifact(artifact) => EnsuredArtifact::DeclaredArtifact {
-                artifact: artifact.dupe(),
+            }),
+            ArtifactArg::DeclaredArtifact(artifact) => Ok(EnsuredArtifact {
+                artifact: StarlarkArtifact::new(artifact.get_bound_artifact()?),
                 abs: false,
-            },
+            }),
         }
     }
 }
 
 impl EnsuredArtifact {
-    pub(crate) fn as_artifact(&self) -> &dyn StarlarkArtifactLike {
-        match self {
-            EnsuredArtifact::Artifact { artifact, .. } => artifact as &dyn StarlarkArtifactLike,
-            EnsuredArtifact::DeclaredArtifact { artifact, .. } => {
-                artifact as &dyn StarlarkArtifactLike
-            }
-        }
+    pub(crate) fn as_artifact(&self) -> &dyn StarlarkInputArtifactLike<'_> {
+        &self.artifact as &dyn StarlarkInputArtifactLike
     }
 
     pub(crate) fn abs(&self) -> bool {
-        match self {
-            EnsuredArtifact::Artifact { abs, .. } => *abs,
-            EnsuredArtifact::DeclaredArtifact { abs, .. } => *abs,
-        }
+        self.abs
     }
 
-    pub(crate) fn get_artifact_path(&self) -> ArtifactPath {
-        match self {
-            EnsuredArtifact::Artifact { artifact, .. } => artifact.get_artifact_path(),
-            EnsuredArtifact::DeclaredArtifact { artifact, .. } => artifact.get_artifact_path(),
-        }
+    pub(crate) fn get_artifact_path(&self) -> ArtifactPath<'_> {
+        self.artifact.get_artifact_path()
     }
 }
 
@@ -256,19 +240,19 @@ impl Display for EnsuredArtifactGroupInner {
 }
 
 impl<'v> AllocValue<'v> for EnsuredArtifact {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
 
 impl<'v> AllocValue<'v> for EnsuredArtifactGroup<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
 
 impl<'v> AllocValue<'v> for EnsuredArtifactGroupInner {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -341,22 +325,14 @@ fn ensured_artifact_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn abs_path<'v>(
         this: ValueTyped<'v, EnsuredArtifact>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<ValueTyped<'v, EnsuredArtifact>> {
         if this.abs() {
             Ok(this)
         } else {
-            let artifact = match &*this {
-                EnsuredArtifact::Artifact { artifact, .. } => EnsuredArtifact::Artifact {
-                    artifact: artifact.dupe(),
-                    abs: true,
-                },
-                EnsuredArtifact::DeclaredArtifact { artifact, .. } => {
-                    EnsuredArtifact::DeclaredArtifact {
-                        artifact: artifact.dupe(),
-                        abs: true,
-                    }
-                }
+            let artifact = EnsuredArtifact {
+                artifact: this.artifact.dupe(),
+                abs: true,
             };
 
             Ok(heap.alloc_typed(artifact))
@@ -380,22 +356,14 @@ fn ensured_artifact_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn rel_path<'v>(
         this: ValueTyped<'v, EnsuredArtifact>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<ValueTyped<'v, EnsuredArtifact>> {
         if !this.abs() {
             Ok(this)
         } else {
-            let artifact = match &*this {
-                EnsuredArtifact::Artifact { artifact, .. } => EnsuredArtifact::Artifact {
-                    artifact: artifact.dupe(),
-                    abs: false,
-                },
-                EnsuredArtifact::DeclaredArtifact { artifact, .. } => {
-                    EnsuredArtifact::DeclaredArtifact {
-                        artifact: artifact.dupe(),
-                        abs: false,
-                    }
-                }
+            let artifact = EnsuredArtifact {
+                artifact: this.artifact.dupe(),
+                abs: false,
             };
 
             Ok(heap.alloc_typed(artifact))
@@ -427,7 +395,7 @@ fn artifact_group_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn abs_path<'v>(
         this: ValueTyped<'v, EnsuredArtifactGroup<'v>>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<ValueTyped<'v, EnsuredArtifactGroup<'v>>> {
         if this.abs {
             Ok(this)
@@ -458,7 +426,7 @@ fn artifact_group_methods(builder: &mut MethodsBuilder) {
     /// ```
     fn rel_path<'v>(
         this: ValueTyped<'v, EnsuredArtifactGroup<'v>>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<ValueTyped<'v, EnsuredArtifactGroup<'v>>> {
         if !this.abs {
             Ok(this)
@@ -482,7 +450,7 @@ pub(crate) struct LazyBuildArtifact {
 
 impl LazyBuildArtifact {
     pub(crate) fn new(artifact: &StarlarkArtifact) -> Self {
-        let as_artifact = artifact as &dyn StarlarkArtifactLike;
+        let as_artifact = artifact as &dyn StarlarkInputArtifactLike;
 
         let bound_artifact = as_artifact.get_bound_artifact().unwrap();
         let associated_artifacts = as_artifact.get_associated_artifacts();
@@ -507,7 +475,7 @@ impl LazyBuildArtifact {
     pub(crate) async fn build_artifacts(
         &self,
         ctx: &mut DiceComputations<'_>,
-    ) -> anyhow::Result<Vec<ActionOutputs>> {
+    ) -> buck2_error::Result<Vec<ActionOutputs>> {
         let res = ctx
             .try_compute_join(&self.artifacts_to_build, |ctx, artifact_group| {
                 async move {

@@ -1,21 +1,25 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Processing and reporting the the results of the build
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::fs::OpenOptions;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::io::BufWriter;
+use std::io::Write;
 use std::sync::Arc;
 
 use buck2_artifact::artifact::artifact_dump::ArtifactInfo;
@@ -30,28 +34,35 @@ use buck2_core::cells::CellResolver;
 use buck2_core::configuration::compatibility::MaybeCompatible;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
+use buck2_core::pattern::pattern::Modifiers;
+use buck2_core::pattern::pattern::TargetLabelWithModifiers;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::NonDefaultProvidersName;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
-use buck2_core::target::label::label::TargetLabel;
+use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_data::ErrorReport;
 use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_error::BuckErrorContext;
 use buck2_error::UniqueRootId;
+use buck2_error::classify::ErrorLike;
+use buck2_error::classify::Tier;
+use buck2_error::classify::best_error;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::directory::ActionDirectoryEntry;
 use buck2_execute::directory::ActionDirectoryMember;
 use buck2_execute::directory::ActionSharedDirectory;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_wrapper_common::invocation_id::TraceId;
 use derivative::Derivative;
 use dice::DiceComputations;
 use dupe::Dupe;
+use dupe::OptionDupedExt;
 use itertools::Either;
 use itertools::EitherOrBoth;
 use itertools::Itertools;
@@ -60,21 +71,26 @@ use starlark_map::small_set::SmallSet;
 
 use crate::build::BuildProviderType;
 use crate::build::ConfiguredBuildTargetResult;
+use crate::build::action_error::ActionErrorBuildOptions;
 use crate::build::action_error::BuildReportActionError;
+use crate::build::action_error::MAX_ERROR_CONTENT_BYTES;
+use crate::build::detailed_aggregated_metrics::types::AllTargetsAggregatedData;
+use crate::build::detailed_aggregated_metrics::types::DetailedAggregatedMetrics;
+use crate::build::detailed_aggregated_metrics::types::TopLevelTargetAggregatedData;
+use crate::build::graph_properties::GraphPropertiesOptions;
+use crate::build::sketch_impl::DEFAULT_SKETCH_VERSION;
+use crate::build::sketch_impl::VersionedSketcher;
+use crate::bxl::types::BxlFunctionLabel;
 
 #[derive(Debug, Serialize)]
 #[allow(clippy::upper_case_acronyms)] // We care about how they serialise
+#[derive(Default)]
 enum BuildOutcome {
+    #[default]
     SUCCESS,
     FAIL,
     #[allow(dead_code)] // Part of the spec, but not yet used
     CANCELED,
-}
-
-impl Default for BuildOutcome {
-    fn default() -> Self {
-        Self::SUCCESS
-    }
 }
 
 /// DO NOT UPDATE WITHOUT UPDATING `docs/users/build_observability/build_report.md`!
@@ -88,6 +104,15 @@ pub struct BuildReport {
     project_root: AbsNormPathBuf,
     truncated: bool,
     strings: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Build metrics aggregated across all targets.
+    build_metrics: Option<AllTargetsBuildMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_configured_graph_sketch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_graph_sketch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_category: Option<String>,
 }
 
 /// The fields that stored in the unconfigured `BuildReportEntry` for buck1 backcompat.
@@ -125,6 +150,55 @@ pub(crate) struct ConfiguredBuildReportEntry {
     /// The serialized graph sketch for this target, if it was produced.
     #[serde(skip_serializing_if = "Option::is_none")]
     configured_graph_sketch: Option<String>,
+    /// Build metrics for this target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build_metrics: Option<Arc<TargetBuildMetrics>>,
+    /// A sketch of the analysis memory used by this target
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retained_analysis_memory_sketch: Option<String>,
+    /// A sketch of the action graph for this target
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_graph_sketch: Option<String>,
+}
+
+/// DO NOT UPDATE WITHOUT UPDATING `docs/users/build_observability/build_report.md`!
+#[derive(Default, Debug, Serialize)]
+pub(crate) struct TargetBuildMetrics {
+    /// The total number of nodes in the action graph, if we were able to fully
+    /// traverse it.
+    pub action_graph_size: Option<u64>,
+    /// These are metrics aggregated without normalization.
+    pub metrics: AggregatedBuildMetrics,
+    /// "Amortized" metrics are aggregated by dividing the metric/cost evenly
+    /// across all top-level targets that require the node that produced the
+    /// metric.
+    pub amortized_metrics: AggregatedBuildMetrics,
+    /// Max value for peak memory usage across all remote actions.
+    pub remote_max_memory_peak_bytes: u64,
+    /// Max value for peak memory usage across all local actions.
+    pub local_max_memory_peak_bytes: u64,
+}
+
+/// DO NOT UPDATE WITHOUT UPDATING `docs/users/build_observability/build_report.md`!
+#[derive(Default, Debug, Serialize)]
+pub(crate) struct AggregatedBuildMetrics {
+    pub full_graph_execution_time_ms: f64,
+    pub full_graph_output_size_bytes: f64,
+    pub local_execution_time_ms: f64,
+    pub remote_execution_time_ms: f64,
+    pub local_executions: f64,
+    pub remote_executions: f64,
+    pub remote_cache_hits: f64,
+    pub analysis_retained_memory: f64,
+    pub declared_actions: f64,
+}
+
+/// DO NOT UPDATE WITHOUT UPDATING `docs/users/build_observability/build_report.md`!
+#[derive(Default, Debug, Serialize)]
+pub(crate) struct AllTargetsBuildMetrics {
+    pub action_graph_size: Option<u64>,
+    pub metrics: AggregatedBuildMetrics,
+    pub compute_time_ms: Option<u64>,
 }
 
 /// DO NOT UPDATE WITHOUT UPDATING `docs/users/build_observability/build_report.md`!
@@ -166,12 +240,14 @@ struct BuildReportError {
     cause_index: usize,
 }
 
-#[derive(Derivative, Serialize, Eq, PartialEq, Hash)]
+#[derive(Derivative, Serialize, Eq, PartialEq, Hash, Clone)]
 #[derivative(Debug)]
 #[serde(untagged)]
 enum EntryLabel {
     #[derivative(Debug = "transparent")]
-    Target(TargetLabel),
+    Target(TargetLabelWithModifiers),
+    #[derivative(Debug = "transparent")]
+    BxlFunction(BxlFunctionLabel),
 }
 
 pub struct BuildReportOpts {
@@ -180,6 +256,10 @@ pub struct BuildReportOpts {
     pub unstable_include_package_project_relative_paths: bool,
     pub unstable_include_artifact_hash_information: bool,
     pub unstable_build_report_filename: String,
+    pub graph_properties_opts: GraphPropertiesOptions,
+    pub unstable_streaming_build_report_filename: String,
+    pub unstable_exclude_action_error_diagnostics: bool,
+    pub unstable_truncate_error_content: bool,
 }
 
 pub struct BuildReportCollector<'a> {
@@ -194,22 +274,42 @@ pub struct BuildReportCollector<'a> {
     include_failures: bool,
     include_package_project_relative_paths: bool,
     include_artifact_hash_information: bool,
+    exclude_action_error_diagnostics: bool,
+    truncate_error_content: bool,
+    graph_properties_opts: GraphPropertiesOptions,
+    total_configured_graph_sketch: Option<VersionedSketcher<ConfiguredTargetLabel>>,
+}
+
+// Build report generation should never produce an input error, always return an error with an infra tag
+#[derive(buck2_error::Error)]
+#[error(transparent)]
+#[buck2(tag = BuildReport)]
+pub struct BuildReportGenerationError(buck2_error::Error);
+
+impl From<buck2_error::Error> for BuildReportGenerationError {
+    fn from(e: buck2_error::Error) -> Self {
+        Self(e)
+    }
 }
 
 impl<'a> BuildReportCollector<'a> {
-    pub fn convert(
-        trace_id: &TraceId,
+    // ============================================================================
+    // Main conversion functions for build reports
+    // ============================================================================
+
+    /// Creates a new BuildReportCollector with the given configuration
+    fn new(
         artifact_fs: &'a ArtifactFs,
         cell_resolver: &'a CellResolver,
-        project_root: &ProjectRoot,
         include_unconfigured_section: bool,
         include_failures: bool,
         include_package_project_relative_paths: bool,
         include_artifact_hash_information: bool,
-        configured: &BTreeMap<ConfiguredProvidersLabel, Option<ConfiguredBuildTargetResult>>,
-        other_errors: &BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
-    ) -> BuildReport {
-        let mut this: BuildReportCollector<'_> = Self {
+        exclude_action_error_diagnostics: bool,
+        truncate_error_content: bool,
+        graph_properties_opts: GraphPropertiesOptions,
+    ) -> Self {
+        Self {
             artifact_fs,
             cell_resolver,
             overall_success: true,
@@ -221,7 +321,47 @@ impl<'a> BuildReportCollector<'a> {
             include_failures,
             include_package_project_relative_paths,
             include_artifact_hash_information,
-        };
+            exclude_action_error_diagnostics,
+            truncate_error_content,
+            graph_properties_opts,
+            total_configured_graph_sketch: if graph_properties_opts.total_configured_graph_sketch {
+                Some(DEFAULT_SKETCH_VERSION.create_sketcher())
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Converts build results and errors into a BuildReport for regular builds.
+    /// This processes both configured build targets and associated errors.
+    pub(crate) fn convert(
+        trace_id: &TraceId,
+        artifact_fs: &'a ArtifactFs,
+        cell_resolver: &'a CellResolver,
+        project_root: &ProjectRoot,
+        include_unconfigured_section: bool,
+        include_failures: bool,
+        include_package_project_relative_paths: bool,
+        include_artifact_hash_information: bool,
+        exclude_action_error_diagnostics: bool,
+        truncate_error_content: bool,
+        configured: &BTreeMap<ConfiguredProvidersLabel, Option<ConfiguredBuildTargetResult>>,
+        configured_to_pattern_modifiers: &HashMap<ConfiguredProvidersLabel, BTreeSet<Modifiers>>,
+        other_errors: &BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
+        detailed_metrics: Option<DetailedAggregatedMetrics>,
+        graph_properties_opts: GraphPropertiesOptions,
+    ) -> Result<BuildReport, BuildReportGenerationError> {
+        let mut this = Self::new(
+            artifact_fs,
+            cell_resolver,
+            include_unconfigured_section,
+            include_failures,
+            include_package_project_relative_paths,
+            include_artifact_hash_information,
+            exclude_action_error_diagnostics,
+            truncate_error_content,
+            graph_properties_opts,
+        );
         let mut entries = HashMap::new();
 
         if other_errors.values().flatten().next().is_some() {
@@ -229,6 +369,28 @@ impl<'a> BuildReportCollector<'a> {
             // with a target below, so we'd miss this otherwise.
             this.overall_success = false;
         }
+
+        let mut metrics_by_configured: HashMap<ConfiguredProvidersLabel, Arc<TargetBuildMetrics>> =
+            HashMap::new();
+        let mut action_graph_sketches_by_configured: HashMap<ConfiguredProvidersLabel, String> =
+            HashMap::new();
+        if let Some(detailed_metrics) = detailed_metrics.as_ref() {
+            for top_level_metrics in &detailed_metrics.top_level_target_metrics {
+                metrics_by_configured.insert(
+                    top_level_metrics.target.clone(),
+                    Self::convert_per_target_metrics(top_level_metrics).into(),
+                );
+                if let Some(sketch) = &top_level_metrics.action_graph_sketch {
+                    if !sketch.is_empty() {
+                        action_graph_sketches_by_configured
+                            .insert(top_level_metrics.target.clone(), sketch.serialize());
+                    }
+                }
+            }
+        }
+
+        // Collect all ErrorReports to find the best (most severe) one
+        let mut all_error_reports = Vec::new();
 
         // The `BuildTargetResult` doesn't group errors by their unconfigured target, so we need
         // to do a little iterator munging to achieve that ourselves
@@ -238,6 +400,7 @@ impl<'a> BuildReportCollector<'a> {
         let errors_by_unconfigured = other_errors
             .iter()
             .filter_map(|(l, e)| Some((l.as_ref()?.target().dupe(), e)));
+
         for i in Itertools::merge_join_by(
             IntoIterator::into_iter(&results_by_unconfigured),
             errors_by_unconfigured,
@@ -252,22 +415,216 @@ impl<'a> BuildReportCollector<'a> {
                     (label, Either::Right(std::iter::empty()), &**errors)
                 }
             };
-            let entry = this.collect_results_for_unconfigured(label.dupe(), results, errors);
-            entries.insert(EntryLabel::Target(label), entry);
+
+            // Group results by Modifiers
+            let mut results_by_modifiers: BTreeMap<
+                Modifiers,
+                Vec<(
+                    &ConfiguredProvidersLabel,
+                    &Option<ConfiguredBuildTargetResult>,
+                )>,
+            > = BTreeMap::new();
+
+            for (configured_label, result) in results {
+                let modifiers_vec = configured_to_pattern_modifiers.get(configured_label);
+
+                if let Some(modifiers_vec) = modifiers_vec {
+                    for modifier in modifiers_vec {
+                        results_by_modifiers
+                            .entry(modifier.dupe())
+                            .or_default()
+                            .push((configured_label, result));
+                    }
+                } else {
+                    results_by_modifiers
+                        .entry(Modifiers::new(None))
+                        .or_default()
+                        .push((configured_label, result));
+                }
+            }
+
+            // If the mapping is empty, results were empty, indicating the EitherOrBoth::Right case.
+            // We still need to create an entry for the error.
+            if results_by_modifiers.is_empty() {
+                results_by_modifiers.insert(Modifiers::new(None), Vec::new());
+            }
+
+            all_error_reports.extend(errors.iter().map(ErrorReport::from));
+
+            for (modifiers, modifiers_results) in results_by_modifiers {
+                let target_with_modifiers = TargetLabelWithModifiers {
+                    target_label: label.dupe(),
+                    modifiers,
+                };
+
+                let entry = this.collect_results_for_unconfigured(
+                    target_with_modifiers.dupe(),
+                    modifiers_results,
+                    errors,
+                    &mut metrics_by_configured,
+                    &action_graph_sketches_by_configured,
+                    &mut all_error_reports,
+                )?;
+
+                entries.insert(EntryLabel::Target(target_with_modifiers), entry);
+            }
+        }
+        this.assemble_build_report(
+            trace_id,
+            project_root,
+            entries,
+            all_error_reports,
+            detailed_metrics,
+        )
+    }
+
+    /// Converts BXL errors into a BuildReport for BXL's ensure artifacts errors.
+    /// This processes errors associated with a single BXL function execution.
+    pub(crate) fn convert_bxl(
+        trace_id: &TraceId,
+        artifact_fs: &'a ArtifactFs,
+        cell_resolver: &'a CellResolver,
+        project_root: &ProjectRoot,
+        include_unconfigured_section: bool,
+        include_failures: bool,
+        include_package_project_relative_paths: bool,
+        include_artifact_hash_information: bool,
+        exclude_action_error_diagnostics: bool,
+        truncate_error_content: bool,
+        bxl_label: &BxlFunctionLabel,
+        errors: &[buck2_error::Error],
+        detailed_metrics: Option<DetailedAggregatedMetrics>,
+        graph_properties_opts: GraphPropertiesOptions,
+    ) -> Result<BuildReport, BuildReportGenerationError> {
+        let mut this = Self::new(
+            artifact_fs,
+            cell_resolver,
+            include_unconfigured_section,
+            include_failures,
+            include_package_project_relative_paths,
+            include_artifact_hash_information,
+            exclude_action_error_diagnostics,
+            truncate_error_content,
+            graph_properties_opts,
+        );
+        let mut entries = HashMap::new();
+        let all_error_reports: Vec<ErrorReport> = errors.iter().map(ErrorReport::from).collect();
+
+        if !errors.is_empty() {
+            this.overall_success = false;
         }
 
-        BuildReport {
+        // Create entry for the BXL function
+        let entry_label = EntryLabel::BxlFunction(bxl_label.clone());
+        let errors = this.convert_error_list(errors, entry_label.clone());
+
+        let entry = BuildReportEntry {
+            compatible: None,
+            configured: HashMap::new(),
+            errors,
+            package_project_relative_path: None, // Package doesn't apply to BXL
+        };
+
+        entries.insert(entry_label, entry);
+
+        this.assemble_build_report(
+            trace_id,
+            project_root,
+            entries,
+            all_error_reports,
+            detailed_metrics,
+        )
+    }
+
+    /// Assembles the BuildReport from collected data
+    fn assemble_build_report(
+        self,
+        trace_id: &TraceId,
+        project_root: &ProjectRoot,
+        entries: HashMap<EntryLabel, BuildReportEntry>,
+        all_error_reports: Vec<ErrorReport>,
+        detailed_metrics: Option<DetailedAggregatedMetrics>,
+    ) -> Result<BuildReport, BuildReportGenerationError> {
+        let total_configured_graph_sketch = self
+            .total_configured_graph_sketch
+            .map(|sketcher| sketcher.into_mergeable_graph_sketch().serialize());
+
+        let action_graph_sketch = detailed_metrics
+            .as_ref()
+            .and_then(|m| m.action_graph_sketch.as_ref())
+            .filter(|sketch| !sketch.is_empty())
+            .map(|sketch| sketch.serialize());
+
+        // Determine error category using existing Buck2 error classification
+        let error_category = if let Some(best_error_report) = best_error(&all_error_reports) {
+            Some(best_error_report.category().to_string())
+        } else if self.overall_success {
+            None // No errors = no error category
+        } else {
+            Some(Tier::Tier0.to_string()) // Default when build failed but no specific error tracked
+        };
+
+        Ok(BuildReport {
             trace_id: trace_id.dupe(),
-            success: this.overall_success,
+            success: self.overall_success,
             results: entries,
-            failures: this.failures,
+            failures: self.failures,
             project_root: project_root.root().to_owned(),
             // In buck1 we may truncate build report for a large number of targets.
             // Setting this to false since we don't currently truncate buck2's build report.
             truncated: false,
-            strings: this.strings,
+            strings: self.strings,
+            build_metrics: detailed_metrics
+                .map(|m| Self::convert_all_target_build_metrics(&m.all_targets_build_metrics)),
+            total_configured_graph_sketch,
+            action_graph_sketch,
+            error_category,
+        })
+    }
+
+    // ============================================================================
+    // Metrics conversion helpers
+    // ============================================================================
+
+    fn convert_all_target_build_metrics(
+        all_target_metrics: &AllTargetsAggregatedData,
+    ) -> AllTargetsBuildMetrics {
+        AllTargetsBuildMetrics {
+            action_graph_size: all_target_metrics.action_graph_size,
+            metrics: Self::convert_aggregated_build_metrics(&all_target_metrics.metrics),
+            compute_time_ms: all_target_metrics.compute_time_ms,
         }
     }
+
+    fn convert_per_target_metrics(metrics: &TopLevelTargetAggregatedData) -> TargetBuildMetrics {
+        TargetBuildMetrics {
+            action_graph_size: metrics.action_graph_size,
+            metrics: Self::convert_aggregated_build_metrics(&metrics.metrics),
+            amortized_metrics: Self::convert_aggregated_build_metrics(&metrics.amortized_metrics),
+            remote_max_memory_peak_bytes: metrics.remote_max_memory_peak_bytes,
+            local_max_memory_peak_bytes: metrics.local_max_memory_peak_bytes,
+        }
+    }
+
+    fn convert_aggregated_build_metrics(
+        metrics: &crate::build::detailed_aggregated_metrics::types::AggregatedBuildMetrics,
+    ) -> AggregatedBuildMetrics {
+        AggregatedBuildMetrics {
+            full_graph_execution_time_ms: metrics.full_graph_execution_time_ms,
+            full_graph_output_size_bytes: metrics.full_graph_output_size_bytes,
+            local_execution_time_ms: metrics.local_execution_time_ms,
+            remote_execution_time_ms: metrics.remote_execution_time_ms,
+            local_executions: metrics.local_executions,
+            remote_executions: metrics.remote_executions,
+            remote_cache_hits: metrics.remote_cache_hits,
+            analysis_retained_memory: metrics.analysis_retained_memory,
+            declared_actions: metrics.declared_actions,
+        }
+    }
+
+    // ============================================================================
+    // Result collection and processing
+    // ============================================================================
 
     pub(crate) fn update_string_cache(&mut self, string: String) -> String {
         let mut hasher = DefaultHasher::new();
@@ -280,7 +637,7 @@ impl<'a> BuildReportCollector<'a> {
     /// Always called for one unconfigured target at a time
     fn collect_results_for_unconfigured<'b>(
         &mut self,
-        target: TargetLabel,
+        target_with_modifiers: TargetLabelWithModifiers,
         results: impl IntoIterator<
             Item = (
                 &'b ConfiguredProvidersLabel,
@@ -288,12 +645,15 @@ impl<'a> BuildReportCollector<'a> {
             ),
         >,
         errors: &[buck2_error::Error],
-    ) -> BuildReportEntry {
+        metrics: &mut HashMap<ConfiguredProvidersLabel, Arc<TargetBuildMetrics>>,
+        action_graph_sketches: &HashMap<ConfiguredProvidersLabel, String>,
+        all_error_reports: &mut Vec<ErrorReport>,
+    ) -> buck2_error::Result<BuildReportEntry> {
         // NOTE: if we're actually building a thing, then the package path must exist, but be
         // conservative and don't crash the overall processing if that happens.
         let package_project_relative_path = if self.include_package_project_relative_paths {
             self.cell_resolver
-                .resolve_path(target.pkg().as_cell_path())
+                .resolve_path(target_with_modifiers.target_label.pkg().as_cell_path())
                 .ok()
         } else {
             None
@@ -312,7 +672,14 @@ impl<'a> BuildReportCollector<'a> {
             .filter_map(|(label, result)| Some((label, result.as_ref()?)))
             .chunk_by(|x| x.0.target().dupe())
         {
-            let configured_report = self.collect_results_for_configured(target.dupe(), results);
+            let configured_report = self.collect_results_for_configured(
+                target_with_modifiers.dupe(),
+                results,
+                metrics,
+                action_graph_sketches,
+                all_error_reports,
+            )?;
+
             if let Some(report) = unconfigured_report.as_mut() {
                 if !configured_report.errors.is_empty() {
                     report.success = BuildOutcome::FAIL;
@@ -342,31 +709,34 @@ impl<'a> BuildReportCollector<'a> {
             configured_reports.insert(label.cfg().dupe(), configured_report);
         }
 
-        let errors = self.convert_error_list(errors, target);
+        let errors = self.convert_error_list(errors, EntryLabel::Target(target_with_modifiers));
         if !errors.is_empty() {
             if let Some(report) = unconfigured_report.as_mut() {
                 report.success = BuildOutcome::FAIL;
             }
         }
 
-        BuildReportEntry {
+        Ok(BuildReportEntry {
             compatible: unconfigured_report,
             configured: configured_reports,
             errors,
             package_project_relative_path,
-        }
+        })
     }
 
     fn collect_results_for_configured<'b>(
         &mut self,
-        target: TargetLabel,
+        target_with_modifiers: TargetLabelWithModifiers,
         results: impl IntoIterator<
             Item = (
                 &'b ConfiguredProvidersLabel,
                 &'b ConfiguredBuildTargetResult,
             ),
         >,
-    ) -> ConfiguredBuildReportEntry {
+        metrics: &mut HashMap<ConfiguredProvidersLabel, Arc<TargetBuildMetrics>>,
+        action_graph_sketches: &HashMap<ConfiguredProvidersLabel, String>,
+        all_error_reports: &mut Vec<ErrorReport>,
+    ) -> buck2_error::Result<ConfiguredBuildReportEntry> {
         let mut configured_report = ConfiguredBuildReportEntry::default();
         let mut errors = Vec::new();
         for (label, result) in results {
@@ -380,7 +750,7 @@ impl<'a> BuildReportCollector<'a> {
                                 update_artifact_info(
                                     &mut configured_report.artifact_info,
                                     provider_name.dupe(),
-                                    &value.entry(),
+                                    value.entry(),
                                 );
                             }
                             configured_report
@@ -388,33 +758,68 @@ impl<'a> BuildReportCollector<'a> {
                                 .outputs
                                 .entry(provider_name.dupe())
                                 .or_default()
-                                .insert(artifact.resolve_path(self.artifact_fs).unwrap());
+                                .insert({
+                                    artifact
+                                        .resolve_configuration_hash_path(self.artifact_fs)
+                                        .unwrap()
+                                });
                         }
                     }
                 }
-                Err(e) => errors.push(e.dupe()),
+                Err(e) => {
+                    errors.push(e.dupe());
+                    // Collect errors into all_error_reports for global error categorization
+                    all_error_reports.push(ErrorReport::from(e));
+                }
             });
 
             errors.extend(result.errors.iter().cloned());
+            // Collect result errors into all_error_reports for global error categorization
+            all_error_reports.extend(errors.iter().map(ErrorReport::from));
 
-            if let Some(Ok(MaybeCompatible::Compatible(ref graph_properties))) =
+            if let Some(Ok(MaybeCompatible::Compatible(graph_properties))) =
                 &result.graph_properties
             {
                 configured_report.inner.configured_graph_size =
-                    graph_properties.configured_graph_size;
+                    Some(graph_properties.configured.configured_graph_size);
 
-                configured_report.configured_graph_sketch = graph_properties
-                    .configured_graph_sketch
-                    .as_ref()
-                    .map(|s| s.serialize());
+                if let Some(configured_graph_sketch) =
+                    graph_properties.configured.configured_graph_sketch.as_ref()
+                {
+                    if self.graph_properties_opts.configured_graph_sketch {
+                        configured_report.configured_graph_sketch =
+                            Some(configured_graph_sketch.serialize());
+                    }
+
+                    if let Some(sketcher) = self.total_configured_graph_sketch.as_mut() {
+                        sketcher.merge(configured_graph_sketch)?;
+                    }
+                }
+
+                if let Some(retained_analysis_memory_sketch) =
+                    graph_properties.retained_analysis_memory_sketch.as_ref()
+                {
+                    if self.graph_properties_opts.retained_analysis_memory_sketch {
+                        configured_report.retained_analysis_memory_sketch =
+                            Some(retained_analysis_memory_sketch.serialize());
+                    }
+                }
             }
+
+            configured_report.build_metrics = metrics.get(label).duped();
+            configured_report.action_graph_sketch = action_graph_sketches.get(label).cloned();
         }
-        configured_report.errors = self.convert_error_list(&errors, target);
+        configured_report.errors =
+            self.convert_error_list(&errors, EntryLabel::Target(target_with_modifiers));
         if !configured_report.errors.is_empty() {
             configured_report.inner.success = BuildOutcome::FAIL;
         }
-        configured_report
+        Ok(configured_report)
     }
+
+    // ============================================================================
+    // Error processing and conversion
+    // ============================================================================
 
     /// Note: In order for production of the build report to be deterministic, the order in
     /// which this function is called, and which errors it is called with, must be
@@ -422,7 +827,7 @@ impl<'a> BuildReportCollector<'a> {
     fn convert_error_list(
         &mut self,
         errors: &[buck2_error::Error],
-        target: TargetLabel,
+        entry_label: EntryLabel,
     ) -> Vec<BuildReportError> {
         if errors.is_empty() {
             return Vec::new();
@@ -448,6 +853,12 @@ impl<'a> BuildReportCollector<'a> {
             } else {
                 error_report.message
             };
+            // Apply truncation if enabled
+            let message = if self.truncate_error_content {
+                buck2_util::truncate::truncate(&message, MAX_ERROR_CONTENT_BYTES)
+            } else {
+                message
+            };
             let error_tags = e
                 .tags()
                 .into_iter()
@@ -459,9 +870,16 @@ impl<'a> BuildReportCollector<'a> {
                 cause_index: self.error_cause_cache.get(&root).copied(),
                 message,
                 error_tags,
-                action_error: e
-                    .action_error()
-                    .map(|e| BuildReportActionError::new(e, self)),
+                action_error: e.action_error().map(|e| {
+                    BuildReportActionError::new(
+                        e,
+                        self,
+                        ActionErrorBuildOptions {
+                            exclude_action_error_diagnostics: self.exclude_action_error_diagnostics,
+                            truncate_error_content: self.truncate_error_content,
+                        },
+                    )
+                }),
             });
         }
         // Sort the errors. This sort *almost* guarantees full determinism, but unfortunately
@@ -520,11 +938,11 @@ impl<'a> BuildReportCollector<'a> {
             // This both omits errors and overwrites previous ones. That's the price you pay for
             // using buck1
             self.failures.insert(
-                EntryLabel::Target(target),
+                entry_label,
                 self.strings
                     .get(&out.last().unwrap().message_content)
                     .unwrap()
-                    .to_string(),
+                    .to_owned(),
             );
         }
 
@@ -586,7 +1004,7 @@ fn report_providers_name(label: &ConfiguredProvidersLabel) -> String {
         ProvidersName::NonDefault(flavor) => match flavor.as_ref() {
             NonDefaultProvidersName::Named(names) => names.iter().join("|"),
             NonDefaultProvidersName::UnrecognizedFlavor(s) => {
-                format!("#{}", s)
+                format!("#{s}")
             }
         },
     }
@@ -596,6 +1014,7 @@ pub async fn build_report_opts<'a>(
     ctx: &mut DiceComputations<'a>,
     cell_resolver: &CellResolver,
     build_opts: &CommonBuildOptions,
+    graph_properties_opts: GraphPropertiesOptions,
 ) -> buck2_error::Result<BuildReportOpts> {
     let esto = &build_opts.unstable_build_report_filename;
     let build_report_opts = BuildReportOpts {
@@ -615,12 +1034,44 @@ pub async fn build_report_opts<'a>(
         unstable_include_artifact_hash_information: build_opts
             .unstable_include_artifact_hash_information,
         unstable_build_report_filename: esto.clone(),
+        graph_properties_opts,
+        unstable_streaming_build_report_filename: build_opts
+            .unstable_streaming_build_report_filename
+            .clone(),
+        unstable_exclude_action_error_diagnostics: build_opts
+            .unstable_exclude_action_error_diagnostics,
+        unstable_truncate_error_content: build_opts.unstable_truncate_error_content,
     };
 
     Ok(build_report_opts)
 }
 
-pub fn generate_build_report(
+fn write_or_serialize_build_report(
+    build_report: &BuildReport,
+    filename: &str,
+    project_root: &ProjectRoot,
+    cwd: &ProjectRelativePath,
+) -> Result<Option<String>, buck2_error::Error> {
+    let mut serialized_build_report = None;
+
+    if !filename.is_empty() {
+        let path = project_root.resolve(cwd).as_abs_path().join(filename);
+        if let Some(parent) = path.parent() {
+            fs_util::create_dir_all(parent)?;
+        }
+        let file = fs_util::create_file(path.clone())
+            .categorize_internal()
+            .buck_error_context("Error writing build report")?;
+        let mut file = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut file, build_report)?
+    } else {
+        serialized_build_report = Some(serde_json::to_string(build_report)?);
+    };
+
+    Ok(serialized_build_report)
+}
+
+pub fn write_build_report(
     opts: BuildReportOpts,
     artifact_fs: &ArtifactFs,
     cell_resolver: &CellResolver,
@@ -628,7 +1079,9 @@ pub fn generate_build_report(
     cwd: &ProjectRelativePath,
     trace_id: &TraceId,
     configured: &BTreeMap<ConfiguredProvidersLabel, Option<ConfiguredBuildTargetResult>>,
+    configured_to_pattern_modifiers: &HashMap<ConfiguredProvidersLabel, BTreeSet<Modifiers>>,
     other_errors: &BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
+    detailed_metrics: Option<DetailedAggregatedMetrics>,
 ) -> Result<Option<String>, buck2_error::Error> {
     let build_report = BuildReportCollector::convert(
         trace_id,
@@ -639,27 +1092,125 @@ pub fn generate_build_report(
         opts.unstable_include_failures_build_report,
         opts.unstable_include_package_project_relative_paths,
         opts.unstable_include_artifact_hash_information,
+        opts.unstable_exclude_action_error_diagnostics,
+        opts.unstable_truncate_error_content,
         configured,
+        configured_to_pattern_modifiers,
         other_errors,
-    );
+        detailed_metrics,
+        opts.graph_properties_opts,
+    )?;
 
-    let mut serialized_build_report = None;
+    write_or_serialize_build_report(
+        &build_report,
+        &opts.unstable_build_report_filename,
+        project_root,
+        cwd,
+    )
+}
 
-    if !opts.unstable_build_report_filename.is_empty() {
-        let path = project_root
-            .resolve(cwd)
-            .as_abs_path()
-            .join(opts.unstable_build_report_filename);
-        if let Some(parent) = path.parent() {
-            fs_util::create_dir_all(parent)?;
-        }
-        let file =
-            fs_util::create_file(path.clone()).buck_error_context("Error writing build report")?;
-        let mut file = BufWriter::new(file);
-        serde_json::to_writer_pretty(&mut file, &build_report)?
-    } else {
-        serialized_build_report = Some(serde_json::to_string(&build_report)?);
-    };
+pub fn write_bxl_build_report(
+    opts: BuildReportOpts,
+    artifact_fs: &ArtifactFs,
+    cell_resolver: &CellResolver,
+    project_root: &ProjectRoot,
+    cwd: &ProjectRelativePath,
+    trace_id: &TraceId,
+    bxl_label: &BxlFunctionLabel,
+    errors: &[buck2_error::Error],
+    detailed_metrics: Option<DetailedAggregatedMetrics>,
+) -> Result<Option<String>, buck2_error::Error> {
+    let build_report = BuildReportCollector::convert_bxl(
+        trace_id,
+        artifact_fs,
+        cell_resolver,
+        project_root,
+        opts.print_unconfigured_section,
+        opts.unstable_include_failures_build_report,
+        opts.unstable_include_package_project_relative_paths,
+        opts.unstable_include_artifact_hash_information,
+        opts.unstable_exclude_action_error_diagnostics,
+        opts.unstable_truncate_error_content,
+        bxl_label,
+        errors,
+        detailed_metrics,
+        opts.graph_properties_opts,
+    )?;
 
-    Ok(serialized_build_report)
+    write_or_serialize_build_report(
+        &build_report,
+        &opts.unstable_build_report_filename,
+        project_root,
+        cwd,
+    )
+}
+
+pub fn stream_build_report(
+    opts: BuildReportOpts,
+    artifact_fs: &ArtifactFs,
+    cell_resolver: &CellResolver,
+    project_root: &ProjectRoot,
+    cwd: &ProjectRelativePath,
+    trace_id: &TraceId,
+    configured: &BTreeMap<ConfiguredProvidersLabel, Option<ConfiguredBuildTargetResult>>,
+    configured_to_pattern_modifiers: &HashMap<ConfiguredProvidersLabel, BTreeSet<Modifiers>>,
+    other_errors: &BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
+    detailed_metrics: Option<DetailedAggregatedMetrics>,
+) -> buck2_error::Result<()> {
+    let build_report = BuildReportCollector::convert(
+        trace_id,
+        artifact_fs,
+        cell_resolver,
+        project_root,
+        opts.print_unconfigured_section,
+        opts.unstable_include_failures_build_report,
+        opts.unstable_include_package_project_relative_paths,
+        opts.unstable_include_artifact_hash_information,
+        opts.unstable_exclude_action_error_diagnostics,
+        opts.unstable_truncate_error_content,
+        configured,
+        configured_to_pattern_modifiers,
+        other_errors,
+        detailed_metrics,
+        opts.graph_properties_opts,
+    )?;
+
+    let serialized_build_report = Some(serde_json::to_string(&build_report)?);
+
+    let path = project_root
+        .resolve(cwd)
+        .as_abs_path()
+        .join(opts.unstable_streaming_build_report_filename);
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.clone())
+        .buck_error_context("Error opening streaming build report file for appending")?;
+    let mut file = BufWriter::new(file);
+    file.write_all(serialized_build_report.as_ref().unwrap().as_bytes())?;
+    file.write_all(b"\n")?;
+
+    Ok(())
+}
+
+pub fn initialize_streaming_build_report(
+    opts: BuildReportOpts,
+    project_root: &ProjectRoot,
+    cwd: &ProjectRelativePath,
+) -> Result<(), buck2_error::Error> {
+    let path = project_root
+        .resolve(cwd)
+        .as_abs_path()
+        .join(opts.unstable_streaming_build_report_filename);
+    if let Some(parent) = path.parent() {
+        fs_util::create_dir_all(parent)?;
+    }
+
+    // create and clear the file
+    let _file = fs_util::create_file(path.clone())
+        .categorize_internal()
+        .buck_error_context("Error initializing streaming build report")?;
+
+    Ok(())
 }

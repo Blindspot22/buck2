@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -12,7 +13,6 @@ use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
 
-use anyhow::Context as _;
 use buck2_downward_api::DownwardApi;
 use buck2_downward_api_proto::ConsoleRequest;
 use buck2_downward_api_proto::ExternalEventRequest;
@@ -20,6 +20,7 @@ use buck2_downward_api_proto::LogRequest;
 use buck2_downward_api_proto::downward_api_client;
 use buck2_downward_api_proto::downward_api_server;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_events::dispatch::with_dispatcher_async;
 use buck2_grpc::ServerHandle;
@@ -72,7 +73,7 @@ pub struct TestOrchestratorClient {
 }
 
 impl TestOrchestratorClient {
-    pub async fn new<T>(io: T) -> anyhow::Result<Self>
+    pub async fn new<T>(io: T) -> buck2_error::Result<Self>
     where
         T: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
@@ -145,7 +146,7 @@ impl TestOrchestratorClient {
         pre_create_dirs: Vec<DeclaredOutput>,
         executor_override: Option<ExecutorConfigOverride>,
         required_local_resources: RequiredLocalResources,
-    ) -> anyhow::Result<ExecuteResponse> {
+    ) -> buck2_error::Result<ExecuteResponse> {
         let test_executable = TestExecutable {
             stage: ui_prints,
             target,
@@ -162,8 +163,9 @@ impl TestOrchestratorClient {
             required_local_resources,
         };
 
-        let req: buck2_test_proto::ExecuteRequest2 =
-            req.try_into().context("Invalid execute request")?;
+        let req: buck2_test_proto::ExecuteRequest2 = req
+            .try_into()
+            .buck_error_context("Invalid execute request")?;
 
         let ExecuteResponse2 { response } = self
             .test_orchestrator_client
@@ -172,9 +174,9 @@ impl TestOrchestratorClient {
             .await?
             .into_inner();
 
-        let response = match response.context("Missing `response`")? {
+        let response = match response.ok_or_else(|| internal_error!("Missing `response`"))? {
             buck2_test_proto::execute_response2::Response::Result(res) => {
-                ExecuteResponse::Result(res.try_into().context("Invalid `result`")?)
+                ExecuteResponse::Result(res.try_into().buck_error_context("Invalid `result`")?)
             }
             buck2_test_proto::execute_response2::Response::Cancelled(
                 buck2_test_proto::Cancelled { reason },
@@ -199,8 +201,8 @@ impl TestOrchestratorClient {
         Ok(response)
     }
 
-    pub async fn report_test_result(&self, result: TestResult) -> anyhow::Result<()> {
-        let result = result.try_into().context("Invalid `result`")?;
+    pub async fn report_test_result(&self, result: TestResult) -> buck2_error::Result<()> {
+        let result = result.try_into().buck_error_context("Invalid `result`")?;
 
         self.test_orchestrator_client
             .clone()
@@ -217,8 +219,8 @@ impl TestOrchestratorClient {
         target: ConfiguredTargetHandle,
         suite: String,
         tests: Vec<String>,
-    ) -> anyhow::Result<()> {
-        let target = target.try_into().context("Invalid `target`")?;
+    ) -> buck2_error::Result<()> {
+        let target = target.try_into().buck_error_context("Invalid `target`")?;
 
         self.test_orchestrator_client
             .clone()
@@ -235,7 +237,7 @@ impl TestOrchestratorClient {
         Ok(())
     }
 
-    pub async fn report_test_session(&self, session_info: String) -> anyhow::Result<()> {
+    pub async fn report_test_session(&self, session_info: String) -> buck2_error::Result<()> {
         self.test_orchestrator_client
             .clone()
             .report_test_session(ReportTestSessionRequest { session_info })
@@ -244,7 +246,7 @@ impl TestOrchestratorClient {
         Ok(())
     }
 
-    pub async fn end_of_test_results(&self, exit_code: i32) -> anyhow::Result<()> {
+    pub async fn end_of_test_results(&self, exit_code: i32) -> buck2_error::Result<()> {
         self.test_orchestrator_client
             .clone()
             .end_of_test_results(EndOfTestResultsRequest { exit_code })
@@ -261,7 +263,7 @@ impl TestOrchestratorClient {
         env: SortedVectorMap<String, ArgValue>,
         pre_create_dirs: Vec<DeclaredOutput>,
         required_local_resources: RequiredLocalResources,
-    ) -> anyhow::Result<PrepareForLocalExecutionResult> {
+    ) -> buck2_error::Result<PrepareForLocalExecutionResult> {
         let executable = TestExecutable {
             stage,
             target,
@@ -272,7 +274,7 @@ impl TestOrchestratorClient {
 
         let executable: buck2_test_proto::TestExecutable = executable
             .try_into()
-            .context("Invalid prepare_for_local_execution request")?;
+            .buck_error_context("Invalid prepare_for_local_execution request")?;
 
         let request = buck2_test_proto::PrepareForLocalExecutionRequest {
             test_executable: Some(executable),
@@ -284,10 +286,10 @@ impl TestOrchestratorClient {
             .await?
             .into_inner()
             .try_into()
-            .context("Invalid `result`")
+            .buck_error_context("Invalid `result`")
     }
 
-    pub async fn attach_info_message(&self, message: String) -> anyhow::Result<()> {
+    pub async fn attach_info_message(&self, message: String) -> buck2_error::Result<()> {
         self.test_orchestrator_client
             .clone()
             .attach_info_message(AttachInfoMessageRequest { message })
@@ -319,7 +321,7 @@ where
             } = request
                 .into_inner()
                 .try_into()
-                .context("Invalid execute2 request")?;
+                .buck_error_context("Invalid execute2 request")?;
 
             let TestExecutable {
                 stage,
@@ -343,12 +345,13 @@ where
                     required_local_resources,
                 )
                 .await
-                .context("Execution failed")?;
+                .buck_error_context("Execution failed")?;
 
             let response = match response {
                 ExecuteResponse::Result(r) => {
                     buck2_test_proto::execute_response2::Response::Result(
-                        r.try_into().context("Failed to serialize result")?,
+                        r.try_into()
+                            .buck_error_context("Failed to serialize result")?,
                     )
                 }
                 ExecuteResponse::Cancelled(reason) => {
@@ -387,7 +390,7 @@ where
             self.inner
                 .end_of_test_results(exit_code)
                 .await
-                .context("Failed to report end-of-tests")?;
+                .buck_error_context("Failed to report end-of-tests")?;
 
             Ok(Empty {})
         })
@@ -402,14 +405,14 @@ where
             let ReportTestResultRequest { result } = request.into_inner();
 
             let result = result
-                .context("Missing `result`")?
+                .ok_or_else(|| internal_error!("Missing `result`"))?
                 .try_into()
-                .context("Invalid `result`")?;
+                .buck_error_context("Invalid `result`")?;
 
             self.inner
                 .report_test_result(result)
                 .await
-                .context("Failed to report end-of-tests")?;
+                .buck_error_context("Failed to report end-of-tests")?;
 
             Ok(Empty {})
         })
@@ -424,18 +427,18 @@ where
             let ReportTestsDiscoveredRequest { target, testing } = request.into_inner();
 
             let target = target
-                .context("Missing `target`")?
+                .ok_or_else(|| internal_error!("Missing `target`"))?
                 .try_into()
-                .context("Invalid `target`")?;
+                .buck_error_context("Invalid `target`")?;
 
             let Testing {
                 suite, testcases, ..
-            } = testing.context("Missing `testing`")?;
+            } = testing.ok_or_else(|| internal_error!("Missing `testing`"))?;
 
             self.inner
                 .report_tests_discovered(target, suite, testcases)
                 .await
-                .context("Failed to report end-of-tests")?;
+                .buck_error_context("Failed to report end-of-tests")?;
 
             Ok(Empty {})
         })
@@ -452,7 +455,7 @@ where
             self.inner
                 .report_test_session(session_info)
                 .await
-                .context("Failed to report test session summary")?;
+                .buck_error_context("Failed to report test session summary")?;
 
             Ok(Empty {})
         })
@@ -479,18 +482,20 @@ where
                 env,
                 pre_create_dirs,
             } = test_executable
-                .context("Missing `test_executable`")?
+                .ok_or_else(|| internal_error!("Missing `test_executable`"))?
                 .try_into()
-                .context("Invalid `test_executable`")
-                .context("Invalid prepare_for_local_execution request")?;
+                .buck_error_context("Invalid `test_executable`")
+                .buck_error_context("Invalid prepare_for_local_execution request")?;
 
             let result = self
                 .inner
                 .prepare_for_local_execution(stage, target, cmd, env, pre_create_dirs, resources)
                 .await
-                .context("Prepare for local execution failed")?;
+                .buck_error_context("Prepare for local execution failed")?;
 
-            result.try_into().context("Failed to serialize result")
+            result
+                .try_into()
+                .buck_error_context("Failed to serialize result")
         })
         .await
     }
@@ -505,7 +510,7 @@ where
             self.inner
                 .attach_info_message(message)
                 .await
-                .context("Failed to attach info messages")?;
+                .buck_error_context("Failed to attach info messages")?;
 
             Ok(Empty {})
         })
@@ -530,7 +535,7 @@ where
             let ConsoleRequest { level, message } = request.into_inner();
 
             let level = level
-                .buck_error_context("Missing `level`")?
+                .ok_or_else(|| internal_error!("Missing `level`"))?
                 .try_into()
                 .buck_error_context("Invalid `level`")?;
 
@@ -552,7 +557,7 @@ where
             let LogRequest { level, message } = request.into_inner();
 
             let level = level
-                .buck_error_context("Missing `level`")?
+                .ok_or_else(|| internal_error!("Missing `level`"))?
                 .try_into()
                 .buck_error_context("Invalid `level`")?;
 
@@ -574,7 +579,7 @@ where
             let ExternalEventRequest { event } = request.into_inner();
 
             let event = event
-                .buck_error_context("Missing `event`")?
+                .ok_or_else(|| internal_error!("Missing `event`"))?
                 .try_into()
                 .buck_error_context("Invalid `event`")?;
 

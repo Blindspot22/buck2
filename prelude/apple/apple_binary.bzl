@@ -1,16 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
-load("@prelude//:attrs_validators.bzl", "get_attrs_validation_specs")
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//:validation_deps.bzl", "get_validation_deps_outputs")
 load("@prelude//apple:apple_stripping.bzl", "apple_strip_args")
 load("@prelude//apple:apple_utility.bzl", "get_module_name")
-# @oss-disable[end= ]: load("@prelude//apple/meta_only:linker_outputs.bzl", "get_extra_linker_output_flags", "get_extra_linker_outputs")
+# @oss-disable[end= ]: load("@prelude//apple/meta_only:linker_outputs.bzl", "extra_distributed_thin_lto_opt_outputs_merger", "get_extra_linker_output_flags", "get_extra_linker_outputs")
 load(
     "@prelude//apple/swift:swift_compilation.bzl",
     "compile_swift",
@@ -18,13 +18,18 @@ load(
     "get_swift_debug_infos",
     "get_swift_dependency_info",
     "get_swiftmodule_linkable",
-    "uses_explicit_modules",
+)
+load("@prelude//apple/swift:swift_helpers.bzl", "uses_explicit_modules")
+load(
+    "@prelude//apple/swift:swift_incremental_support.bzl",
+    "get_uses_content_based_paths",
 )
 load("@prelude//apple/swift:swift_types.bzl", "SWIFT_EXTENSION")
 load(
     "@prelude//cxx:argsfiles.bzl",
     "CompileArgsfiles",
 )
+load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
 load("@prelude//cxx:cxx_executable.bzl", "cxx_executable")
 load("@prelude//cxx:cxx_library_utility.bzl", "cxx_attr_deps", "cxx_attr_exported_deps")
 load(
@@ -33,12 +38,18 @@ load(
     "get_srcs_with_flags",
 )
 load(
+    "@prelude//cxx:cxx_transitive_diagnostics.bzl",
+    "cxx_transitive_diagnostics_combine",
+)
+load(
     "@prelude//cxx:cxx_types.bzl",
     "CxxRuleAdditionalParams",
     "CxxRuleConstructorParams",
 )
+load("@prelude//cxx:cxx_utility.bzl", "cxx_attrs_get_allow_cache_upload")
 load(
     "@prelude//cxx:headers.bzl",
+    "HeaderMode",
     "cxx_attr_headers",
     "cxx_get_regular_cxx_headers_layout",
     "prepare_headers",
@@ -48,11 +59,7 @@ load(
     "@prelude//cxx:link_groups.bzl",
     "get_link_group_info",
 )
-load(
-    "@prelude//cxx:preprocessor.bzl",
-    "CPreprocessor",
-    "CPreprocessorArgs",
-)
+load("@prelude//cxx:link_types.bzl", "ExtraLinkerOutputCategory")
 load(
     "@prelude//linking:link_info.bzl",
     "CxxSanitizerRuntimeInfo",
@@ -62,12 +69,15 @@ load(
 )
 load("@prelude//utils:arglike.bzl", "ArgLike")
 load("@prelude//utils:expect.bzl", "expect")
+load("@prelude//utils:utils.bzl", "map_val")
+load("@prelude//xplugins:debug_artifacts.bzl", "xplugins_get_debug_artifacts_info")
+load("@prelude//xplugins:utils.bzl", "get_xplugins_usage_info", "get_xplugins_usage_subtargets")
 load(":apple_bundle_types.bzl", "AppleBundleLinkerMapInfo", "AppleMinDeploymentVersionInfo")
 load(":apple_bundle_utility.bzl", "get_bundle_infos_from_graph", "merge_bundle_linker_maps_info")
 load(":apple_code_signing_types.bzl", "AppleEntitlementsInfo")
 load(":apple_dsym.bzl", "DSYM_SUBTARGET", "get_apple_dsym")
 load(":apple_entitlements.bzl", "entitlements_link_flags")
-load(":apple_error_handler.bzl", "apple_build_error_handler")
+load(":apple_error_handler.bzl", "apple_build_error_handler", "cxx_error_deserializer", "cxx_error_handler")
 load(":apple_frameworks.bzl", "get_framework_search_path_flags")
 load(":apple_rpaths.bzl", "get_rpath_flags_for_apple_binary")
 load(":apple_target_sdk_version.bzl", "get_min_deployment_version_for_node")
@@ -89,19 +99,18 @@ def apple_binary_impl(ctx: AnalysisContext) -> [list[Provider], Promise]:
         module_name = get_module_name(ctx)
 
         framework_search_path_flags = get_framework_search_path_flags(ctx)
-        swift_compile, _ = compile_swift(
+        swift_compile_result = compile_swift(
             ctx,
             swift_srcs,
             False,  # parse_as_library
             deps_providers,
             module_name,
-            module_name + "_Private",
             [],
-            None,
             None,
             framework_search_path_flags,
             objc_bridging_header_flags,
         )
+        swift_compile = swift_compile_result.swift_compilation
         swift_object_files = swift_compile.object_files if swift_compile else []
         swift_preprocessor = [swift_compile.pre] if swift_compile else []
         extra_link_flags = get_rpath_flags_for_apple_binary(ctx) + entitlements_link_flags(ctx)
@@ -116,15 +125,25 @@ def apple_binary_impl(ctx: AnalysisContext) -> [list[Provider], Promise]:
             ]
             extension_compiler_flags = ["-fapplication-extension"]
 
-        framework_search_path_pre = CPreprocessor(
-            args = CPreprocessorArgs(args = [framework_search_path_flags]),
-        )
-
-        swift_dependency_info = swift_compile.dependency_info if swift_compile else get_swift_dependency_info(ctx, None, None, deps_providers)
+        swift_dependency_info = swift_compile.dependency_info if swift_compile else get_swift_dependency_info(ctx, None, deps_providers, False)
         swift_debug_info = get_swift_debug_infos(
             ctx,
             swift_dependency_info,
             swift_compile,
+        )
+
+        link_group_info = get_link_group_info(ctx)
+        binary_subtargets = {
+            "swift-compilation-database": [
+                DefaultInfo(
+                    default_output = swift_compile.compilation_database.db if swift_compile else None,
+                    other_outputs = [swift_compile.compilation_database.other_outputs] if swift_compile else [],
+                ),
+            ],
+        } | get_xplugins_usage_subtargets(
+            ctx,
+            usage_info = get_xplugins_usage_info(ctx),
+            link_group_info = link_group_info,
         )
 
         validation_deps_outputs = get_validation_deps_outputs(ctx)
@@ -143,40 +162,33 @@ def apple_binary_impl(ctx: AnalysisContext) -> [list[Provider], Promise]:
                 # follow.
                 static_external_debug_info = swift_debug_info.static,
                 shared_external_debug_info = swift_debug_info.shared,
-                subtargets = {
-                    "swift-compilation-database": [
-                        DefaultInfo(
-                            default_output = swift_compile.compilation_database.db if swift_compile else None,
-                            other_outputs = [swift_compile.compilation_database.other_outputs] if swift_compile else [],
-                        ),
-                    ],
-                },
-                external_debug_info_tags = [],  # This might be used to materialise all transitive Swift related object files with ArtifactInfoTag("swiftmodule")
+                subtargets = binary_subtargets,
             ),
             extra_link_input = swift_object_files,
             extra_link_input_has_external_debug_info = True,
-            extra_preprocessors = [framework_search_path_pre] + swift_preprocessor,
+            extra_preprocessors = swift_preprocessor,
             strip_executable = stripped,
             strip_args_factory = apple_strip_args,
             cxx_populate_xcode_attributes_func = lambda local_ctx, **kwargs: apple_populate_xcode_attributes(local_ctx, contains_swift_sources = contains_swift_sources, **kwargs),
-            link_group_info = get_link_group_info(ctx),
+            link_group_info = link_group_info,
             prefer_stripped_objects = ctx.attrs.prefer_stripped_objects,
             # Some apple rules rely on `static` libs *not* following dependents.
             link_groups_force_static_follows_dependents = False,
             swiftmodule_linkable = get_swiftmodule_linkable(swift_compile),
             compiler_flags = ctx.attrs.compiler_flags + extension_compiler_flags,
             lang_compiler_flags = ctx.attrs.lang_compiler_flags,
-            platform_compiler_flags = ctx.attrs.platform_compiler_flags,
-            lang_platform_compiler_flags = ctx.attrs.lang_platform_compiler_flags,
             preprocessor_flags = ctx.attrs.preprocessor_flags,
             lang_preprocessor_flags = ctx.attrs.lang_preprocessor_flags,
-            platform_preprocessor_flags = ctx.attrs.platform_preprocessor_flags,
-            lang_platform_preprocessor_flags = ctx.attrs.lang_platform_preprocessor_flags,
-            error_handler = apple_build_error_handler,
+            error_handler = cxx_error_handler if cxx_error_deserializer(ctx) else apple_build_error_handler,
             index_stores = [swift_compile.index_store] if swift_compile else None,
             executable_name = ctx.attrs.executable_name,
             extra_linker_outputs_factory = _get_extra_linker_outputs,
             extra_linker_outputs_flags_factory = _get_extra_linker_outputs_flags,
+            extra_distributed_thin_lto_opt_outputs_merger = _extra_distributed_thin_lto_opt_outputs_merger,
+            allow_cache_upload = cxx_attrs_get_allow_cache_upload(ctx.attrs, get_cxx_toolchain_info(ctx).cxx_compiler_info.allow_cache_upload),
+            precompiled_header = ctx.attrs.precompiled_header,
+            prefix_header = ctx.attrs.prefix_header,
+            use_content_based_paths = get_uses_content_based_paths(ctx),
         )
         cxx_output = cxx_executable(ctx, constructor_params)
 
@@ -231,13 +243,29 @@ def apple_binary_impl(ctx: AnalysisContext) -> [list[Provider], Promise]:
 
         index_stores.extend(cxx_output.index_stores)
 
-        index_store_subtargets, index_store_info = create_index_store_subtargets_and_provider(ctx, index_stores, swift_index_stores, non_exported_deps + exported_deps)
+        all_deps = non_exported_deps + exported_deps
+
+        index_store_subtargets, index_store_info = create_index_store_subtargets_and_provider(ctx, index_stores, swift_index_stores, all_deps)
         cxx_output.sub_targets.update(index_store_subtargets)
 
-        validation_specs = get_attrs_validation_specs(ctx)
-        validation_providers = [ValidationInfo(validations = validation_specs)] if validation_specs else []
+        validation_providers = [ValidationInfo(validations = cxx_output.validation_specs)] if cxx_output.validation_specs else []
 
-        return [
+        all_diagnostics = []
+        if swift_compile:
+            all_diagnostics.append(swift_compile.typecheck_file)
+        if cxx_output.diagnostics:
+            all_diagnostics.append(cxx_output.diagnostics)
+
+        diagnostics_providers = [
+            cxx_transitive_diagnostics_combine(
+                ctx = ctx,
+                diagnostics = all_diagnostics,
+                # TODO: We might be able to use all_deps, but, this changes the iteration order of deps.
+                deps = exported_deps + non_exported_deps,
+            ),
+        ]
+
+        providers = [
             DefaultInfo(default_output = cxx_output.binary, sub_targets = cxx_output.sub_targets),
             RunInfo(args = cmd_args(cxx_output.binary, hidden = cxx_output.runtime_files)),
             AppleEntitlementsInfo(entitlements_file = ctx.attrs.entitlements_file),
@@ -247,22 +275,32 @@ def apple_binary_impl(ctx: AnalysisContext) -> [list[Provider], Promise]:
             merge_bundle_linker_maps_info(bundle_infos),
             UnstrippedLinkOutputInfo(artifact = unstripped_binary),
             index_store_info,
-        ] + [resource_graph] + min_version_providers + link_command_providers + sanitizer_runtime_providers + validation_providers
+        ] + [resource_graph] + min_version_providers + link_command_providers + sanitizer_runtime_providers + validation_providers + diagnostics_providers
+
+        xplugins_debug_artifacts_info = xplugins_get_debug_artifacts_info(ctx, all_deps)
+        if xplugins_debug_artifacts_info:
+            providers.append(xplugins_debug_artifacts_info)
+
+        return providers
 
     if uses_explicit_modules(ctx):
         return get_swift_anonymous_targets(ctx, get_apple_binary_providers)
     else:
         return get_apple_binary_providers([])
 
-def _get_extra_linker_outputs(ctx: AnalysisContext) -> ExtraLinkerOutputs:
+def _get_extra_linker_outputs(ctx: AnalysisContext, extra_linker_output_category: ExtraLinkerOutputCategory = ExtraLinkerOutputCategory("produced-during-local-link")) -> ExtraLinkerOutputs:
     _ = ctx  # buildifier: disable=unused-variable
-    # @oss-disable[end= ]: return get_extra_linker_outputs(ctx)
+    # @oss-disable[end= ]: return get_extra_linker_outputs(ctx, extra_linker_output_category)
     return ExtraLinkerOutputs() # @oss-enable
 
-def _get_extra_linker_outputs_flags(ctx: AnalysisContext, outputs: dict[str, Artifact]) -> list[ArgLike]:
+def _get_extra_linker_outputs_flags(ctx: AnalysisContext, outputs: dict[str, Artifact], extra_linker_output_category: ExtraLinkerOutputCategory = ExtraLinkerOutputCategory("produced-during-local-link")) -> list[ArgLike]:
     _ = ctx  # buildifier: disable=unused-variable
-    # @oss-disable[end= ]: return get_extra_linker_output_flags(ctx, outputs)
+    # @oss-disable[end= ]: return get_extra_linker_output_flags(ctx, outputs, extra_linker_output_category)
     return [] # @oss-enable
+
+def _extra_distributed_thin_lto_opt_outputs_merger(ctx: AnalysisContext, outputs_to_bind: dict[str, Artifact], outputs_to_merge: list[dict[str, Artifact]]):
+    # @oss-disable[end= ]: return extra_distributed_thin_lto_opt_outputs_merger(ctx, outputs_to_bind, outputs_to_merge)
+    return # @oss-enable
 
 def _filter_swift_srcs(ctx: AnalysisContext) -> (list[CxxSrcWithFlags], list[CxxSrcWithFlags]):
     cxx_srcs = []
@@ -288,7 +326,10 @@ def _get_bridging_header_flags(ctx: AnalysisContext) -> list[ArgLike]:
         header_map = {paths.join(h.namespace, h.name): h.artifact for h in headers}
 
         # We need to expose private headers to swift-compile action, in case something is imported to bridging header.
-        header_root = prepare_headers(ctx, header_map, "apple-binary-private-headers")
+        cxx_toolchain_info = get_cxx_toolchain_info(ctx)
+        header_mode = map_val(HeaderMode, getattr(ctx.attrs, "header_mode", None))
+        allow_cache_upload = cxx_attrs_get_allow_cache_upload(ctx.attrs)
+        header_root = prepare_headers(ctx.actions, cxx_toolchain_info, header_map, "apple-binary-private-headers", header_mode = header_mode, allow_cache_upload = allow_cache_upload)
         if header_root != None:
             private_headers_args = [cmd_args("-I"), header_root.include_path]
         else:

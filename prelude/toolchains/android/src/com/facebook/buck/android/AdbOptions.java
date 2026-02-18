@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android;
@@ -18,9 +19,9 @@ public class AdbOptions {
   private int adbServerPort;
   private boolean multiInstallMode;
   private boolean stagedInstallMode;
-  private int adbTimeout;
   private boolean ignoreMissingDevice;
   private boolean apexMode;
+  private String restartMode;
 
   public AdbOptions(
       String adbExecutablePath,
@@ -28,17 +29,17 @@ public class AdbOptions {
       int adbServerPort,
       boolean multiInstallMode,
       boolean stagedInstallMode,
-      int adbTimeout,
       boolean ignoreMissingDevice,
-      boolean apexMode) {
+      boolean apexMode,
+      String restartMode) {
     this.adbExecutablePath = adbExecutablePath;
     this.adbThreadCount = adbThreadCount;
     this.adbServerPort = adbServerPort;
     this.multiInstallMode = multiInstallMode;
     this.stagedInstallMode = stagedInstallMode;
-    this.adbTimeout = adbTimeout;
     this.ignoreMissingDevice = ignoreMissingDevice;
     this.apexMode = apexMode;
+    this.restartMode = restartMode;
   }
 
   public String getAdbExecutablePath() {
@@ -65,12 +66,12 @@ public class AdbOptions {
     return apexMode;
   }
 
-  public int getAdbTimeout() {
-    return adbTimeout;
-  }
-
   public boolean getIgnoreMissingDevice() {
     return ignoreMissingDevice;
+  }
+
+  public String getRestartMode() {
+    return restartMode;
   }
 
   @Override
@@ -86,12 +87,12 @@ public class AdbOptions {
         + multiInstallMode
         + ", stagedInstallMode="
         + stagedInstallMode
-        + ", adbTimeout="
-        + adbTimeout
         + ", ignoreMissingDevice="
         + ignoreMissingDevice
         + ", apexMode="
         + apexMode
+        + ", restartMode="
+        + restartMode
         + '}';
   }
 }

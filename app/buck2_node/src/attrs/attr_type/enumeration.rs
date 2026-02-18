@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -12,9 +13,10 @@ use std::hash::Hash;
 
 use allocative::Allocative;
 use buck2_util::arc_str::ArcStr;
+use pagable::Pagable;
 use starlark_map::ordered_set::OrderedSet;
 
-#[derive(Debug, Eq, PartialEq, Hash, Allocative)]
+#[derive(Debug, Pagable, Eq, PartialEq, Hash, Allocative)]
 pub struct EnumAttrType {
     pub variants: OrderedSet<ArcStr>,
 }
@@ -50,8 +52,8 @@ impl EnumAttrType {
             if i != 0 {
                 write!(f, ",")?;
             }
-            write!(f, "{:?}", x)?;
+            write!(f, "{x:?}")?;
         }
-        write!(f, "]{})", arg)
+        write!(f, "]{arg})")
     }
 }

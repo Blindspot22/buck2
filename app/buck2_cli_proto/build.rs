@@ -1,36 +1,32 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::env;
 use std::io;
-use std::path::PathBuf;
 
 fn main() -> io::Result<()> {
     let proto_files = &["daemon.proto"];
 
-    let data_include = if let Ok(value) = env::var("BUCK_HACK_DATA_PROTOC_INCLUDE") {
-        let path = PathBuf::from(value);
-        path.parent().unwrap().to_str().unwrap().to_owned()
+    let includes = if let Ok(path) = env::var("BUCK_PROTO_SRCS") {
+        vec![path]
     } else {
-        "../buck2_data".to_owned()
+        vec![
+            ".".to_owned(),
+            "../buck2_data".to_owned(),
+            "../buck2_subscription_proto".to_owned(),
+            "../buck2_host_sharing_proto".to_owned(),
+        ]
     };
 
-    let subscription_include = if let Ok(value) = env::var("BUCK_HACK_SUBSCRIPTION_PROTOC_INCLUDE")
-    {
-        let path = PathBuf::from(value);
-        path.parent().unwrap().to_str().unwrap().to_owned()
-    } else {
-        "../buck2_subscription_proto".to_owned()
-    };
-
-    buck2_protoc_dev::configure()
-        .setup_protoc()
+    let builder = buck2_protoc_dev::configure();
+    unsafe { builder.setup_protoc() }
         .type_attribute(".", "#[derive(::serde::Serialize, ::serde::Deserialize)] #[serde(rename_all = \"snake_case\")]")
         .type_attribute(".", "#[derive(::allocative::Allocative)]")
         .field_attribute("start_time", "#[serde(with = \"serialize_timestamp\")]")
@@ -44,5 +40,5 @@ fn main() -> io::Result<()> {
         .field_attribute("expires_at", "#[serde(with = \"serialize_timestamp\")]")
         .extern_path(".buck.data", "::buck2_data")
         .extern_path(".buck.subscription", "::buck2_subscription_proto")
-        .compile(proto_files, &[".", &data_include, &subscription_include])
+        .compile(proto_files, &includes)
 }

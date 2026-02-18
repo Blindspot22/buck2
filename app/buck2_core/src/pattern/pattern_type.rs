@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -13,12 +14,17 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 
 use allocative::Allocative;
+use pagable::Pagable;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::configuration::bound_label::BoundConfigurationLabel;
 use crate::configuration::builtin::BuiltinPlatform;
 use crate::configuration::data::ConfigurationData;
 use crate::configuration::hash::ConfigurationHash;
 use crate::package::PackageLabel;
+use crate::pattern::pattern::Modifiers;
+use crate::pattern::pattern::ProvidersLabelWithModifiers;
 use crate::provider::label::ProvidersLabel;
 use crate::provider::label::ProvidersName;
 use crate::target::label::label::TargetLabel;
@@ -73,7 +79,10 @@ pub trait PatternType:
     Hash,
     Ord,
     PartialOrd,
-    Allocative
+    Allocative,
+    Serialize,
+    Deserialize,
+    Pagable
 )]
 #[display("")]
 pub struct TargetPatternExtra;
@@ -132,6 +141,18 @@ impl ProvidersPatternExtra {
     ) -> ProvidersLabel {
         ProvidersLabel::new(TargetLabel::new(package, target_name), self.providers)
     }
+
+    pub fn into_providers_label_with_modifiers(
+        self,
+        package: PackageLabel,
+        target_name: &TargetNameRef,
+        modifiers: Modifiers,
+    ) -> ProvidersLabelWithModifiers {
+        ProvidersLabelWithModifiers {
+            providers_label: self.into_providers_label(package, target_name),
+            modifiers,
+        }
+    }
 }
 
 impl PatternType for ProvidersPatternExtra {
@@ -178,7 +199,7 @@ pub enum ConfigurationPredicate {
     #[display(
         "{}{}",
         _0,
-        _1.as_ref().map_or(String::new(), |h| format!("#{}", h))
+        _1.as_ref().map_or(String::new(), |h| format!("#{h}"))
     )]
     Bound(
         BoundConfigurationLabel,
@@ -218,12 +239,12 @@ impl ConfigurationPredicate {
                 match self.0 {
                     ConfigurationPredicate::Any => Ok(()),
                     ConfigurationPredicate::Builtin(builtin) => {
-                        write!(f, " ({})", builtin)
+                        write!(f, " ({builtin})")
                     }
                     ConfigurationPredicate::Bound(label, hash) => {
-                        write!(f, " ({}", label)?;
+                        write!(f, " ({label}")?;
                         if let Some(hash) = hash {
-                            write!(f, "#{}", hash)?;
+                            write!(f, "#{hash}")?;
                         }
                         write!(f, ")")?;
                         Ok(())

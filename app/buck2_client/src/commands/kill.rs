@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
@@ -17,7 +18,6 @@ use buck2_client_ctx::daemon::client::BuckdLifecycleLock;
 use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::startup_deadline::StartupDeadline;
-use buck2_error::BuckErrorContext;
 
 /// Kill the buck daemon.
 ///
@@ -47,8 +47,7 @@ impl BuckSubcommand for KillCommand {
             daemon_dir.clone(),
             StartupDeadline::duration_from_now(Duration::from_secs(10))?,
         )
-        .await
-        .with_buck_error_context(|| "Error locking buckd lifecycle.lock")?;
+        .await?;
 
         buck2_client_ctx::daemon::client::kill::kill_command_impl(
             &lifecycle_lock,

@@ -1,22 +1,25 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use starlark::environment::FrozenModule;
 use starlark::eval::Evaluator;
 use starlark::eval::ProfileData;
 use starlark::eval::ProfileMode;
 
-use crate::starlark_profiler::data::ProfileTarget;
+use crate::dice::starlark_provider::StarlarkEvalKind;
 use crate::starlark_profiler::data::StarlarkProfileDataAndStats;
 
 #[derive(Debug, buck2_error::Error)]
@@ -29,34 +32,62 @@ enum StarlarkProfilerError {
     RetainedMemoryNotFrozen,
 }
 
-pub struct StarlarkProfiler {
-    profile_mode: ProfileMode,
+pub struct ProfilerData {
+    profile_mode: Option<ProfileMode>,
 
     initialized_at: Option<Instant>,
     finalized_at: Option<Instant>,
-    profile_data: Option<ProfileData>,
-
-    target: ProfileTarget,
+    profile_data: Option<buck2_error::Result<ProfileData>>,
 }
 
-impl StarlarkProfiler {
-    pub fn new(profile_mode: ProfileMode, target: ProfileTarget) -> StarlarkProfiler {
-        Self {
+impl ProfilerData {
+    pub(crate) fn new(profile_mode: Option<ProfileMode>) -> Self {
+        ProfilerData {
             profile_mode,
             initialized_at: None,
             finalized_at: None,
             profile_data: None,
-            target,
         }
     }
 
-    /// Collect all profiling data.
+    /// Prepare an Evaluator to capture output relevant to this profiler.
+    pub(crate) fn initialize(&mut self, eval: &mut Evaluator) -> buck2_error::Result<bool> {
+        self.initialized_at = Some(Instant::now());
+        if let Some(mode) = &self.profile_mode {
+            eval.enable_profile(mode)
+                .map_err(|e| internal_error!("{}", e))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Post-analysis, produce the output of this profiler.
+    pub(crate) fn evaluation_complete(&mut self, eval: &mut Evaluator) {
+        self.finalized_at = Some(Instant::now());
+        if let Some(mode) = &self.profile_mode {
+            if !mode.requires_frozen_module() {
+                self.profile_data = Some(
+                    eval.gen_profile()
+                        .internal_error("error during profile generation"),
+                );
+            }
+        }
+    }
+
     pub fn finish(
         mut self,
         frozen_module: Option<&FrozenModule>,
-    ) -> buck2_error::Result<StarlarkProfileDataAndStats> {
-        let total_retained_bytes = match (frozen_module, self.profile_mode.requires_frozen_module())
-        {
+        target: StarlarkEvalKind,
+    ) -> buck2_error::Result<Option<Arc<StarlarkProfileDataAndStats>>> {
+        let mode = match self.profile_mode {
+            None => {
+                return Ok(None);
+            }
+            Some(v) => v,
+        };
+
+        let total_retained_bytes = match (frozen_module, mode.requires_frozen_module()) {
             (None, true) => {
                 return Err(StarlarkProfilerError::RetainedMemoryNotFrozen.into());
             }
@@ -65,7 +96,7 @@ impl StarlarkProfiler {
                     let profile = module
                         .heap_profile()
                         .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
-                    self.profile_data = Some(profile);
+                    self.profile_data = Some(Ok(profile));
                 }
 
                 module
@@ -73,95 +104,21 @@ impl StarlarkProfiler {
                     .allocated_summary()
                     .total_allocated_bytes()
             }
-            _ => 0,
+            (None, false) => 0,
         };
 
-        Ok(StarlarkProfileDataAndStats {
-            initialized_at: self.initialized_at.internal_error("did not initialize")?,
-            finalized_at: self.finalized_at.internal_error("did not finalize")?,
+        Ok(Some(Arc::new(StarlarkProfileDataAndStats {
+            initialized_at: self
+                .initialized_at
+                .ok_or_else(|| internal_error!("did not initialize"))?,
+            finalized_at: self
+                .finalized_at
+                .ok_or_else(|| internal_error!("did not finalize"))?,
             total_retained_bytes,
             profile_data: self
                 .profile_data
-                .internal_error("profile_data not initialized")?,
-            targets: vec![self.target],
-        })
-    }
-
-    /// Prepare an Evaluator to capture output relevant to this profiler.
-    fn initialize(&mut self, eval: &mut Evaluator) -> buck2_error::Result<()> {
-        eval.enable_profile(&self.profile_mode)
-            .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
-        self.initialized_at = Some(Instant::now());
-        Ok(())
-    }
-
-    /// Post-analysis, produce the output of this profiler.
-    fn evaluation_complete(&mut self, eval: &mut Evaluator) -> buck2_error::Result<()> {
-        self.finalized_at = Some(Instant::now());
-        if !self.profile_mode.requires_frozen_module() {
-            self.profile_data = Some(eval.gen_profile()?);
-        }
-        Ok(())
-    }
-}
-
-enum StarlarkProfilerOptImpl<'p> {
-    None,
-    Profiler(&'p mut StarlarkProfiler),
-}
-
-/// Modules can be evaluated with profiling or with instrumentation for profiling.
-/// This type enapsulates this logic.
-pub struct StarlarkProfilerOpt<'p>(StarlarkProfilerOptImpl<'p>);
-
-impl<'p> StarlarkProfilerOpt<'p> {
-    pub fn for_profiler(profiler: &'p mut StarlarkProfiler) -> Self {
-        StarlarkProfilerOpt(StarlarkProfilerOptImpl::Profiler(profiler))
-    }
-
-    /// No profiling.
-    pub fn disabled() -> StarlarkProfilerOpt<'p> {
-        StarlarkProfilerOpt(StarlarkProfilerOptImpl::None)
-    }
-
-    pub fn initialize(&mut self, eval: &mut Evaluator) -> buck2_error::Result<bool> {
-        match &mut self.0 {
-            StarlarkProfilerOptImpl::None => Ok(false),
-            StarlarkProfilerOptImpl::Profiler(profiler) => profiler.initialize(eval).map(|_| true),
-        }
-    }
-
-    pub fn evaluation_complete(&mut self, eval: &mut Evaluator) -> buck2_error::Result<()> {
-        if let StarlarkProfilerOptImpl::Profiler(profiler) = &mut self.0 {
-            profiler.evaluation_complete(eval)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-pub enum StarlarkProfilerOptVal {
-    Disabled,
-    Profiler(StarlarkProfiler),
-}
-
-impl StarlarkProfilerOptVal {
-    pub fn as_mut(&mut self) -> StarlarkProfilerOpt {
-        match self {
-            StarlarkProfilerOptVal::Disabled => StarlarkProfilerOpt::disabled(),
-            StarlarkProfilerOptVal::Profiler(profiler) => {
-                StarlarkProfilerOpt::for_profiler(profiler)
-            }
-        }
-    }
-
-    pub fn finish(
-        self,
-        frozen_module: Option<&FrozenModule>,
-    ) -> buck2_error::Result<Option<StarlarkProfileDataAndStats>> {
-        match self {
-            StarlarkProfilerOptVal::Disabled => Ok(None),
-            StarlarkProfilerOptVal::Profiler(profiler) => profiler.finish(frozen_module).map(Some),
-        }
+                .ok_or_else(|| internal_error!("profile_data not initialized"))??,
+            targets: vec![target],
+        })))
     }
 }

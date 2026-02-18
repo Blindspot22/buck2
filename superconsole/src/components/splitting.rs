@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Splitting is one of the most primitive building blocks of a fully featured UI.
@@ -68,12 +69,12 @@ impl InternalSplitKind {
 
         dimensions: Dimensions,
         mode: DrawMode,
-    ) -> anyhow::Result<Vec<Lines>> {
+    ) -> Result<Vec<Lines>, C::Error> {
         match self {
             InternalSplitKind::SizedNormalized(sizes) => children
                 .into_iter()
                 .zip(sizes.iter())
-                .map(|(child, size)| -> anyhow::Result<_> {
+                .map(|(child, size)| -> Result<_, C::Error> {
                     // allocate alloted size
                     let child_dimension = dimensions.multiply(*size, direction);
                     let mut output = child.draw(child_dimension, mode)?;
@@ -115,7 +116,7 @@ impl InternalSplitKind {
 
 /// [`Splits`](SplitKind) along a given [`direction`](crate::Direction) for its child [`components`](Component).
 /// Child components are truncated to the bounds passed to them.
-pub struct Split<C = Box<dyn Component>> {
+pub struct Split<C> {
     children: Vec<C>,
     direction: Direction,
     split: InternalSplitKind,
@@ -148,7 +149,9 @@ impl<C: Component> Split<C> {
 }
 
 impl<C: Component> Component for Split<C> {
-    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = C::Error;
+
+    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> Result<Lines, C::Error> {
         let outputs = self
             .split
             .draw(&self.children, self.direction, dimensions, mode)?;

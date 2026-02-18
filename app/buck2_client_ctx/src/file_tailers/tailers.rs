@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_common::daemon_dir::DaemonDir;
@@ -18,7 +19,7 @@ use crate::file_tailers::tailer::StdoutOrStderr;
 pub struct FileTailers {
     _stdout_tailer: Option<FileTailer>,
     _stderr_tailer: Option<FileTailer>,
-    pub(crate) stream: UnboundedReceiver<FileTailerEvent>,
+    pub(crate) stream: Option<UnboundedReceiver<FileTailerEvent>>,
 }
 
 impl FileTailers {
@@ -34,7 +35,7 @@ impl FileTailers {
         let this = Self {
             _stdout_tailer: Some(stdout_tailer),
             _stderr_tailer: Some(stderr_tailer),
-            stream: rx,
+            stream: Some(rx),
         };
         Ok(this)
     }
@@ -44,12 +45,23 @@ impl FileTailers {
             _stdout_tailer: None,
             _stderr_tailer: None,
             // Empty stream.
-            stream: mpsc::unbounded_channel().1,
+            stream: None,
         }
     }
 
-    pub fn stop_reading(self) -> UnboundedReceiver<FileTailerEvent> {
-        // by dropping the tailers, they shut themselves down.
-        self.stream
+    pub async fn recv(&mut self) -> Option<FileTailerEvent> {
+        if let Some(stream) = self.stream.as_mut() {
+            stream.recv().await
+        } else {
+            None
+        }
+    }
+
+    pub fn stop_reading(&mut self) -> Option<UnboundedReceiver<FileTailerEvent>> {
+        // dropping the tailers shuts them down and closes the stream.
+        drop(self._stderr_tailer.take());
+        drop(self._stdout_tailer.take());
+
+        self.stream.take()
     }
 }

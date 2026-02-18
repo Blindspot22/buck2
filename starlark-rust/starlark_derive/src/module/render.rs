@@ -106,7 +106,7 @@ fn render_attr(x: StarAttr, generics: &StarGenerics) -> syn::Stmt {
         docstring,
     } = x;
     let name_str = ident_string(&name);
-    let name_inner = syn::Ident::new(&format!("{}__inner", name_str), name.span());
+    let name_inner = syn::Ident::new(&format!("{name_str}__inner"), name.span());
     let docstring: syn::Expr = match docstring {
         Some(d) => render_some(syn::parse_quote! { #d.to_owned() }),
         None => render_none(),
@@ -136,7 +136,7 @@ fn render_attr(x: StarAttr, generics: &StarGenerics) -> syn::Stmt {
         #[allow(unused_variables)]
         fn #name_inner #generic_decls(
             this: #this_return_type,
-            __heap: &'v starlark::values::Heap,
+            __heap: starlark::values::Heap<'v>,
         ) -> #return_type
         #where_clause
         {
@@ -150,7 +150,7 @@ fn render_attr(x: StarAttr, generics: &StarGenerics) -> syn::Stmt {
         fn #name #generic_decls(
             _ignored: std::option::Option<starlark::values::FrozenValue>,
             #this_value: starlark::values::Value<'v>,
-            heap: &'v starlark::values::Heap,
+            heap: starlark::values::Heap<'v>,
         ) -> starlark::Result<starlark::values::Value<'v>>
         #where_clause
         {

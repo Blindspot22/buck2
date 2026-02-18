@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -24,13 +25,35 @@ use std::borrow::Cow;
 /// Additionally, we probably also incorrectly use shell quoting for `cmd.exe`.
 ///
 /// Long story short, we should not depend on possible correct behavior change in `shlex` crate.
-pub(crate) fn shlex_quote(in_str: &str) -> Cow<str> {
+pub(crate) fn shlex_quote(in_str: &str) -> Cow<'_, str> {
     if in_str.is_empty() {
         "\"\"".into()
-    } else if in_str.bytes().any(|c| match c as char {
-        '|' | '&' | ';' | '<' | '>' | '(' | ')' | '$' | '`' | '\\' | '"' | '\'' | ' ' | '\t'
-        | '\r' | '\n' | '*' | '?' | '[' | '#' | '~' | '=' | '%' => true,
-        _ => false,
+    } else if in_str.bytes().any(|c| {
+        matches!(
+            c as char,
+            '|' | '&'
+                | ';'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '$'
+                | '`'
+                | '\\'
+                | '"'
+                | '\''
+                | ' '
+                | '\t'
+                | '\r'
+                | '\n'
+                | '*'
+                | '?'
+                | '['
+                | '#'
+                | '~'
+                | '='
+                | '%'
+        )
     }) {
         let mut out: Vec<u8> = Vec::new();
         out.push(b'"');

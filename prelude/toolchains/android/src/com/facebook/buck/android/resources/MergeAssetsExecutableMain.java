@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.resources;
@@ -55,6 +56,11 @@ public class MergeAssetsExecutableMain {
       usage = "list of asset extensions that should not be compressed")
   private List<String> extraNoCompressAssetExtensions = new ArrayList<>();
 
+  @Option(
+      name = "--extra_no_compress_asset_regex",
+      usage = "regex pattern to match asset paths that should not be compressed")
+  private String extraNoCompressRegex = null;
+
   @Option(name = "--binary-type", usage = "either 'apk' or 'aab'")
   private String binaryType;
 
@@ -96,6 +102,7 @@ public class MergeAssetsExecutableMain {
         AbsPath.of(Paths.get(".").normalize().toAbsolutePath()),
         dirs,
         ImmutableSet.copyOf(extraNoCompressAssetExtensions),
+        Optional.ofNullable(extraNoCompressRegex),
         MergeAssetsUtils.BinaryType.valueOf(binaryType.toUpperCase()));
 
     if (outputApkHash != null) {

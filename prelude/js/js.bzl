@@ -1,12 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:genrule.bzl", "genrule_attributes")
-load("@prelude//android:build_only_native_code.bzl", "is_build_only_native_code")
 load("@prelude//decls:common.bzl", "buck")
 load("@prelude//decls:toolchains_common.bzl", "toolchains_common")
 load("@prelude//js:js_bundle.bzl", "js_bundle_impl")
@@ -21,8 +21,6 @@ def _select_platform():
             "config//os/constraints:windows": "windows",
         }),
         "config//react-native:macos": "macos",
-        # TODO(T210407097): Remove after deleting //third-party/microsoft-fork-of-react-native
-        "fbsource//tools/build_defs/js/config:macos_legacy": "macos_legacy",
         "fbsource//tools/build_defs/js/constraints/metro_js_platform_override:android": "android",
         "fbsource//tools/build_defs/js/constraints/metro_js_platform_override:ios": "ios",
         "fbsource//tools/build_defs/js/constraints/metro_js_platform_override:macos": "macos",
@@ -33,10 +31,16 @@ def _select_platform():
 def _is_release():
     return select({
         "DEFAULT": select({
-            "DEFAULT": False,
-            "fbsource//tools/build_defs/android/config:build_mode_opt": True,
+            "DEFAULT": select({
+                "DEFAULT": False,
+                "fbsource//tools/build_defs/android/config:build_mode_opt": True,
+            }),
+            "config//build_mode/constraints:release": True,
         }),
-        "config//build_mode/constraints:release": True,
+        "config//runtime:fbcode": select({
+            "DEFAULT": False,
+            "config//build_mode/constraints:opt": True,
+        }),
     })
 
 def _select_asset_dest_path_resolver():
@@ -64,6 +68,10 @@ extra_attributes = {
         ),
     },
     "js_bundle_genrule": genrule_attributes() | {
+        "has_content_based_path": attrs.bool(default = select({
+            "DEFAULT": False,
+            "config//features/apple:content_based_path_hashing_enabled": True,
+        })),
         "type": attrs.string(
             default = "js_bundle_genrule",
         ),
@@ -81,7 +89,6 @@ extra_attributes = {
             attrs.string(),
             default = _select_asset_dest_path_resolver(),
         ),
-        "_build_only_native_code": attrs.bool(default = is_build_only_native_code()),
         "_is_release": attrs.bool(
             default = _is_release(),
         ),

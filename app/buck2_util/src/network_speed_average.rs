@@ -1,13 +1,13 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use std::mem;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -34,7 +34,7 @@ impl NetworkSpeedAverage {
     /// Each update value must be greater than or equal to the previous one.
     /// Equal values are ignored during average calculation.
     pub fn update(&mut self, timestamp: SystemTime, value: u64) {
-        let last = mem::replace(&mut self.last_snapshot, Some(Snapshot { timestamp, value }));
+        let last = self.last_snapshot.replace(Snapshot { timestamp, value });
         if let Some((duration, value)) =
             NetworkSpeedAverage::elapsed_if_value_changed(&last, &Snapshot { timestamp, value })
         {

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
@@ -40,7 +41,6 @@ use crate::impls::value::MaybeValidDiceValue;
 use crate::impls::value::TrackedInvalidationPaths;
 use crate::introspection::graph::GraphNodeKind;
 use crate::introspection::graph::KeyID;
-use crate::introspection::graph::NodeID;
 use crate::introspection::graph::SerializedGraphNode;
 use crate::versions::VersionNumber;
 use crate::versions::VersionRange;
@@ -62,7 +62,7 @@ impl VersionedGraphNode {
         &mut self,
         v: VersionNumber,
         invalidation_priority: InvalidationSourcePriority,
-    ) -> InvalidateResult {
+    ) -> InvalidateResult<'_> {
         match self {
             VersionedGraphNode::Occupied(e) => e.force_dirty(v, invalidation_priority),
             VersionedGraphNode::Vacant(e) => {
@@ -73,7 +73,7 @@ impl VersionedGraphNode {
                 }
             }
             VersionedGraphNode::Injected(e) => {
-                panic!("injected keys don't get invalidated (`{:?}`)", e)
+                panic!("injected keys don't get invalidated (`{e:?}`)")
             }
         }
     }
@@ -82,7 +82,7 @@ impl VersionedGraphNode {
         &mut self,
         v: VersionNumber,
         invalidation_priority: Option<InvalidationSourcePriority>,
-    ) -> InvalidateResult {
+    ) -> InvalidateResult<'_> {
         match self {
             VersionedGraphNode::Occupied(e) => {
                 if e.mark_invalidated(v, invalidation_priority) {
@@ -92,10 +92,10 @@ impl VersionedGraphNode {
                 }
             }
             VersionedGraphNode::Vacant(e) => {
-                panic!("vacant nodes shouldn't get invalidated (`{:?}`)", e)
+                panic!("vacant nodes shouldn't get invalidated (`{e:?}`)")
             }
             VersionedGraphNode::Injected(e) => {
-                panic!("injected keys don't get invalidated (`{:?}`)", e)
+                panic!("injected keys don't get invalidated (`{e:?}`)")
             }
         }
     }
@@ -124,7 +124,7 @@ impl VersionedGraphNode {
         version: VersionNumber,
         value: DiceValidValue,
         invalidation_priority: InvalidationSourcePriority,
-    ) -> InvalidateResult {
+    ) -> InvalidateResult<'_> {
         match self {
             VersionedGraphNode::Occupied(occ) => {
                 occ.on_injected(version, value, invalidation_priority)
@@ -225,20 +225,20 @@ impl VersionedGraphNode {
             deps.map(|d| d.introspect()).collect()
         }
 
-        fn visit_rdeps(rdeps: impl Iterator<Item = DiceKey>) -> Vec<NodeID> {
-            rdeps.unique().map(|d| NodeID(d.index as usize)).collect()
+        fn visit_rdeps(rdeps: impl Iterator<Item = DiceKey>) -> Vec<KeyID> {
+            rdeps.unique().map(|d| KeyID(d.index as usize)).collect()
         }
 
         match self {
             VersionedGraphNode::Occupied(o) => Some(SerializedGraphNode {
-                node_id: NodeID(o.key.index as usize),
+                node_id: KeyID(o.key.index as usize),
                 kind: GraphNodeKind::Occupied,
                 history: crate::introspection::graph::CellHistory {
                     valid_ranges: o.metadata.verified_ranges.to_introspectable(),
                     force_dirtied_at: o.metadata.dirtied_history.to_introspectable(),
                 },
-                deps: Some(visit_deps(o.deps().iter_keys())),
-                rdeps: Some(visit_rdeps(o.rdeps())),
+                deps: visit_deps(o.deps().iter_keys()),
+                rdeps: visit_rdeps(o.rdeps()),
             }),
             VersionedGraphNode::Vacant(_) => {
                 // TODO(bobyf) should probably write the metadata of vacant
@@ -247,14 +247,14 @@ impl VersionedGraphNode {
             VersionedGraphNode::Injected(inj) => {
                 let latest = inj.latest();
                 Some(SerializedGraphNode {
-                    node_id: NodeID(inj.key.index as usize),
+                    node_id: KeyID(inj.key.index as usize),
                     kind: GraphNodeKind::Occupied,
                     history: crate::introspection::graph::CellHistory {
                         valid_ranges: latest.valid_versions.to_introspectable(),
                         force_dirtied_at: Vec::new(),
                     },
-                    deps: None,
-                    rdeps: Some(visit_rdeps(inj.rdeps.iter())),
+                    deps: HashSet::default(),
+                    rdeps: visit_rdeps(inj.rdeps.iter()),
                 })
             }
         }
@@ -484,7 +484,7 @@ impl OccupiedGraphNode {
         version: VersionNumber,
         value: DiceValidValue,
         invalidation_priority: InvalidationSourcePriority,
-    ) -> InvalidateResult {
+    ) -> InvalidateResult<'_> {
         // TODO(cjhopman): accepting injections only for InjectedKey would make the VersionedGraph simpler. Currently, this is used
         // for "mocking" dice keys in tests via DiceBuilder::mock_and_return().
         if self.val().equality(&value) {
@@ -539,7 +539,7 @@ impl OccupiedGraphNode {
         &mut self,
         v: VersionNumber,
         invalidation_priority: InvalidationSourcePriority,
-    ) -> InvalidateResult {
+    ) -> InvalidateResult<'_> {
         self.mark_invalidated(v, Some(invalidation_priority));
         if self
             .metadata
@@ -569,7 +569,7 @@ impl OccupiedGraphNode {
             .intersect_range(VersionRange::bounded(VersionNumber::ZERO, v))
     }
 
-    fn rdeps(&self) -> impl Iterator<Item = DiceKey> + '_ {
+    fn rdeps(&self) -> impl Iterator<Item = DiceKey> {
         self.metadata.rdeps.iter()
     }
 
@@ -637,7 +637,7 @@ impl InjectedGraphNode {
         version: VersionNumber,
         value: DiceValidValue,
         invalidation_priority: InvalidationSourcePriority,
-    ) -> InvalidateResult {
+    ) -> InvalidateResult<'_> {
         match self.values.values_mut().next_back() {
             Some(v) if v.value.equality(&value) => {
                 return InvalidateResult::NoChange;
@@ -720,8 +720,8 @@ impl InjectedGraphNode {
 mod tests {
     use allocative::Allocative;
     use async_trait::async_trait;
-    use buck2_futures::cancellation::CancellationContext;
     use derive_more::Display;
+    use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
 
     use crate::api::computations::DiceComputations;

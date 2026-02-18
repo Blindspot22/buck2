@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Shared, concurrent dice task cache that is shared between computations at the same version
@@ -75,7 +76,7 @@ impl SharedCache {
             .map(|task| task.value.dupe())
     }
 
-    pub(crate) fn get(&self, key: DiceKey) -> DiceTaskRef {
+    pub(crate) fn get(&self, key: DiceKey) -> DiceTaskRef<'_> {
         if let Some(computed) = self.try_get_computed(key) {
             return DiceTaskRef::Computed(computed);
         }
@@ -172,7 +173,7 @@ pub(crate) mod introspection {
     impl SharedCache {
         pub(crate) fn iter_tasks(
             &self,
-        ) -> impl Iterator<Item = (DiceKey, DiceTaskStateForDebugging)> + '_ {
+        ) -> impl Iterator<Item = (DiceKey, DiceTaskStateForDebugging)> {
             self.data
                 .storage
                 .iter()
@@ -187,10 +188,10 @@ mod tests {
 
     use allocative::Allocative;
     use async_trait::async_trait;
-    use buck2_futures::cancellation::CancellationContext;
-    use buck2_futures::spawner::TokioSpawner;
     use derive_more::Display;
     use dice_error::result::CancellationReason;
+    use dice_futures::cancellation::CancellationContext;
+    use dice_futures::spawner::TokioSpawner;
     use dupe::Dupe;
     use futures::FutureExt;
 

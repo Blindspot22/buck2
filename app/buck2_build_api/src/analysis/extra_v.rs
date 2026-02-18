@@ -1,17 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::OnceCell;
 
 use allocative::Allocative;
-use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use gazebo::prelude::OptionExt;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::FrozenModule;
@@ -64,7 +65,7 @@ impl<'v> Freeze for AnalysisExtraValue<'v> {
 }
 
 impl<'v> AnalysisExtraValue<'v> {
-    pub fn get(module: &'v Module) -> buck2_error::Result<Option<&'v AnalysisExtraValue<'v>>> {
+    pub fn get(module: &Module<'v>) -> buck2_error::Result<Option<&'v AnalysisExtraValue<'v>>> {
         let Some(extra) = module.extra_value() else {
             return Ok(None);
         };
@@ -75,7 +76,7 @@ impl<'v> AnalysisExtraValue<'v> {
         ))
     }
 
-    pub fn get_or_init(module: &'v Module) -> buck2_error::Result<&'v AnalysisExtraValue<'v>> {
+    pub fn get_or_init(module: &Module<'v>) -> buck2_error::Result<&'v AnalysisExtraValue<'v>> {
         if let Some(extra) = Self::get(module)? {
             return Ok(extra);
         }
@@ -86,7 +87,7 @@ impl<'v> AnalysisExtraValue<'v> {
                     .alloc(StarlarkAnyComplex::new(AnalysisExtraValue::default())),
             )
             .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
-        Self::get(module)?.internal_error("extra_value must be set")
+        Self::get(module)?.ok_or_else(|| internal_error!("extra_value must be set"))
     }
 }
 
@@ -97,7 +98,7 @@ impl FrozenAnalysisExtraValue {
     {
         Ok(module
             .owned_extra_value()
-            .internal_error("extra_value not set")?
+            .ok_or_else(|| internal_error!("extra_value not set"))?
             .downcast_starlark()?)
     }
 }

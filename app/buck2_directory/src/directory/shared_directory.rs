@@ -1,18 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_core::directory_digest::DirectoryDigest;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileNameBuf;
 use derivative::Derivative;
 use derive_more::Display;
 use dupe::Clone_;
@@ -94,6 +95,10 @@ where
         self.inner.data.fingerprint()
     }
 
+    pub fn size(&self) -> u64 {
+        self.inner.data.size
+    }
+
     pub fn into_builder(self) -> DirectoryBuilder<L, H> {
         DirectoryBuilder::Immutable(self.as_immutable())
     }
@@ -108,7 +113,7 @@ where
     L: Clone,
     H: DirectoryDigest,
 {
-    pub fn into_entries<C>(self) -> C
+    pub fn collect_entries<C>(self) -> C
     where
         C: FromIterator<(FileNameBuf, DirectoryEntry<DirectoryBuilder<L, H>, L>)>,
     {
@@ -116,6 +121,17 @@ where
             .into_iter()
             .map(|(k, v)| (k.clone(), v.clone().map_dir(|v| v.into_builder())))
             .collect()
+    }
+
+    pub fn into_entries(
+        self,
+    ) -> impl Iterator<Item = (FileNameBuf, DirectoryEntry<DirectoryBuilder<L, H>, L>)> {
+        // Hard to convince the borrow checker that this is safe, so write this using indexing in
+        // this slightly awkward way
+        (0..self.inner.data.entries.len()).map(move |i| {
+            let (k, v) = self.inner.data.entries.get_key_value_at_index(i).unwrap();
+            (k.clone(), v.clone().map_dir(|v| v.into_builder()))
+        })
     }
 }
 

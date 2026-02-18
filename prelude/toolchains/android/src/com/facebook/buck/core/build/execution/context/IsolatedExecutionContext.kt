@@ -1,21 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.core.build.execution.context
 
 import com.facebook.buck.core.filesystems.AbsPath
-import com.facebook.buck.util.Ansi
 import com.facebook.buck.util.ClassLoaderCache
 import com.facebook.buck.util.Console
-import com.facebook.buck.util.ProcessExecutor
 import com.facebook.buck.util.Verbosity
-import com.google.common.collect.ImmutableMap
 import com.google.common.io.Closer
 import java.io.Closeable
 import java.io.IOException
@@ -26,9 +24,7 @@ import java.util.Optional
 data class IsolatedExecutionContext(
     val classLoaderCache: ClassLoaderCache,
     val console: Console,
-    val processExecutor: ProcessExecutor,
     val ruleCellRoot: AbsPath,
-    val environment: ImmutableMap<String?, String?>
 ) : Closeable {
   val verbosity: Verbosity
     get() = console.verbosity
@@ -38,9 +34,6 @@ data class IsolatedExecutionContext(
 
   val stdOut: PrintStream
     get() = console.stdErr
-
-  val ansi: Ansi
-    get() = console.ansi
 
   @Throws(IOException::class)
   override fun close() {
@@ -57,19 +50,17 @@ data class IsolatedExecutionContext(
   fun createSubContext(
       newStdout: PrintStream?,
       newStderr: PrintStream?,
-      verbosityOverride: Optional<Verbosity?>
+      verbosityOverride: Optional<Verbosity?>,
   ): IsolatedExecutionContext {
     val console = this.console
-    val newConsole =
-        Console(verbosityOverride.orElse(console.verbosity), newStdout, newStderr, console.ansi)
+    val newConsole = Console(verbosityOverride.orElse(console.verbosity), newStdout, newStderr)
 
     // This should replace (or otherwise retain) all of the closeable parts of the context.
     return IsolatedExecutionContext(
         classLoaderCache.addRef(),
         newConsole,
-        processExecutor.cloneWithOutputStreams(newStdout, newStderr),
         ruleCellRoot,
-        environment)
+    )
   }
 
   companion object {
@@ -78,11 +69,13 @@ data class IsolatedExecutionContext(
     fun of(
         classLoaderCache: ClassLoaderCache,
         console: Console,
-        processExecutor: ProcessExecutor,
-        ruleCellRoot: AbsPath
+        ruleCellRoot: AbsPath,
     ): IsolatedExecutionContext {
       return IsolatedExecutionContext(
-          classLoaderCache.addRef(), console, processExecutor, ruleCellRoot, ImmutableMap.of())
+          classLoaderCache.addRef(),
+          console,
+          ruleCellRoot,
+      )
     }
   }
 }

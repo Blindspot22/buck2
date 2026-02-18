@@ -1,14 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 import json
 import unittest
 from tempfile import NamedTemporaryFile
-from typing import Dict, List
 
 from .spec import BuildTargetPatternOutputPathMatcher, Spec
 
@@ -95,7 +95,7 @@ def _get_spec(test_spec) -> Spec:
         return Spec(tmp.name)
 
 
-def _base_spec() -> Dict[str, List[str]]:
+def _base_spec() -> dict[str, list[str]]:
     return {
         "include_build_target_patterns": [],
         "include_regular_expressions": [],

@@ -1,10 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
+load("@prelude//:paths.bzl", "paths")
 load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load(
     "@prelude//cxx:preprocessor.bzl",
@@ -38,20 +40,20 @@ load(
     "@prelude//utils:utils.bzl",
     "map_idx",
 )
+load(":cgo_builder.bzl", "get_cgo_build_context")
 load(":compile.bzl", "GoPkgCompileInfo", "GoTestInfo")
 load(":coverage.bzl", "GoCoverageMode")
 load(":link.bzl", "GoPkgLinkInfo", "get_inherited_link_pkgs")
 load(":package_builder.bzl", "build_package")
 load(":packages.bzl", "cgo_exported_preprocessor", "go_attr_pkg_name", "merge_pkgs")
-load(":toolchain.bzl", "evaluate_cgo_enabled")
+load(":toolchain.bzl", "GoToolchainInfo", "evaluate_cgo_enabled", "get_toolchain_env_vars")
 
 def go_library_impl(ctx: AnalysisContext) -> list[Provider]:
     cxx_toolchain_available = CxxToolchainInfo in ctx.attrs._cxx_toolchain
     pkg_name = go_attr_pkg_name(ctx)
 
-    race = ctx.attrs._race
-    asan = ctx.attrs._asan
     coverage_mode = GoCoverageMode(ctx.attrs._coverage_mode) if ctx.attrs._coverage_mode else None
+    cgo_build_context = get_cgo_build_context(ctx)
 
     pkg, pkg_info = build_package(
         ctx = ctx,
@@ -59,18 +61,18 @@ def go_library_impl(ctx: AnalysisContext) -> list[Provider]:
         main = False,
         srcs = ctx.attrs.srcs + ctx.attrs.headers,
         package_root = ctx.attrs.package_root,
+        cgo_build_context = cgo_build_context,
         deps = ctx.attrs.deps,
         compiler_flags = ctx.attrs.compiler_flags,
         assembler_flags = ctx.attrs.assembler_flags,
         build_tags = ctx.attrs._build_tags,
-        race = race,
-        asan = asan,
         coverage_mode = coverage_mode,
         embedcfg = ctx.attrs.embedcfg,
+        embed_srcs = ctx.attrs.embed_srcs,
         cgo_enabled = evaluate_cgo_enabled(cxx_toolchain_available, ctx.attrs._cgo_enabled, ctx.attrs.override_cgo_enabled),
     )
 
-    default_output = pkg.pkg
+    default_output = _combine_package(ctx, pkg_name, pkg.pkg, pkg.export_file)
     pkgs = {
         pkg_name: pkg,
     }
@@ -111,7 +113,7 @@ def go_library_impl(ctx: AnalysisContext) -> list[Provider]:
             ),
             deps = ctx.attrs.deps,
         ),
-        cxx_merge_cpreprocessors(ctx, own_exported_preprocessors, cxx_inherited_preprocessor_infos(ctx.attrs.deps)),
+        cxx_merge_cpreprocessors(ctx.actions, own_exported_preprocessors, cxx_inherited_preprocessor_infos(ctx.attrs.deps)),
         pkg_info,
     ]
 
@@ -120,3 +122,23 @@ def _get_empty_link_infos() -> dict[LibOutputStyle, LinkInfos]:
     for output_style in LibOutputStyle:
         infos[output_style] = LinkInfos(default = LinkInfo())
     return infos
+
+# The combined package is convinient for debugging purposes, but for actual builds we use separate objects.
+def _combine_package(ctx: AnalysisContext, pkg_name: str, a_file: Artifact, x_file: Artifact) -> Artifact:
+    go_toolchain = ctx.attrs._go_toolchain[GoToolchainInfo]
+    env = get_toolchain_env_vars(go_toolchain)
+
+    pkg_file = ctx.actions.declare_output(paths.basename(pkg_name) + "-combined.a", has_content_based_path = True)
+
+    pack_cmd = [
+        go_toolchain.packer,
+        "c",
+        pkg_file.as_output(),
+        a_file,
+        x_file,
+    ]
+
+    identifier = paths.basename(pkg_name) + "-combined"
+    ctx.actions.run(pack_cmd, env = env, category = "go_pack", identifier = identifier)
+
+    return pkg_file

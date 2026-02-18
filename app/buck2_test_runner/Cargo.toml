@@ -1,12 +1,11 @@
 [package]
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_test_runner"
 repository = { workspace = true }
 version = "0.1.0"
 
 [dependencies]
-anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }

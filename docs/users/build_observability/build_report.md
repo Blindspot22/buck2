@@ -12,6 +12,23 @@ successful outcomes are well served by direct usage of the CLI.
 To request a build report, pass `--build-report <path>` to `buck build` on the
 CLI.
 
+You can also pass `--build-report-options` with a comma-separated list of
+options to customize the build report:
+
+- `fill-out-failures`: Fill out the `failures` field in the build report (for
+  Buck1 backwards compatibility).
+- `package-project-relative-paths`: Include the project-relative path of
+  packages for built targets.
+- `include-artifact-hash-information`: Include artifact hash information in the
+  output.
+- `exclude-action-error-diagnostics`: Exclude the `error_diagnostics` field from
+  action errors in the build report. This can reduce the size of build reports
+  when detailed error diagnostic information from action error handlers is not
+  needed.
+- `truncate-error-content`: Truncate error message content in the build report
+  to reduce size. This applies the same truncation limits used for error logging
+  (20KB per error message).
+
 At a high level, the build report outputs information for each of the targets
 that you requested to have built on the CLI. As a result, it may report
 information for more than one configuration or subtarget of a target. For
@@ -29,11 +46,15 @@ BuildReport {
     # True if all requested targets built successfully
     success: bool,
 
+    # The error category for the build, in case it failed. One of "USER", "INFRA", "ENVIRONMENT".
+    error_category: str,
+
     # The absolute path to the project root
     project_root: Path,
 
-    # The results of the build, categorized by unconfigured target
-    results: dict[TargetLabel, BuildReportEntry],
+    # The results of the build, categorized by unconfigured target along with
+    # any potential modifiers from the `?modifier` syntax
+    results: dict[TargetLabelWithModifiers, BuildReportEntry],
 
     # A cache for error message lookup. This is meant for deduplicating strings
     # that might otherwise appear many times in the build report and cause an
@@ -45,9 +66,16 @@ BuildReport {
     #
     # Currently always empty. Will be filled in if a flag is passed in the future.
     #
-    # A map from targets that failed to build to error messages describing the
+    # A map from targets with potential `?modifier` modifiers that failed to build to error messages describing the
     # failure.
-    failures: dict[TargetLabel, str],
+    failures: dict[TargetLabelWithModifiers, str],
+
+    # Build metrics aggregated across all targets.
+    build_metrics: AllTargetsBuildMetrics,
+
+    # Set sketch of configured target graph stored in a hex string.
+    # Enabled by setting `-c buck2.log_total_configured_graph_sketch=true`.
+    total_configured_graph_sketch: Optional[str],
 }
 
 BuildReportEntry {
@@ -68,7 +96,7 @@ BuildReportEntry {
     # The two fields below are included for buck1 backwards compatibility only.
     # They are both computed by aggregating across all the configured targets in
     # the way you might expect.
-    success: "FAIL" | "SUCCESS,
+    success: "FAIL" | "SUCCESS",
     outputs: dict[str, list[Path]],
 
     # The path to the package containing this target, relative to the project
@@ -78,7 +106,7 @@ BuildReportEntry {
 
 ConfiguredBuildReportEntry {
     # Did this target build successfully or not?
-    success: "FAIL" | "SUCCESS,
+    success: "FAIL" | "SUCCESS",
 
     # A map of subtargets that were built to a list of the successfully built
     # outputs for that subtarget.
@@ -97,6 +125,65 @@ ConfiguredBuildReportEntry {
     # Information about this particular artifact. Includes things like its hash, whether it is
     # executable, etc.
     artifact_info: dict[str, ArtifactInfoFile | ArtifactInfoSymlink | ArtifactInfoExternalSymlink],
+
+    # Set sketch of configured target graph stored in a hex string.
+    # Enabled by setting `-c buck2.log_configured_graph_sketch=true`.
+    configured_graph_sketch: Optional[str],
+
+    # Set sketch of analysis memory utilization stored in a hex string.
+    #
+    # Computing the cardinality of this sketch returns an (approximate) number of bytes.
+    #
+    # Enabled by setting `-c buck2.log_retained_analysis_memory_sketch=true`
+    retained_analysis_memory_sketch: Optional[str],
+
+    # Metrics for this target. Represents the aggregated metrics for top level targets.
+    metrics: TargetBuildMetrics,
+}
+
+AllTargetsBuildMetrics {
+    #  The total number of nodes in the action graph, if we were able to fully traverse it.
+    action_graph_size: Optional[u64],
+
+    # Metrics aggregated across all targets.
+    metrics: AggregatedBuildMetrics,
+}
+
+TargetBuildMetrics {
+    # The total number of nodes in the action graph, if we were able to fully traverse it.
+    action_graph_size: Optional[u64],
+
+    # These are metrics aggregated without normalization.
+    metrics: AggregatedBuildMetrics
+
+    # "Amortized" metrics are aggregated by dividing the metric/cost evenly
+    # across all top-level targets that require the node that produced the
+    # metric. For example, when building four targets `//:foo`, `//:bar`,
+    # `//:baz`, `//:qux` if some intermediate action is required for each of the
+    # first three, its costs will be aggregated to them each multiplied by 1/3
+    # while no cost will be attributed to `//:qux`.
+    amortized_metrics: AggregatedBuildMetrics
+
+    # Max value for peak memory usage across all remote actions.
+    remote_max_memory_peak_bytes: Optional[u64]
+
+    # Max value for peak memory usage across all local actions.
+    local_max_memory_peak_bytes: Optional[u64]
+}
+
+AggregatedBuildMetrics {
+    full_graph_execution_time_ms: float
+    full_graph_output_size_bytes: float
+
+    local_execution_time_ms: float
+    remote_execution_time_ms: float
+
+    local_executions: float
+    remote_executions: float
+    remote_cache_hits: float
+
+    analysis_retained_memory: float
+    declared_actions: float
 }
 
 Error {
@@ -180,7 +267,7 @@ ActionSubError {
 }
 
 ActionErrorLocation {
-    # File path where the error appeared, preferrably either project-relative or absolute.
+    # File path where the error appeared, preferably either project-relative or absolute.
     file: str,
 
     # Optional line number
@@ -226,7 +313,7 @@ parsing to fail.
 A number of fields above are marked as being for buck1 backwards compatibility
 only. These fields all have superior alternatives available in the build report
 already. We would strongly prefer that new code neither use nor parse them, as
-this increases the likelyhood that they can be removed one day.
+this increases the likelihood that they can be removed one day.
 
 The build report additionally outputs a few fields that are intentionally not
 documented here. Those fields are even less useful than ones documented as being
@@ -240,7 +327,7 @@ The build report currently has at least the following limitations:
 1.  It includes only one action error per failed target. This is the expected
     behavior when `--keep-going` is not passed, but when `--keep-going` is
     passed, this is a bug.
-1.  It is currently not generated when a non-existant package is specified on
+1.  It is currently not generated when a non-existent package is specified on
     the command line. This is also a bug.
 1.  It cannot be requested for any buck2 command other than `build`
 1.  Errors do not contain any additional metadata outside of the error message.
@@ -249,7 +336,7 @@ The build report currently has at least the following limitations:
     backcompat opt-in flag in the future.
 
 Finally, it's worth raising that the concept of error deduplication has some
-fundamental limitations; if two targets both refer to the same non-existant
+fundamental limitations; if two targets both refer to the same non-existent
 dependency, do those errors have the same cause (the dependency doesn't exist)
 or different causes (each target is individually broken)? As a result, the exact
 details of when two errors are considered to have the same cause are not

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -13,10 +14,10 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from buck2.tests.e2e_util.api.buck import Buck
-from buck2.tests.e2e_util.buck_workspace import buck_test
+from buck2.tests.e2e_util.buck_workspace import buck_test, env
 
 
 def fixture(name: str) -> str:
@@ -27,7 +28,8 @@ def fixture(name: str) -> str:
 @buck_test()
 async def test_console_facts(buck: Buck) -> None:
     res = await buck.log(
-        "replay", fixture("my_genrule0"), "--", "build", "--console", "simple"
+        "replay",
+        fixture("my_genrule0"),
     )
     assert re.search("Network: .*([0-9.]+)([KMG]?)B", res.stderr) is not None
     assert "Cache hits: 100%" in res.stderr
@@ -39,10 +41,6 @@ async def test_console_facts_no_repo(buck: Buck) -> None:
     res = await buck.log(
         "replay",
         fixture("my_genrule0"),
-        "--",
-        "build",
-        "--console",
-        "simple",
         rel_cwd=Path(os.path.relpath("/", buck.cwd)),
     )
     assert re.search("Network: .*([0-9.]+)([KMG]?)B", res.stderr) is not None
@@ -52,9 +50,7 @@ async def test_console_facts_no_repo(buck: Buck) -> None:
 
 @buck_test()
 async def test_super_console_facts(buck: Buck) -> None:
-    res = await buck.log(
-        "replay", fixture("my_genrule0"), "--", "build", "--console", "super"
-    )
+    res = await buck.log("replay", fixture("my_genrule0"))
     assert re.search("Network: .*([0-9.]+)([KMG]?)B", res.stderr) is not None
     assert "Cache hits: 100%" in res.stderr
     assert "Commands: 1" in res.stderr
@@ -149,27 +145,39 @@ async def test_stale_snapshot(buck: Buck, tmp_path: Path) -> None:
     stale_message = "Resource usage: <snapshot is stale>"
 
     # Check it's there.
-    res = await buck.log("replay", str(logfile), "--console", "simple")
+    res = await buck.log("replay", str(logfile))
     assert stale_message in res.stderr
 
     # Check it's not in the original one.
-    res = await buck.log("replay", original, "--console", "simple")
+    res = await buck.log("replay", original)
     assert stale_message not in res.stderr
 
 
-def _get(data: Dict[str, Any], *key: str) -> Dict[str, Any]:
+def _get(data: dict[str, Any], *key: str) -> dict[str, Any] | None:
     for k in key:
-        data = data.get(k)
-        if data is None:
-            break
-
+        res = data.get(k)
+        if res is None:
+            return None
+        else:
+            data = res
     return data
 
 
 @buck_test()
 async def test_super_console_changes(buck: Buck) -> None:
-    res = await buck.log(
-        "replay", fixture("my_genrule1"), "--", "build", "--console", "super"
-    )
+    res = await buck.log("replay", fixture("my_genrule1"))
     assert "File changed: fbcode//buck2/dir1/file1" in res.stderr
     assert "Directory changed: fbcode//buck2/dir1" in res.stderr
+
+
+@buck_test(
+    extra_buck_config={
+        "buck2_system_warning": {
+            "memory_pressure_threshold_percent": "1",
+        },
+    },
+)
+@env("BUCK2_TEST_FAKE_SYSTEM_TOTAL_MEMORY", "1000")
+async def test_system_memory_exceeded_warning(buck: Buck) -> None:
+    res = await buck.build("//:slow", "--console=simple")
+    assert "High memory pressure" in res.stderr

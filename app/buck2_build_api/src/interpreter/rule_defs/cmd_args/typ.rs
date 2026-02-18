@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::Ref;
@@ -18,7 +19,10 @@ use std::fmt::Formatter;
 use std::marker::PhantomData;
 
 use allocative::Allocative;
-use buck2_core::fs::paths::RelativePathBuf;
+use buck2_artifact::artifact::artifact_type::Artifact;
+use buck2_artifact::artifact::artifact_type::OutputArtifact;
+use buck2_error::internal_error;
+use buck2_fs::paths::RelativePathBuf;
 use display_container::display_pair;
 use display_container::fmt_container;
 use display_container::iter_display_chain;
@@ -65,6 +69,8 @@ use crate::artifact_groups::ArtifactGroup;
 use crate::interpreter::rule_defs::artifact::associated::AssociatedArtifacts;
 use crate::interpreter::rule_defs::artifact::starlark_declared_artifact::StarlarkDeclaredArtifact;
 use crate::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
+use crate::interpreter::rule_defs::artifact_tagging::ArtifactTag;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 use crate::interpreter::rule_defs::cmd_args::options::CommandLineOptions;
 use crate::interpreter::rule_defs::cmd_args::options::CommandLineOptionsRef;
@@ -81,6 +87,13 @@ use crate::interpreter::rule_defs::cmd_args::traits::SimpleCommandLineArtifactVi
 use crate::interpreter::rule_defs::cmd_args::traits::WriteToFileMacroVisitor;
 use crate::interpreter::rule_defs::cmd_args::value::CommandLineArg;
 use crate::interpreter::rule_defs::cmd_args::value::FrozenCommandLineArg;
+
+#[derive(Debug, buck2_error::Error)]
+pub enum CommandLineError {
+    #[error("Artifact(s) {0:?} cannot be used with ignore_artifacts as they are content-based")]
+    #[buck2(input)]
+    ContentBasedIgnoreArtifacts(IndexSet<String>),
+}
 
 /// Fields of `cmd_args`. Abstract mutable and frozen versions.
 trait Fields<'v> {
@@ -183,18 +196,24 @@ impl<'v, F: Fields<'v>> FieldsRef<'v, F> {
         }
     }
 
-    fn relative_to_path<C>(&self, ctx: &C) -> buck2_error::Result<Option<RelativePathBuf>>
+    fn relative_to_path<C>(
+        &self,
+        ctx: &C,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
+    ) -> buck2_error::Result<Option<RelativePathBuf>>
     where
         C: CommandLineContext + ?Sized,
     {
         match &self.0.options() {
             None => Ok(None),
-            Some(options) => options.to_command_line_options().relative_to_path(ctx),
+            Some(options) => options
+                .to_command_line_options()
+                .relative_to_path(ctx, artifact_path_mapping),
         }
     }
 }
 
-impl<'v, F: Fields<'v>> CommandLineArgLike for FieldsRef<'v, F> {
+impl<'v, F: Fields<'v>> CommandLineArgLike<'v> for FieldsRef<'v, F> {
     fn register_me(&self) {
         command_line_arg_like_impl!(StarlarkCmdArgs::starlark_type_repr());
     }
@@ -203,38 +222,113 @@ impl<'v, F: Fields<'v>> CommandLineArgLike for FieldsRef<'v, F> {
         &self,
         cli: &mut dyn CommandLineBuilder,
         context: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         match self.0.options() {
             None => {
                 for item in self.0.items() {
-                    item.as_command_line_arg()
-                        .add_to_command_line(cli, context)?;
+                    item.as_command_line_arg().add_to_command_line(
+                        cli,
+                        context,
+                        artifact_path_mapping,
+                    )?;
                 }
                 Ok(())
             }
-            Some(options) => {
-                options
-                    .to_command_line_options()
-                    .wrap_builder(cli, context, |cli, context| {
-                        for item in self.0.items() {
-                            item.as_command_line_arg()
-                                .add_to_command_line(cli, context)?;
-                        }
-                        Ok(())
-                    })
-            }
+            Some(options) => options.to_command_line_options().wrap_builder(
+                cli,
+                context,
+                |cli, context| {
+                    for item in self.0.items() {
+                        item.as_command_line_arg().add_to_command_line(
+                            cli,
+                            context,
+                            artifact_path_mapping,
+                        )?;
+                    }
+                    Ok(())
+                },
+                artifact_path_mapping,
+            ),
         }
     }
 
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
         if !self.ignore_artifacts() {
+            fn visit_items<'a>(
+                visitor: &mut dyn CommandLineArtifactVisitor<'a>,
+                items: &[CommandLineArg<'a>],
+            ) -> buck2_error::Result<()> {
+                for item in items {
+                    visitor.push_frame()?;
+                    item.as_command_line_arg().visit_artifacts(visitor)?;
+                    visitor.pop_frame();
+                }
+
+                Ok(())
+            }
+
+            visit_items(visitor, self.0.items())?;
+            if !visitor.skip_hidden() {
+                visit_items(visitor, self.0.hidden())?;
+            }
+        } else {
+            struct IgnoredArtifactsVisitor {
+                content_based_artifacts: IndexSet<String>,
+            }
+
+            impl IgnoredArtifactsVisitor {
+                fn new() -> Self {
+                    Self {
+                        content_based_artifacts: IndexSet::new(),
+                    }
+                }
+            }
+
+            impl<'v> CommandLineArtifactVisitor<'v> for IgnoredArtifactsVisitor {
+                fn visit_input(&mut self, input: ArtifactGroup, _tags: Vec<&ArtifactTag>) {
+                    if input.path_resolution_may_require_artifact_value() {
+                        self.content_based_artifacts.insert(input.to_string());
+                    }
+                }
+
+                fn visit_declared_artifact(
+                    &mut self,
+                    declared_artifact: buck2_artifact::artifact::artifact_type::DeclaredArtifact,
+                    _tags: Vec<&ArtifactTag>,
+                ) -> buck2_error::Result<()> {
+                    if declared_artifact.has_content_based_path() {
+                        self.content_based_artifacts
+                            .insert(declared_artifact.to_string());
+                    }
+
+                    Ok(())
+                }
+
+                fn visit_declared_output(
+                    &mut self,
+                    _artifact: OutputArtifact<'v>,
+                    _tags: Vec<&ArtifactTag>,
+                ) {
+                }
+
+                fn visit_frozen_output(&mut self, _artifact: Artifact, _tags: Vec<&ArtifactTag>) {}
+            }
+            let mut ignored_artifacts_visitor = IgnoredArtifactsVisitor::new();
             for item in self.0.items().iter().chain(self.0.hidden().iter()) {
-                visitor.push_frame()?;
-                item.as_command_line_arg().visit_artifacts(visitor)?;
-                visitor.pop_frame();
+                ignored_artifacts_visitor.push_frame()?;
+                item.as_command_line_arg()
+                    .visit_artifacts(&mut ignored_artifacts_visitor)?;
+                ignored_artifacts_visitor.pop_frame();
+            }
+            if !ignored_artifacts_visitor.content_based_artifacts.is_empty() {
+                return Err(CommandLineError::ContentBasedIgnoreArtifacts(
+                    ignored_artifacts_visitor.content_based_artifacts,
+                )
+                .into());
             }
         }
         Ok(())
@@ -255,16 +349,19 @@ impl<'v, F: Fields<'v>> CommandLineArgLike for FieldsRef<'v, F> {
     fn visit_write_to_file_macros(
         &self,
         visitor: &mut dyn WriteToFileMacroVisitor,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
-        visitor.set_current_relative_to_path(&|ctx| self.relative_to_path(ctx))?;
+        visitor.set_current_relative_to_path(&|ctx| {
+            self.relative_to_path(ctx, artifact_path_mapping)
+        })?;
 
         for item in self.0.items() {
             item.as_command_line_arg()
-                .visit_write_to_file_macros(visitor)?;
+                .visit_write_to_file_macros(visitor, artifact_path_mapping)?;
         }
         for item in self.0.hidden() {
             item.as_command_line_arg()
-                .visit_write_to_file_macros(visitor)?;
+                .visit_write_to_file_macros(visitor, artifact_path_mapping)?;
         }
         Ok(())
     }
@@ -455,7 +552,7 @@ impl<'v> StarlarkValue<'v> for StarlarkCmdArgs<'v> {
         demand.provide_value::<&dyn CommandLineArgLike>(self);
     }
 
-    fn try_freeze_static(&self) -> Option<FrozenValue> {
+    fn try_freeze_directly(&self, _freezer: &Freezer<'_>) -> Option<FreezeResult<FrozenValue>> {
         let StarlarkCommandLineData {
             items,
             hidden,
@@ -468,7 +565,7 @@ impl<'v> StarlarkValue<'v> for StarlarkCmdArgs<'v> {
                     hidden: ThinBoxSliceFrozenValue::empty(),
                     options: FrozenCommandLineOptions::empty(),
                 });
-            Some(EMPTY.unpack().to_frozen_value())
+            Some(Ok(EMPTY.unpack().to_frozen_value()))
         } else {
             None
         }
@@ -487,17 +584,17 @@ impl<'v> StarlarkValue<'v> for FrozenStarlarkCmdArgs {
     }
 
     fn provide(&'v self, demand: &mut Demand<'_, 'v>) {
-        demand.provide_value::<&dyn CommandLineArgLike>(self);
+        demand.provide_value::<&dyn CommandLineArgLike<'v>>(self);
     }
 }
 
 impl<'v> AllocValue<'v> for StarlarkCmdArgs<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
 
-impl<'v> CommandLineArgLike for StarlarkCmdArgs<'v> {
+impl<'v> CommandLineArgLike<'v> for StarlarkCmdArgs<'v> {
     fn register_me(&self) {
         command_line_arg_like_impl!(StarlarkCmdArgs::starlark_type_repr());
     }
@@ -506,13 +603,18 @@ impl<'v> CommandLineArgLike for StarlarkCmdArgs<'v> {
         &self,
         cli: &mut dyn CommandLineBuilder,
         context: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
-        FieldsRef(self.0.borrow(), PhantomData).add_to_command_line(cli, context)
+        FieldsRef(self.0.borrow(), PhantomData).add_to_command_line(
+            cli,
+            context,
+            artifact_path_mapping,
+        )
     }
 
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
         FieldsRef(self.0.borrow(), PhantomData).visit_artifacts(visitor)
     }
@@ -524,12 +626,14 @@ impl<'v> CommandLineArgLike for StarlarkCmdArgs<'v> {
     fn visit_write_to_file_macros(
         &self,
         visitor: &mut dyn WriteToFileMacroVisitor,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
-        FieldsRef(self.0.borrow(), PhantomData).visit_write_to_file_macros(visitor)
+        FieldsRef(self.0.borrow(), PhantomData)
+            .visit_write_to_file_macros(visitor, artifact_path_mapping)
     }
 }
 
-impl CommandLineArgLike for FrozenStarlarkCmdArgs {
+impl<'v> CommandLineArgLike<'v> for FrozenStarlarkCmdArgs {
     fn register_me(&self) {
         command_line_arg_like_impl!(FrozenStarlarkCmdArgs::starlark_type_repr());
     }
@@ -538,13 +642,14 @@ impl CommandLineArgLike for FrozenStarlarkCmdArgs {
         &self,
         cli: &mut dyn CommandLineBuilder,
         context: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
-        FieldsRef(self, PhantomData).add_to_command_line(cli, context)
+        FieldsRef(self, PhantomData).add_to_command_line(cli, context, artifact_path_mapping)
     }
 
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
         FieldsRef(self, PhantomData).visit_artifacts(visitor)
     }
@@ -556,8 +661,9 @@ impl CommandLineArgLike for FrozenStarlarkCmdArgs {
     fn visit_write_to_file_macros(
         &self,
         visitor: &mut dyn WriteToFileMacroVisitor,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
-        FieldsRef(self, PhantomData).visit_write_to_file_macros(visitor)
+        FieldsRef(self, PhantomData).visit_write_to_file_macros(visitor, artifact_path_mapping)
     }
 }
 
@@ -699,7 +805,7 @@ impl<'v> UnpackValue<'v> for StarlarkCommandLineMut<'v> {
 }
 
 impl<'v> AllocValue<'v> for StarlarkCommandLineMut<'v> {
-    fn alloc_value(self, _heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, _heap: Heap<'v>) -> Value<'v> {
         self.value
     }
 }
@@ -727,7 +833,7 @@ fn cmd_args_methods(builder: &mut MethodsBuilder) {
     /// Note that this operation mutates the input `cmd_args`.
     fn add<'v>(
         mut this: StarlarkCommandLineMut<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
         args: &Arguments<'v, '_>,
     ) -> starlark::Result<StarlarkCommandLineMut<'v>> {
         args.no_named_args()?;
@@ -767,8 +873,27 @@ fn cmd_args_methods(builder: &mut MethodsBuilder) {
     }
 
     /// Collect all the inputs (including hidden) referenced by this command line.
-    /// The output can be compared for equality and have its `len` requested to see whether
-    /// there are any inputs, but is otherwise mostly opaque.
+    ///
+    /// The returned collection is opaque and primarily useful for:
+    /// - Checking if the command has any artifact dependencies
+    /// - Comparing input sets between different `cmd_args` objects
+    ///
+    /// The collection supports `len()` and equality comparisons but cannot be iterated.
+    ///
+    /// Example:
+    /// ```python
+    /// def _impl(ctx):
+    ///     cmd = cmd_args(ctx.attrs.srcs)
+    ///
+    ///     # Check if command has any inputs
+    ///     if len(cmd.inputs) > 0:
+    ///         pass
+    ///
+    ///     # Compare input sets
+    ///     other_cmd = cmd_args(ctx.attrs.headers, hidden = ctx.attrs.resources)
+    ///     if cmd.inputs == other_cmd.inputs:
+    ///         pass
+    /// ```
     #[starlark(attribute)]
     fn inputs<'v>(this: Value<'v>) -> starlark::Result<StarlarkCommandLineInputs> {
         let mut visitor = SimpleCommandLineArtifactVisitor::new();
@@ -782,15 +907,29 @@ fn cmd_args_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn outputs<'v>(
         this: Value<'v>,
-        heap: &Heap,
+        heap: Heap<'_>,
     ) -> starlark::Result<Vec<StarlarkOutputArtifact<'v>>> {
         let mut visitor = SimpleCommandLineArtifactVisitor::new();
         cmd_args(this).visit_artifacts(&mut visitor)?;
-        let mut outputs = Vec::with_capacity(visitor.outputs.len());
-        for out in visitor.outputs {
+        let mut outputs =
+            Vec::with_capacity(visitor.declared_outputs.len() + visitor.frozen_outputs.len());
+        for out in visitor.declared_outputs {
             let declared = heap.alloc_typed(StarlarkDeclaredArtifact::new(
                 None,
                 (*out).dupe(),
+                AssociatedArtifacts::new(),
+            ));
+            outputs.push(StarlarkOutputArtifact::new(declared));
+        }
+        // FIXME(JakobDegen): We should probably not be allowing people to get an `OutputArtifact`
+        // for an artifact declared in a downstream action??
+        for out in visitor.frozen_outputs {
+            let declared = heap.alloc_typed(StarlarkDeclaredArtifact::new(
+                None,
+                (*out
+                    .allocate_new_output_artifact_for(heap)
+                    .ok_or_else(|| internal_error!("Expecting artifact to be output artifact"))?)
+                .dupe(),
                 AssociatedArtifacts::new(),
             ));
             outputs.push(StarlarkOutputArtifact::new(declared));
@@ -829,7 +968,7 @@ pub fn register_cmd_args(builder: &mut GlobalsBuilder) {
     /// must be baked into the binary. As an example:
     ///
     /// ```python
-    /// resources = cmd_args(resource_file, format = "-DFOO={}").ignore_artifacts()
+    /// resources = cmd_args(resource_file, format = "-DFOO={}", ignore_artifacts=True)
     /// ctx.actions.run(cmd_args("gcc", "-c", source_file, resources))
     /// ```
     ///
@@ -973,6 +1112,11 @@ impl Display for StarlarkCommandLineInputs {
 
 #[starlark_value(type = "CommandLineInputs")]
 impl<'v> StarlarkValue<'v> for StarlarkCommandLineInputs {
+    fn get_methods() -> Option<&'static Methods> {
+        static RES: MethodsStatic = MethodsStatic::new();
+        RES.methods(command_line_inputs_methods)
+    }
+
     fn length(&self) -> starlark::Result<i32> {
         self.inputs
             .len()
@@ -987,6 +1131,15 @@ impl<'v> StarlarkValue<'v> for StarlarkCommandLineInputs {
             Ok(false)
         }
     }
+}
+
+/// An opaque collection of input artifacts referenced by a `cmd_args` object.
+///
+/// Returned by the [`.inputs`](../cmd_args/#cmd_argsinputs) attribute. Supports `len()` and equality comparisons.
+/// See the [`.inputs`](../cmd_args/#cmd_argsinputs) attribute documentation for usage examples.
+#[starlark_module]
+fn command_line_inputs_methods(_builder: &mut MethodsBuilder) {
+    // No methods currently - this type only supports len() and equality via StarlarkValue trait
 }
 
 #[starlark_module]

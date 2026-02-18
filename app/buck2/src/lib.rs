@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -12,12 +13,10 @@
 
 use std::thread;
 
-use buck2_audit::AuditCommand;
 use buck2_client::commands::build::BuildCommand;
 use buck2_client::commands::bxl::BxlCommand;
 use buck2_client::commands::clean::CleanCommand;
 use buck2_client::commands::ctargets::ConfiguredTargetsCommand;
-use buck2_client::commands::debug::DebugCommand;
 use buck2_client::commands::expand_external_cell::ExpandExternalCellsCommand;
 use buck2_client::commands::explain::ExplainCommand;
 use buck2_client::commands::help_env::HelpEnvCommand;
@@ -25,13 +24,11 @@ use buck2_client::commands::init::InitCommand;
 use buck2_client::commands::install::InstallCommand;
 use buck2_client::commands::kill::KillCommand;
 use buck2_client::commands::killall::KillallCommand;
-use buck2_client::commands::log::LogCommand;
 use buck2_client::commands::lsp::LspCommand;
 use buck2_client::commands::profile::ProfileCommand;
 use buck2_client::commands::query::aquery::AqueryCommand;
 use buck2_client::commands::query::cquery::CqueryCommand;
 use buck2_client::commands::query::uquery::UqueryCommand;
-use buck2_client::commands::rage::RageCommand;
 use buck2_client::commands::root::RootCommand;
 use buck2_client::commands::run::RunCommand;
 use buck2_client::commands::server::ServerCommand;
@@ -40,23 +37,32 @@ use buck2_client::commands::subscribe::SubscribeCommand;
 use buck2_client::commands::targets::TargetsCommand;
 use buck2_client::commands::test::TestCommand;
 use buck2_client_ctx::argfiles::expand_argv;
+use buck2_client_ctx::client_ctx::BuckSubcommand;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
 use buck2_client_ctx::client_metadata::ClientMetadata;
+use buck2_client_ctx::client_metadata::parse_client_metadata;
 use buck2_client_ctx::common::BuckArgMatches;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::immediate_config::ImmediateConfigContext;
-use buck2_client_ctx::tokio_runtime_setup::client_tokio_runtime;
 use buck2_client_ctx::version::BuckVersion;
+use buck2_cmd_audit_client::AuditCommand;
+use buck2_cmd_debug_client::DebugCommand;
+use buck2_cmd_log_client::LogCommand;
+use buck2_cmd_rage_client::rage::RageCommand;
 use buck2_cmd_starlark_client::StarlarkCommand;
 use buck2_common::argv::Argv;
 use buck2_common::invocation_paths_result::InvocationPathsResult;
 use buck2_common::invocation_roots::get_invocation_paths_result;
 use buck2_core::buck2_env;
-use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_core::buck2_env_name;
+use buck2_data::ErrorReport;
 use buck2_error::BuckErrorContext;
+use buck2_error::ErrorTag;
+use buck2_error::ExitCode;
 use buck2_error::buck2_error;
-use buck2_error::conversion::from_any_with_tag;
+use buck2_error::conversion::clap::buck_error_clap_parser;
 use buck2_event_observer::verbosity::Verbosity;
+use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_util::threads::thread_spawn_scoped;
 use clap::CommandFactory;
 use clap::FromArgMatches;
@@ -71,9 +77,8 @@ pub(crate) mod commands;
 pub mod panic;
 pub mod process_context;
 
-fn parse_isolation_dir(s: &str) -> anyhow::Result<FileNameBuf> {
-    FileNameBuf::try_from(s.to_owned())
-        .buck_error_context_anyhow("isolation dir must be a directory name")
+fn parse_isolation_dir(s: &str) -> buck2_error::Result<FileNameBuf> {
+    FileNameBuf::try_from(s.to_owned()).buck_error_context("isolation dir must be a directory name")
 }
 
 /// Options of `buck2` command, before subcommand.
@@ -87,9 +92,10 @@ struct BeforeSubcommandOptions {
     /// The isolation directory also influences the output paths provided by Buck2,
     /// and as a result using a non-default isolation dir will cause cache misses (and slower builds).
     #[clap(
-        value_parser = parse_isolation_dir,
+        value_parser = buck_error_clap_parser(parse_isolation_dir),
         env("BUCK_ISOLATION_DIR"),
         long,
+        global = true,
         default_value="v2"
     )]
     isolation_dir: FileNameBuf,
@@ -110,7 +116,8 @@ struct BeforeSubcommandOptions {
         long = "verbose",
         default_value = "1",
         global = true,
-        value_parser= Verbosity::try_from_cli
+        env = buck2_env_name!("BUCK_VERBOSE"),
+        value_parser = buck_error_clap_parser(Verbosity::try_from_cli)
     )]
     verbosity: Verbosity,
 
@@ -121,7 +128,7 @@ struct BeforeSubcommandOptions {
     /// Metadata key-value pairs to inject into Buck2's logging. Client metadata must be of the
     /// form `key=value`, where `key` is a snake_case identifier, and will be sent to backend
     /// datasets.
-    #[clap(long, global = true)]
+    #[clap(long, global = true, value_parser = buck_error_clap_parser(parse_client_metadata))]
     client_metadata: Vec<ClientMetadata>,
 
     /// Do not launch a daemon process, run buck server in client process.
@@ -188,23 +195,85 @@ impl Opt {
 }
 
 pub fn exec(process: ProcessContext<'_>) -> ExitResult {
-    let mut immediate_config = ImmediateConfigContext::new(process.working_dir);
+    let cwd = process.shared.working_dir.clone();
+    let mut immediate_config = ImmediateConfigContext::new(&cwd);
     let arg0_override = buck2_env!("BUCK2_ARG0")?;
     let expanded_args = expand_argv(
         arg0_override,
-        process.args.to_vec(),
+        process.shared.args.to_vec(),
         &mut immediate_config,
-        process.working_dir,
+        &cwd,
     )
     .buck_error_context("Error expanding argsfiles")?;
 
     let argv = Argv {
-        argv: process.args.to_vec(),
+        argv: process.shared.args.to_vec(),
         expanded_argv: expanded_args,
     };
 
-    let opt = ParsedArgv::parse(argv)?;
+    let clap = Opt::command();
+    let matches = match clap.try_get_matches_from(argv.expanded_argv.args()) {
+        Ok(matches) => matches,
+        Err(e) => {
+            // Print colorized output, ExitResult::report will not colorize
+            e.print()?;
+            return if e.exit_code() == 0 {
+                ExitResult::success()
+            } else {
+                let e = buck2_error::Error::from(e).tag([ErrorTag::ClapMatch]);
+                ExitResult::status_with_emitted_errors(
+                    ExitCode::UserError,
+                    vec![ErrorReport::from(&e)],
+                )
+            };
+        }
+    };
+    let mut opt = ParsedArgv::parse(argv, matches)?;
 
+    let client_metadata = ClientMetadata::from_env()?;
+    if !client_metadata.is_empty() {
+        // insert the `client_metadata` at the beginning of the list, so that the client id metadata from the env var could be overridden by the cli arg
+        opt.opt
+            .common_opts
+            .client_metadata
+            .splice(0..0, client_metadata);
+    }
+
+    // If --client-metadata=? was not set and from_env did not find "id", then
+    // if we are running in a terminal, we add id=terminal-fallback to
+    // opt.opt.common_opts.client_metadata to transmit to scuba that the client
+    // is an end user: https://fburl.com/scuba/buck2_builds/n4klo51d
+    let has_client_id = opt
+        .opt
+        .common_opts
+        .client_metadata
+        .iter()
+        .any(|m| m.key == "id");
+
+    if !has_client_id {
+        use std::io::IsTerminal;
+        let client_id = if std::io::stdin().is_terminal() {
+            Some("terminal-fallback")
+        } else {
+            // Check if running from VSCode
+            let is_vscode = std::env::var("VSCODE_PID")
+                .ok()
+                .is_some_and(|v| !v.is_empty())
+                || std::env::var("TERM_PROGRAM").ok().as_deref() == Some("vscode");
+            if is_vscode {
+                Some("vscode-fallback")
+            } else {
+                None
+            }
+        };
+
+        if let Some(val) = client_id {
+            opt.opt.common_opts.client_metadata.push(ClientMetadata {
+                key: "id".to_owned(),
+                value: val.to_owned(),
+            });
+        }
+    }
     opt.exec(process, &immediate_config)
 }
 
@@ -215,10 +284,7 @@ struct ParsedArgv {
 }
 
 impl ParsedArgv {
-    fn parse(argv: Argv) -> buck2_error::Result<Self> {
-        let clap = Opt::command();
-        let matches = clap.get_matches_from(argv.expanded_argv.args());
-
+    fn parse(argv: Argv, matches: clap::ArgMatches) -> buck2_error::Result<Self> {
         let opt: Opt = Opt::from_arg_matches(&matches)?;
 
         if opt.common_opts.help_wrapper {
@@ -248,7 +314,7 @@ impl ParsedArgv {
         let expanded_args = self.argv.expanded_argv.clone();
         self.opt.exec(
             process,
-            &immediate_config,
+            immediate_config,
             BuckArgMatches::from_clap(&self.matches, &expanded_args),
             self.argv,
         )
@@ -300,7 +366,7 @@ pub(crate) enum CommandKind {
     #[clap(hide = true)]
     Complete(buck2_cmd_completion_client::complete::CompleteCommand),
     Completion(buck2_cmd_completion_client::completion::CompletionCommand),
-    Docs(buck2_cmd_docs::DocsCommand),
+    Docs(buck2_cmd_docs_client::DocsCommand),
     #[clap(subcommand)]
     Profile(ProfileCommand),
     #[clap(hide(true))] // @oss-enable
@@ -321,16 +387,19 @@ impl CommandKind {
         argv: Argv,
         common_opts: BeforeSubcommandOptions,
     ) -> ExitResult {
-        let paths_result =
-            get_invocation_paths_result(process.working_dir, common_opts.isolation_dir.clone());
+        let paths_result = get_invocation_paths_result(
+            &process.shared.working_dir,
+            common_opts.isolation_dir.clone(),
+        );
 
         // Handle the daemon command earlier: it wants to fork, but the things we do below might
         // want to create threads.
         #[cfg(not(client_only))]
         if let CommandKind::Daemon(cmd) = self {
+            process.events_ctx.log_invocation_record = false;
             return cmd
                 .exec(
-                    process.log_reload_handle.dupe(),
+                    process.shared.log_reload_handle.dupe(),
                     paths_result.get_result()?,
                     false,
                     || {},
@@ -353,7 +422,7 @@ impl CommandKind {
                     Ok(res) => res,
                     Err(_) => ExitResult::bail("Main thread panicked"),
                 },
-                Err(e) => ExitResult::bail(format_args!("Failed to start main thread: {}", e)),
+                Err(e) => ExitResult::bail(format_args!("Failed to start main thread: {e}")),
             }
         })
     }
@@ -376,14 +445,22 @@ impl CommandKind {
 
         let fb = buck2_common::fbinit::get_or_init_fbcode_globals();
 
-        let runtime = client_tokio_runtime()?;
+        let ProcessContext {
+            trace_id,
+            events_ctx,
+            shared,
+            runtime,
+            start_time,
+        } = process;
+
+        let runtime = runtime.get_or_init()?;
 
         let start_in_process_daemon = if common_opts.no_buckd {
             #[cfg(not(client_only))]
             let v = buck2_daemon::no_buckd::start_in_process_daemon(
                 immediate_config.daemon_startup_config()?,
                 paths.clone().get_result()?,
-                &runtime,
+                runtime,
             )?;
             #[cfg(client_only)]
             let v = unreachable!(); // case covered above
@@ -397,72 +474,117 @@ impl CommandKind {
             fb,
             immediate_config,
             paths,
-            process.working_dir.clone(),
+            shared.working_dir.clone(),
             common_opts.verbosity,
+            start_time,
             start_in_process_daemon,
             argv,
-            process.trace_id.dupe(),
-            process.stdin,
-            process.restarter,
-            process.restarted_trace_id.dupe(),
-            &runtime,
+            trace_id.dupe(),
+            &mut shared.stdin,
+            &mut shared.restarter,
+            runtime,
             common_opts.oncall,
             common_opts.client_metadata,
             common_opts.isolation_dir,
-            process.start_time,
         );
+        if let Some(recorder) = events_ctx.recorder.as_mut() {
+            recorder.update_for_client_ctx(&command_ctx, self.command_name());
+        }
 
         match self {
             #[cfg(not(client_only))]
             CommandKind::Daemon(..) => unreachable!("Checked earlier"),
             #[cfg(not(client_only))]
-            CommandKind::Forkserver(cmd) => cmd
-                .exec(matches, command_ctx, process.log_reload_handle.dupe())
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
-                .into(),
+            CommandKind::Forkserver(cmd) => cmd.exec(
+                matches,
+                command_ctx,
+                events_ctx,
+                shared.log_reload_handle.dupe(),
+            ),
             #[cfg(not(client_only))]
-            CommandKind::InternalTestRunner(cmd) => cmd
-                .exec(matches, command_ctx)
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
-                .into(),
-            CommandKind::Aquery(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Build(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Bxl(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Test(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Cquery(cmd) => command_ctx.exec(cmd, matches),
+            CommandKind::InternalTestRunner(cmd) => cmd.exec(matches, command_ctx, events_ctx),
+            CommandKind::Aquery(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Build(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Bxl(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Test(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Cquery(cmd) => command_ctx.exec(cmd, matches, events_ctx),
             CommandKind::HelpEnv(cmd) => cmd.exec(matches, command_ctx),
-            CommandKind::Kill(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Killall(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Clean(cmd) => cmd.exec(matches, command_ctx),
+            CommandKind::Kill(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Killall(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Clean(cmd) => cmd.exec(matches, command_ctx, events_ctx),
             CommandKind::Root(cmd) => cmd.exec(matches, command_ctx).into(),
             CommandKind::Query(cmd) => {
                 buck2_client_ctx::eprintln!(
                     "WARNING: \"buck2 query\" is an alias for \"buck2 uquery\". Consider using \"buck2 cquery\" or \"buck2 uquery\" explicitly."
                 )?;
-                command_ctx.exec(cmd, matches)
+                command_ctx.exec(cmd, matches, events_ctx)
             }
-            CommandKind::Server(cmd) => command_ctx.exec(cmd, matches),
+            CommandKind::Server(cmd) => command_ctx.exec(cmd, matches, events_ctx),
             CommandKind::Status(cmd) => cmd.exec(matches, command_ctx).into(),
-            CommandKind::Targets(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Utargets(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Ctargets(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Audit(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Starlark(cmd) => cmd.exec(matches, command_ctx),
-            CommandKind::Run(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Uquery(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Debug(cmd) => cmd.exec(matches, command_ctx),
-            CommandKind::Complete(cmd) => cmd.exec(matches, command_ctx),
+            CommandKind::Targets(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Utargets(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Ctargets(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Audit(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Starlark(cmd) => cmd.exec(matches, command_ctx, events_ctx),
+            CommandKind::Run(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Uquery(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Debug(cmd) => cmd.exec(matches, command_ctx, events_ctx),
+            CommandKind::Complete(cmd) => cmd.exec(matches, command_ctx, events_ctx),
             CommandKind::Completion(cmd) => cmd.exec(Opt::command(), matches, command_ctx),
-            CommandKind::Docs(cmd) => cmd.exec(matches, command_ctx),
-            CommandKind::Profile(cmd) => cmd.exec(matches, command_ctx),
+            CommandKind::Docs(cmd) => cmd.exec(Opt::command(), matches, command_ctx, events_ctx),
+            CommandKind::Profile(cmd) => cmd.exec(matches, command_ctx, events_ctx),
             CommandKind::Rage(cmd) => cmd.exec(matches, command_ctx),
             CommandKind::Init(cmd) => cmd.exec(matches, command_ctx),
-            CommandKind::Explain(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Install(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Log(cmd) => cmd.exec(matches, command_ctx),
-            CommandKind::Lsp(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::Subscribe(cmd) => command_ctx.exec(cmd, matches),
-            CommandKind::ExpandExternalCell(cmd) => command_ctx.exec(cmd, matches),
+            CommandKind::Explain(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Install(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Log(cmd) => cmd.exec(matches, command_ctx, events_ctx),
+            CommandKind::Lsp(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::Subscribe(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+            CommandKind::ExpandExternalCell(cmd) => command_ctx.exec(cmd, matches, events_ctx),
+        }
+    }
+
+    fn command_name(&self) -> &'static str {
+        match self {
+            #[cfg(not(client_only))]
+            CommandKind::Daemon(_) => "daemon",
+            #[cfg(not(client_only))]
+            CommandKind::Forkserver(_) => "forkserver",
+            #[cfg(not(client_only))]
+            CommandKind::InternalTestRunner(_) => "internal-test-runner",
+            CommandKind::Aquery(cmd) => cmd.logging_name(),
+            CommandKind::Build(cmd) => cmd.logging_name(),
+            CommandKind::Bxl(cmd) => cmd.logging_name(),
+            CommandKind::Test(cmd) => cmd.logging_name(),
+            CommandKind::Cquery(cmd) => cmd.logging_name(),
+            CommandKind::HelpEnv(_) => "help-env",
+            CommandKind::Kill(cmd) => cmd.logging_name(),
+            CommandKind::Killall(cmd) => cmd.logging_name(),
+            CommandKind::Clean(cmd) => cmd.command_name(),
+            CommandKind::Root(_) => "root",
+            CommandKind::Query(cmd) => cmd.logging_name(),
+            CommandKind::Server(cmd) => cmd.logging_name(),
+            CommandKind::Status(_) => "status",
+            CommandKind::Targets(cmd) => cmd.logging_name(),
+            CommandKind::Utargets(cmd) => cmd.logging_name(),
+            CommandKind::Ctargets(cmd) => cmd.logging_name(),
+            CommandKind::Audit(cmd) => cmd.logging_name(),
+            CommandKind::Starlark(cmd) => cmd.command_name(),
+            CommandKind::Run(cmd) => cmd.logging_name(),
+            CommandKind::Uquery(cmd) => cmd.logging_name(),
+            CommandKind::Debug(_) => "debug",
+            CommandKind::Complete(_) => "complete",
+            CommandKind::Completion(_) => "completion",
+            CommandKind::Docs(_) => "docs",
+            CommandKind::Profile(_) => "profile",
+            CommandKind::Rage(_) => "rage",
+            CommandKind::Init(_) => "init",
+            CommandKind::Explain(cmd) => cmd.logging_name(),
+            CommandKind::Install(cmd) => cmd.logging_name(),
+            CommandKind::Log(cmd) => cmd.command_name(),
+            CommandKind::Lsp(cmd) => cmd.logging_name(),
+            CommandKind::Subscribe(cmd) => cmd.logging_name(),
+            CommandKind::ExpandExternalCell(cmd) => cmd.logging_name(),
         }
     }
 }

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//linking:link_info.bzl", "LinkStrategy")
 load("@prelude//rust:build_params.bzl", "MetadataKind")
@@ -89,9 +90,9 @@ def _process_target_config(
         "crate_dynamic": ra_info.crate.dynamic,
         "crate_root": ra_info.crate_root,
         "deps": deps,
-        "edition": _get_nullable_attr(attrs, "edition"),
+        "edition": ra_info.edition,
         "env": env,
-        "features": resolved_attrs.features,
+        "features": ra_info.features,
         "in_workspace": in_workspace,
         "kind": target.rule_type,
         "label": target.label.raw_target(),
@@ -100,11 +101,106 @@ def _process_target_config(
         "named_deps": named_deps,
         "proc_macro": _get_nullable_attr(attrs, "proc_macro"),
         "project_relative_buildfile": ctx.fs.project_rel_path(target.buildfile_path),
-        "rustc_flags": _get_nullable_attr(attrs, "rustc_flags"),
+        "rustc_flags": ra_info.rustc_flags,
         "source_folder": materialize(ctx, target),  # Always generate the source folder. Let rust-project resolve whether or not to use it
         "srcs": srcs,
         "tests": tests,
     }
+
+def _select_assume_default(value):
+    """Unwrap select() values, assuming the DEFAULT value is always used.
+    """
+    if isinstance(value, bxl.SelectConcat):
+        items = []
+        for raw_item in value.select_iter():
+            if isinstance(raw_item, list):
+                items.extend(raw_item)
+            else:
+                unwrapped = _select_assume_default(raw_item)
+                if isinstance(unwrapped, list):
+                    items.extend(unwrapped)
+
+        return items
+
+    if isinstance(value, bxl.SelectDict):
+        return value.get_select_entry("DEFAULT")
+
+    return value
+
+def _get_attr_no_select(target: bxl.UnconfiguredTargetNode, attr: str) -> typing.Any:
+    return _select_assume_default(target.get_attr(attr))
+
+def gather_unconfigured_deps(ctx: bxl.Context, targets: list[TargetLabel]) -> dict[TargetLabel, TargetInfo]:
+    """Make a best-effort attempt to gather target and dependency information for
+    the targets given.
+
+    This intended for targets where we cannot use the configured target nodes,
+    typically because they have compatible_with constraints that do not match the
+    current machine.
+
+    """
+    out = {}
+
+    unconfigured_targets = ctx.unconfigured_targets(targets)
+
+    for target in unconfigured_targets:
+        deps = []
+        for dep in _get_attr_no_select(target, "deps") or []:
+            deps.append(dep.raw_target())
+
+        raw_env = _get_attr_no_select(target, "env") or {}
+        env = {k: cmd_args(v, delimiter = "") for k, v in raw_env.items()}
+
+        srcs = [src.short_path for src in _get_attr_no_select(target, "srcs") or []]
+
+        mapped_srcs = {}
+        raw_mapped_srcs = _get_attr_no_select(target, "mapped_srcs") or {}
+        for t, t_srcs in raw_mapped_srcs.items():
+            if hasattr(t, "raw_target"):
+                mapped_srcs[t.raw_target()] = t_srcs
+
+        abs_buildfile_path = ctx.root() + "/" + target.buildfile_path.cell + "/" + target.buildfile_path.path
+        source_folder = abs_buildfile_path.removesuffix("/TARGETS").removesuffix("/BUCK")
+
+        crate_root = _get_attr_no_select(target, "crate_root")
+        if not crate_root:
+            for src in srcs:
+                if src.endswith("/lib.rs") or src.endswith("/main.rs"):
+                    crate_root = src
+                    break
+
+        if not crate_root:
+            continue
+
+        tests = []
+        for test in _get_attr_no_select(target, "tests") or []:
+            tests.append(test.raw_target())
+
+        info = {
+            "crate": _get_attr_no_select(target, "crate"),
+            "crate_dynamic": _get_attr_no_select(target, "crate_dynamic"),
+            "crate_root": crate_root,
+            "deps": deps,
+            "edition": _get_attr_no_select(target, "edition"),
+            "env": env,
+            "features": _get_attr_no_select(target, "features"),
+            "in_workspace": False,
+            "kind": target.rule_type,
+            "label": target.label,
+            "mapped_srcs": mapped_srcs,
+            "name": target.get_attr("name"),
+            "named_deps": {},
+            "proc_macro": _get_attr_no_select(target, "proc_macro"),
+            "project_relative_buildfile": ctx.fs.project_rel_path(target.buildfile_path),
+            "rustc_flags": _get_attr_no_select(target, "rustc_flags"),
+            "source_folder": source_folder,
+            "srcs": srcs,
+            "tests": tests,
+        }
+
+        out[target.label] = info
+
+    return out
 
 def gather_deps(
         ctx: bxl.Context,
@@ -229,11 +325,21 @@ def resolve_targets_impl(ctx: bxl.Context) -> None:
     queried_proc_macros = expand_proc_macros(ctx, target_analysis)
     resolved_deps = gather_deps(ctx, target_analysis, workspaces)
 
+    expanded_targets = sorted([t.raw_target() for t in target_analysis.keys()])
+    if not expanded_targets:
+        # ctx.analysis() drops targets that are incompatible with the current buck
+        # configuration (see the `skip_incompatible` keyword argument).
+        #
+        # If we have no expanded targets at all, try to find sufficient metadata about
+        # the requested targets using unconfigured buck targets.
+        expanded_targets = targets
+        resolved_deps = gather_unconfigured_deps(ctx, targets)
+
     artifact = actions.declare_output("resolve_targets.json")
     artifacts = actions.write_json(
         artifact,
         ExpandedAndResolved(
-            expanded_targets = sorted([t.raw_target() for t in target_analysis.keys()]),
+            expanded_targets = expanded_targets,
             queried_proc_macros = queried_proc_macros,
             resolved_deps = resolved_deps,
         ),
@@ -244,10 +350,58 @@ def resolve_targets_impl(ctx: bxl.Context) -> None:
     ctx.output.ensure_multiple(artifacts)
     ctx.output.print(ctx.output.ensure(artifact).abs_path())
 
+def _resolve_vendor_rust_libraries(ctx: bxl.Context, targets: bxl.UnconfiguredTargetSet) -> bxl.UnconfiguredTargetSet:
+    """Rust files in third-party/rust/vendor/ are owned by rust_filegroup targets,
+    but a rust_filegroup is just a set of files, without any information about
+    the crate.
+
+    For example:
+
+    file: third-party/rust/vendor/nix-0.30.1/src/fcntl.rs
+    owner: fbsource//third-party/rust/vendor/nix-0.30.1:srcs
+    library: fbsource//third-party/rust/vendor/nix:0.30.1
+
+    Look up the relevant rust_library by taking advantage of the fact that
+    target names follow a predictable pattern.
+
+    """
+    filegroups = ctx.uquery().kind("^rust_filegroup$", targets)
+
+    rust_libraries = utarget_set()
+    for fg in filegroups:
+        # E.g. third-party/rust/vendor/nix-0.30.1
+        package_path = fg.label.package
+
+        if not package_path.startswith("third-party/rust/vendor/"):
+            continue
+        crate_version = package_path.removeprefix("third-party/rust/vendor/")
+
+        # "nix-0.30.1" -> ("nix", "0.30.1")
+        parts = crate_version.rsplit("-", 1)
+        if len(parts) != 2:
+            continue
+        crate_name, version = parts
+
+        # E.g. fbsource//third-party/rust/vendor/nix:0.30.1
+        lib_target_str = "{}//third-party/rust/vendor/{}:{}".format(fg.label.cell, crate_name, version)
+
+        # Since we're using string conventions to find the library, defensively
+        # check that the target actually exists.
+        if ctx.target_exists(lib_target_str):
+            rust_libraries += ctx.unconfigured_targets([lib_target_str])
+
+    return (targets - filegroups) + rust_libraries
+
 def resolve_owning_buildfile_impl(ctx: bxl.Context) -> None:
     # depending on the input, determine the initial set of targets
+
     if ctx.cli_args.files:
+        # Find targets that own these files and are relevant to rust.
         targets = ctx.uquery().owner(ctx.cli_args.files)
+        targets = ctx.uquery().kind("^(rust_binary|rust_library|rust_test|rust_filegroup)$", targets)
+
+        # Convert rust_filegroup targets to rust_library targets.
+        targets = _resolve_vendor_rust_libraries(ctx, targets)
     elif ctx.cli_args.buildfiles:
         targets = [ctx.uquery().targets_in_buildfile(buildfile) for buildfile in ctx.cli_args.buildfiles]
 
@@ -273,7 +427,10 @@ def resolve_owning_buildfile_impl(ctx: bxl.Context) -> None:
     # collect extra targets from each buildfile
     extra_targets_by_buildfile = {}
     for buildfile_path in targets_by_buildfile:
-        extra_targets = ctx.uquery().targets_in_buildfile("{}".format(buildfile_path))
+        if "third-party/rust/vendor/" in buildfile_path:
+            continue
+
+        extra_targets = ctx.uquery().targets_in_buildfile(buildfile_path)
         extra_targets = ctx.uquery().kind("^(rust_binary|rust_library|rust_test)$", extra_targets)
 
         # Exclude targets with the rustc_do_no_check label from the extra targets. This

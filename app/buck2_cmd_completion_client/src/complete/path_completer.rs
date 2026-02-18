@@ -1,14 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_client_ctx::command_outcome::CommandOutcome;
-use buck2_core::fs::working_dir::AbsWorkingDir;
+use buck2_fs::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::working_dir::AbsWorkingDir;
 
 use super::path_sanitizer::PathSanitizer;
 use super::path_sanitizer::SanitizedPath;
@@ -77,8 +81,9 @@ impl<'a, 'b> PathCompleter<'a, 'b> {
         if let Some(offset_dir) = partial_path.parent() {
             scan_dir = scan_dir.join(offset_dir);
         }
-
-        for entry_result in scan_dir.read_dir()? {
+        let scan_dir = AbsNormPath::new(&scan_dir)?;
+        let entries = fs_util::read_dir(scan_dir).categorize_input()?;
+        for entry_result in entries {
             let entry = entry_result?;
             if entry.path().is_dir() && file_name_string(&entry).starts_with(partial_base) {
                 let given_expanded =
@@ -98,7 +103,9 @@ impl<'a, 'b> PathCompleter<'a, 'b> {
             scan_dir = scan_dir.join(offset_dir);
         }
 
-        for entry_result in scan_dir.read_dir()? {
+        let scan_dir = AbsNormPath::new(&scan_dir)?;
+        let entries = fs_util::read_dir(scan_dir).categorize_input()?;
+        for entry_result in entries {
             let entry = entry_result?;
             if entry.path().is_dir() && file_name_string(&entry).starts_with(partial_base) {
                 return Ok(true);

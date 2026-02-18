@@ -30,6 +30,12 @@ use std::mem;
 use allocative::Allocative;
 use equivalent::Equivalent;
 use hashbrown::HashTable;
+#[cfg(feature = "pagable")]
+use pagable::Pagable;
+#[cfg(feature = "pagable")]
+use pagable::PagableDeserialize;
+#[cfg(feature = "pagable")]
+use pagable::PagableSerialize;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -148,7 +154,7 @@ impl<K, V> SmallMap<K, V> {
 
     /// Key references iterator.
     #[inline]
-    pub fn keys(&self) -> Keys<K, V> {
+    pub fn keys(&self) -> Keys<'_, K, V> {
         Keys {
             iter: self.entries.keys(),
         }
@@ -156,7 +162,7 @@ impl<K, V> SmallMap<K, V> {
 
     /// Value references iterator.
     #[inline]
-    pub fn values(&self) -> Values<K, V> {
+    pub fn values(&self) -> Values<'_, K, V> {
         Values {
             iter: self.entries.values(),
         }
@@ -180,7 +186,7 @@ impl<K, V> SmallMap<K, V> {
 
     /// Mutable value references iterator.
     #[inline]
-    pub fn values_mut(&mut self) -> ValuesMut<K, V> {
+    pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
         ValuesMut {
             iter: self.entries.values_mut(),
         }
@@ -196,7 +202,7 @@ impl<K, V> SmallMap<K, V> {
 
     /// Entry references with hashes iterator.
     #[inline]
-    pub fn iter_hashed(&self) -> IterHashed<K, V> {
+    pub fn iter_hashed(&self) -> IterHashed<'_, K, V> {
         IterHashed {
             iter: self.entries.iter_hashed(),
         }
@@ -843,6 +849,12 @@ impl<'a, K, V> OccupiedEntry<'a, K, V> {
     pub(crate) fn into_mut_entry(self) -> (&'a K, &'a mut V) {
         (self.key, self.value)
     }
+
+    /// Get access to both the key and the value in the entry
+    #[inline]
+    pub fn as_key_and_mut_value(&mut self) -> (&K, &mut V) {
+        (self.key, self.value)
+    }
 }
 
 impl<'a, K, V> VacantEntry<'a, K, V>
@@ -907,6 +919,21 @@ where
         match self {
             Entry::Occupied(e) => e.into_mut_entry(),
             Entry::Vacant(e) => e.insert_entry(default()),
+        }
+    }
+
+    /// Modify if present
+    #[inline]
+    pub fn and_modify<F>(self, f: F) -> Self
+    where
+        F: FnOnce(&mut V),
+    {
+        match self {
+            Entry::Occupied(mut entry) => {
+                f(entry.get_mut());
+                Entry::Occupied(entry)
+            }
+            Entry::Vacant(entry) => Entry::Vacant(entry),
         }
     }
 }
@@ -1009,10 +1036,10 @@ where
 #[macro_export]
 macro_rules! smallmap {
     (@single $($x:tt)*) => (());
-    (@count $($rest:expr_2021),*) => (<[()]>::len(&[$(smallmap!(@single $rest)),*]));
+    (@count $($rest:expr),*) => (<[()]>::len(&[$(smallmap!(@single $rest)),*]));
 
-    ($($key:expr_2021 => $value:expr_2021,)+) => { smallmap!($($key => $value),+) };
-    ($($key:expr_2021 => $value:expr_2021),*) => {
+    ($($key:expr => $value:expr,)+) => { smallmap!($($key => $value),+) };
+    ($($key:expr => $value:expr),*) => {
         {
             let cap = smallmap!(@count $($key),*);
             #[allow(unused_mut)]
@@ -1023,6 +1050,32 @@ macro_rules! smallmap {
             map
         }
     };
+}
+
+#[cfg(feature = "pagable")]
+impl<K: Pagable, V: Pagable> PagableSerialize for SmallMap<K, V> {
+    fn pagable_serialize(
+        &self,
+        serializer: &mut dyn pagable::PagableSerializer,
+    ) -> pagable::__internal::anyhow::Result<()> {
+        self.entries.pagable_serialize(serializer)
+    }
+}
+
+#[cfg(feature = "pagable")]
+impl<'de, K: Pagable, V: Pagable> PagableDeserialize<'de> for SmallMap<K, V> {
+    fn pagable_deserialize<D: pagable::PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Self> {
+        let entries =
+            <VecMap<K, V> as pagable::PagableDeserialize>::pagable_deserialize(deserializer)?;
+        let mut this = Self {
+            entries,
+            index: None,
+        };
+        this.create_index(this.entries.len());
+        Ok(this)
+    }
 }
 
 impl<K: Serialize, V: Serialize> Serialize for SmallMap<K, V> {
@@ -1089,7 +1142,7 @@ mod tests {
     #[test]
     fn empty_map() {
         let m = SmallMap::<i8, &str>::new();
-        assert_eq!(m.is_empty(), true);
+        assert!(m.is_empty());
         assert_eq!(m.len(), 0);
         assert_eq!(m.iter().next(), None);
     }
@@ -1102,16 +1155,16 @@ mod tests {
 
         let entries2 = [(1, 'b'), (0, 'a')];
         let m2 = entries2.iter().copied().collect::<SmallMap<_, _>>();
-        assert_eq!(m1.is_empty(), false);
+        assert!(!m1.is_empty());
         assert_eq!(m1.len(), 2);
-        assert_eq!(m2.is_empty(), false);
+        assert!(!m2.is_empty());
         assert_eq!(m2.len(), 2);
 
-        assert_eq!(m1.iter().eq(entries1.iter().map(|(k, v)| (k, v))), true);
-        assert_eq!(m2.iter().eq(entries2.iter().map(|(k, v)| (k, v))), true);
-        assert_eq!(m1.iter().eq(m2.iter()), false);
-        assert_eq!(m1.eq(&m1), true);
-        assert_eq!(m2.eq(&m2), true);
+        assert!(m1.iter().eq(entries1.iter().map(|(k, v)| (k, v))));
+        assert!(m2.iter().eq(entries2.iter().map(|(k, v)| (k, v))));
+        assert!(!m1.iter().eq(m2.iter()));
+        assert!(m1.eq(&m1));
+        assert!(m2.eq(&m2));
         assert_eq!(m1, m2);
 
         assert_eq!(m1.get(&0), Some(&'a'));
@@ -1142,16 +1195,16 @@ mod tests {
         let letters = ('a'..='z').rev();
         let entries2 = numbers.zip(letters);
         let m2 = entries2.clone().collect::<SmallMap<_, _>>();
-        assert_eq!(m1.is_empty(), false);
+        assert!(!m1.is_empty());
         assert_eq!(m1.len(), 26);
-        assert_eq!(m2.is_empty(), false);
+        assert!(!m2.is_empty());
         assert_eq!(m2.len(), 26);
 
-        assert_eq!(m1.clone().into_iter().eq(entries1), true);
-        assert_eq!(m2.clone().into_iter().eq(entries2), true);
-        assert_eq!(m1.iter().eq(m2.iter()), false);
-        assert_eq!(m1.eq(&m1), true);
-        assert_eq!(m2.eq(&m2), true);
+        assert!(m1.clone().into_iter().eq(entries1));
+        assert!(m2.clone().into_iter().eq(entries2));
+        assert!(!m1.iter().eq(m2.iter()));
+        assert!(m1.eq(&m1));
+        assert!(m2.eq(&m2));
         assert_eq!(m1, m2);
 
         assert_eq!(m1.get(&1), Some(&'b'));
@@ -1475,5 +1528,28 @@ mod tests {
         assert_eq!(map.len(), 50);
         assert_eq!(map.get("7"), None);
         assert_eq!(map.get("8"), Some(&11));
+    }
+
+    #[test]
+    fn test_and_modify() {
+        let mut map = SmallMap::new();
+        map.insert("key1", 10);
+        map.insert("key3", 100);
+
+        let value1 = map.entry("key1").and_modify(|v| *v += 5).or_insert(0);
+        assert_eq!(*value1, 15);
+        assert_eq!(map.get("key1"), Some(&15));
+
+        let value2 = map.entry("key2").and_modify(|v| *v += 5).or_insert(10);
+        assert_eq!(*value2, 10);
+        assert_eq!(map.get("key2"), Some(&10));
+
+        let value3 = map
+            .entry("key3")
+            .and_modify(|v| *v *= 2)
+            .and_modify(|v| *v += 10)
+            .or_insert(0);
+        assert_eq!(*value3, 210);
+        assert_eq!(map.get("key3"), Some(&210));
     }
 }

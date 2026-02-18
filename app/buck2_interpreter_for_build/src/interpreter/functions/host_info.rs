@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -58,6 +59,7 @@ fn new_host_info(
             host("is_x86_64", InterpreterHostArchitecture::X86_64),
             host("is_aarch64", InterpreterHostArchitecture::AArch64),
             host("is_arm", InterpreterHostArchitecture::Arm),
+            host("is_riscv64", InterpreterHostArchitecture::Riscv64),
             ("is_armeb", false),
             host("is_i386", InterpreterHostArchitecture::X86),
             host("is_mips", InterpreterHostArchitecture::Mips),
@@ -143,7 +145,7 @@ pub(crate) fn register_host_info(builder: &mut GlobalsBuilder) {
         // that might reuse each other's output.
         let host_info = &BuildContext::from_context(eval)?.host_info;
         Ok(ValueOfUnchecked::new(
-            host_info.value.owned_value(eval.frozen_heap()),
+            eval.heap().access_owned_frozen_value(&host_info.value),
         ))
     }
 }

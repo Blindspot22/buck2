@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeMap;
@@ -12,9 +13,9 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_core::cells::cell_root_path::CellRootPath;
-use buck2_core::fs::paths::RelativePath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_error::BuckErrorContext;
+use buck2_fs::paths::RelativePath;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -62,7 +63,7 @@ enum ConfigError {
 fn format_cycle(cycle: &[(String, String)]) -> String {
     cycle
         .iter()
-        .map(|(section, key)| format!("`{}.{}`", section, key))
+        .map(|(section, key)| format!("`{section}.{key}`"))
         .join(" -> ")
 }
 
@@ -123,7 +124,7 @@ impl LegacyConfigParser {
         file_parser
             .parse_file_on_stack(path, follow_includes, file_ops)
             .await
-            .with_buck_error_context(|| format!("Error parsing buckconfig `{}`", path))?;
+            .with_buck_error_context(|| format!("Error parsing buckconfig `{path}`"))?;
         file_parser.finish_file();
 
         Ok(())
@@ -180,7 +181,7 @@ impl LegacyConfigParser {
         }
     }
 
-    pub(crate) fn filter_values<F>(&mut self, filter: F)
+    pub(crate) fn filter_values<F>(mut self, filter: F) -> Self
     where
         F: Fn(&BuckconfigKeyRef) -> bool,
     {
@@ -192,6 +193,7 @@ impl LegacyConfigParser {
                 })
             });
         }
+        self
     }
 
     pub(crate) fn to_proto_external_config_values(
@@ -200,16 +202,15 @@ impl LegacyConfigParser {
     ) -> Vec<buck2_data::ConfigValue> {
         self.values
             .iter()
-            .map(|(k, v)| {
+            .flat_map(|(k, v)| {
                 v.values.iter().map(|(key, value)| buck2_data::ConfigValue {
-                    section: k.to_string(),
-                    key: key.to_string(),
+                    section: k.to_owned(),
+                    key: key.to_owned(),
                     value: value.raw_value().to_owned(),
                     cell: None,
                     is_cli,
                 })
             })
-            .flatten()
             .collect()
     }
     pub(crate) fn combine(external_path_configs: Vec<ExternalPathBuckconfigData>) -> Self {

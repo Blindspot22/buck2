@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -11,7 +12,7 @@
 import dataclasses
 import json
 import pathlib
-from typing import Dict, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 
 import inputs
 
@@ -26,7 +27,7 @@ class SourceInfo:
 class FullBuildMap:
     content: Mapping[str, SourceInfo] = dataclasses.field(default_factory=dict)
 
-    def to_build_map_json(self) -> Dict[str, str]:
+    def to_build_map_json(self) -> dict[str, str]:
         return {
             artifact_path: source_info.source_path
             for artifact_path, source_info in self.content.items()
@@ -38,7 +39,7 @@ class FullBuildMap:
 
 
 def merge_partial_build_map_inplace(
-    sofar: Dict[str, SourceInfo],
+    sofar: dict[str, SourceInfo],
     target_entry: inputs.TargetEntry,
 ) -> None:
     for artifact_path, source_path in target_entry.build_map.content.items():
@@ -51,7 +52,7 @@ def merge_partial_build_map_inplace(
 def merge_partial_build_maps(
     target_entries: Iterable[inputs.TargetEntry],
 ) -> FullBuildMap:
-    result: Dict[str, SourceInfo] = {}
+    result: dict[str, SourceInfo] = {}
     for target_entry in target_entries:
         merge_partial_build_map_inplace(result, target_entry)
     return FullBuildMap(result)

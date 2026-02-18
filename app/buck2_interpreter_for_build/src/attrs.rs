@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_error::BuckErrorContext;
@@ -70,10 +71,7 @@ impl AttributeCoerceExt for Attribute {
                 .coerce_with_default(configurable, coercer_ctx, value, default.map(|x| &**x))
                 .map(CoercedValue::Custom)
                 .with_buck_error_context(|| {
-                    format!(
-                        "Error coercing attribute `{}` of type `{}`",
-                        param_name, self
-                    )
+                    format!("Error coercing attribute `{param_name}` of type `{self}`")
                 }),
             Some(_) => Ok(CoercedValue::Default),
             None => Err(AttrCoerceError::MissingMandatoryParameter(param_name.to_owned()).into()),

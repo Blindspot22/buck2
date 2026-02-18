@@ -1,10 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
+load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load(":argsfiles.bzl", "CompileArgsfile", "CompileArgsfiles")
 load(":cxx_toolchain_types.bzl", "CxxObjectFormat", "DepTrackingMode")
 
@@ -70,6 +72,16 @@ HeadersDepFiles = record(
     dep_tracking_mode = field(DepTrackingMode),
 )
 
+# Output from CUDA distributed compilation
+CudaDistributedCompileOutput = record(
+    # Dependency graph of the NVCC sub-commands.
+    nvcc_dag = field(Artifact),
+    # Environment variables for the NVCC sub-commands.
+    nvcc_env = field(Artifact),
+    # Argsfile for the host compiler.
+    hostcc_argsfile = field(Artifact),
+)
+
 # Information about how to compile a source file of particular extension.
 CxxCompileCommand = record(
     # The compiler and any args which are independent of the rule.
@@ -85,6 +97,21 @@ CxxCompileCommand = record(
     # The action category
     category = field(str),
     allow_cache_upload = field(bool),
+    allow_content_based_paths = field(bool),
+)
+
+# Declared index store output and metadata
+DeclaredIndexStore = record(
+    output = field(Artifact),
+    filename_base = field(str),
+)
+
+# Factory for creating and compiling index stores
+# - declare: Called during analysis to declare the output artifact
+# - compile: Called during execution (inside dynamic action) to run the compilation
+IndexStoreFactory = record(
+    declare = field(typing.Callable[[AnalysisActions, typing.Any], DeclaredIndexStore | None]),
+    compile = field(typing.Callable[[AnalysisActions, Label, OutputArtifact, str, CxxToolchainInfo, cmd_args], None]),
 )
 
 # Information about how to compile a source file.
@@ -100,8 +127,10 @@ CxxSrcCompileCommand = record(
     args = field(list[typing.Any]),
     # Is this a header file?
     is_header = field(bool, False),
+    # Whether to use content-based paths for the outputs of the compilation command.
+    uses_content_based_paths = field(bool),
     # The index store factory to use to generate index store for this source file.
-    index_store_factory = field(typing.Callable | None, None),
+    index_store_factory = field(IndexStoreFactory | None, None),
     error_handler = field([typing.Callable, None], None),
 )
 
@@ -139,24 +168,25 @@ CxxCompileOutput = record(
     # the `.dwo` when using `-gsplit-dwarf=split`).
     external_debug_info = field(Artifact | None, None),
     clang_remarks = field(Artifact | None, None),
+    clang_llvm_statistics = field(Artifact | None, None),
     clang_trace = field(Artifact | None, None),
     gcno_file = field(Artifact | None, None),
     index_store = field(Artifact | None, None),
     assembly = field(Artifact | None, None),
     diagnostics = field(Artifact | None, None),
     preproc = field(Artifact | None, None),
-    # Dependency graph of the NVCC sub-commands.
-    nvcc_dag = field(Artifact | None, None),
-    # Environment variables for the NVCC sub-commands.
-    nvcc_env = field(Artifact | None, None),
+    dist_cuda = field(CudaDistributedCompileOutput | None, None),
+    pch_object = field(Artifact | None, None),
+    json_error = field(Artifact | None, None),
 )
 
 CxxCompileFlavor = enum(
-    # Default compilation witout alterations
-    "default",
     # Produces position independent compile outputs
     "pic",
     # Produces position independent compile outputs
     # using optimization flags from toolchain
-    "pic_optimized",
+    "optimized",
+    # Produces position independent compile outputs
+    # using debug flags from toolchain
+    "debug",
 )

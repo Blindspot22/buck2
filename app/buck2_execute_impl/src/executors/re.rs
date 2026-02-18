@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ops::ControlFlow;
@@ -13,6 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
+use buck2_core::execution_types::executor_config::ReGangWorker;
 use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::project::ProjectRoot;
@@ -35,6 +37,7 @@ use buck2_execute::execute::request::CommandExecutionRequest;
 use buck2_execute::execute::request::ExecutorPreference;
 use buck2_execute::execute::result::CommandCancellationReason;
 use buck2_execute::execute::result::CommandExecutionErrorType;
+use buck2_execute::execute::result::CommandExecutionMetadata;
 use buck2_execute::execute::result::CommandExecutionResult;
 use buck2_execute::knobs::ExecutorGlobalKnobs;
 use buck2_execute::materialize::materializer::Materializer;
@@ -44,19 +47,23 @@ use buck2_execute::re::client::ExecuteResponseOrCancelled;
 use buck2_execute::re::error::RemoteExecutionError;
 use buck2_execute::re::error::get_re_error_tag;
 use buck2_execute::re::manager::ManagedRemoteExecutionClient;
+use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
+use buck2_execute::re::remote_action_result::ExecuteResponseWithQueueStats;
 use buck2_execute::re::remote_action_result::RemoteActionResult;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_util::time_span::TimeSpan;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use indexmap::IndexMap;
 use remote_execution as RE;
-use remote_execution::ExecuteResponse;
 use remote_execution::TCode;
 use tracing::info;
 
+use crate::incremental_actions_helper::save_content_based_incremental_state;
 use crate::re::download::DownloadResult;
 use crate::re::download::download_action_results;
 use crate::re::paranoid_download::ParanoidDownloader;
+use crate::sqlite::incremental_state_db::IncrementalDbState;
 use crate::storage_resource_exhausted::is_storage_resource_exhausted;
 
 #[derive(Debug, buck2_error::Error)]
@@ -70,17 +77,22 @@ pub struct ReExecutor {
     pub artifact_fs: ArtifactFs,
     pub project_fs: ProjectRoot,
     pub materializer: Arc<dyn Materializer>,
+    pub incremental_db_state: Arc<IncrementalDbState>,
     pub re_client: ManagedRemoteExecutionClient,
     pub re_action_key: Option<String>,
     pub knobs: ExecutorGlobalKnobs,
     pub skip_cache_read: bool,
     pub skip_cache_write: bool,
-    pub re_max_queue_time_ms: Option<u64>,
+    pub re_max_queue_time: Option<Duration>,
     pub re_resource_units: Option<i64>,
     pub paranoid: Option<ParanoidDownloader>,
     pub materialize_failed_inputs: bool,
     pub materialize_failed_outputs: bool,
     pub dependencies: Vec<RemoteExecutorDependency>,
+    pub gang_workers: Vec<ReGangWorker>,
+    pub deduplicate_get_digests_ttl_calls: bool,
+    pub output_trees_download_config: OutputTreesDownloadConfig,
+    pub priority: Option<i32>,
 }
 
 impl ReExecutor {
@@ -104,6 +116,7 @@ impl ReExecutor {
                     paths.input_directory(),
                     Some(identity),
                     digest_config,
+                    self.deduplicate_get_digests_ttl_calls,
                 )
                 .await;
             match res {
@@ -123,7 +136,7 @@ impl ReExecutor {
         match upload_response {
             Ok(()) => {}
             Err(e) => {
-                let e: buck2_error::Error = e.into();
+                let e: buck2_error::Error = e;
                 let is_storage_resource_exhausted = e
                     .find_typed_context::<RemoteExecutionError>()
                     .is_some_and(|re_client_error| {
@@ -154,42 +167,55 @@ impl ReExecutor {
         digest_config: DigestConfig,
         platform: &RE::Platform,
         dependencies: impl IntoIterator<Item = &'a RemoteExecutorDependency>,
+        re_gang_workers: &[buck2_core::execution_types::executor_config::ReGangWorker],
         meta_internal_extra_params: &MetaInternalExtraParams,
-    ) -> ControlFlow<CommandExecutionResult, (CommandExecutionManager, ExecuteResponse)> {
+        worker_tool_action_digest: Option<ActionDigest>,
+    ) -> ControlFlow<CommandExecutionResult, (CommandExecutionManager, ExecuteResponseWithQueueStats)>
+    {
         info!(
             "RE command line:\n```\n$ {}\n```\n for action `{}`",
             request.all_args_str(),
             action_digest,
         );
 
-        let execute_response = self
-            .re_client
-            .execute(
-                action_digest.dupe(),
-                platform,
-                dependencies,
-                &identity,
-                &mut manager,
-                self.skip_cache_read,
-                self.skip_cache_write,
-                self.re_max_queue_time_ms.map(Duration::from_millis),
-                self.re_resource_units,
-                &self.knobs,
-                meta_internal_extra_params,
-            )
-            .await;
+        let now = TimeSpan::start_now();
 
-        let response = match execute_response {
-            Ok(ExecuteResponseOrCancelled::Response(result)) => result,
-            Ok(ExecuteResponseOrCancelled::Cancelled(cancelled)) => {
-                let reason = cancelled.reason.map(|reason| match reason {
-                    CancellationReason::NotSpecified => CommandCancellationReason::NotSpecified,
-                    CancellationReason::ReQueueTimeout => CommandCancellationReason::ReQueueTimeout,
-                });
-                return ControlFlow::Break(manager.cancel(reason));
-            }
-            Err(e) => return ControlFlow::Break(manager.error("remote_call_error", e)),
-        };
+        let execute_response_fut = self.re_client.execute(
+            action_digest.dupe(),
+            platform,
+            dependencies,
+            re_gang_workers,
+            &identity,
+            &mut manager,
+            self.skip_cache_read,
+            self.skip_cache_write,
+            self.re_max_queue_time,
+            self.re_resource_units,
+            &self.knobs,
+            meta_internal_extra_params,
+            worker_tool_action_digest,
+            self.priority,
+        );
+
+        let execute_response =
+            if let Some(timeout) = buck2_common::self_test_timeout::maybe_cap_timeout(None) {
+                match tokio::time::timeout(timeout, execute_response_fut).await {
+                    Ok(resp) => resp,
+                    Err(_) => {
+                        return ControlFlow::Break(manager.error(
+                            "re_timeout_exceeded",
+                            buck2_error::buck2_error!(
+                                buck2_error::ErrorTag::Tier0,
+                                "Command {} exceeded its timeout (timeout was {}s)",
+                                &identity.action_key,
+                                timeout.as_secs(),
+                            ),
+                        ));
+                    }
+                }
+            } else {
+                execute_response_fut.await
+            };
 
         let remote_details = RemoteCommandExecutionDetails::new(
             action_digest.dupe(),
@@ -197,18 +223,49 @@ impl ReExecutor {
             self.re_client.get_session_id().await.ok(),
             self.re_client.use_case,
             &platform,
+            worker_tool_action_digest.is_some(),
         );
+
+        let response = match execute_response {
+            Ok(ExecuteResponseOrCancelled::Response(result)) => result,
+            Ok(ExecuteResponseOrCancelled::Cancelled(cancelled, queue_stats)) => {
+                let reason = cancelled
+                    .reason
+                    .map(|reason| match reason {
+                        CancellationReason::NotSpecified => CommandCancellationReason::NotSpecified,
+                        CancellationReason::ReQueueTimeout => {
+                            CommandCancellationReason::ReQueueTimeout
+                        }
+                    })
+                    .unwrap_or(CommandCancellationReason::NotSpecified);
+                return ControlFlow::Break(manager.cancel(
+                    CommandExecutionKind::Remote {
+                        details: remote_details,
+                        queue_time: queue_stats.cumulative_queue_duration,
+                        materialized_inputs_for_failed: None,
+                        materialized_outputs_for_failed_actions: None,
+                    },
+                    reason,
+                    CommandExecutionMetadata {
+                        queue_duration: Some(queue_stats.cumulative_queue_duration),
+                        ..CommandExecutionMetadata::empty(TimeSpan::empty_now())
+                    },
+                ));
+            }
+            Err(e) => return ControlFlow::Break(manager.error("remote_call_error", e)),
+        };
 
         let execution_kind = response.execution_kind(remote_details);
         let manager = manager.with_execution_kind(execution_kind.clone());
-        let additional_message = if response.status.message.is_empty() {
+        let additional_message = if response.execute_response.status.message.is_empty() {
             None
         } else {
-            Some(response.status.message.clone())
+            Some(response.execute_response.status.message.clone())
         };
 
-        if response.status.code != TCode::OK {
-            let res = if let Some(out) = as_missing_outputs_error(&response.status) {
+        if response.execute_response.status.code != TCode::OK {
+            let res = if let Some(out) = as_missing_outputs_error(&response.execute_response.status)
+            {
                 // TODO: Add a dedicated report variant for this.
                 // NOTE: We don't get stdout / stderr from RE when this happens, so the best we can
                 // do here is just pass on the error.
@@ -221,21 +278,25 @@ impl ReExecutor {
                     },
                     // We also don't get this output so don't put trash in here.
                     None,
-                    Default::default(),
+                    CommandExecutionMetadata::empty(TimeSpan::empty_now()),
                     additional_message,
                 )
-            } else if is_timeout_error(&response.status) && request.timeout().is_some() {
+            } else if is_timeout_error(&response.execute_response.status)
+                && request.timeout().is_some()
+            {
                 manager.timeout(
                     execution_kind,
+                    IndexMap::new(),
                     // Checked above: we fallthrough to the error path if we didn't set a timeout
                     // and yet received one.
                     request.timeout().unwrap(),
                     CommandStdStreams::Remote(response.std_streams(&self.re_client, digest_config)),
-                    response.timing(),
+                    CommandExecutionMetadata::from_re_timing(response.timing(), now.end_now()),
                     additional_message,
                 )
             } else {
-                let error_type = if is_storage_resource_exhausted(&response.status) {
+                let error_type = if is_storage_resource_exhausted(&response.execute_response.status)
+                {
                     CommandExecutionErrorType::StorageResourceExhausted
                 } else {
                     CommandExecutionErrorType::Other
@@ -244,7 +305,7 @@ impl ReExecutor {
                     "remote_exec_error",
                     ReErrorWrapper {
                         action_digest: action_digest.dupe(),
-                        inner: response.status,
+                        inner: response.execute_response.status,
                     },
                     error_type,
                 )
@@ -266,7 +327,6 @@ impl ReExecutor {
                         execution_time.as_secs(),
                         timeout.as_secs(),
                     )
-                    .into()
                 );
 
                 if let Err(e) = res {
@@ -295,6 +355,8 @@ impl PreparedCommandExecutor for ReExecutor {
                     action_and_blobs,
                     platform,
                     remote_execution_dependencies,
+                    re_gang_workers,
+                    worker_tool_init_action,
                 },
             digest_config,
         } = command;
@@ -305,6 +367,7 @@ impl PreparedCommandExecutor for ReExecutor {
             self.re_client.get_session_id().await.ok(),
             self.re_client.use_case,
             &platform,
+            request.remote_worker().is_some() && worker_tool_init_action.is_some(),
         );
         let manager = manager.with_execution_kind(CommandExecutionKind::Remote {
             details: details.clone(),
@@ -333,6 +396,31 @@ impl PreparedCommandExecutor for ReExecutor {
             )
             .await?;
 
+        let manager = if let (Some(worker), Some(worker_tool_init_action)) =
+            (request.remote_worker(), worker_tool_init_action)
+        {
+            self.upload(
+                manager,
+                &identity,
+                &worker_tool_init_action.blobs,
+                &worker.input_paths,
+                *digest_config,
+            )
+            .await?
+        } else {
+            manager
+        };
+        let worker_tool_action_digest = worker_tool_init_action.clone().map(|w| w.action);
+
+        let execution_time = TimeSpan::start_now();
+
+        let re_gang_workers: Vec<_> = self
+            .gang_workers
+            .iter()
+            .chain(re_gang_workers.iter())
+            .cloned()
+            .collect();
+
         let (manager, response) = self
             .re_execute(
                 manager,
@@ -344,19 +432,22 @@ impl PreparedCommandExecutor for ReExecutor {
                 self.dependencies
                     .iter()
                     .chain(remote_execution_dependencies.iter()),
+                &re_gang_workers,
                 &command.request.meta_internal_extra_params(),
+                worker_tool_action_digest,
             )
             .await?;
 
-        let exit_code = response.action_result.exit_code;
-        let additional_message = if response.status.message.is_empty() {
+        let exit_code = response.execute_response.action_result.exit_code;
+        let additional_message = if response.execute_response.status.message.is_empty() {
             None
         } else {
-            Some(response.status.message.clone())
+            Some(response.execute_response.status.message.clone())
         };
 
         let res = download_action_results(
             request,
+            execution_time,
             &*self.materializer,
             &self.re_client,
             *digest_config,
@@ -377,12 +468,25 @@ impl PreparedCommandExecutor for ReExecutor {
             self.materialize_failed_inputs,
             self.materialize_failed_outputs,
             additional_message,
+            &self.output_trees_download_config,
         )
         .boxed()
         .await;
 
         let DownloadResult::Result(mut res) = res;
-        res.action_result = Some(response.action_result);
+        res.action_result = Some(response.execute_response.action_result);
+
+        if let Some(run_action_key) = request.run_action_key()
+            && !request.outputs_cleanup
+        {
+            save_content_based_incremental_state(
+                run_action_key.clone(),
+                &self.incremental_db_state,
+                &self.artifact_fs,
+                &res,
+            );
+        }
+
         res
     }
 

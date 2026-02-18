@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//utils:expect.bzl", "expect")
 load("@prelude//utils:materialization_test.bzl", "materialization_test")
@@ -19,9 +20,10 @@ def http_file_shared(
         unzip_tool: [RunInfo, None],
         sha1: [None, str],
         sha256: [None, str],
-        size_bytes: [None, int]) -> list[Provider]:
-    output = actions.declare_output(name)
-    downloaded_output = actions.declare_output("exploded_zip") if is_exploded_zip else output
+        size_bytes: [None, int],
+        has_content_based_path: bool) -> list[Provider]:
+    output = actions.declare_output(name, has_content_based_path = has_content_based_path)
+    downloaded_output = actions.declare_output("exploded_zip", has_content_based_path = has_content_based_path) if is_exploded_zip else output
     actions.download_file(
         downloaded_output,
         url,
@@ -29,7 +31,6 @@ def http_file_shared(
         is_executable = is_executable,
         sha1 = sha1,
         sha256 = sha256,
-        is_deferrable = True,
         size_bytes = size_bytes,
     )
 
@@ -72,4 +73,5 @@ def http_file_impl(ctx: AnalysisContext) -> list[Provider]:
         is_exploded_zip = False,
         unzip_tool = None,
         size_bytes = ctx.attrs.size_bytes,
+        has_content_based_path = ctx.attrs.has_content_based_path,
     )

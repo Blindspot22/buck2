@@ -1,20 +1,22 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java.abi;
 
 import com.facebook.buck.cd.model.java.AbiGenerationMode;
-import com.facebook.buck.core.exceptions.HumanReadableException;
+import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.jvm.java.lang.model.ElementsExtended;
 import com.facebook.buck.util.zip.JarBuilder;
 import java.io.IOException;
 import java.util.Set;
+import javax.annotation.Nullable;
 import javax.annotation.processing.Messager;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
@@ -30,15 +32,18 @@ public class StubGenerator {
   private final boolean includeParameterMetadata;
   private final boolean keepSynthetic;
 
+  private final AbsPath classOutputPath;
+
   public StubGenerator(
       SourceVersion version,
       ElementsExtended elements,
       Types types,
       Messager messager,
-      JarBuilder jarBuilder,
+      @Nullable JarBuilder jarBuilder,
       AbiGenerationMode abiCompatibilityMode,
       boolean includeParameterMetadata,
-      boolean keepSynthetic) {
+      boolean keepSynthetic,
+      AbsPath classOutputPath) {
     this.version = version;
     this.elements = elements;
     this.types = types;
@@ -47,22 +52,29 @@ public class StubGenerator {
     this.abiCompatibilityMode = abiCompatibilityMode;
     this.includeParameterMetadata = includeParameterMetadata;
     this.keepSynthetic = keepSynthetic;
+    this.classOutputPath = classOutputPath;
   }
 
   public void generate(Set<Element> topLevelElements) {
     try {
-      new StubJar(
-              version,
-              elements,
-              types,
-              messager,
-              topLevelElements,
-              includeParameterMetadata,
-              keepSynthetic)
-          .setCompatibilityMode(abiCompatibilityMode)
-          .writeTo(jarBuilder);
+      StubJar stubJar =
+          new StubJar(
+                  version,
+                  elements,
+                  types,
+                  messager,
+                  topLevelElements,
+                  includeParameterMetadata,
+                  keepSynthetic)
+              .setCompatibilityMode(abiCompatibilityMode);
+
+      if (classOutputPath != null) {
+        stubJar.writeClasses(classOutputPath);
+      } else {
+        stubJar.writeTo(jarBuilder);
+      }
     } catch (IOException e) {
-      throw new HumanReadableException("Failed to generate abi: %s", e.getMessage());
+      throw new RuntimeException(String.format("Failed to generate abi: %s", e.getMessage()));
     }
   }
 }

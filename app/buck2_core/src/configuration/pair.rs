@@ -1,18 +1,20 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
 use buck2_util::hash::BuckHasher;
 use dupe::Dupe;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
 use static_interner::Intern;
-use static_interner::Interner;
+use static_interner::interner;
 use strong_hash::StrongHash;
 
 use crate::configuration::data::ConfigurationData;
@@ -24,7 +26,9 @@ enum ConfigurationError {
     HasExecCfg,
 }
 
-#[derive(Debug, Allocative, Hash, Eq, PartialEq, Ord, PartialOrd, StrongHash)]
+#[derive(
+    Debug, Allocative, Hash, Eq, PartialEq, Ord, PartialOrd, Pagable, StrongHash
+)]
 struct ConfigurationPairData {
     cfg: ConfigurationData,
     /// Usually this is None, but for toolchain deps where the exec_cfg isn't picked it is set
@@ -34,11 +38,11 @@ struct ConfigurationPairData {
 /// Pair of `cfg` and `exec_cfg`.
 /// These two are added to `TargetLabel` to make `ConfiguredTargetLabel`.
 #[derive(
-    Debug, Clone, Dupe, Hash, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash
+    Debug, Clone, Dupe, Hash, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash, Pagable
 )]
 pub struct Configuration(Intern<ConfigurationPairData>);
 
-static INTERNER: Interner<ConfigurationPairData, BuckHasher> = Interner::new();
+interner!(INTERNER, BuckHasher, ConfigurationPairData);
 
 impl Configuration {
     #[inline]
@@ -77,7 +81,8 @@ impl Configuration {
     PartialOrd,
     Allocative,
     derive_more::Display,
-    strong_hash::StrongHash
+    strong_hash::StrongHash,
+    Pagable
 )]
 #[display("{}", self.cfg())]
 pub struct ConfigurationNoExec(Configuration);

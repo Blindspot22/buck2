@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_build_api::interpreter::rule_defs::register_rule_defs;
@@ -31,7 +32,7 @@ fn transitive_set_tester() -> Tester {
 }
 
 #[test]
-fn test_define_transitive_set() -> anyhow::Result<()> {
+fn test_define_transitive_set() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
     tester.run_starlark_bzl_test(indoc!(
         r#"
@@ -50,7 +51,7 @@ fn test_define_transitive_set() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_hash_transitive_set() -> anyhow::Result<()> {
+fn test_hash_transitive_set() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.add_import(
@@ -76,7 +77,7 @@ fn test_hash_transitive_set() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_define_transitive_set_projections() -> anyhow::Result<()> {
+fn test_define_transitive_set_projections() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
     tester.run_starlark_test(indoc!(
         r#"
@@ -94,7 +95,7 @@ fn test_define_transitive_set_projections() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_create_transitive_set() -> anyhow::Result<()> {
+fn test_create_transitive_set() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.run_starlark_bzl_test(indoc!(
@@ -131,7 +132,7 @@ fn test_create_transitive_set() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_frozen_transitive_sets() -> anyhow::Result<()> {
+fn test_frozen_transitive_sets() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.add_import(
@@ -165,7 +166,7 @@ fn test_frozen_transitive_sets() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_transitive_set_display() -> anyhow::Result<()> {
+fn test_transitive_set_display() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.run_starlark_bzl_test(indoc!(
@@ -190,7 +191,7 @@ fn test_transitive_set_display() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_transitive_sets_projection() -> anyhow::Result<()> {
+fn test_transitive_sets_projection() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.run_starlark_bzl_test(indoc!(
@@ -228,7 +229,7 @@ fn test_transitive_sets_projection() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_transitive_sets_iteration() -> anyhow::Result<()> {
+fn test_transitive_sets_iteration() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     /* Validate on a simple tree which validates transitive links:
@@ -299,7 +300,7 @@ fn test_transitive_sets_iteration() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_frozen_transitive_sets_iteration() -> anyhow::Result<()> {
+fn test_frozen_transitive_sets_iteration() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.add_import(
@@ -335,7 +336,7 @@ fn test_frozen_transitive_sets_iteration() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_projection_args() -> anyhow::Result<()> {
+fn test_projection_args() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.add_import(
@@ -374,7 +375,7 @@ fn test_projection_args() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_projection_inputs() -> anyhow::Result<()> {
+fn test_projection_inputs() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.run_starlark_bzl_test(indoc!(
@@ -407,7 +408,7 @@ fn test_projection_inputs() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_projection_iteration() -> anyhow::Result<()> {
+fn test_projection_iteration() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     /*
@@ -450,7 +451,7 @@ fn test_projection_iteration() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_json_projection() -> anyhow::Result<()> {
+fn test_json_projection() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     /*
@@ -493,7 +494,7 @@ fn test_json_projection() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_reduction() -> anyhow::Result<()> {
+fn test_reduction() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.run_starlark_bzl_test(indoc!(
@@ -534,7 +535,7 @@ fn test_reduction() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_definition_type() -> anyhow::Result<()> {
+fn test_definition_type() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.add_import(
@@ -560,7 +561,7 @@ fn test_definition_type() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_type_1() -> anyhow::Result<()> {
+fn test_type_1() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.run_starlark_bzl_test(indoc!(
@@ -583,7 +584,7 @@ fn test_type_1() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_type_2() -> anyhow::Result<()> {
+fn test_type_2() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
     let contents = indoc!(
         r#"
@@ -611,17 +612,24 @@ fn test_type_2() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_transitive_set_ordering_docs() -> anyhow::Result<()> {
+fn test_transitive_set_ordering_docs() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
-    /*
-     *  qux -> bar -> foo
-     *          \-----^
+    /*       [A] (root)
+     *       / \
+     *     [B] [C]
+     *     / \   \
+     *   [D]  \   \
+     *   / \   \  /
+     *   \ [F] / /
+     *    \   / /
+     *     \ / /
+     *      [E]
      */
     tester.run_starlark_bzl_test(indoc!(
         r#"
-        def project(value):
-            return value
+        def project(value: str) -> str:
+            return value.lower()
 
         MySet = transitive_set(args_projections = {
             "project": project
@@ -634,24 +642,26 @@ fn test_transitive_set_ordering_docs() -> anyhow::Result<()> {
         )
 
         def test():
-            set1 = ctx.actions.tset(MySet, value = "foo")
-            set2 = ctx.actions.tset(MySet, value = "bar", children = [set1])
-            set3 = ctx.actions.tset(MySet, value = "qux", children = [set1, set2])
+            F = ctx.actions.tset(MySet, value = "F")
+            E = ctx.actions.tset(MySet, value = "E")
+            D = ctx.actions.tset(MySet, value = "D", children = [E, F])
+            C = ctx.actions.tset(MySet, value = "C", children = [E])
+            B = ctx.actions.tset(MySet, value = "B", children = [D, E])
+            A = ctx.actions.tset(MySet, value = "A", children = [B, C])
 
-            values = list(set3.traverse(ordering = "topological"))
+            values = list(A.traverse(ordering = "topological"))
 
             # This also works for projections
-            args = set3.project_as_args("project", ordering = "topological")
-
-            assert_eq(values, ["qux", "bar", "foo"])
-            assert_eq(["qux", "bar", "foo"], get_args(args))
+            args = A.project_as_args("project", ordering = "topological")
+            assert_eq(["a", "b", "d", "f", "c", "e"], get_args(args))
 
             # Test all orderings which show up in the table.
-            assert_eq(list(set3.traverse()), ["qux", "foo", "bar"])
-            assert_eq(list(set3.traverse(ordering = "preorder")), ["qux", "foo", "bar"])
-            assert_eq(list(set3.traverse(ordering = "postorder")), ["foo", "bar", "qux"])
-            assert_eq(list(set3.traverse(ordering = "topological")), ["qux", "bar", "foo"])
-            assert_eq(list(set3.traverse(ordering = "bfs")), ["qux", "foo", "bar"])
+            assert_eq(["A", "B", "D", "F", "E", "C"], list(A.traverse()))
+            assert_eq(["A", "B", "D", "F", "E", "C"], list(A.traverse(ordering = "preorder")))
+            assert_eq(["E", "F", "D", "B", "C", "A"], list(A.traverse(ordering = "postorder")))
+            assert_eq(["A", "B", "D", "F", "C", "E"], list(A.traverse(ordering = "topological")))
+            assert_eq(["A", "B", "C", "D", "E", "F"], list(A.traverse(ordering = "bfs")))
+            assert_eq(["A", "B", "D", "E", "F", "C"], list(A.traverse(ordering = "dfs")))
         "#
     ))?;
 
@@ -659,7 +669,7 @@ fn test_transitive_set_ordering_docs() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_accessors() -> anyhow::Result<()> {
+fn test_accessors() -> buck2_error::Result<()> {
     let mut tester = transitive_set_tester();
 
     tester.run_starlark_bzl_test(indoc!(

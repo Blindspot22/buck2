@@ -1,35 +1,38 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Display;
 use std::fmt::Formatter;
 
 use allocative::Allocative;
+use buck2_fs::paths::file_name::FileName;
+use pagable::Pagable;
+use strong_hash::StrongHash;
 
 use crate::cells::build_file_cell::BuildFileCell;
 use crate::cells::cell_path::CellPath;
 use crate::cells::cell_path::CellPathRef;
 use crate::cells::name::CellName;
 use crate::cells::paths::CellRelativePath;
-use crate::fs::paths::file_name::FileName;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(input)]
 enum ImportPathError {
     #[error("Invalid import path `{0}`")]
     Invalid(CellPath),
-    #[error("Import path must have suffix `.bzl`: `{0}`")]
+    #[error("Import path must have suffix `.bzl`, `.json`, or `.toml`: `{0}`")]
     Suffix(CellPath),
 }
 
 /// Path of a `.bzl` file.
-#[derive(Clone, Hash, Eq, PartialEq, Debug, Allocative, strong_hash::StrongHash)]
+#[derive(Clone, Hash, StrongHash, Eq, PartialEq, Debug, Allocative, Pagable)]
 pub struct ImportPath {
     /// The path to the import as a 'CellPath', which contains the cell
     /// information and the cell relative path to the bzl file itself, including the bzl suffix
@@ -60,7 +63,7 @@ impl ImportPath {
             return Err(ImportPathError::Invalid(path).into());
         }
 
-        if path.path().extension() != Some("bzl") {
+        if !matches!(path.path().extension(), Some("bzl" | "json" | "toml")) {
             return Err(ImportPathError::Suffix(path).into());
         }
 
@@ -126,7 +129,7 @@ impl ImportPath {
     }
 
     /// Parent directory of the import path.
-    pub fn path_parent(&self) -> CellPathRef {
+    pub fn path_parent(&self) -> CellPathRef<'_> {
         self.path
             .parent()
             .expect("constructor verified path has parent")

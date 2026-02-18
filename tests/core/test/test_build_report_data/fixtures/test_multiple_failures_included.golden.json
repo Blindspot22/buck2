@@ -1,6 +1,7 @@
 # This file is @generated, regenerate by re-running test with `-- --env BUCK2_UPDATE_GOLDEN=1` appended to the test command
 
 {
+  "error_category": "USER",
   "failures": {
     "root//:fail_build1": "Error running analysis for <IRRELEVANT>",
     "root//:fail_build2": "Error running analysis for <IRRELEVANT>"
@@ -18,7 +19,7 @@
                 "ANALYSIS",
                 "INPUT"
               ],
-              "message_content": "5564745075654374890"
+              "message_content": "<STRING_HASH>"
             }
           ],
           "other_outputs": {},
@@ -44,7 +45,7 @@
                 "ANALYSIS",
                 "STARLARK_VALUE"
               ],
-              "message_content": "16305574893340231969"
+              "message_content": "<STRING_HASH>"
             }
           ],
           "other_outputs": {},
@@ -60,8 +61,8 @@
     }
   },
   "strings": {
-    "16305574893340231969": "Error running analysis for <IRRELEVANT>",
-    "5564745075654374890": "Error running analysis for <IRRELEVANT>"
+    "<STRING_HASH>": "Error running analysis for <IRRELEVANT>",
+    "<STRING_HASH>": "Error running analysis for <IRRELEVANT>"
   },
   "success": false,
   "truncated": false

@@ -1,6 +1,6 @@
 [package]
 description = "A Rust-centric companion tool to Buck for usage in IDEs."
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "rust-project"
 readme = "README.md"
@@ -12,12 +12,13 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 crossbeam = { workspace = true }
 dunce = { workspace = true }
-elf = "0.7.0"
+elf = "0.8.0"
 lsp-server = { workspace = true }
 lsp-types = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
 tracing = { workspace = true }
 tracing-core = "0.1.32"
 tracing-subscriber = { workspace = true }

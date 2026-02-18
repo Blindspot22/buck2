@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//utils:graph_utils.bzl", "post_order_traversal")
 load(
@@ -32,7 +33,14 @@ PostConstraintAnalysisParams = record(
     target_modifiers = list[Modifier],
     cli_modifiers = list[Modifier],
     extra_data = struct,
+    configuring_exec_dep = bool,
 )
+
+def _get_buckconfig_backed_modifiers(extra_data: struct, configuring_exec_dep: bool) -> str | None:
+    # If we are configuring an exec dep, we don't want to apply any modifiers from buckconfig.
+    if configuring_exec_dep:
+        return None
+    return getattr(extra_data, "buckconfig_backed_modifiers", None)
 
 def cfg_constructor_pre_constraint_analysis(
         *,
@@ -45,6 +53,7 @@ def cfg_constructor_pre_constraint_analysis(
         rule_name: str,
         aliases: struct,
         extra_data: struct,
+        configuring_exec_dep: bool,
         **_kwargs) -> (list[str], PostConstraintAnalysisParams):
     """
     First stage of cfg constructor for modifiers.
@@ -54,7 +63,7 @@ def cfg_constructor_pre_constraint_analysis(
             PlatformInfo from legacy target platform resolution, if one is specified
         package_modifiers:
             A list of modifiers specified from all parent PACKAGE files
-        target_modifier:
+        target_modifiers:
             A list of modifiers specified from buildfile via `metadata` attribute.
         cli_modifiers:
             modifiers specified from `--modifier` flag, `?modifier`, or BXL
@@ -62,6 +71,9 @@ def cfg_constructor_pre_constraint_analysis(
             A struct that contains mapping of modifier aliases to modifier.
         extra_data:
             Some extra data that is for extra logging/validation for our internal modifier implementation.
+        configuring_exec_dep (bool):
+            Indicates whether this target is being configured as an execution dependency (exec_dep).
+            When True, this flag enables the cfg_constructor to apply exec-specific modifier resolution logic.
 
     Returns `(refs, PostConstraintAnalysisParams)`, where `refs` is a list of fully qualified configuration
     targets we need providers for.
@@ -80,7 +92,7 @@ def cfg_constructor_pre_constraint_analysis(
     cli_modifiers = [resolved_modifier for modifier in cli_modifiers for resolved_modifier in resolve_alias(modifier, aliases)]
 
     refs = []
-    buckconfig_backed_modifiers = getattr(extra_data, "buckconfig_backed_modifiers", None)
+    buckconfig_backed_modifiers = _get_buckconfig_backed_modifiers(extra_data, configuring_exec_dep)
     if buckconfig_backed_modifiers:
         refs.append(buckconfig_backed_modifiers)
 
@@ -98,6 +110,7 @@ def cfg_constructor_pre_constraint_analysis(
         target_modifiers = target_modifiers,
         cli_modifiers = cli_modifiers,
         extra_data = extra_data,
+        configuring_exec_dep = configuring_exec_dep,
     )
 
 def cfg_constructor_post_constraint_analysis(
@@ -129,7 +142,7 @@ def cfg_constructor_post_constraint_analysis(
 
     constraint_setting_to_modifier_infos = {}
     cli_modifier_validation = getattr(params.extra_data, "cli_modifier_validation", None)
-    buckconfig_backed_modifiers = getattr(params.extra_data, "buckconfig_backed_modifiers", None)
+    buckconfig_backed_modifiers = _get_buckconfig_backed_modifiers(params.extra_data, params.configuring_exec_dep)
 
     if buckconfig_backed_modifiers:
         apply_buckconfig_backed_modifiers(constraint_setting_to_modifier_infos, refs[buckconfig_backed_modifiers][BuckconfigBackedModifierInfo].pre_platform_modifiers)
@@ -171,6 +184,12 @@ def cfg_constructor_post_constraint_analysis(
                 modifier = modifier,
                 location = ModifierCliLocation(),
             )
+
+            # Exclude CLI modifier allowlist validation when evaluating the exec configuration,
+            # because modifiers from CLI are not applied to exec dependencies.
+            # Instead, we treat the original platform constraints as "CLI modifiers" so they take precedence.
+            if params.configuring_exec_dep:
+                continue
             if cli_modifier_validation:
                 cli_modifier_validation(constraint_setting_label, modifier)
 

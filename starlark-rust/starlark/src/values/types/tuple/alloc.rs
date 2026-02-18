@@ -36,7 +36,7 @@ use crate::values::type_repr::StarlarkTypeRepr;
 /// ```
 /// # use starlark::values::{FrozenHeap, Heap};
 /// # use starlark::values::tuple::AllocTuple;
-/// # fn alloc(heap: &Heap, frozen_heap: &FrozenHeap) {
+/// # fn alloc(heap: Heap<'_>, frozen_heap: &FrozenHeap) {
 /// let l = heap.alloc(AllocTuple([1, 2, 3]));
 /// let ls = frozen_heap.alloc(AllocTuple([1, 2, 3]));
 /// # }
@@ -65,7 +65,7 @@ where
     T: IntoIterator,
     T::Item: AllocValue<'v>,
 {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_tuple_iter(self.0.into_iter().map(|x| x.alloc_value(heap)))
     }
 }
@@ -90,20 +90,20 @@ mod tests {
 
     #[test]
     fn test_alloc_tuple() {
-        let heap = Heap::new();
+        Heap::temp(|heap| {
+            let a = heap.alloc(AllocTuple([""; 0]));
+            let b = heap.alloc(AllocTuple([1, 2, 3].iter().copied().filter(|_| false)));
+            assert_eq!(0, TupleRef::from_value(a).unwrap().content().len());
+            assert!(a.ptr_eq(b));
 
-        let a = heap.alloc(AllocTuple([""; 0]));
-        let b = heap.alloc(AllocTuple([1, 2, 3].iter().copied().filter(|_| false)));
-        assert_eq!(0, TupleRef::from_value(a).unwrap().content().len());
-        assert!(a.ptr_eq(b));
+            // Fixed length iterator.
+            let c = heap.alloc(AllocTuple([1, 2]));
+            assert_eq!(2, TupleRef::from_value(c).unwrap().content().len());
 
-        // Fixed length iterator.
-        let c = heap.alloc(AllocTuple([1, 2]));
-        assert_eq!(2, TupleRef::from_value(c).unwrap().content().len());
-
-        // Iterator of unknown length.
-        let d = heap.alloc(AllocTuple([1, 2, 3].iter().copied().filter(|c| *c > 1)));
-        assert_eq!(2, TupleRef::from_value(d).unwrap().content().len());
+            // Iterator of unknown length.
+            let d = heap.alloc(AllocTuple([1, 2, 3].iter().copied().filter(|c| *c > 1)));
+            assert_eq!(2, TupleRef::from_value(d).unwrap().content().len());
+        });
     }
 
     #[test]

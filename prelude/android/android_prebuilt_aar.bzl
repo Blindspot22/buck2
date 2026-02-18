@@ -1,13 +1,15 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
-load("@prelude//android:android_providers.bzl", "AndroidResourceInfo", "PrebuiltNativeLibraryDir", "RESOURCE_PRIORITY_LOW", "merge_android_packageable_info")
+load("@prelude//android:android_providers.bzl", "AndroidResourceInfo", "AndroidResourceRDotInfo", "PrebuiltNativeLibraryDir", "RESOURCE_PRIORITY_LOW", "merge_android_packageable_info")
 load("@prelude//android:android_resource.bzl", "aapt2_compile", "extract_package_from_manifest")
 load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
+load("@prelude//android:r_dot_java.bzl", "get_dummy_r_dot_java")
 load(
     "@prelude//java:java_providers.bzl",
     "ClasspathSnapshotGranularity",
@@ -19,15 +21,15 @@ load(
 load("@prelude//java:java_toolchain.bzl", "JavaToolchainInfo")
 
 def android_prebuilt_aar_impl(ctx: AnalysisContext) -> list[Provider]:
-    manifest = ctx.actions.declare_output("AndroidManifest.xml")
-    all_classes_jar = ctx.actions.declare_output("classes.jar")
-    r_dot_txt = ctx.actions.declare_output("R.txt")
-    res = ctx.actions.declare_output("res", dir = True)
-    assets = ctx.actions.declare_output("assets", dir = True)
-    jni = ctx.actions.declare_output("jni", dir = True)
-    annotation_jars_dir = ctx.actions.declare_output("annotation_jars", dir = True)
-    proguard_config = ctx.actions.declare_output("proguard.txt")
-    lint_jar = ctx.actions.declare_output("lint.jar")
+    manifest = ctx.actions.declare_output("AndroidManifest.xml", has_content_based_path = True)
+    all_classes_jar = ctx.actions.declare_output("classes.jar", has_content_based_path = True)
+    r_dot_txt = ctx.actions.declare_output("R.txt", has_content_based_path = True)
+    res = ctx.actions.declare_output("res", dir = True, has_content_based_path = True)
+    assets = ctx.actions.declare_output("assets", dir = True, has_content_based_path = True)
+    jni = ctx.actions.declare_output("jni", dir = True, has_content_based_path = True)
+    annotation_jars_dir = ctx.actions.declare_output("annotation_jars", dir = True, has_content_based_path = True)
+    proguard_config = ctx.actions.declare_output("proguard.txt", has_content_based_path = True)
+    lint_jar = ctx.actions.declare_output("lint.jar", has_content_based_path = True)
 
     android_toolchain = ctx.attrs._android_toolchain[AndroidToolchainInfo]
     unpack_aar_tool = android_toolchain.unpack_aar[RunInfo]
@@ -74,6 +76,17 @@ def android_prebuilt_aar_impl(ctx: AnalysisContext) -> list[Provider]:
         text_symbols = r_dot_txt,
     )
 
+    dummy_r_dot_java_info = get_dummy_r_dot_java(
+        ctx,
+        android_toolchain.merge_android_resources[RunInfo],
+        [resource_info],
+        None,
+    )
+
+    android_resource_r_dot_info = AndroidResourceRDotInfo(
+        dummy_r_dot_java = dummy_r_dot_java_info.library_output.abi,
+    )
+
     abi = None if java_toolchain.is_bootstrap_toolchain else create_abi(ctx.actions, java_toolchain.class_abi_generator, all_classes_jar)
     abi_jar_snapshot = generate_java_classpath_snapshot(ctx.actions, java_toolchain.cp_snapshot_generator, ClasspathSnapshotGranularity("CLASS_LEVEL"), abi or all_classes_jar, "")
 
@@ -116,6 +129,7 @@ def android_prebuilt_aar_impl(ctx: AnalysisContext) -> list[Provider]:
         linkable_graph,
         template_placeholder_info,
         java_library_intellij_info,
+        android_resource_r_dot_info,
         merge_android_packageable_info(
             ctx.label,
             ctx.actions,

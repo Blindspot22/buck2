@@ -1,17 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::mem;
 use std::process::Output;
 use std::process::Stdio;
 
-use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
@@ -28,15 +28,16 @@ impl ProperlyReapedChild {
     pub async fn output(mut self) -> buck2_error::Result<Output> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut child = mem::take(&mut self.child).internal_error("child field must be set")?;
+        let mut child =
+            mem::take(&mut self.child).ok_or_else(|| internal_error!("child field must be set"))?;
         let mut stdout_pipe = child
             .stdout
             .take()
-            .buck_error_context("stdout is not piped")?;
+            .ok_or_else(|| internal_error!("stdout is not piped"))?;
         let mut stderr_pipe = child
             .stderr
             .take()
-            .buck_error_context("stderr is not piped")?;
+            .ok_or_else(|| internal_error!("stderr is not piped"))?;
         let (stdout_error, stderr_error, status) = tokio::join!(
             stdout_pipe.read_to_end(&mut stdout),
             stderr_pipe.read_to_end(&mut stderr),

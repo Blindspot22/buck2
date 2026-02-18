@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -16,7 +17,8 @@ use buck2_util::thin_box::ThinBoxSlice;
 use static_assertions::assert_eq_size;
 
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::arg_builder::ArgBuilder;
@@ -58,6 +60,7 @@ impl ResolvedQueryMacro {
         &self,
         builder: &mut dyn ArgBuilder,
         ctx: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         match self {
             Self::Outputs(list) => {
@@ -68,7 +71,7 @@ impl ResolvedQueryMacro {
                             builder.push_str(" ");
                         }
                         first = false;
-                        add_output_to_arg(builder, ctx, output)?;
+                        add_output_to_arg(builder, ctx, output, artifact_path_mapping)?;
                     }
                 }
             }
@@ -83,7 +86,7 @@ impl ResolvedQueryMacro {
                         first = false;
                         builder.push_str(&target.unconfigured().to_string());
                         builder.push_str(sep);
-                        add_output_to_arg(builder, ctx, output)?;
+                        add_output_to_arg(builder, ctx, output, artifact_path_mapping)?;
                     }
                 }
             }
@@ -102,7 +105,7 @@ impl ResolvedQueryMacro {
 
     pub fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'_>,
     ) -> buck2_error::Result<()> {
         match self {
             Self::Outputs(list) => {

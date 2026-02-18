@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -129,10 +130,10 @@ impl fmt::Display for HumanizedBytes {
             preformat(self.bytes, 1024.0, "B", &["KiB", "MiB", "GiB"]);
 
         match (point, self.fixed_width) {
-            (false, false) => write!(f, "{:.0}{}", val, label),
-            (true, false) => write!(f, "{:.1}{}", val, label),
-            (false, true) => write!(f, "{:>3.0}{:<3}", val, label),
-            (true, true) => write!(f, "{:>3.1}{:<3}", val, label),
+            (false, false) => write!(f, "{val:.0}{label}"),
+            (true, false) => write!(f, "{val:.1}{label}"),
+            (false, true) => write!(f, "{val:>3.0}{label:<3}"),
+            (true, true) => write!(f, "{val:>3.1}{label:<3}"),
         }
     }
 }
@@ -147,10 +148,10 @@ impl fmt::Display for HumanizedBytesPerSecond {
         );
 
         match (point, self.fixed_width) {
-            (false, false) => write!(f, "{:.0}{}", val, label),
-            (true, false) => write!(f, "{:.1}{}", val, label),
-            (false, true) => write!(f, "{:>3.0}{:<5}", val, label),
-            (true, true) => write!(f, "{:>3.1}{:<5}", val, label),
+            (false, false) => write!(f, "{val:.0}{label}"),
+            (true, false) => write!(f, "{val:.1}{label}"),
+            (false, true) => write!(f, "{val:>3.0}{label:<5}"),
+            (true, true) => write!(f, "{val:>3.1}{label:<5}"),
         }
     }
 }
@@ -160,10 +161,10 @@ impl fmt::Display for HumanizedCount {
         let Preformat { val, label, point } = preformat(self.count, 1000.0, "", &["K", "M", "B"]);
 
         match (point, self.fixed_width) {
-            (false, false) => write!(f, "{:.0}{}", val, label),
-            (true, false) => write!(f, "{:.1}{}", val, label),
-            (false, true) => write!(f, "{:>3.0}{:<1}", val, label),
-            (true, true) => write!(f, "{:>3.1}{:<1}", val, label),
+            (false, false) => write!(f, "{val:.0}{label}"),
+            (true, false) => write!(f, "{val:.1}{label}"),
+            (false, true) => write!(f, "{val:>3.0}{label:<1}"),
+            (true, true) => write!(f, "{val:>3.1}{label:<1}"),
         }
     }
 }

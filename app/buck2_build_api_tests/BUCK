@@ -1,4 +1,4 @@
-load("@fbcode_macros//build_defs:rust_unittest.bzl", "rust_unittest")
+load("@fbsource//tools/build_defs:rust_unittest.bzl", "rust_unittest")
 
 oncall("build_infra")
 
@@ -6,7 +6,6 @@ rust_unittest(
     name = "buck2_build_api_tests",
     srcs = glob(["src/**/*.rs"]),
     deps = [
-        "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:assert_matches",
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:ctor",
@@ -24,6 +23,8 @@ rust_unittest(
         "//buck2/app/buck2_anon_target:buck2_anon_target",
         "//buck2/app/buck2_artifact:buck2_artifact",
         "//buck2/app/buck2_build_api:buck2_build_api",
+        "//buck2/app/buck2_build_signals:buck2_build_signals",
+        "//buck2/app/buck2_certs:buck2_certs",
         "//buck2/app/buck2_common:buck2_common",
         "//buck2/app/buck2_configured:buck2_configured",
         "//buck2/app/buck2_core:buck2_core",
@@ -33,6 +34,7 @@ rust_unittest(
         "//buck2/app/buck2_events:buck2_events",
         "//buck2/app/buck2_execute:buck2_execute",
         "//buck2/app/buck2_file_watcher:buck2_file_watcher",
+        "//buck2/app/buck2_fs:buck2_fs",
         "//buck2/app/buck2_http:buck2_http",
         "//buck2/app/buck2_interpreter:buck2_interpreter",
         "//buck2/app/buck2_interpreter_for_build:buck2_interpreter_for_build",

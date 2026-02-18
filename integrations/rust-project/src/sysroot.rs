@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::path::Path;
@@ -19,7 +20,7 @@ use crate::buck::Buck;
 use crate::buck::truncate_line_ending;
 use crate::buck::utf8_output;
 use crate::cli::develop_with_sysroot;
-use crate::json_project::Sysroot;
+use crate::project_json::Sysroot;
 use crate::target::Target;
 
 #[derive(Debug)]
@@ -37,10 +38,11 @@ pub(crate) enum SysrootConfig {
 ///
 /// `sysroot_src` is the directory that contains the source to std crates:
 /// <https://rust-analyzer.github.io/manual.html#non-cargo-based-projects>
-#[instrument(ret)]
+#[instrument(skip_all)]
 pub(crate) fn resolve_buckconfig_sysroot(
     buck: &Buck,
     project_root: &Path,
+    universe_targets: &[Target],
 ) -> Result<Sysroot, anyhow::Error> {
     let sysroot: PathBuf = {
         // TODO(diliopoulos): remove hardcoded path to toolchain sysroot and replace with something
@@ -68,14 +70,19 @@ pub(crate) fn resolve_buckconfig_sysroot(
     };
 
     let sysroot_src = buck.resolve_sysroot_src()?;
-    let sysroot_targets = Target::new(format!("fbsource//{}:", sysroot_src.to_string_lossy()));
+
+    let sysroot_targets = buck.query_sysroot_targets(
+        &format!("fbsource//{}:", sysroot_src.to_string_lossy()),
+        universe_targets,
+    );
+
     // the `library` path component needs to be appended to the `sysroot_src_path`
     // so that rust-analyzer will be able to find standard library sources.
     let sysroot_src = project_root.join(sysroot_src).join("library");
 
     let mut sysroot_project = develop_with_sysroot(
         buck,
-        vec![sysroot_targets],
+        sysroot_targets,
         Sysroot {
             sysroot: sysroot.clone(),
             sysroot_src: Some(sysroot_src.clone()),

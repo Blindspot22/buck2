@@ -1,13 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use anyhow::Context as _;
+use buck2_error::BuckErrorContext as _;
+use buck2_error::internal_error;
 use buck2_grpc::ServerHandle;
 use buck2_grpc::make_channel;
 use buck2_grpc::spawn_oneshot;
@@ -30,7 +32,7 @@ pub struct TestExecutorClient {
 }
 
 impl TestExecutorClient {
-    pub async fn new<T>(io: T) -> anyhow::Result<Self>
+    pub async fn new<T>(io: T) -> buck2_error::Result<Self>
     where
         T: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
@@ -46,23 +48,23 @@ impl TestExecutorClient {
 
 #[async_trait::async_trait]
 impl TestExecutor for TestExecutorClient {
-    async fn external_runner_spec(&self, s: ExternalRunnerSpec) -> anyhow::Result<()> {
+    async fn external_runner_spec(&self, s: ExternalRunnerSpec) -> buck2_error::Result<()> {
         self.client
             .clone()
             .external_runner_spec(ExternalRunnerSpecRequest {
-                test_spec: Some(s.try_into().context("Invalid `test_spec`")?),
+                test_spec: Some(s.try_into().buck_error_context("Invalid `test_spec`")?),
             })
             .await?;
 
         Ok(())
     }
 
-    async fn end_of_test_requests(&self) -> anyhow::Result<()> {
+    async fn end_of_test_requests(&self) -> buck2_error::Result<()> {
         self.client.clone().end_of_test_requests(Empty {}).await?;
         Ok(())
     }
 
-    async fn unstable_heap_dump(&self, path: &str) -> anyhow::Result<()> {
+    async fn unstable_heap_dump(&self, path: &str) -> buck2_error::Result<()> {
         self.client
             .clone()
             .unstable_heap_dump(UnstableHeapDumpRequest {
@@ -90,14 +92,14 @@ where
             let ExternalRunnerSpecRequest { test_spec } = request.into_inner();
 
             let test_spec = test_spec
-                .context("Missing `test_spec`")?
+                .ok_or_else(|| internal_error!("Missing `test_spec`"))?
                 .try_into()
-                .context("Invalid `test_spec`")?;
+                .buck_error_context("Invalid `test_spec`")?;
 
             self.inner
                 .external_runner_spec(test_spec)
                 .await
-                .context("Failed to dispatch test_spec")?;
+                .buck_error_context("Failed to dispatch test_spec")?;
 
             Ok(Empty {})
         })
@@ -112,7 +114,7 @@ where
             self.inner
                 .end_of_test_requests()
                 .await
-                .context("Failed to report end-of-tests")?;
+                .buck_error_context("Failed to report end-of-tests")?;
 
             Ok(Empty {})
         })
@@ -127,7 +129,7 @@ where
             self.inner
                 .unstable_heap_dump(&req.into_inner().destination_path)
                 .await
-                .context("Failed to dispatch unstable_heap_dump")?;
+                .buck_error_context("Failed to dispatch unstable_heap_dump")?;
             Ok(UnstableHeapDumpResponse {})
         })
         .await

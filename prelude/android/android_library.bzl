@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:validation_deps.bzl", "get_validation_deps_outputs")
 load(
@@ -20,12 +21,30 @@ load(
     "@prelude//java:java_providers.bzl",
     "JavaClasspathEntry",  # @unused Used as type
     "JavaCompilingDepsTSet",
+    "JavaLibraryInfo",
     "JavaProviders",  # @unused Used as type
     "create_native_providers",
     "single_library_compiling_deps",
     "to_list",
 )
+load(
+    "@prelude//java/utils:java_utils.bzl",
+    "CustomJdkInfo",
+    "get_java_version_attributes",
+)
 load("@prelude//kotlin:kotlin_library.bzl", "build_kotlin_library")
+load("@prelude//utils:expect.bzl", "expect")
+load("@prelude//utils:label_provider.bzl", "LabelInfo")
+
+def get_custom_jdk_info(ctx: AnalysisContext) -> CustomJdkInfo:
+    bootclasspath_entries = [] + ctx.attrs._android_toolchain[AndroidToolchainInfo].android_bootclasspath + optional_jars(ctx)
+    bootclasspath_snapshots = [] + ctx.attrs._android_toolchain[AndroidToolchainInfo].android_bootclasspath_snapshots + optional_abi_jar_snapshots(ctx)
+
+    return CustomJdkInfo(
+        bootclasspath = bootclasspath_entries,
+        bootclasspath_jar_snapshots = bootclasspath_snapshots,
+        system_image = ctx.attrs._android_toolchain[AndroidToolchainInfo].jdk_system_image,
+    )
 
 def android_library_impl(ctx: AnalysisContext) -> list[Provider]:
     packaging_deps = ctx.attrs.deps + ctx.attrs.exported_deps + ctx.attrs.runtime_deps
@@ -37,7 +56,12 @@ def android_library_impl(ctx: AnalysisContext) -> list[Provider]:
             cxx_resource_info,
             linkable_graph,
             # Add an unused default output in case this target is used as an attr.source() anywhere.
-            DefaultInfo(default_output = ctx.actions.write("{}/unused.jar".format(ctx.label.name), [])),
+            DefaultInfo(
+                default_output = ctx.actions.write("{}/unused.jar".format(ctx.label.name), []),
+                sub_targets = {
+                    "generated_sources": [DefaultInfo(default_output = ctx.actions.write("{}/generated_sources".format(ctx.label.name), []))],
+                },
+            ),
             TemplatePlaceholderInfo(keyed_variables = {
                 "classpath": "unused_but_needed_for_analysis",
             }),
@@ -57,10 +81,33 @@ def android_library_impl(ctx: AnalysisContext) -> list[Provider]:
             manifest = ctx.attrs.manifest,
         ),
         merge_exported_android_resource_info(ctx.attrs.exported_deps),
-    ] + android_providers
+    ] + android_providers + [LabelInfo(labels = ctx.attrs.labels)]
 
 def optional_jars(ctx: AnalysisContext) -> list[Artifact]:
-    return ctx.attrs.android_optional_jars or []
+    if not ctx.attrs.android_optional_jars:
+        return []
+
+    result = []
+    for dep in ctx.attrs.android_optional_jars:
+        java_library_info = dep.get(JavaLibraryInfo)
+        expect(java_library_info != None and java_library_info.library_output != None, "Only targets producing a Java bytecode output can be added as 'android_optional_jars'!")
+        result.append(java_library_info.library_output.full_library)
+
+    return result
+
+def optional_abi_jar_snapshots(ctx: AnalysisContext) -> list[Artifact]:
+    if not ctx.attrs.android_optional_jars:
+        return []
+
+    result = []
+    for dep in ctx.attrs.android_optional_jars:
+        java_library_info = dep.get(JavaLibraryInfo)
+        expect(java_library_info != None and java_library_info.library_output != None, "Only targets producing a Java bytecode output can be added as 'android_optional_jars'!")
+
+        if (java_library_info.library_output.abi_jar_snapshot):
+            result.append(java_library_info.library_output.abi_jar_snapshot)
+
+    return result
 
 def build_android_library(
         ctx: AnalysisContext,
@@ -68,7 +115,7 @@ def build_android_library(
         extra_sub_targets = {},
         validation_deps_outputs: [list[Artifact], None] = None,
         classpath_entries: JavaCompilingDepsTSet | None = None) -> (JavaProviders, [AndroidLibraryIntellijInfo, None]):
-    bootclasspath_entries = [] + ctx.attrs._android_toolchain[AndroidToolchainInfo].android_bootclasspath + optional_jars(ctx)
+    custom_jdk_info = get_custom_jdk_info(ctx)
     additional_classpath_entries_children = [classpath_entries] if classpath_entries else []
 
     dummy_r_dot_java, android_library_intellij_info = _get_dummy_r_dot_java(ctx)
@@ -85,22 +132,30 @@ def build_android_library(
         children = additional_classpath_entries_children,
     ) if additional_classpath_entries_children else None
 
+    extra_arguments = []
+    source_level, _ = get_java_version_attributes(ctx)
+    if source_level >= 9:
+        # Force javac to avoid generating bytecode that uses java.lang.invoke.StringConcatFactory. This is only present in Android build tools SDK 36+.
+        extra_arguments.append("-XDstringConcat=inline")
+
     if ctx.attrs.language != None and ctx.attrs.language.lower() == "kotlin":
         return build_kotlin_library(
             ctx,
             additional_classpath_entries = additional_classpath_entries,
-            bootclasspath_entries = bootclasspath_entries,
+            custom_jdk_info = custom_jdk_info,
             extra_sub_targets = extra_sub_targets,
             validation_deps_outputs = validation_deps_outputs,
+            extra_arguments = extra_arguments,
         ), android_library_intellij_info
     else:
         return build_java_library(
             ctx,
             ctx.attrs.srcs,
             additional_classpath_entries = additional_classpath_entries,
-            bootclasspath_entries = bootclasspath_entries,
+            custom_jdk_info = custom_jdk_info,
             extra_sub_targets = extra_sub_targets,
             validation_deps_outputs = validation_deps_outputs,
+            extra_arguments = extra_arguments,
         ), android_library_intellij_info
 
 def _get_dummy_r_dot_java(

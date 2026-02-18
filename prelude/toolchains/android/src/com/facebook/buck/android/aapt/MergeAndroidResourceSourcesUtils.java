@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.aapt;
@@ -16,11 +17,14 @@ import com.android.ide.common.resources.NoOpResourcePreprocessor;
 import com.android.ide.common.resources.ResourceMerger;
 import com.android.ide.common.resources.ResourceSet;
 import com.android.utils.ILogger;
+import com.facebook.infer.annotation.Nullsafe;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import java.nio.file.Path;
+import java.util.Objects;
 
 /** Merges multiple directories containing Android resource sources into one directory. */
+@Nullsafe(Nullsafe.Mode.LOCAL)
 class MergeAndroidResourceSourcesUtils {
 
   public static void mergeResPaths(
@@ -31,7 +35,7 @@ class MergeAndroidResourceSourcesUtils {
       ResourceSet set =
           new ResourceSet(
               resPath.toString(),
-              ResourceNamespace.RES_AUTO,
+              Objects.requireNonNull(ResourceNamespace.RES_AUTO),
               /* libraryName */ null,
               /* validateEnabled */ true,
               /* aaptEnv */ null);
@@ -45,7 +49,7 @@ class MergeAndroidResourceSourcesUtils {
             outFolderPath.toFile(),
             null /*publicFile*/,
             null /*blameLogFolder*/,
-            NoOpResourcePreprocessor.INSTANCE,
+            Objects.requireNonNull(NoOpResourcePreprocessor.INSTANCE),
             tmpFolderPath.toFile(),
             ImmutableMap.of() /* moduleSourceSet */,
             "unused_package_name");

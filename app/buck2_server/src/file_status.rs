@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -14,24 +15,24 @@ use std::path::Path;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use buck2_common::dice::cells::HasCellResolver;
-use buck2_common::dice::file_ops::DiceFileOps;
-use buck2_common::file_ops::FileOps;
-use buck2_common::file_ops::RawPathMetadata;
-use buck2_common::file_ops::RawSymlink;
+use buck2_common::file_ops::dice::DiceFileComputations;
+use buck2_common::file_ops::metadata::RawPathMetadata;
+use buck2_common::file_ops::metadata::RawSymlink;
 use buck2_common::io::IoProvider;
 use buck2_common::io::fs::FsIoProvider;
 use buck2_core::cells::CellResolver;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_execute::digest_config::HasDigestConfig;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
 use buck2_server_ctx::stdout_partial_output::StdoutPartialOutput;
 use buck2_server_ctx::template::ServerCommandTemplate;
 use buck2_server_ctx::template::run_server_command;
 use buck2_util::commas::commas;
+use dice::DiceComputations;
 use dice::DiceTransaction;
 use dupe::Dupe;
 use gazebo::variants::VariantName;
@@ -82,12 +83,11 @@ impl FileStatusResult<'_> {
         if fs != dice {
             writeln!(
                 self.stdout,
-                "MISMATCH: {} at {}: fs = {}, dice = {}",
-                kind, path, fs, dice,
+                "MISMATCH: {kind} at {path}: fs = {fs}, dice = {dice}",
             )?;
             self.bad += 1;
         } else if self.show_matches {
-            writeln!(self.stdout, "Match: {} at {}: {}", kind, path, fs)?;
+            writeln!(self.stdout, "Match: {kind} at {path}: {fs}")?;
         }
 
         Ok(())
@@ -102,7 +102,7 @@ impl fmt::Display for DirList {
         let mut comma = commas();
         for path in &self.0 {
             comma(f)?;
-            write!(f, "{}", path)?;
+            write!(f, "{path}")?;
         }
         Ok(())
     }
@@ -139,12 +139,8 @@ impl ServerCommandTemplate for FileStatusServerCommand {
 
         for path in &self.req.paths {
             let path = project_root.relativize_any(AbsPath::new(Path::new(path))?)?;
-            writeln!(&mut stderr, "Check file status: {}", path)?;
-            let result = &mut result;
-            ctx.with_linear_recompute(|ctx| async move {
-                check_file_status(&DiceFileOps(&ctx), cell_resolver, io, &path, result).await
-            })
-            .await?;
+            writeln!(&mut stderr, "Check file status: {path}")?;
+            check_file_status(&mut ctx, cell_resolver, io, &path, &mut result).await?;
         }
         if result.bad != 0 {
             Err(buck2_error::buck2_error!(
@@ -161,16 +157,11 @@ impl ServerCommandTemplate for FileStatusServerCommand {
             Ok(buck2_cli_proto::GenericResponse {})
         }
     }
-
-    fn is_success(&self, _response: &Self::Response) -> bool {
-        // No response if we failed.
-        true
-    }
 }
 
 #[async_recursion]
 async fn check_file_status(
-    file_ops: &dyn FileOps,
+    ctx: &mut DiceComputations,
     cell_resolver: &CellResolver,
     io: &dyn IoProvider,
     path: &ProjectRelativePath,
@@ -178,16 +169,18 @@ async fn check_file_status(
 ) -> buck2_error::Result<()> {
     result.checking();
 
-    let cell_path = cell_resolver.get_cell_path(path)?;
-    if file_ops.is_ignored(cell_path.as_ref()).await?.is_ignored() {
+    let cell_path = cell_resolver.get_cell_path(path);
+    if DiceFileComputations::is_ignored(ctx, cell_path.as_ref())
+        .await?
+        .is_ignored()
+    {
         return Ok(());
     }
 
     let fs_metadata = io.read_path_metadata_if_exists(path.to_owned()).await?;
 
-    let dice_metadata = file_ops
-        .read_path_metadata_if_exists(cell_path.as_ref())
-        .await?;
+    let dice_metadata =
+        DiceFileComputations::read_path_metadata_if_exists(ctx, cell_path.as_ref()).await?;
 
     let (fs_metadata, dice_metadata) = match (&fs_metadata, &dice_metadata) {
         (Some(fs), Some(dice)) => (fs, dice),
@@ -226,9 +219,18 @@ async fn check_file_status(
             )?;
 
             match (fs_to, dice_to) {
-                (RawSymlink::Relative(fs_rel), RawSymlink::Relative(dice_rel)) => {
+                (
+                    RawSymlink::Relative(fs_rel, fs_raw_rel),
+                    RawSymlink::Relative(dice_rel, dice_raw_rel),
+                ) => {
                     let dice_rel = cell_resolver.resolve_path(dice_rel.as_ref().as_ref())?;
                     result.report("relative symlink destination", path, fs_rel, &dice_rel)?;
+                    result.report(
+                        "relative symlink destination raw",
+                        path,
+                        fs_raw_rel,
+                        dice_raw_rel,
+                    )?;
                 }
                 (RawSymlink::External(fs_ext), RawSymlink::External(dice_ext)) => {
                     result.report("external symlink destination", path, fs_ext, dice_ext)?;
@@ -243,7 +245,7 @@ async fn check_file_status(
         }
         (RawPathMetadata::Directory, RawPathMetadata::Directory) => {
             let fs_read_dir = io.read_dir(path.to_owned()).await?;
-            let dice_read_dir = file_ops.read_dir(cell_path.as_ref()).await?;
+            let dice_read_dir = DiceFileComputations::read_dir(ctx, cell_path.as_ref()).await?;
 
             // No point checking file types here, we'll do that when we inspect them.
             let mut fs_names = fs_read_dir
@@ -266,8 +268,7 @@ async fn check_file_status(
             result.report("directory contents", path, &fs_names, &dice_names)?;
 
             for file_name in &fs_names.0 {
-                check_file_status(file_ops, cell_resolver, io, &path.join(file_name), result)
-                    .await?;
+                check_file_status(ctx, cell_resolver, io, &path.join(file_name), result).await?;
             }
         }
         (_, _) => {

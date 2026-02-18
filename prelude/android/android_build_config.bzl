@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
 load("@prelude//java:java_library.bzl", "compile_to_jar")
@@ -90,12 +91,16 @@ def _generate_build_config_dot_java(
     default_values_file = ctx.actions.write(
         _get_output_name(java_package, "default_values"),
         ["{} {} = {}".format(x.type, x.name, x.value) for x in default_values],
+        has_content_based_path = True,
     )
     generate_build_config_cmd.add(["--default-values-file", default_values_file])
     if values_file:
         generate_build_config_cmd.add(["--values-file", values_file])
 
-    build_config_dot_java = ctx.actions.declare_output(_get_output_name(java_package, "BuildConfig.java"))
+    build_config_dot_java = ctx.actions.declare_output(
+        _get_output_name(java_package, "BuildConfig.java"),
+        has_content_based_path = True,
+    )
     generate_build_config_cmd.add(["--output", build_config_dot_java.as_output()])
 
     ctx.actions.run(

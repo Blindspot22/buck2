@@ -1,13 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_data::error::ErrorTag;
+
+use crate::ExitCode;
 
 /// When there's no tag, but we want to put something in Scuba, we use this.
 pub const ERROR_TAG_UNCLASSIFIED: &str = "UNCLASSIFIED";
@@ -35,6 +38,17 @@ pub enum Tier {
     Tier0,
 }
 
+impl std::fmt::Display for Tier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Tier::Environment => "ENVIRONMENT",
+            Tier::Tier0 => "INFRA",
+            Tier::Input => "USER",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 struct TagMetadata {
     category: Option<Tier>,
     rank: u32,
@@ -46,6 +60,8 @@ struct TagMetadata {
     // reported externally.
     // These should be removed/avoided if possible.
     hidden: bool,
+    // Allows overriding the exit code derived from the error tier.
+    exit_code: ExitCode,
 }
 
 impl TagMetadata {
@@ -59,6 +75,10 @@ impl TagMetadata {
             ..self
         }
     }
+
+    fn exit_code(self, exit_code: ExitCode) -> Self {
+        Self { exit_code, ..self }
+    }
 }
 
 macro_rules! rank {
@@ -69,24 +89,28 @@ macro_rules! rank {
                 rank: line!(),
                 generic: false,
                 hidden: false,
+                exit_code: ExitCode::InfraError,
             },
             "tier0" => TagMetadata {
                 category: Some(Tier::Tier0),
                 rank: line!(),
                 generic: false,
                 hidden: false,
+                exit_code: ExitCode::InfraError,
             },
             "input" => TagMetadata {
                 category: Some(Tier::Input),
                 rank: line!(),
                 generic: false,
                 hidden: false,
+                exit_code: ExitCode::UserError,
             },
             "unspecified" => TagMetadata {
                 category: None,
                 rank: line!(),
                 generic: true,
                 hidden: false,
+                exit_code: ExitCode::UnknownFailure,
             },
             _ => unreachable!(),
         }
@@ -105,6 +129,7 @@ pub enum ErrorSourceArea {
 
 pub trait ErrorTagExtra {
     fn source_area(&self) -> ErrorSourceArea;
+    fn exit_code(&self) -> ExitCode;
 }
 
 impl ErrorTagExtra for ErrorTag {
@@ -124,6 +149,10 @@ impl ErrorTagExtra for ErrorTag {
             ErrorSourceArea::Buck2
         }
     }
+
+    fn exit_code(&self) -> ExitCode {
+        tag_metadata(*self).exit_code
+    }
 }
 
 /// Ordering determines tag rank, more interesting tags first
@@ -133,20 +162,29 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::NoValidCerts => rank!(environment),
         ErrorTag::ServerSigterm => rank!(environment),
         ErrorTag::IoMaterializerFileBusy => rank!(environment),
-        ErrorTag::IoClientBrokenPipe => rank!(environment),
+        ErrorTag::IoClientBrokenPipe => rank!(environment).exit_code(ExitCode::ClientIoBrokenPipe),
         ErrorTag::IoReadOnlyFilesystem => rank!(environment),
         ErrorTag::WatchmanRootNotConnectedError => rank!(environment),
         ErrorTag::WatchmanCheckoutInProgress => rank!(environment),
         ErrorTag::ServerTransportError => rank!(environment),
         ErrorTag::ServerMemoryPressure => rank!(environment),
-        // Daemon was likely SIGKILLed, otherwise it should have written something to stderr
-        ErrorTag::ServerStderrEmpty => rank!(environment),
         // Note: This is only true internally due to buckwrapper
         ErrorTag::NoBuckRoot => rank!(environment),
         ErrorTag::InstallerEnvironment => rank!(environment).hidden(),
         ErrorTag::IoNotConnected => rank!(environment), // This typically means eden is not mounted
         // Typically due to poor network performance and large artifacts.
         ErrorTag::ReDeadlineExceeded => rank!(environment),
+        // Typically due to network configuration/x2p
+        ErrorTag::ReConnection => rank!(environment),
+        // Means a new command 'clear'ed the DICE version (e.g. from merge base change) and an old command was rejected.
+        ErrorTag::DiceRejected => rank!(environment),
+        ErrorTag::HttpForbidden => rank!(environment),
+        ErrorTag::HttpUnauthorized => rank!(environment),
+        // Http 4xx errors could be either systemic problems or caused by user input.
+        // Treat them as environment errors for alerting and SLIs, but input errors so that they aren't ignored by CI.
+        ErrorTag::HttpClient => rank!(environment).exit_code(ExitCode::UserError),
+        // Mostly caused by network related operation being too slow/timeout.
+        ErrorTag::IoEdenNetworkCurlTimedout => rank!(environment),
 
         // Tier 0 errors
         ErrorTag::ServerJemallocAssert => rank!(tier0),
@@ -155,8 +193,16 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::ServerSegv => rank!(tier0),
         ErrorTag::ServerSigbus => rank!(tier0),
         ErrorTag::ServerSigabrt => rank!(tier0),
-        ErrorTag::ServerStderrUnknown => rank!(tier0),
-        ErrorTag::InternalError => rank!(tier0),
+        ErrorTag::ClientStartupTimeout => rank!(tier0),
+        ErrorTag::DaemonLaunchFailed => rank!(tier0),
+        ErrorTag::DaemonStartupFailed => rank!(tier0),
+        ErrorTag::DaemonNestedConstraintsMismatch => rank!(tier0),
+        ErrorTag::DaemonConstraintsWrongAfterStart => rank!(tier0),
+        ErrorTag::DaemonDirCleanupFailed => rank!(tier0),
+        ErrorTag::DaemonKillFailed => rank!(tier0),
+        ErrorTag::BuckdLifecycleLock => rank!(tier0),
+        ErrorTag::BuckdInfoMissing => rank!(tier0),
+        ErrorTag::BuckdInfoParseError => rank!(tier0),
         ErrorTag::DaemonWontDieFromKill => rank!(tier0),
         ErrorTag::GrpcResponseMessageTooLarge => rank!(tier0),
         ErrorTag::ReClientCrash => rank!(tier0),
@@ -190,8 +236,6 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::Regex => rank!(tier0),
         ErrorTag::RelativePath => rank!(tier0),
         ErrorTag::Rusqlite => rank!(tier0),
-        ErrorTag::Tokio => rank!(tier0),
-        ErrorTag::Tonic => rank!(tier0),
         ErrorTag::Uuid => rank!(tier0),
         ErrorTag::SerdeJson => rank!(tier0),
         ErrorTag::StdSlice => rank!(tier0),
@@ -236,6 +280,7 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::Interpreter => rank!(tier0),
         ErrorTag::StarlarkServer => rank!(tier0),
         ErrorTag::KillAll => rank!(tier0),
+        ErrorTag::BuildReport => rank!(tier0), // build report generation should never be an input error
 
         ErrorTag::InvalidEvent => rank!(tier0),
         ErrorTag::InvalidDigest => rank!(tier0),
@@ -264,7 +309,8 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::Bail => rank!(tier0),
 
         ErrorTag::EventLogUpload => rank!(tier0),
-        ErrorTag::EventLog => rank!(tier0),
+        ErrorTag::EventLogEof => rank!(tier0),
+        ErrorTag::EventLogNotOpen => rank!(tier0),
 
         ErrorTag::MallocStats => rank!(tier0),
         ErrorTag::Mallctl => rank!(tier0),
@@ -287,6 +333,13 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::IoEdenJournalTruncated => rank!(tier0),
         ErrorTag::IoEdenOutOfDateParent => rank!(tier0),
         ErrorTag::IoEdenListMounts => rank!(tier0),
+        ErrorTag::IoEdenRequestError => rank!(tier0),
+        ErrorTag::IoEdenUnknownField => rank!(tier0),
+        ErrorTag::IoEdenAttributeUnavailable => rank!(tier0),
+        ErrorTag::IoEdenDataCorruption => rank!(tier0),
+        ErrorTag::IoEdenNetworkTls => rank!(tier0),
+        ErrorTag::IoEdenNetworkUncategorized => rank!(tier0),
+        ErrorTag::IoEdenUncategorized => rank!(tier0),
         ErrorTag::IoBlockingExecutor => rank!(tier0),
         ErrorTag::WatchmanClient => rank!(tier0),
         ErrorTag::WatchmanTimeout => rank!(tier0),
@@ -301,6 +354,7 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::WatchmanConnect => rank!(tier0),
         ErrorTag::WatchmanRequestError => rank!(tier0),
         ErrorTag::NotifyWatcher => rank!(tier0),
+        ErrorTag::HttpServiceUnavailable => rank!(tier0),
         ErrorTag::HttpServer => rank!(tier0),
         ErrorTag::StarlarkInternal => rank!(tier0),
         ErrorTag::ActionMismatchedOutputs => rank!(tier0),
@@ -312,18 +366,21 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::DiceDuplicateActivationData => rank!(tier0),
         ErrorTag::InstallerUnknown => rank!(tier0),
         ErrorTag::InstallerTier0 => rank!(tier0).hidden(),
-
+        ErrorTag::InternalError => rank!(tier0),
         ErrorTag::Environment => rank!(environment).hidden(),
         ErrorTag::Tier0 => rank!(tier0).hidden(),
+        // Daemon disconnected with nothing in stderr, likely SIGKILLed.
+        ErrorTag::DaemonDisconnect => rank!(environment),
 
         // Input errors
+        ErrorTag::ClapMatch => rank!(input),
         ErrorTag::ReFailedPrecondition => rank!(input),
         // FIXME(JakobDegen): Make this bad experience once that's available. Usually when this
         // happens, it's probably because the user tried to shut down with Ctrl+C and something
         // about that didn't work
         ErrorTag::InterruptedByDaemonShutdown => rank!(input),
-        ErrorTag::DaemonIsBusy => rank!(input),
-        ErrorTag::DaemonPreempted => rank!(input),
+        ErrorTag::DaemonIsBusy => rank!(input).exit_code(ExitCode::DaemonIsBusy),
+        ErrorTag::DaemonPreempted => rank!(input).exit_code(ExitCode::DaemonPreempted),
         ErrorTag::ConfigureAttr => rank!(input),
         ErrorTag::DepOnlyIncompatible => rank!(input),
         ErrorTag::TargetIncompatible => rank!(input),
@@ -338,6 +395,8 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::ActionWrongOutputType => rank!(input),
         ErrorTag::ActionCommandFailure => rank!(input),
         ErrorTag::ProjectMissingPath => rank!(input),
+        ErrorTag::ArtifactMissingFilename => rank!(input),
+        ErrorTag::MissingInputPath => rank!(input),
         ErrorTag::StarlarkFail => rank!(input),
         ErrorTag::StarlarkStackOverflow => rank!(input),
         ErrorTag::StarlarkValue => rank!(input),
@@ -346,11 +405,12 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::StarlarkParser => rank!(input),
         ErrorTag::StarlarkNativeInput => rank!(input),
         ErrorTag::Visibility => rank!(input),
-        ErrorTag::HttpClient => rank!(input),
         ErrorTag::TestDeadlineExpired => rank!(input),
         ErrorTag::Unimplemented => rank!(input),
         ErrorTag::InstallerInput => rank!(input).hidden(),
         ErrorTag::BuildDeadlineExpired => rank!(input),
+        ErrorTag::EventLogIndexOutOfBounds => rank!(input),
+        ErrorTag::ReUserQuota => rank!(input),
 
         ErrorTag::Input => rank!(input).hidden(),
 
@@ -361,6 +421,7 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         // - A phase of the build.
         // By default these are generic (excluded from category keys)
         ErrorTag::ClientGrpc => rank!(unspecified),
+        ErrorTag::ClientGrpcStream => rank!(unspecified),
         ErrorTag::CompatibilityError => rank!(unspecified),
         ErrorTag::IoBrokenPipe => rank!(unspecified),
         ErrorTag::IoWindowsSharingViolation => rank!(unspecified),
@@ -370,8 +431,6 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::IoSystem => rank!(unspecified),
         ErrorTag::IoEden => rank!(unspecified).generic(false),
         ErrorTag::IoEdenConnectionError => rank!(unspecified),
-        ErrorTag::IoEdenRequestError => rank!(unspecified),
-        ErrorTag::IoEdenUnknownField => rank!(unspecified),
         ErrorTag::MaterializationError => rank!(unspecified),
         ErrorTag::CleanInterrupt => rank!(unspecified),
         ErrorTag::Tpx => rank!(unspecified),
@@ -379,9 +438,11 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::Http => rank!(unspecified),
         ErrorTag::DownloadFileHeadRequest => rank!(unspecified),
         ErrorTag::StarlarkError => rank!(unspecified),
-        ErrorTag::UnexpectedNone => rank!(unspecified),
         ErrorTag::UnusedDefaultTag => rank!(unspecified),
         ErrorTag::BuildSketchError => rank!(unspecified),
+        ErrorTag::Tokio => rank!(unspecified),
+        ErrorTag::Tonic => rank!(unspecified),
+        ErrorTag::MissingInternalPath => rank!(unspecified),
         // Build phases
         ErrorTag::DaemonStateInitFailed => rank!(unspecified),
         ErrorTag::DaemonConnect => rank!(unspecified),
@@ -425,8 +486,7 @@ impl ErrorLike for buck2_data::ErrorReport {
 
     fn category(&self) -> Tier {
         self.best_tag()
-            .map(|t| tag_metadata(t).category)
-            .flatten()
+            .and_then(|t| tag_metadata(t).category)
             .unwrap_or(Tier::Tier0)
     }
 }
@@ -545,7 +605,7 @@ mod tests {
     fn test_ranked_tags() {
         let errors = vec![ErrorReport {
             tags: vec![
-                ErrorTag::ServerStderrEmpty as i32,
+                ErrorTag::DaemonDisconnect as i32,
                 ErrorTag::ClientGrpc as i32,
             ],
             ..ErrorReport::default()
@@ -560,7 +620,7 @@ mod tests {
     #[test]
     fn test_source_area() {
         assert_eq!(
-            ErrorTag::ServerStderrEmpty.source_area(),
+            ErrorTag::DaemonDisconnect.source_area(),
             ErrorSourceArea::Buck2
         );
         assert_eq!(ErrorTag::ReAborted.source_area(), ErrorSourceArea::Re);

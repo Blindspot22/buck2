@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Implementation of the Haskell build rules.
 
@@ -359,7 +360,7 @@ def haskell_prebuilt_library_impl(ctx: AnalysisContext) -> list[Provider]:
     return [
         DefaultInfo(),
         haskell_lib_provider,
-        cxx_merge_cpreprocessors(ctx, [own_pp_info], inherited_pp_info),
+        cxx_merge_cpreprocessors(ctx.actions, [own_pp_info], inherited_pp_info),
         merge_shared_libraries(
             ctx.actions,
             shared_libs,
@@ -579,6 +580,7 @@ def _build_haskell_lib(
             [ctx.attrs.linker_flags] +
             ["-o", lib.as_output()] +
             [
+                "-package-env=-",
                 get_shared_library_flags(linker_info.type),
                 "-dynamic",
                 cmd_args(
@@ -594,6 +596,8 @@ def _build_haskell_lib(
             ctx,
             nlis,
             to_link_strategy(link_style),
+            prefer_stripped = False,
+            transformation_spec_context = None,
         )
         link.add(cmd_args(unpack_link_args(infos), prepend = "-optl"))
         ctx.actions.run(
@@ -610,7 +614,8 @@ def _build_haskell_lib(
     else:  # static flavours
         # TODO: avoid making an archive for a single object, like cxx does
         # (but would that work with Template Haskell?)
-        archive = make_archive(ctx, lib_short_path, objfiles)
+        # TODO: Opt haskell actions into content based paths.
+        archive = make_archive(ctx, lib_short_path, objfiles, force_disable_content_based_path = True)
         lib = archive.artifact
         libs = [lib] + (archive.external_objects if archive.archive_contents_type == ArchiveContentsType("thin") else [])
         link_infos = LinkInfos(
@@ -858,7 +863,7 @@ def haskell_library_impl(ctx: AnalysisContext) -> list[Provider]:
             prof_infos = prof_merged_link_info,
         ),
         linkable_graph,
-        cxx_merge_cpreprocessors(ctx, pp, inherited_pp_info),
+        cxx_merge_cpreprocessors(ctx.actions, pp, inherited_pp_info),
         merge_shared_libraries(
             ctx.actions,
             shared_libs,
@@ -884,6 +889,8 @@ def haskell_library_impl(ctx: AnalysisContext) -> list[Provider]:
                 ctx,
                 [merged_link_info],
                 to_link_strategy(link_style),
+                prefer_stripped = False,
+                transformation_spec_context = None,
             ),
         ))
         templ_vars[name] = args
@@ -956,7 +963,7 @@ def haskell_binary_impl(ctx: AnalysisContext) -> list[Provider]:
         hidden = compiled.stubs,
     )
 
-    link_args = cmd_args()
+    link_args = cmd_args("-package-env=-")
 
     osuf, _hisuf = output_extensions(link_style, enable_profiling)
 
@@ -1102,7 +1109,7 @@ def haskell_binary_impl(ctx: AnalysisContext) -> list[Provider]:
             targets_consumed_by_link_groups = {},
         )
 
-        for shared_lib in traverse_shared_library_info(shlib_info):
+        for shared_lib in traverse_shared_library_info(shlib_info, transformation_provider = None):
             label = shared_lib.label
             if is_link_group_shlib(label, link_group_ctx):
                 sos.append(shared_lib)
@@ -1123,8 +1130,14 @@ def haskell_binary_impl(ctx: AnalysisContext) -> list[Provider]:
             li = lib.get(MergedLinkInfo)
             if li != None:
                 nlis.append(li)
-        sos.extend(traverse_shared_library_info(shlib_info))
-        infos = get_link_args_for_strategy(ctx, nlis, to_link_strategy(link_style))
+        sos.extend(traverse_shared_library_info(shlib_info, transformation_provider = None))
+        infos = get_link_args_for_strategy(
+            ctx,
+            nlis,
+            to_link_strategy(link_style),
+            prefer_stripped = False,
+            transformation_spec_context = None,
+        )
 
     link_args.add(cmd_args(unpack_link_args(infos), prepend = "-optl"))
 

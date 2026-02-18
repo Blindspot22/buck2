@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -59,7 +60,7 @@ impl SourceLocation {
             path.to_owned()
         } else {
             // Shouldn't happen, but we still want to see the path if it does.
-            format!("external:{}", path)
+            format!("external:{path}")
         };
 
         Self {
@@ -88,10 +89,10 @@ impl std::fmt::Display for SourceLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.path)?;
         if let Some(type_name) = &self.type_name {
-            write!(f, "::{}", type_name)?;
+            write!(f, "::{type_name}")?;
         }
         if let Some(source_line) = self.source_line {
-            write!(f, "::{}", source_line)?;
+            write!(f, "::{source_line}")?;
         }
         Ok(())
     }
@@ -100,7 +101,6 @@ impl std::fmt::Display for SourceLocation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate as buck2_error;
     use crate::conversion::from_any_with_tag;
     use crate::conversion_test::MyError;
 
@@ -190,10 +190,7 @@ mod tests {
             e.source_location().to_string(),
             "buck2_error/src/source_location.rs",
         );
-
-        let e: buck2_error::Error = from_any_with_tag(MyError, crate::ErrorTag::Input);
-        let e: anyhow::Error = e.into();
-        let e: crate::Error = from_any_with_tag(e, crate::ErrorTag::Input);
+        let e = e.context("mycontext");
         assert_eq!(
             e.source_location().to_string(),
             "buck2_error/src/source_location.rs",

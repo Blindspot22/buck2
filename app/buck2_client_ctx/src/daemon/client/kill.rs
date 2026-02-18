@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
@@ -17,6 +18,7 @@ use buck2_error::buck2_error;
 use buck2_wrapper_common::kill;
 use buck2_wrapper_common::pid::Pid;
 use sysinfo::ProcessRefreshKind;
+use sysinfo::ProcessesToUpdate;
 use sysinfo::System;
 use tonic::Request;
 use tonic::codegen::InterceptedService;
@@ -26,6 +28,7 @@ use crate::daemon::client::BuckdLifecycleLock;
 use crate::daemon::client::connect::BuckAddAuthTokenInterceptor;
 use crate::daemon::client::connect::BuckdProcessInfo;
 use crate::daemon::client::connect::buckd_startup_timeout;
+use crate::startup_deadline::StartupDeadline;
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);
 /// Kill request does not wait for the process to exit.
@@ -59,7 +62,7 @@ pub async fn kill_command_impl(
             // No time out: we just errored out. This is likely indicative that there is no
             // buckd (i.e. our connection got rejected), so let's check for this and then
             // provide some information.
-            let e: buck2_error::Error = e.into();
+            let e = e;
 
             // TODO(minglunli): Look into checking for explicit 'Connection Refused' or something more
             // concretely pointing to `no server running` instead of all transport errors
@@ -125,7 +128,7 @@ pub(crate) async fn kill(
                     if !kill::process_exists(pid)? {
                         return Ok(());
                     }
-                    if time_req_sent.elapsed() > GRACEFUL_SHUTDOWN_TIMEOUT {
+                    if Instant::now() - time_req_sent > GRACEFUL_SHUTDOWN_TIMEOUT {
                         crate::eprintln!(
                             "Timed out waiting for graceful shutdown of buck2 daemon pid {}",
                             pid
@@ -165,9 +168,11 @@ pub(crate) async fn hard_kill(info: &DaemonProcessInfo) -> buck2_error::Result<(
 
 pub(crate) async fn hard_kill_until(
     info: &DaemonProcessInfo,
-    deadline: Instant,
+    deadline: &StartupDeadline,
 ) -> buck2_error::Result<()> {
     let pid = Pid::from_i64(info.pid)?;
+
+    let deadline = deadline.down_deadline()?.deadline();
 
     let now = Instant::now();
     hard_kill_impl(pid, now, deadline.saturating_duration_since(now)).await
@@ -191,7 +196,7 @@ async fn hard_kill_impl(
         return Ok(());
     };
     let timestamp_after_kill = Instant::now();
-    while start_at.elapsed() < deadline {
+    while Instant::now() - start_at < deadline {
         if handle.has_exited()? {
             return Ok(());
         }
@@ -205,7 +210,7 @@ async fn hard_kill_impl(
         return Ok(());
     }
 
-    let elapsed_s = timestamp_after_kill.elapsed().as_secs_f32();
+    let elapsed_s = (Instant::now() - timestamp_after_kill).as_secs_f32();
     Err(buck2_error!(
         ErrorTag::DaemonWontDieFromKill,
         "Daemon pid {pid} did not die after kill within {elapsed_s:.1}s (status: {status})"
@@ -222,11 +227,15 @@ fn get_callers_for_kill() -> Vec<String> {
     ) -> Option<(sysinfo::Pid, Duration)> {
         // Specifics about this process need to be refreshed by this time.
         let proc = system.process(pid)?;
-        let title =
-            shlex::try_join(proc.cmd().iter().map(|s| s.as_str())).expect("Null byte unexpected");
+        let title = shlex::try_join(proc.cmd().iter().filter_map(|s| s.to_str()))
+            .expect("Null byte unexpected");
         process_tree.push(title);
         let parent_pid = proc.parent()?;
-        system.refresh_process_specifics(parent_pid, ProcessRefreshKind::new());
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[parent_pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
         let parent_proc = system.process(parent_pid)?;
         let parent_creation_time = kill::process_creation_time(parent_proc)?;
         if parent_creation_time <= creation_time {
@@ -240,7 +249,11 @@ fn get_callers_for_kill() -> Vec<String> {
     let mut process_tree = Vec::new();
 
     let pid = sysinfo::Pid::from_u32(std::process::id());
-    system.refresh_process_specifics(pid, ProcessRefreshKind::new());
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
     let mut curr = system
         .process(pid)
         .and_then(|proc| Some((pid, kill::process_creation_time(proc)?)));

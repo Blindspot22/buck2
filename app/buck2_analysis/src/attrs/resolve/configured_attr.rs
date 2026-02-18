@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_artifact::artifact::artifact_type::Artifact;
@@ -59,19 +60,19 @@ pub trait ConfiguredAttrExt {
     fn resolve<'v>(
         &self,
         pkg: PackageLabel,
-        ctx: &dyn AttrResolutionContext<'v>,
+        ctx: &mut dyn AttrResolutionContext<'v>,
     ) -> buck2_error::Result<Vec<Value<'v>>>;
 
     fn resolve_single<'v>(
         &self,
         pkg: PackageLabel,
-        ctx: &dyn AttrResolutionContext<'v>,
+        ctx: &mut dyn AttrResolutionContext<'v>,
     ) -> buck2_error::Result<Value<'v>>;
 
     fn to_value<'v>(
         &self,
         pkg: PackageLabelOption,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> buck2_error::Result<Value<'v>>;
 }
 
@@ -85,7 +86,7 @@ impl ConfiguredAttrExt for ConfiguredAttr {
     fn resolve<'v>(
         &self,
         pkg: PackageLabel,
-        ctx: &dyn AttrResolutionContext<'v>,
+        ctx: &mut dyn AttrResolutionContext<'v>,
     ) -> buck2_error::Result<Vec<Value<'v>>> {
         match self {
             // SourceLabel is special since it is the only type that can be expand to many
@@ -101,7 +102,7 @@ impl ConfiguredAttrExt for ConfiguredAttr {
     fn resolve_single<'v>(
         &self,
         pkg: PackageLabel,
-        ctx: &dyn AttrResolutionContext<'v>,
+        ctx: &mut dyn AttrResolutionContext<'v>,
     ) -> buck2_error::Result<Value<'v>> {
         match self {
             ConfiguredAttr::Bool(v) => Ok(Value::new_bool(v.0)),
@@ -174,7 +175,7 @@ impl ConfiguredAttrExt for ConfiguredAttr {
     fn to_value<'v>(
         &self,
         pkg: PackageLabelOption,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> buck2_error::Result<Value<'v>> {
         configured_attr_to_value(self, pkg, heap)
     }
@@ -183,32 +184,32 @@ impl ConfiguredAttrExt for ConfiguredAttr {
 fn configured_attr_to_value<'v>(
     this: &ConfiguredAttr,
     pkg: PackageLabelOption,
-    heap: &'v Heap,
+    heap: Heap<'v>,
 ) -> buck2_error::Result<Value<'v>> {
     Ok(match this {
         ConfiguredAttr::Bool(v) => heap.alloc(v.0),
         ConfiguredAttr::Int(v) => heap.alloc(*v),
         ConfiguredAttr::String(s) | ConfiguredAttr::EnumVariant(s) => heap.alloc(s.as_str()),
         ConfiguredAttr::List(list) => {
-            heap.alloc(list.try_map(|v| configured_attr_to_value(&v, pkg, heap))?)
+            heap.alloc(list.try_map(|v| configured_attr_to_value(v, pkg, heap))?)
         }
         ConfiguredAttr::Tuple(v) => heap.alloc(AllocTuple(
-            v.try_map(|v| configured_attr_to_value(&v, pkg, heap))?,
+            v.try_map(|v| configured_attr_to_value(v, pkg, heap))?,
         )),
         ConfiguredAttr::Dict(map) => {
             let mut res = SmallMap::with_capacity(map.len());
 
             for (k, v) in map.iter() {
                 res.insert_hashed(
-                    configured_attr_to_value(&k, pkg, heap)?.get_hashed()?,
-                    configured_attr_to_value(&v, pkg, heap)?,
+                    configured_attr_to_value(k, pkg, heap)?.get_hashed()?,
+                    configured_attr_to_value(v, pkg, heap)?,
                 );
             }
 
             heap.alloc(Dict::new(res))
         }
         ConfiguredAttr::None => Value::new_none(),
-        ConfiguredAttr::OneOf(box l, _) => configured_attr_to_value(&l, pkg, heap)?,
+        ConfiguredAttr::OneOf(box l, _) => configured_attr_to_value(l, pkg, heap)?,
         ConfiguredAttr::Visibility(VisibilitySpecification(specs))
         | ConfiguredAttr::WithinView(WithinViewSpecification(specs)) => match specs {
             VisibilityPatternList::Public => heap.alloc(AllocList(["PUBLIC"])),

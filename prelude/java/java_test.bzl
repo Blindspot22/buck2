@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//java:class_to_srcs.bzl",
@@ -36,7 +37,7 @@ def java_test_impl(ctx: AnalysisContext) -> list[Provider]:
     java_providers = build_java_library(ctx, ctx.attrs.srcs)
     external_runner_test_info = build_junit_test(ctx, java_providers.java_library_info, java_providers.java_packaging_info, java_providers.class_to_src_map)
 
-    return inject_test_run_info(ctx, external_runner_test_info) + [
+    providers = [
         java_providers.java_library_intellij_info,
         java_providers.java_library_info,
         java_providers.java_packaging_info,
@@ -44,6 +45,10 @@ def java_test_impl(ctx: AnalysisContext) -> list[Provider]:
         java_providers.default_info,
         java_providers.class_to_src_map,
     ]
+    if java_providers.validation_info:
+        providers.append(java_providers.validation_info)
+
+    return inject_test_run_info(ctx, external_runner_test_info) + providers
 
 def build_junit_test(
         ctx: AnalysisContext,
@@ -162,11 +167,12 @@ def build_junit_test(
         env["JACOCO_CLASSNAME_SOURCE_MAP"] = transitive_class_to_src_map
 
     list_tests = java_test_toolchain.list_tests
-    if list_tests != None and "tpx:supports_static_listing=false" not in ctx.attrs.labels:
+    if list_tests != None and "tpx:supports_static_listing=true" in ctx.attrs.labels and "tpx:supports_static_listing=false" not in ctx.attrs.labels:
         list_tests_command = cmd_args([
             list_tests[RunInfo],
             "list-tests",
-            ctx.attrs.srcs,
+            "--sources-file",
+            ctx.actions.write("source_files.txt", ctx.attrs.srcs, with_inputs = True),
         ])
         env["TPX_LIST_TESTS_COMMAND"] = list_tests_command
 
@@ -198,7 +204,7 @@ def _get_native_libs_env(ctx: AnalysisContext) -> dict:
     cxx_library_symlink_tree = create_shlib_symlink_tree(
         actions = ctx.actions,
         out = "cxx_library_symlink_tree",
-        shared_libs = traverse_shared_library_info(shared_library_info),
+        shared_libs = traverse_shared_library_info(shared_library_info, transformation_provider = None),
     )
 
     return {"BUCK_LD_SYMLINK_TREE": cxx_library_symlink_tree}

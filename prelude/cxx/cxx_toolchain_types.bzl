@@ -1,15 +1,25 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
+load("@prelude//cxx:cxx_apple_linker_flags.bzl", "apple_extra_darwin_linker_flags", "apple_format_target_triple", "is_valid_apple_platform_name")
+load("@prelude//cxx:cxx_error_handler.bzl", "cxx_generic_error_handler")
 load("@prelude//cxx:debug.bzl", "SplitDebugMode")
 
 LinkerType = enum("gnu", "darwin", "windows", "wasm")
 
-ShlibInterfacesMode = enum("disabled", "enabled", "defined_only", "stub_from_library", "stub_from_headers")
+ShlibInterfacesMode = enum(
+    "disabled",
+    "defined_only",  # Generate a "stub" shared library by only linking object files passed to the link, ignoring static libraries or dynamic libraries linked against.
+    # This known to be incorrect in the presence of static libraries, as they won't be represented in the interface.
+    "stub_from_library",  # Generate an interface from the completed shared library via some external tool.
+    "stub_from_object_files",  # Generate an interface from the input files (ie. object files, archives, etc.) without actually linking them together, again via external tool.
+    "stub_from_linker_invocation",  # For linkers that support it, generate an interface from the linker invocation that would ordinarily produce the shared library, adding some extra flags
+)
 
 # TODO(T110378149): Consider whether it makes sense to move these things to
 # configurations/constraints rather than part of the toolchain.
@@ -28,6 +38,7 @@ LinkerInfo = provider(
         # "" on Unix, "exe" on Windows
         "binary_extension": provider_field(typing.Any, default = None),  # str
         "dist_thin_lto_codegen_flags": provider_field([cmd_args, None], default = None),
+        "extra_outputs": provider_field(list[str], default = []),
         "generate_linker_maps": provider_field(typing.Any, default = None),  # bool
         # Whether to run native links locally.  We support this for fbcode platforms
         # to avoid issues with C++ static links (see comment in
@@ -68,10 +79,14 @@ LinkerInfo = provider(
         "supports_distributed_thinlto": provider_field(typing.Any, default = None),
         "independent_shlib_interface_linker_flags": provider_field(typing.Any, default = None),
         "thin_lto_premerger_enabled": provider_field(bool, default = False),
+        "thin_lto_double_codegen_enabled": provider_field(bool, default = False),
         "type": LinkerType,
         "use_archiver_flags": provider_field(typing.Any, default = None),
         "force_full_hybrid_if_capable": provider_field(typing.Any, default = None),
         "is_pdb_generated": provider_field(typing.Any, default = None),  # bool
+        # Flags to use to "sandbox" exported library linker flags.
+        "push_pop_state_flags": provider_field(typing.Any, default = None),
+        "supports_content_based_paths_for_archiving": provider_field(bool, default = False),
     },
 )
 
@@ -124,12 +139,19 @@ _compiler_fields = [
     "compiler",
     "compiler_type",
     "compiler_flags",
+    # An optional @argsfile `Artifact` that contains the preprocessor flags and the compiler flags.
+    "argsfile",  # `Artifact | None`
+    # An optional @argsfile `Artifact` that contains the preprocessor flags and the compiler flags
+    # formatted for xcode.
+    "argsfile_xcode",  # `Artifact | None`
     "preprocessor",
     "preprocessor_type",
     "preprocessor_flags",
     # Controls cache upload for object files
     "allow_cache_upload",
     "supports_two_phase_compilation",
+    "compiler_with_wrapper",
+    "supports_content_based_paths",
 ]
 
 AsCompilerInfo = provider(fields = _compiler_fields)
@@ -148,15 +170,20 @@ DistLtoToolsInfo = provider(fields = dict(
     opt = dict[LinkerType, RunInfo],
     prepare = dict[LinkerType, RunInfo],
     copy = RunInfo,
+    archive_mapper = RunInfo,
+    compiler_stats_merger = RunInfo,
 ))
 
 CxxInternalTools = provider(fields = dict(
+    check_nonempty_output = RunInfo,
     concatenate_diagnostics = RunInfo,
     dep_file_processor = RunInfo,
     dist_lto = DistLtoToolsInfo,
+    filter_argsfile = RunInfo,
     hmap_wrapper = RunInfo,
     make_comp_db = RunInfo,
     remap_cwd = RunInfo,
+    serialized_diagnostics_to_json_wrapper = RunInfo,
     stderr_to_file = RunInfo,
 ))
 
@@ -178,7 +205,7 @@ CxxObjectFormat = enum(
 PicBehavior = enum(
     # Regardless of whether -fPIC is specified explicitly
     # every compiled artifact will have a position-independent representation.
-    # This should be the the default when targeting x86_64 + arm64.
+    # This should be the default when targeting x86_64 + arm64.
     "always_enabled",
     # The -fPIC flag is known and changes the compiled artifact.
     "supported",
@@ -199,9 +226,10 @@ CxxToolchainInfo = provider(
         "binary_utilities_info": provider_field(typing.Any, default = None),
         "bolt_enabled": provider_field(typing.Any, default = None),
         "c_compiler_info": provider_field(typing.Any, default = None),
+        "clang_llvm_statistics": provider_field(typing.Any, default = None),
         "clang_remarks": provider_field(typing.Any, default = None),
         "clang_trace": provider_field(typing.Any, default = None),
-        "conflicting_header_basename_allowlist": provider_field(typing.Any, default = None),
+        "compiler_flavor_flags": provider_field(typing.Any, default = {}),
         "cpp_dep_tracking_mode": provider_field(typing.Any, default = None),
         "cuda_compiler_info": provider_field(typing.Any, default = None),
         "cuda_dep_tracking_mode": provider_field(typing.Any, default = None),
@@ -214,20 +242,22 @@ CxxToolchainInfo = provider(
         "headers_as_raw_headers_mode": provider_field(typing.Any, default = None),
         "hip_compiler_info": provider_field(typing.Any, default = None),
         "internal_tools": provider_field(CxxInternalTools),
+        "libclang": provider_field(typing.Any, default = None),
         "linker_info": provider_field(typing.Any, default = None),
         "lipo": provider_field([RunInfo, None], default = None),
+        "llvm_cgdata": provider_field([RunInfo, None], default = None),
         "llvm_link": provider_field(typing.Any, default = None),
+        "minimum_os_version": provider_field([str, None], default = None),
         "objc_compiler_info": provider_field([ObjcCompilerInfo, None], default = None),
         "objcxx_compiler_info": provider_field([ObjcxxCompilerInfo, None], default = None),
         "object_format": provider_field(typing.Any, default = None),
-        "optimization_compiler_flags_EXPERIMENTAL": provider_field(typing.Any, default = []),
         "pic_behavior": provider_field(typing.Any, default = None),
         "raw_headers_as_headers_mode": provider_field(typing.Any, default = None),
         "rc_compiler_info": provider_field(typing.Any, default = None),
         "remap_cwd": provider_field(bool, default = False),
         "split_debug_mode": provider_field(typing.Any, default = None),
         "strip_flags_info": provider_field(typing.Any, default = None),
-        "target_sdk_version": provider_field([str, None], default = None),
+        "supported_compile_flavors": provider_field(typing.Any, default = []),
         "use_dep_files": provider_field(typing.Any, default = None),
         "use_distributed_thinlto": provider_field(typing.Any, default = None),
     },
@@ -260,7 +290,6 @@ def cxx_toolchain_infos(
         internal_tools: CxxInternalTools,
         headers_as_raw_headers_mode = None,
         raw_headers_as_headers_mode = None,
-        conflicting_header_basename_allowlist = [],
         asm_compiler_info = None,
         as_compiler_info = None,
         hip_compiler_info = None,
@@ -271,6 +300,7 @@ def cxx_toolchain_infos(
         use_distributed_thinlto = False,
         use_dep_files = False,
         clang_remarks = None,
+        clang_llvm_statistics = False,
         gcno_files = None,
         clang_trace = False,
         cpp_dep_tracking_mode = DepTrackingMode("none"),
@@ -278,14 +308,17 @@ def cxx_toolchain_infos(
         strip_flags_info = None,
         split_debug_mode = SplitDebugMode("none"),
         bolt_enabled = False,
+        llvm_cgdata = None,
         llvm_link = None,
         platform_deps_aliases = [],
         pic_behavior = PicBehavior("supported"),
         dumpbin_toolchain_path = None,
-        target_sdk_version = None,
+        minimum_os_version = None,
+        libclang = None,
         lipo = None,
         remap_cwd = False,
-        optimization_compiler_flags_EXPERIMENTAL = [],
+        compiler_flavor_flags = {},
+        supported_compile_flavors = ["pic"],
         objc_compiler_info = None,
         objcxx_compiler_info = None,
         cxx_error_handler = None):
@@ -310,6 +343,28 @@ def cxx_toolchain_infos(
             **{k: getattr(cxx_compiler_info, k, None) for k in _compiler_fields}
         )
 
+    # TODO(minglunli): Should probably dedup from Buck2 side instead
+    def cxx_combined_error_handler(ctx: ActionErrorCtx) -> list[ActionSubError]:
+        errors = []
+        error_set = set()
+
+        # cxx specific error handler is called if it's defined
+        if cxx_error_handler != None:
+            specific_errors = cxx_error_handler(ctx)
+            for err in specific_errors:
+                # TDOO(nero): Impllment hash for ActionSubError, so no need to convert to string
+                err_str = str(err)
+                if err_str not in error_set:
+                    errors.append(err)
+                    error_set.add(err_str)
+
+        for generic in cxx_generic_error_handler(ctx):
+            err_str = str(generic)
+            if err_str not in error_set:
+                errors.append(generic)
+                error_set.add(err_str)
+        return errors
+
     toolchain_info = CxxToolchainInfo(
         as_compiler_info = as_compiler_info,
         asm_compiler_info = asm_compiler_info,
@@ -317,8 +372,8 @@ def cxx_toolchain_infos(
         bolt_enabled = bolt_enabled,
         c_compiler_info = c_compiler_info,
         clang_remarks = clang_remarks,
+        clang_llvm_statistics = clang_llvm_statistics,
         clang_trace = clang_trace,
-        conflicting_header_basename_allowlist = conflicting_header_basename_allowlist,
         cpp_dep_tracking_mode = cpp_dep_tracking_mode,
         cuda_compiler_info = cuda_compiler_info,
         cuda_dep_tracking_mode = cuda_dep_tracking_mode,
@@ -330,24 +385,37 @@ def cxx_toolchain_infos(
         headers_as_raw_headers_mode = headers_as_raw_headers_mode,
         hip_compiler_info = hip_compiler_info,
         internal_tools = internal_tools,
+        libclang = libclang,
         linker_info = linker_info,
         lipo = lipo,
+        llvm_cgdata = llvm_cgdata,
         llvm_link = llvm_link,
         objc_compiler_info = objc_compiler_info,
         objcxx_compiler_info = objcxx_compiler_info,
         object_format = object_format,
-        optimization_compiler_flags_EXPERIMENTAL = optimization_compiler_flags_EXPERIMENTAL,
+        compiler_flavor_flags = compiler_flavor_flags,
         pic_behavior = pic_behavior,
         raw_headers_as_headers_mode = raw_headers_as_headers_mode,
         rc_compiler_info = rc_compiler_info,
         remap_cwd = remap_cwd,
         split_debug_mode = split_debug_mode,
         strip_flags_info = strip_flags_info,
-        target_sdk_version = target_sdk_version,
+        minimum_os_version = minimum_os_version,
         use_dep_files = use_dep_files,
         use_distributed_thinlto = use_distributed_thinlto,
-        cxx_error_handler = cxx_error_handler,
+        cxx_error_handler = cxx_combined_error_handler,
+        supported_compile_flavors = supported_compile_flavors,
     )
+
+    ldflags_shared_extra = None
+    if linker_info.type == LinkerType("darwin") and is_valid_apple_platform_name(platform_name):
+        # These flags are used in `cxx_genrule()`, using the toolchain's target sdk version is
+        # the best we can do, as there's no target sdk on the rule itself.
+        #
+        # Without target triple, the linker will use the host OS as the target
+        # which is almost always incorrect.
+        apple_target_triple = apple_format_target_triple(platform_name, minimum_os_version or "")
+        ldflags_shared_extra = apple_extra_darwin_linker_flags(apple_target_triple)
 
     # Provide placeholder mappings, used primarily by cxx_genrule.
     # We don't support these buck1 placeholders since we can't take an argument.
@@ -366,12 +434,10 @@ def cxx_toolchain_infos(
         # NOTE(agallagher): The arg-less variants of the ldflags macro are
         # identical, and are just separate to match v1's behavior (ideally,
         # we just have a single `ldflags` macro for this case).
-        "ldflags-shared": _shell_quote(linker_info.linker_flags or []),
+        "ldflags-shared": _shell_quote(linker_info.linker_flags or [], ldflags_shared_extra),
         "ldflags-static": _shell_quote(linker_info.linker_flags or []),
         "ldflags-static-pic": _shell_quote(linker_info.linker_flags or []),
         "objcopy": binary_utilities_info.objcopy,
-        # TODO(T110378148): $(platform-name) is almost unusued. Should we remove it?
-        "platform-name": platform_name,
     }
 
     if as_compiler_info != None:
@@ -385,8 +451,8 @@ def cxx_toolchain_infos(
     placeholders_info = TemplatePlaceholderInfo(unkeyed_variables = unkeyed_variables)
     return [toolchain_info, placeholders_info, CxxPlatformInfo(name = platform_name, deps_aliases = platform_deps_aliases)]
 
-def _shell_quote(xs):
-    return cmd_args(xs, quote = "shell")
+def _shell_quote(xs, extra = None):
+    return cmd_args(xs, extra or [], quote = "shell")
 
 # export these things under a single "cxx" struct
 cxx = struct(

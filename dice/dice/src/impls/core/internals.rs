@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::thread;
@@ -117,15 +118,18 @@ impl CoreState {
         deps: Arc<SeriesParallelDeps>,
         invalidation_paths: TrackedInvalidationPaths,
     ) -> CancellableResult<DiceComputedValue> {
-        if self.version_tracker.is_relevant(key.v, epoch) {
+        if !self.version_tracker.is_relevant(key.v, epoch) {
+            debug!(msg = "update is rejected due to outdated epoch", k = ?key.k, v = %key.v, v_epoch = %epoch);
+            Err(CancellationReason::OutdatedEpoch)
+        } else if self.version_tracker.should_reject(key.v) {
+            debug!(msg = "update is rejected due to invalid version", k = ?key.k, v = %key.v);
+            Err(CancellationReason::Rejected)
+        } else {
             debug!(msg = "update graph entry", k = ?key.k, v = %key.v, v_epoch = %epoch);
             Ok(self
                 .graph
                 .update(key, value, reusability, deps, storage, invalidation_paths)
                 .0)
-        } else {
-            debug!(msg = "update is rejected due to outdated epoch", k = ?key.k, v = %key.v, v_epoch = %epoch);
-            Err(CancellationReason::OutdatedEpoch)
         }
     }
 
@@ -138,6 +142,7 @@ impl CoreState {
     }
 
     pub(super) fn unstable_drop_everything(&mut self) {
+        debug!("Dropping all DICE nodes");
         self.version_tracker.clear();
 
         // Do the actual drop on a different thread because we may have to drop a lot of stuff
@@ -180,10 +185,11 @@ mod tests {
 
     use allocative::Allocative;
     use async_trait::async_trait;
-    use buck2_futures::cancellation::CancellationContext;
-    use buck2_futures::spawner::TokioSpawner;
     use derive_more::Display;
+    use dice_error::result::CancellableResult;
     use dice_error::result::CancellationReason;
+    use dice_futures::cancellation::CancellationContext;
+    use dice_futures::spawner::TokioSpawner;
     use dupe::Dupe;
     use futures::FutureExt;
     use tokio::sync::Semaphore;
@@ -193,7 +199,12 @@ mod tests {
     use crate::api::key::Key;
     use crate::arc::Arc;
     use crate::impls::cache::DiceTaskRef;
+    use crate::impls::core::graph::storage::ValueReusable;
+    use crate::impls::core::graph::types::VersionedGraphKey;
     use crate::impls::core::internals::CoreState;
+    use crate::impls::core::internals::StorageType;
+    use crate::impls::core::versions::VersionEpoch;
+    use crate::impls::deps::graph::SeriesParallelDeps;
     use crate::impls::key::DiceKey;
     use crate::impls::key::ParentKey;
     use crate::impls::task::dice::DiceTask;
@@ -254,6 +265,38 @@ mod tests {
         let (another_epoch, another) = core.ctx_at_version(v);
         assert!(!ctx.ptr_eq(&another));
         assert_ne!(another_epoch, epoch);
+    }
+
+    #[test]
+    fn cancellation_reason() {
+        let mut core = CoreState::new();
+        fn update(
+            core: &mut CoreState,
+            epoch: VersionEpoch,
+            version: VersionNumber,
+        ) -> CancellableResult<DiceComputedValue> {
+            core.update_computed(
+                VersionedGraphKey::new(version, DiceKey { index: 0 }),
+                epoch,
+                StorageType::Normal,
+                DiceValidValue::testing_new(DiceKeyValue::<K>::new(1)),
+                ValueReusable::EqualityBased,
+                Arc::new(SeriesParallelDeps::None),
+                TrackedInvalidationPaths::clean(),
+            )
+        }
+        let v: VersionNumber = VersionNumber::new(0);
+        let (epoch, _ctx) = core.ctx_at_version(v);
+        let res = update(&mut core, epoch, v);
+        assert_eq!(res.err(), None);
+
+        core.unstable_drop_everything();
+        let res = update(&mut core, epoch, v);
+        assert_eq!(res.err(), Some(CancellationReason::Rejected));
+
+        core.drop_ctx_at_version(v);
+        let res = update(&mut core, epoch, v);
+        assert_eq!(res.err(), Some(CancellationReason::OutdatedEpoch));
     }
 
     async fn make_completed_task(key: DiceKey, val: usize) -> DiceTask {

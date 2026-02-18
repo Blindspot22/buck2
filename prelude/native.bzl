@@ -1,12 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # `native` is fine to use in the prelude for v2
-# @lint-ignore-every BUCKLINT
 
 # This is buck2's shim import. Any public symbols here will be available within
 # **all** interpreted files.
@@ -15,7 +15,8 @@ load("@prelude//:is_full_meta_repo.bzl", "is_full_meta_repo")
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//:rules.bzl", __rules__ = "rules")
 load("@prelude//android:cpu_filters.bzl", "ALL_CPU_FILTERS", "CPU_FILTER_FOR_DEFAULT_PLATFORM")
-load("@prelude//apple:apple_macro_layer.bzl", "apple_binary_macro_impl", "apple_bundle_macro_impl", "apple_library_macro_impl", "apple_package_macro_impl", "apple_test_macro_impl", "apple_universal_executable_macro_impl", "apple_xcuitest_macro_impl", "prebuilt_apple_framework_macro_impl")
+load("@prelude//apple:apple_macro_layer.bzl", "apple_binary_macro_impl", "apple_bundle_macro_impl", "apple_library_for_distribution_macro_impl", "apple_library_macro_impl", "apple_metal_library_macro_impl", "apple_package_macro_impl", "apple_test_macro_impl", "apple_universal_executable_macro_impl", "apple_xcuitest_macro_impl", "prebuilt_apple_framework_macro_impl")
+load("@prelude//apple:prebuilt_apple_xcframework_macro_impl.bzl", "prebuilt_apple_xcframework_macro_impl")
 load("@prelude//apple/swift:swift_toolchain_macro_layer.bzl", "swift_toolchain_macro_impl")
 load("@prelude//cxx:cxx_toolchain.bzl", "cxx_toolchain_inheriting_target_platform")
 load("@prelude//cxx:cxx_toolchain_macro_layer.bzl", "cxx_toolchain_macro_impl")
@@ -74,7 +75,7 @@ def _extract_versions(constraints):
     Convert v1-style version constraints to a v2-compatible config settings.
 
     The constraints are normally of the form:
-    `{"//third-party-buck/platform*/build/python:__project__": "3.8"}`.
+    `{"python": "3.8"}`.
     """
 
     versions = {}
@@ -82,11 +83,7 @@ def _extract_versions(constraints):
     # Since the constraints will be duplicated for each fbcode "platform", do
     # some initial work to de-duplicate them here, by extracting just the
     # project and version and verify we get just a single reduced result.
-    for target, version in constraints.items():
-        expect(target.startswith("fbcode//") or target.startswith("//"), target)
-        base, name = target.split(":")
-        expect(name == "__project__", name)
-        project = paths.basename(base)
+    for project, version in constraints.items():
         expect(project not in versions or version == versions[project])
         versions[project] = version
 
@@ -192,6 +189,47 @@ def _android_aar_macro_stub(
         **kwargs
     )
 
+def _convert_kotlin_compiler_plugins(kotlin_compiler_plugins):
+    if type(kotlin_compiler_plugins) == type({}):
+        return [
+            (key, value)
+            for key, value in kotlin_compiler_plugins.items()
+        ]
+    else:
+        return kotlin_compiler_plugins
+
+def _kotlin_library_macro_stub(
+        kotlin_compiler_plugins = {},
+        **kwargs):
+    __rules__["kotlin_library"](
+        kotlin_compiler_plugins = _convert_kotlin_compiler_plugins(kotlin_compiler_plugins),
+        **kwargs
+    )
+
+def _kotlin_test_macro_stub(
+        kotlin_compiler_plugins = {},
+        **kwargs):
+    __rules__["kotlin_test"](
+        kotlin_compiler_plugins = _convert_kotlin_compiler_plugins(kotlin_compiler_plugins),
+        **kwargs
+    )
+
+def _android_library_macro_stub(
+        kotlin_compiler_plugins = {},
+        **kwargs):
+    __rules__["android_library"](
+        kotlin_compiler_plugins = _convert_kotlin_compiler_plugins(kotlin_compiler_plugins),
+        **kwargs
+    )
+
+def _robolectric_test_macro_stub(
+        kotlin_compiler_plugins = {},
+        **kwargs):
+    __rules__["robolectric_test"](
+        kotlin_compiler_plugins = _convert_kotlin_compiler_plugins(kotlin_compiler_plugins),
+        **kwargs
+    )
+
 def _android_binary_macro_stub(
         allow_r_dot_java_in_secondary_dex = False,
         cpu_filters = None,
@@ -247,10 +285,6 @@ def _prebuilt_cxx_library_macro_stub(
         versioned_exported_preprocessor_flags = None,
         exported_lang_preprocessor_flags = None,
         versioned_exported_lang_preprocessor_flags = None,
-        exported_platform_preprocessor_flags = None,
-        versioned_exported_platform_preprocessor_flags = None,
-        exported_lang_platform_preprocessor_flags = None,
-        versioned_exported_lang_platform_preprocessor_flags = None,
         static_lib = None,
         versioned_static_lib = None,
         static_pic_lib = None,
@@ -268,14 +302,6 @@ def _prebuilt_cxx_library_macro_stub(
         exported_lang_preprocessor_flags = _concat(
             exported_lang_preprocessor_flags,
             _versioned_param_to_select(versioned_exported_lang_preprocessor_flags),
-        ),
-        exported_platform_preprocessor_flags = _concat(
-            exported_platform_preprocessor_flags,
-            _versioned_param_to_select(versioned_exported_platform_preprocessor_flags),
-        ),
-        exported_lang_platform_preprocessor_flags = _concat(
-            exported_lang_platform_preprocessor_flags,
-            _versioned_param_to_select(versioned_exported_lang_platform_preprocessor_flags),
         ),
         static_lib = selects.apply_n(
             [static_lib, selects.apply(versioned_static_lib, _versioned_param_to_select)],
@@ -349,28 +375,28 @@ def _configured_alias_macro_stub(
 def _apple_bundle_macro_stub(**kwargs):
     apple_bundle_macro_impl(
         apple_bundle_rule = __rules__["apple_bundle"],
-        apple_resource_bundle_rule = _user_rules["apple_resource_bundle"],
+        apple_resource_bundle_rule = __rules__["apple_resource_bundle"],
         **kwargs
     )
 
 def _apple_watchos_bundle_macro_stub(**kwargs):
     apple_bundle_macro_impl(
-        apple_bundle_rule = _user_rules["apple_watchos_bundle"],
-        apple_resource_bundle_rule = _user_rules["apple_resource_bundle"],
+        apple_bundle_rule = __rules__["apple_watchos_bundle"],
+        apple_resource_bundle_rule = __rules__["apple_resource_bundle"],
         **kwargs
     )
 
 def _apple_macos_bundle_macro_stub(**kwargs):
     apple_bundle_macro_impl(
-        apple_bundle_rule = _user_rules["apple_macos_bundle"],
-        apple_resource_bundle_rule = _user_rules["apple_resource_bundle"],
+        apple_bundle_rule = __rules__["apple_macos_bundle"],
+        apple_resource_bundle_rule = __rules__["apple_resource_bundle"],
         **kwargs
     )
 
 def _apple_test_macro_stub(**kwargs):
     apple_test_macro_impl(
         apple_test_rule = __rules__["apple_test"],
-        apple_resource_bundle_rule = _user_rules["apple_resource_bundle"],
+        apple_resource_bundle_rule = __rules__["apple_resource_bundle"],
         **kwargs
     )
 
@@ -393,10 +419,22 @@ def _apple_library_macro_stub(**kwargs):
         **kwargs
     )
 
+def _apple_metal_library_macro_stub(**kwargs):
+    apple_metal_library_macro_impl(
+        apple_metal_library_rule = __rules__["apple_metal_library"],
+        **kwargs
+    )
+
+def _apple_library_for_distribution_macro_stub(**kwargs):
+    apple_library_for_distribution_macro_impl(
+        apple_library_for_distribution_rule = __rules__["apple_library_for_distribution"],
+        **kwargs
+    )
+
 def _apple_package_macro_stub(**kwargs):
     apple_package_macro_impl(
         apple_package_rule = __rules__["apple_package"],
-        apple_ipa_package_rule = _user_rules["apple_ipa_package"],
+        apple_ipa_package_rule = __rules__["apple_ipa_package"],
         **kwargs
     )
 
@@ -465,6 +503,14 @@ def _prebuilt_apple_framework_macro_stub(**kwargs):
         **kwargs
     )
 
+def _prebuilt_apple_xcframework_macro_stub(**kwargs):
+    prebuilt_apple_xcframework_macro_impl(
+        filegroup_rule = __rules__["filegroup"],
+        genrule = __rules__["genrule"],
+        prebuilt_apple_framework_rule = __rules__["prebuilt_apple_framework"],
+        **kwargs
+    )
+
 # TODO(cjhopman): These macro wrappers should be handled in prelude/rules.bzl+rule_impl.bzl.
 # Probably good if they were defined to take in the base rule that
 # they are wrapping and return the wrapped one.
@@ -473,10 +519,13 @@ __extra_rules__ = {
     "android_binary": _android_binary_macro_stub,
     "android_bundle": _android_bundle_macro_stub,
     "android_instrumentation_apk": _android_instrumentation_apk_macro_stub,
+    "android_library": _android_library_macro_stub,
     "apple_binary": _apple_binary_macro_stub,
     "apple_bundle": _apple_bundle_macro_stub,
     "apple_library": _apple_library_macro_stub,
+    "apple_library_for_distribution": _apple_library_for_distribution_macro_stub,
     "apple_macos_bundle": _apple_macos_bundle_macro_stub,
+    "apple_metal_library": _apple_metal_library_macro_stub,
     "apple_package": _apple_package_macro_stub,
     "apple_test": _apple_test_macro_stub,
     "apple_universal_executable": _apple_universal_executable_macro_stub,
@@ -488,9 +537,13 @@ __extra_rules__ = {
     "erlang_application": _erlang_application_macro_stub,
     "erlang_tests": _erlang_tests_macro_stub,
     "export_file": _export_file_macro_stub,
+    "kotlin_library": _kotlin_library_macro_stub,
+    "kotlin_test": _kotlin_test_macro_stub,
     "prebuilt_apple_framework": _prebuilt_apple_framework_macro_stub,
+    "prebuilt_apple_xcframework": _prebuilt_apple_xcframework_macro_stub,
     "prebuilt_cxx_library": _prebuilt_cxx_library_macro_stub,
     "python_library": _python_library_macro_stub,
+    "robolectric_test": _robolectric_test_macro_stub,
     "rust_binary": _rust_binary_macro_stub,
     "rust_library": _rust_library_macro_stub,
     "rust_test": _rust_test_macro_stub,

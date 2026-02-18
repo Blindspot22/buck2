@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Borrow;
@@ -30,6 +31,7 @@ use dupe::Dupe;
 use dupe::Dupe_;
 use num_enum::TryFromPrimitive;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
 use sha1::Sha1;
 use sha2::Sha256;
 
@@ -43,7 +45,7 @@ pub const SHA256_SIZE: usize = 32;
 pub const BLAKE3_SIZE: usize = 32;
 
 /// The bytes that make up a file digest.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Allocative, Clone, Copy)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Allocative, Clone, Copy, Pagable)]
 pub enum RawDigest {
     // TODO: Perhaps this should be represented as a (DigestAlgorithmKind, [0;32])
     Sha1([u8; SHA1_SIZE]),
@@ -210,7 +212,7 @@ impl CasDigestConfig {
 
     /// Allow optimizing the empty file digest path, we do that by having the CasDigestConfig hold
     /// a cell for it (later in this stack).
-    pub fn empty_file_digest(self) -> crate::file_ops::TrackedFileDigest {
+    pub fn empty_file_digest(self) -> crate::file_ops::metadata::TrackedFileDigest {
         self.inner.empty_file_digest.dupe()
     }
 
@@ -272,7 +274,7 @@ struct CasDigestConfigInner {
     preferred_algorithm: DigestAlgorithm,
     digest160: Option<DigestAlgorithm>,
     digest256: Option<DigestAlgorithm>,
-    empty_file_digest: crate::file_ops::TrackedFileDigest,
+    empty_file_digest: crate::file_ops::metadata::TrackedFileDigest,
     /// A potentially different configuration to use when digesting source files.
     source: SourceFilesConfig,
 }
@@ -442,7 +444,7 @@ impl<Kind: CasDigestKind> Digester<Kind> {
 /// Separate struct to allow us to use  `repr(transparent)` below and guarantee an identical
 /// layout.
 #[derive(
-    Display, PartialEq, Eq, PartialOrd, Ord, Hash, Allocative, Clone, Dupe, Copy
+    Display, PartialEq, Eq, PartialOrd, Ord, Hash, Allocative, Clone, Dupe, Copy, Pagable
 )]
 #[display("{}:{}", digest, size)]
 pub struct CasDigestData {
@@ -493,7 +495,7 @@ impl CasDigestData {
     }
 }
 
-#[derive(Display, Derivative, Allocative, Clone_, Dupe_, Copy_)]
+#[derive(Display, Derivative, Allocative, Clone_, Dupe_, Copy_, Pagable)]
 #[allocative(bound = "")]
 #[derivative(PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[display("{}", data)]
@@ -511,7 +513,7 @@ pub struct CasDigest<Kind: CasDigestKind> {
 
 impl<Kind: CasDigestKind> fmt::Debug for CasDigest<Kind> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -700,14 +702,14 @@ pub enum CasDigestParseError {
 /// the sha1 and the size of the underlying blob. We *also* keep track of its expiry in the CAS.
 /// Note that for directory, the expiry represents that of the directory's blob, not its underlying
 /// contents.
-#[derive(Allocative)]
+#[derive(Allocative, Debug, Pagable)]
 #[allocative(bound = "")]
 struct TrackedCasDigestInner<Kind: CasDigestKind> {
     data: CasDigest<Kind>,
     expires: AtomicI64,
 }
 
-#[derive(Display, Dupe_, Allocative)]
+#[derive(Display, Dupe_, Allocative, Pagable)]
 #[allocative(bound = "")]
 #[display("{}", self.data())]
 pub struct TrackedCasDigest<Kind: CasDigestKind> {
@@ -736,7 +738,7 @@ impl<Kind: CasDigestKind> Borrow<CasDigest<Kind>> for &TrackedCasDigest<Kind> {
 
 impl<Kind: CasDigestKind> PartialOrd for TrackedCasDigest<Kind> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.data().partial_cmp(other.data())
+        Some(self.cmp(other))
     }
 }
 
@@ -772,11 +774,6 @@ impl<Kind: CasDigestKind> fmt::Debug for TrackedCasDigest<Kind> {
 }
 
 impl<Kind: CasDigestKind> buck2_core::directory_digest::DirectoryDigest for TrackedCasDigest<Kind> {}
-
-impl<Kind: CasDigestKind> buck2_core::directory_digest::InternableDirectoryDigest
-    for TrackedCasDigest<Kind>
-{
-}
 
 impl<Kind: CasDigestKind> TrackedCasDigest<Kind> {
     pub fn new(data: CasDigest<Kind>, config: CasDigestConfig) -> Self
@@ -931,7 +928,7 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_ops::FileDigestKind;
+    use crate::file_ops::metadata::FileDigestKind;
 
     #[test]
     fn test_digest_from_str() {

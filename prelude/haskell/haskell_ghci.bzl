@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
@@ -319,6 +320,7 @@ def _build_haskell_omnibus_so(ctx: AnalysisContext) -> HaskellOmnibusData:
             link_weight = linker_info.link_weight,
             identifier = soname,
             link_execution_preference = LinkExecutionPreference("any"),
+            produce_shared_library_interface = False,
         ),
     )
     omnibus = link_result.linked_object.output
@@ -370,7 +372,8 @@ def _replace_macros_in_script_template(
     replace_cmd = cmd_args(script_template_processor)
     replace_cmd.add(cmd_args(script_template, format = "--script_template={}"))
     for name, path in toolchain_paths.items():
-        replace_cmd.add(cmd_args(path, format = "--{}={{}}".format(name)))
+        if path:
+            replace_cmd.add(cmd_args(path, format = "--{}={{}}".format(name)))
 
     replace_cmd.add(cmd_args(
         final_script.as_output(),
@@ -484,7 +487,7 @@ def _build_preload_deps_root(
         if SharedLibraryInfo in preload_dep:
             slib_info = preload_dep[SharedLibraryInfo]
 
-            shlib = traverse_shared_library_info(slib_info)
+            shlib = traverse_shared_library_info(slib_info, transformation_provider = None)
 
             for soname, shared_lib in with_unique_str_sonames(shlib).items():
                 preload_symlinks[soname] = shared_lib.lib.output

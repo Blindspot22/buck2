@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::any::Any;
@@ -15,9 +16,9 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use cmp_any::PartialEqAny;
 use derive_more::Display;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use fxhash::FxHasher;
 
@@ -234,7 +235,7 @@ pub(crate) struct CowDiceKeyHashed<'a> {
 }
 
 impl<'a> CowDiceKeyHashed<'a> {
-    pub(crate) fn key_ref<K: Key>(key: &K) -> CowDiceKeyHashed {
+    pub(crate) fn key_ref<K: Key>(key: &'a K) -> CowDiceKeyHashed<'a> {
         let hash = key_hash(key);
         CowDiceKeyHashed {
             cow: CowDiceKey::Ref(DiceKeyErasedRef::key(key)),
@@ -282,7 +283,7 @@ pub(crate) trait DiceKeyDyn: Allocative + Display + Send + Sync + 'static {
         cancellations: &CancellationContext,
     ) -> Arc<dyn DiceValueDyn>;
 
-    fn cmp_any(&self) -> PartialEqAny;
+    fn cmp_any(&self) -> PartialEqAny<'_>;
 
     fn hash(&self) -> u64;
 
@@ -311,7 +312,7 @@ where
         Arc::new(DiceKeyValue::<K>::new(value))
     }
 
-    fn cmp_any(&self) -> PartialEqAny {
+    fn cmp_any(&self) -> PartialEqAny<'_> {
         PartialEqAny::new(self)
     }
 
@@ -347,7 +348,7 @@ pub(crate) trait DiceProjectionDyn: Allocative + Display + Send + Sync + 'static
         ctx: &DiceProjectionComputations,
     ) -> Arc<dyn DiceValueDyn>;
 
-    fn cmp_any(&self) -> PartialEqAny;
+    fn cmp_any(&self) -> PartialEqAny<'_>;
 
     fn hash(&self) -> u64;
 
@@ -378,7 +379,7 @@ where
         Arc::new(DiceProjectValue::<K>::new(value))
     }
 
-    fn cmp_any(&self) -> PartialEqAny {
+    fn cmp_any(&self) -> PartialEqAny<'_> {
         PartialEqAny::new(self)
     }
 
@@ -518,7 +519,7 @@ mod introspection {
                 fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
                     match &self.0 {
                         DiceKeyErased::Key(k) => {
-                            write!(f, "{}", k)
+                            write!(f, "{k}")
                         }
                         DiceKeyErased::Projection(p) => {
                             write!(f, "{}", p.proj)
@@ -528,7 +529,7 @@ mod introspection {
             }
 
             impl KeyForIntrospection for Wrap {
-                fn get_key_equality(&self) -> PartialEqAny {
+                fn get_key_equality(&self) -> PartialEqAny<'_> {
                     PartialEqAny::new(self)
                 }
 
@@ -558,8 +559,8 @@ mod tests {
     use std::sync::Arc;
 
     use allocative::Allocative;
-    use buck2_futures::cancellation::CancellationContext;
     use derive_more::Display;
+    use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
 
     use crate::api::computations::DiceComputations;

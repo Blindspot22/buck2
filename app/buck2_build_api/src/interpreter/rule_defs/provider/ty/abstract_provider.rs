@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::OnceLock;
@@ -12,6 +13,7 @@ use std::sync::OnceLock;
 use allocative::Allocative;
 use buck2_interpreter::late_binding_ty::ProviderReprLate;
 use dupe::Dupe;
+use starlark::type_matcher;
 use starlark::typing::Ty;
 use starlark::typing::TyStarlarkValue;
 use starlark::typing::TyUser;
@@ -30,6 +32,7 @@ use crate::interpreter::rule_defs::provider::user::UserProvider;
 #[derive(Allocative, Clone, Debug)]
 struct ProviderMatcher;
 
+#[type_matcher]
 impl TypeMatcher for ProviderMatcher {
     fn matches(&self, value: Value) -> bool {
         ValueAsProviderLike::unpack(value).is_some()
@@ -41,7 +44,7 @@ fn mk_ty_provider() -> buck2_error::Result<Ty> {
         UserProvider::TYPE.to_owned(),
         // Builtin providers behave like `UserProvider`.
         TyStarlarkValue::new::<UserProvider>(),
-        TypeInstanceId::gen(),
+        TypeInstanceId::r#gen(),
         TyUserParams {
             matcher: Some(TypeMatcherFactory::new(ProviderMatcher)),
             fields: TyUserFields::unknown(),

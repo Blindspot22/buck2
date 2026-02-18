@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -39,7 +40,7 @@ use crate::components::alignment::VerticalAlignmentKind;
 /// // rest of the output
 /// ```
 #[derive(Debug)]
-pub struct Bordered<C: Component = Box<dyn Component>> {
+pub struct Bordered<C: Component> {
     child: Aligned<C>,
     pub border: BorderedSpec,
 }
@@ -98,12 +99,14 @@ fn construct_vertical_padding(padding: Span, width: usize) -> Vec<Line> {
 }
 
 impl<C: Component> Component for Bordered<C> {
+    type Error = C::Error;
+
     fn draw_unchecked(
         &self,
 
         Dimensions { width, height }: Dimensions,
         mode: DrawMode,
-    ) -> anyhow::Result<Lines> {
+    ) -> Result<Lines, C::Error> {
         // Reserve enough draw space for the walls.
         let opt_len = |opt_word: &Option<Span>| match opt_word {
             Some(word) => word.len(),

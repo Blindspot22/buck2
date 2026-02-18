@@ -148,11 +148,6 @@ impl<'v> StringValue<'v> {
             .unpack_frozen()
             .map(|s| unsafe { FrozenStringValue::new_unchecked(s) })
     }
-
-    #[inline]
-    pub(crate) unsafe fn cast_lifetime<'w>(self) -> StringValue<'w> {
-        unsafe { StringValue::new_unchecked(self.to_value().cast_lifetime()) }
-    }
 }
 
 /// Common type for [`StringValue`] and [`FrozenStringValue`].
@@ -262,12 +257,13 @@ mod tests {
     fn test_string_hashes() {
         let expected = Hashed::new("xyz").hash();
 
-        let heap = Heap::new();
-        let s: StringValue = heap.alloc_str("xyz");
-        assert_eq!(expected, Hashed::new(s).hash());
-        assert_eq!(s.get_hashed().hash(), s.hashed().unwrap().hash());
-        let v: Value = heap.alloc_str("xyz").to_value();
-        assert_eq!(expected, v.get_hashed().unwrap().hash());
+        Heap::temp(|heap| {
+            let s: StringValue = heap.alloc_str("xyz");
+            assert_eq!(expected, Hashed::new(s).hash());
+            assert_eq!(s.get_hashed().hash(), s.hashed().unwrap().hash());
+            let v: Value = heap.alloc_str("xyz").to_value();
+            assert_eq!(expected, v.get_hashed().unwrap().hash());
+        });
 
         let heap = FrozenHeap::new();
         let fs: FrozenStringValue = heap.alloc_str("xyz");

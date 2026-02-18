@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -14,12 +15,12 @@ use async_trait::async_trait;
 use buck2_core::buck2_env;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_error::BuckErrorContext;
-use buck2_error::conversion::from_any_with_tag;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_error::internal_error;
 use buck2_util::threads::thread_spawn;
 use crossbeam_channel::unbounded;
 use dice::DiceComputations;
 use dice::UserComputationData;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
@@ -34,8 +35,8 @@ pub trait BlockingExecutor: Allocative + Send + Sync + 'static {
     /// fairly high concurrency as they aren't expected to contend with each other.
     async fn execute_dyn_io_inline<'a>(
         &self,
-        f: Box<dyn FnOnce() -> anyhow::Result<()> + Send + 'a>,
-    ) -> anyhow::Result<()>;
+        f: Box<dyn FnOnce() -> buck2_error::Result<()> + Send + 'a>,
+    ) -> buck2_error::Result<()>;
 
     /// Execute a blocking I/O operation, possibly on a dedicated I/O pool. This should be used as
     /// the default for I/O. The operations executed here must perform _only_ I/O (since if they do
@@ -62,8 +63,8 @@ impl dyn BlockingExecutor {
             Ok(())
         }))
         .await
-        .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::IoBlockingExecutor))?;
-        res.buck_error_context("Inline I/O did not execute")
+        .tag(buck2_error::ErrorTag::IoBlockingExecutor)?;
+        res.ok_or_else(|| internal_error!("Inline I/O did not execute"))
     }
 }
 
@@ -99,14 +100,14 @@ impl BuckBlockingExecutor {
     ///   issues modifying the directory structure does.
     pub fn default_concurrency(fs: ProjectRoot) -> buck2_error::Result<Self> {
         let io_threads = buck2_env!("BUCK2_IO_THREADS", type=usize, default=4)?;
-        let io_semaphore = buck2_env!("BUCK2_IO_SEMAPHORE", type=usize, default=num_cpus::get())?;
+        let io_semaphore = buck2_env!("BUCK2_IO_SEMAPHORE", type=usize, default=buck2_util::threads::available_parallelism())?;
 
         let (command_sender, command_receiver) = unbounded();
 
         for i in 0..io_threads {
             let command_receiver = command_receiver.clone();
             let fs = fs.dupe();
-            thread_spawn(&format!("buck-io-{}", i), move || {
+            thread_spawn(&format!("buck-io-{i}"), move || {
                 for ThreadPoolIoRequest { sender, io } in command_receiver.iter() {
                     let res = io.execute(&fs);
                     let _ignored = sender.send(res);
@@ -126,8 +127,8 @@ impl BuckBlockingExecutor {
 impl BlockingExecutor for BuckBlockingExecutor {
     async fn execute_dyn_io_inline<'a>(
         &self,
-        f: Box<dyn FnOnce() -> anyhow::Result<()> + Send + 'a>,
-    ) -> anyhow::Result<()> {
+        f: Box<dyn FnOnce() -> buck2_error::Result<()> + Send + 'a>,
+    ) -> buck2_error::Result<()> {
         let _permit = self
             .io_data_semaphore
             .acquire()
@@ -157,6 +158,54 @@ impl BlockingExecutor for BuckBlockingExecutor {
 
     fn queue_size(&self) -> usize {
         self.command_sender.len()
+    }
+}
+
+/// Executor that bypasses the queue and executes IO directly using Tokio's
+/// blocking thread pool.
+
+#[derive(Allocative)]
+pub struct DirectIoExecutor {
+    #[allocative(skip)]
+    project_fs: ProjectRoot,
+}
+
+impl DirectIoExecutor {
+    pub fn new(project_fs: ProjectRoot) -> buck2_error::Result<Self> {
+        Ok(Self { project_fs })
+    }
+}
+
+#[async_trait]
+impl BlockingExecutor for DirectIoExecutor {
+    async fn execute_dyn_io_inline<'a>(
+        &self,
+        f: Box<dyn FnOnce() -> buck2_error::Result<()> + Send + 'a>,
+    ) -> buck2_error::Result<()> {
+        tokio::task::block_in_place(f)
+    }
+
+    fn execute_io<'a>(
+        &self,
+        io: Box<dyn IoRequest>,
+        cancellations: &'a CancellationContext,
+    ) -> BoxFuture<'a, buck2_error::Result<()>> {
+        let project_fs = self.project_fs.dupe();
+
+        cancellations
+            .critical_section(|| async move {
+                // Execute IO operation in Tokio's blocking thread pool
+                tokio::task::spawn_blocking(move || io.execute(&project_fs))
+                    .await
+                    .buck_error_context("Direct IO spawn_blocking failed")?
+            })
+            .boxed()
+    }
+
+    fn queue_size(&self) -> usize {
+        // This executor does not maintain its own queue. We are logging Tokio
+        // IO thread metrics separately.
+        0
     }
 }
 
@@ -196,8 +245,8 @@ pub mod testing {
     impl BlockingExecutor for DummyBlockingExecutor {
         async fn execute_dyn_io_inline<'a>(
             &self,
-            f: Box<dyn FnOnce() -> anyhow::Result<()> + Send + 'a>,
-        ) -> anyhow::Result<()> {
+            f: Box<dyn FnOnce() -> buck2_error::Result<()> + Send + 'a>,
+        ) -> buck2_error::Result<()> {
             f()
         }
 

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ffi::OsString;
@@ -13,16 +14,18 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::fs_util::IoError;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
+use buck2_fs::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::RelativePathBuf;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use compact_str::CompactString;
 use dupe::Dupe;
 use once_cell::sync::Lazy;
@@ -30,13 +33,14 @@ use tokio::sync::Semaphore;
 
 use crate::cas_digest::CasDigestConfig;
 use crate::external_symlink::ExternalSymlink;
-use crate::file_ops::FileDigest;
-use crate::file_ops::FileDigestConfig;
-use crate::file_ops::FileMetadata;
-use crate::file_ops::RawDirEntry;
-use crate::file_ops::RawPathMetadata;
-use crate::file_ops::RawSymlink;
-use crate::file_ops::TrackedFileDigest;
+use crate::file_ops::metadata::FileDigest;
+use crate::file_ops::metadata::FileDigestConfig;
+use crate::file_ops::metadata::FileMetadata;
+use crate::file_ops::metadata::RawDirEntry;
+use crate::file_ops::metadata::RawPathMetadata;
+use crate::file_ops::metadata::RawSymlink;
+use crate::file_ops::metadata::Symlink;
+use crate::file_ops::metadata::TrackedFileDigest;
 use crate::io::IoProvider;
 
 #[derive(Clone, Dupe, Allocative)]
@@ -113,9 +117,7 @@ impl IoProvider for FsIoProvider {
         static SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(100));
         let _permit = SEMAPHORE.acquire().await.unwrap();
 
-        tokio::task::spawn_blocking(move || fs_util::read_to_string_if_exists(path))
-            .await?
-            .map_err(|e| IoError::categorize_for_source_file(e).into())
+        tokio::task::spawn_blocking(move || fs_util::read_to_string_if_exists(path)).await?
     }
 
     async fn read_dir_impl(
@@ -131,8 +133,7 @@ impl IoProvider for FsIoProvider {
         let path = self.fs.resolve(&path);
 
         tokio::task::spawn_blocking(move || {
-            let dir_entries =
-                fs_util::read_dir(path).map_err(IoError::categorize_for_source_file)?;
+            let dir_entries = fs_util::read_dir(path).categorize_input()?;
 
             let mut entries = Vec::new();
 
@@ -248,7 +249,7 @@ fn read_path_metadata<P: AsRef<AbsPath>>(
     }
 
     // If we get here that means we never hit a symlink. So, the metadata we have
-    let meta = meta.buck_error_context("Attempted to access empty path")?;
+    let meta = meta.ok_or_else(|| internal_error!("Attempted to access empty path"))?;
     let meta = convert_metadata(&curr, meta, file_digest_config)?;
 
     if cfg!(test) {
@@ -289,42 +290,43 @@ enum ExactPathMetadata {
 
 impl ExactPathMetadata {
     fn from_exact_path(curr: &PathAndAbsPath) -> buck2_error::Result<Self> {
-        Ok(
-            match fs_util::symlink_metadata_if_exists(&curr.abspath)
-                .map_err(IoError::categorize_for_source_file)?
-            {
-                Some(meta) if meta.file_type().is_symlink() => {
-                    let dest = fs_util::read_link(&curr.abspath)
-                        .map_err(IoError::categorize_for_source_file)?;
+        Ok(match fs_util::symlink_metadata_if_exists(&curr.abspath)? {
+            Some(meta) if meta.file_type().is_symlink() => {
+                let dest = fs_util::read_link(&curr.abspath).categorize_input()?;
 
-                    let out = if dest.is_absolute() {
-                        ExactPathSymlinkMetadata::ExternalSymlink(dest)
-                    } else {
-                        // Remove the symlink name.
-                        let link_path = curr
-                            .path
-                            .parent()
-                            .expect("We pushed a component to this so it cannot be empty")
-                            .join_system(&dest)
-                            .with_buck_error_context(|| {
-                                format!("Invalid symlink at `{}`: `{}`", curr.path, dest.display())
-                            })?;
+                let out = if dest.is_absolute() {
+                    ExactPathSymlinkMetadata::ExternalSymlink(dest)
+                } else {
+                    // Remove the symlink name.
+                    let link_path = curr
+                        .path
+                        .parent()
+                        .expect("We pushed a component to this so it cannot be empty")
+                        .join_system_normalized(&dest)
+                        .with_buck_error_context(|| {
+                            format!("Invalid symlink at `{}`: `{}`", curr.path, dest.display())
+                        })?;
 
-                        ExactPathSymlinkMetadata::InternalSymlink(link_path)
-                    };
+                    // FIXME(JakobDegen): Remove the `unwrap` after we fork `relative_path`
+                    ExactPathSymlinkMetadata::InternalSymlink(
+                        link_path,
+                        RelativePathBuf::from_path(dest).unwrap(),
+                    )
+                };
 
-                    ExactPathMetadata::Symlink(out)
-                }
-                Some(meta) => ExactPathMetadata::FileOrDirectory(meta),
-                None => ExactPathMetadata::DoesNotExist,
-            },
-        )
+                ExactPathMetadata::Symlink(out)
+            }
+            Some(meta) => ExactPathMetadata::FileOrDirectory(meta),
+            None => ExactPathMetadata::DoesNotExist,
+        })
     }
 }
 
 enum ExactPathSymlinkMetadata {
     ExternalSymlink(PathBuf),
-    InternalSymlink(ForwardRelativePathBuf),
+    /// The path of the symlink target resolved to a project relative path, and the symlink target
+    /// verbatim
+    InternalSymlink(ForwardRelativePathBuf, RelativePathBuf),
 }
 
 impl ExactPathSymlinkMetadata {
@@ -338,11 +340,17 @@ impl ExactPathSymlinkMetadata {
                 at: curr.path,
                 to: RawSymlink::External(Arc::new(ExternalSymlink::new(link_path, rest)?)),
             },
-            Self::InternalSymlink(mut link_path) => {
+            Self::InternalSymlink(mut link_path, mut rel_link_path) => {
                 link_path.push(&rest);
+                // FIXME(JakobDegen): The `relative_path` crate has a misbehavior where it pushes a
+                // trailing `/` onto the path if this is empty. One of many reasons to stop using
+                // that crate.
+                if !rest.is_empty() {
+                    rel_link_path.push(&rest);
+                }
                 RawPathMetadata::Symlink {
                     at: curr.path,
-                    to: RawSymlink::Relative(link_path),
+                    to: RawSymlink::Relative(link_path, Arc::new(Symlink::new(rel_link_path))),
                 }
             }
         })
@@ -400,6 +408,7 @@ mod tests {
     use std::os::unix;
 
     use assert_matches::assert_matches;
+    use buck2_fs::fs_util::uncategorized as fs_util;
     use tempfile::TempDir;
 
     use super::*;
@@ -431,8 +440,9 @@ mod tests {
 
         assert_matches!(
             read_path_metadata(AbsPath::new(t.path())?, ForwardRelativePath::new("x")?, FileDigestConfig::source(CasDigestConfig::testing_default())),
-            Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r)})) => {
+            Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r, r_rel)})) => {
                 assert_eq!(r, "y/z");
+                assert_eq!(r_rel.target(), "y/z");
             }
         );
 
@@ -449,8 +459,9 @@ mod tests {
 
         assert_matches!(
             read_path_metadata(AbsPath::new(t)?, ForwardRelativePath::new("x/xx/xxx")?, FileDigestConfig::source(CasDigestConfig::testing_default())),
-            Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r)})) => {
+            Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r, r_rel)})) => {
                 assert_eq!(r, "x/y");
+                assert_eq!(r_rel.target(), "../y");
             }
         );
 
@@ -465,8 +476,9 @@ mod tests {
 
         assert_matches!(
             read_path_metadata(AbsPath::new(t.path())?, ForwardRelativePath::new("x/z/zz")?, FileDigestConfig::source(CasDigestConfig::testing_default())),
-            Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r)})) => {
+            Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r, r_rel)})) => {
                 assert_eq!(r, "y/z/zz");
+                assert_eq!(r_rel.target(), "y/z/zz");
             }
         );
 
@@ -481,7 +493,7 @@ mod tests {
 
         assert_matches!(
             read_path_metadata(AbsPath::new(t.path())?, ForwardRelativePath::new("x/xx/xxx")?, FileDigestConfig::source(CasDigestConfig::testing_default())),
-            Err(e) if format!("{:#}", e).contains("Invalid symlink")
+            Err(e) if format!("{e:#}").contains("Invalid symlink")
         );
 
         Ok(())

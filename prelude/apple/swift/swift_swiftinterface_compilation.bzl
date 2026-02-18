@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//apple:apple_utility.bzl", "expand_relative_prefixed_sdk_path")
 load("@prelude//apple/swift:swift_pcm_compilation.bzl", "get_compiled_pcm_deps_tset")
@@ -13,6 +14,10 @@ load(
     ":swift_debug_info_utils.bzl",
     "extract_and_merge_clang_debug_infos",
     "extract_and_merge_swift_debug_infos",
+)
+load(
+    ":swift_incremental_support.bzl",
+    "get_uses_content_based_paths",
 )
 load(":swift_module_map.bzl", "write_swift_module_map_with_deps")
 load(":swift_sdk_flags.bzl", "get_sdk_flags")
@@ -28,6 +33,7 @@ def get_swift_interface_anon_targets(
             _swift_interface_compilation,
             {
                 "dep": d,
+                "has_content_based_path": True,
                 "name": d.label,
                 "_swift_toolchain": get_swift_toolchain_info_dep(ctx),
             },
@@ -45,7 +51,9 @@ def compile_swiftinterface_common(
         sdk_deps_providers,
         expanded_swiftinterface_cmd,
         category,
-        additional_compiled_pcm):
+        additional_compiled_pcm,
+        additional_compiled_swiftmodules = None):
+    uses_content_based_paths = get_uses_content_based_paths(ctx)
     swift_toolchain = get_swift_toolchain_info(ctx)
     cmd = cmd_args(swift_toolchain.compiler)
     cmd.add(partial_cmd)
@@ -65,6 +73,10 @@ def compile_swiftinterface_common(
     clang_deps_tset = get_compiled_sdk_clang_deps_tset(ctx, sdk_deps_providers)
     swift_deps_tset = get_compiled_sdk_swift_deps_tset(ctx, sdk_deps_providers + deps)
 
+    #'additional_compiled_swiftmodules' in practice will be third-party frameworks
+    if additional_compiled_swiftmodules:
+        swift_deps_tset = ctx.actions.tset(SwiftCompiledModuleTset, children = [swift_deps_tset, additional_compiled_swiftmodules])
+
     all_deps_tset = ctx.actions.tset(
         SwiftCompiledModuleTset,
         children = [pcm_deps_tset, clang_deps_tset, swift_deps_tset],
@@ -76,7 +88,7 @@ def compile_swiftinterface_common(
         swift_module_map_artifact,
     ])
 
-    swiftmodule_output = ctx.actions.declare_output(uncompiled_module_info_name + SWIFTMODULE_EXTENSION)
+    swiftmodule_output = ctx.actions.declare_output(uncompiled_module_info_name + SWIFTMODULE_EXTENSION, has_content_based_path = uses_content_based_paths)
     cmd.add([
         "-o",
         swiftmodule_output.as_output(),
@@ -149,6 +161,7 @@ _swift_interface_compilation = rule(
     impl = _swift_interface_compilation_impl,
     attrs = {
         "dep": attrs.dep(),
+        "has_content_based_path": attrs.bool(),
         "_swift_toolchain": attrs.dep(),
     },
 )

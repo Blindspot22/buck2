@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Borrow;
@@ -13,17 +14,39 @@ use std::ops::Deref;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
+use serde::Deserialize;
+use serde::Serialize;
 use strong_hash::StrongHash;
 use triomphe::Arc;
 
 use crate::arc_str::iterator_as_exact_size_iterator::IteratorAsExactSizeIterator;
 
 /// `Arc<[T]>` but more efficient.
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub struct ArcSlice<T> {
     // This can be `NonNull<[T]>` when `Arc::from_raw` is available:
     // https://github.com/Manishearth/triomphe/pull/57/files
     slice: Option<Arc<[T]>>,
+}
+
+impl<T: Serialize> Serialize for ArcSlice<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.deref().serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ArcSlice<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v: Vec<_> = Vec::deserialize(deserializer)?;
+        Ok(v.into())
+    }
 }
 
 impl<T> ArcSlice<T> {

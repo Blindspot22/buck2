@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![allow(dead_code)]
@@ -12,9 +13,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use buck2_common::invocation_paths::InvocationPaths;
 use buck2_core::soft_error;
 use buck2_data::buck_event::Data::*;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::BuckEvent;
 use buck2_health_check::health_check_client::HealthCheckClient;
 use buck2_health_check::health_check_client::StreamingHealthCheckClient;
@@ -55,11 +57,18 @@ impl HealthCheckSubscriber {
     pub fn new(
         tags_sender: Sender<Vec<String>>,
         display_reports_sender: Sender<Vec<DisplayReport>>,
+        paths: Option<&InvocationPaths>,
     ) -> Box<Self> {
         let (tx, rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_SIZE);
-        let client =
-            StreamingHealthCheckClient::new(Some(tags_sender), Some(display_reports_sender), rx);
-        Self::new_with_client(Some(Box::new(client)), tx)
+        let client = StreamingHealthCheckClient::new(
+            Some(tags_sender),
+            Some(display_reports_sender),
+            rx,
+            paths,
+        )
+        .map(|c| Box::new(c) as Box<dyn HealthCheckClient>)
+        .ok();
+        Self::new_with_client(client, tx)
     }
 
     fn new_with_client(
@@ -80,12 +89,19 @@ impl HealthCheckSubscriber {
         if self.event_sender.is_none() || self.health_check_client.is_none() {
             return Ok(());
         }
+        let trace_id = event.trace_id();
 
         let health_check_event = match event.data() {
             SpanStart(start) => match &start.data {
                 Some(buck2_data::span_start_event::Data::Command(command)) => {
                     Some(HealthCheckEvent::HealthCheckContextEvent(
-                        HealthCheckContextEvent::CommandStart(command.clone()),
+                        HealthCheckContextEvent::CommandStart(
+                            buck2_data::CommandStartWithTraceId {
+                                trace_id: trace_id.map(|id| id.to_string()).unwrap_or_default(),
+                                command_start: Some(command.clone()),
+                                timestamp: Some(event.timestamp().into()),
+                            },
+                        ),
                     ))
                 }
                 _ => None,
@@ -95,7 +111,7 @@ impl HealthCheckSubscriber {
                 match end
                     .data
                     .as_ref()
-                    .buck_error_context("Missing `data` in SpanEnd")?
+                    .ok_or_else(|| internal_error!("Missing `data` in SpanEnd"))?
                 {
                     FileWatcher(file_watcher) => file_watcher
                         .stats
@@ -131,7 +147,7 @@ impl HealthCheckSubscriber {
                 match instant
                     .data
                     .as_ref()
-                    .buck_error_context("Missing `data` in `Instant`")?
+                    .ok_or_else(|| internal_error!("Missing `data` in `Instant`"))?
                 {
                     SystemInfo(system_info) => Some(HealthCheckEvent::HealthCheckContextEvent(
                         HealthCheckContextEvent::ExperimentConfigurations(system_info.clone()),
@@ -141,7 +157,14 @@ impl HealthCheckSubscriber {
                             HealthCheckContextEvent::ParsedTargetPatterns(target_patterns.clone()),
                         ))
                     }
-                    Snapshot(_) => Some(HealthCheckEvent::Snapshot()),
+                    Snapshot(_snapshot) => {
+                        // Create a new HealthCheckSnapshotData from the snapshot
+                        let snapshot_data =
+                            buck2_health_check::interface::HealthCheckSnapshotData {
+                                timestamp: event.timestamp(),
+                            };
+                        Some(HealthCheckEvent::Snapshot(snapshot_data))
+                    }
                     _ => None,
                 }
             }
@@ -196,6 +219,7 @@ mod tests {
     use buck2_health_check::interface::HealthCheckType;
     use buck2_health_check::report::DisplayReport;
     use buck2_health_check::report::HealthIssue;
+    use buck2_health_check::report::Message;
     use buck2_health_check::report::Severity;
     use buck2_wrapper_common::invocation_id::TraceId;
     use tokio::sync::mpsc::Receiver;
@@ -217,7 +241,7 @@ mod tests {
             let handle = tokio::spawn(async move {
                 while let Some(event) = event_rx.recv().await {
                     match event {
-                        HealthCheckEvent::Snapshot() => {
+                        HealthCheckEvent::Snapshot(_) => {
                             // Send test tags
                             let _unused = tags_tx
                                 .send(vec!["test_tag1".to_owned(), "test_tag2".to_owned()])
@@ -245,7 +269,7 @@ mod tests {
                 health_check_type: HealthCheckType::StableRevision,
                 health_issue: Some(HealthIssue {
                     severity: Severity::Warning,
-                    message: "Test report 1".to_owned(),
+                    message: Message::Simple("Test report 1".to_owned()),
                     remediation: None,
                 }),
             },
@@ -253,7 +277,7 @@ mod tests {
                 health_check_type: HealthCheckType::LowDiskSpace,
                 health_issue: Some(HealthIssue {
                     severity: Severity::Info,
-                    message: "Test report 2".to_owned(),
+                    message: Message::Simple("Test report 2".to_owned()),
                     remediation: None,
                 }),
             },
@@ -280,9 +304,9 @@ mod tests {
             ..Default::default()
         };
         buck2_data::buck_event::Data::SpanEnd(buck2_data::SpanEndEvent {
-            data: Some(buck2_data::span_end_event::Data::ActionExecution(
-                Box::new(action_end).into(),
-            )),
+            data: Some(buck2_data::span_end_event::Data::ActionExecution(Box::new(
+                action_end,
+            ))),
             ..buck2_data::SpanEndEvent::default()
         })
     }
@@ -335,8 +359,8 @@ mod tests {
             events_tx,
         );
 
-        let event1 = test_event(event_for_excess_cache_miss().into());
-        let event2 = test_event(event_for_excess_cache_miss().into());
+        let event1 = test_event(event_for_excess_cache_miss());
+        let event2 = test_event(event_for_excess_cache_miss());
 
         subscriber.handle_event(&event1).await.unwrap();
         subscriber.handle_event(&event2).await.unwrap();

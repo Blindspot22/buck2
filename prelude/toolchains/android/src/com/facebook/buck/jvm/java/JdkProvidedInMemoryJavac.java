@@ -1,15 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
 
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.jvm.java.javax.SynchronizedToolProvider;
 import com.google.common.base.MoreObjects;
 import javax.tools.JavaCompiler;
@@ -28,7 +28,7 @@ public class JdkProvidedInMemoryJavac extends Jsr199Javac {
       protected JavaCompiler createCompiler(JavacExecutionContext context) {
         JavaCompiler compiler = SynchronizedToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
-          throw new HumanReadableException(
+          throw new RuntimeException(
               "No system compiler found. Did you install the JRE instead of the JDK?");
         }
         return compiler;

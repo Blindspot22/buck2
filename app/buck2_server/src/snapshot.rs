@@ -1,22 +1,24 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
-use buck2_core::fs::fs_util::DiskSpaceStats;
-use buck2_core::fs::fs_util::disk_space_stats;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_core::io_counters::IoCounterKey;
 use buck2_error::BuckErrorContext;
 use buck2_events::EventSinkStats;
 use buck2_execute::re::manager::ReConnectionManager;
+use buck2_fs::fs_util::DiskSpaceStats;
+use buck2_fs::fs_util::disk_space_stats;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_util::process_stats::process_stats;
 use buck2_util::system_stats::UnixSystemStats;
 use dupe::Dupe;
@@ -47,7 +49,7 @@ impl SnapshotCollector {
     }
 
     /// Create a new Snapshot.
-    pub fn create_snapshot(&self) -> buck2_data::Snapshot {
+    pub async fn create_snapshot(&self) -> buck2_data::Snapshot {
         let mut snapshot = buck2_data::Snapshot::default();
         self.add_system_metrics(&mut snapshot);
         self.add_daemon_metrics(&mut snapshot);
@@ -59,6 +61,7 @@ impl SnapshotCollector {
         self.add_sink_metrics(&mut snapshot);
         self.add_net_io_metrics(&mut snapshot);
         self.add_cpu_usage(&mut snapshot);
+        self.add_memory_metrics(&mut snapshot).await;
         snapshot
     }
 
@@ -68,6 +71,11 @@ impl SnapshotCollector {
     }
 
     fn add_io_metrics(&self, snapshot: &mut buck2_data::Snapshot) {
+        let metrics = tokio::runtime::Handle::current().metrics();
+        snapshot.tokio_blocking_queue_depth = metrics.blocking_queue_depth() as u64;
+        snapshot.tokio_num_idle_blocking_threads = metrics.num_idle_blocking_threads() as u64;
+        snapshot.tokio_num_blocking_threads = metrics.num_blocking_threads() as u64;
+
         // Using loop here to make sure no key is forgotten.
         for key in IoCounterKey::ALL {
             let pointer = match key {
@@ -91,6 +99,30 @@ impl SnapshotCollector {
                 IoCounterKey::EdenSettle => &mut snapshot.io_in_flight_eden_settle,
             };
             *pointer = key.get();
+        }
+
+        for key in IoCounterKey::ALL {
+            let pointer = match key {
+                IoCounterKey::Copy => &mut snapshot.io_copy_count,
+                IoCounterKey::Symlink => &mut snapshot.io_symlink_count,
+                IoCounterKey::Hardlink => &mut snapshot.io_hardlink_count,
+                IoCounterKey::MkDir => &mut snapshot.io_mkdir_count,
+                IoCounterKey::ReadDir => &mut snapshot.io_readdir_count,
+                IoCounterKey::ReadDirEden => &mut snapshot.io_readdir_eden_count,
+                IoCounterKey::RmDir => &mut snapshot.io_rmdir_count,
+                IoCounterKey::RmDirAll => &mut snapshot.io_rmdir_all_count,
+                IoCounterKey::Stat => &mut snapshot.io_stat_count,
+                IoCounterKey::StatEden => &mut snapshot.io_stat_eden_count,
+                IoCounterKey::Chmod => &mut snapshot.io_chmod_count,
+                IoCounterKey::ReadLink => &mut snapshot.io_readlink_count,
+                IoCounterKey::Remove => &mut snapshot.io_remove_count,
+                IoCounterKey::Rename => &mut snapshot.io_rename_count,
+                IoCounterKey::Read => &mut snapshot.io_read_count,
+                IoCounterKey::Write => &mut snapshot.io_write_count,
+                IoCounterKey::Canonicalize => &mut snapshot.io_canonicalize_count,
+                IoCounterKey::EdenSettle => &mut snapshot.io_eden_settle_count,
+            };
+            *pointer = Some(key.get_finished());
         }
     }
 
@@ -157,6 +189,13 @@ impl SnapshotCollector {
             snapshot.local_cache_hits_bytes = stats.local_cache.hits_bytes;
             snapshot.local_cache_misses_files = stats.local_cache.misses_files;
             snapshot.local_cache_misses_bytes = stats.local_cache.misses_bytes;
+
+            snapshot.local_cache_hits_files_from_memory_cache = stats.local_cache.hits_from_memory;
+            snapshot.local_cache_hits_files_from_filesystem_cache = stats.local_cache.hits_from_fs;
+
+            snapshot.local_cache_lookups = stats.local_cache.cache_lookups;
+            snapshot.local_cache_lookup_latency_microseconds =
+                stats.local_cache.cache_lookup_latency_microseconds;
 
             Ok(())
         }
@@ -251,7 +290,7 @@ impl SnapshotCollector {
         if let Some(system_cpu_us) = process_stats.system_cpu_us {
             snapshot.buck2_system_cpu_us = system_cpu_us;
         }
-        snapshot.daemon_uptime_s = self.daemon.start_time.elapsed().as_secs();
+        snapshot.daemon_uptime_s = (Instant::now() - self.daemon.start_time).as_secs();
         snapshot.buck2_rss = process_stats.rss_bytes;
         let allocator_stats = get_allocator_stats().ok();
         if let Some(alloc_stats) = allocator_stats {
@@ -283,9 +322,45 @@ impl SnapshotCollector {
 
     fn add_cpu_usage(&self, snapshot: &mut buck2_data::Snapshot) {
         if let Some(collector) = &self.cpu_usage_collector {
-            if let Ok(cpu_usage) = collector.get_usage_since_command_start() {
+            if let Some(cpu_usage) = collector.get_usage_since_command_start() {
                 snapshot.host_cpu_usage_system_ms = Some(cpu_usage.system_millis);
                 snapshot.host_cpu_usage_user_ms = Some(cpu_usage.user_millis);
+            }
+        }
+    }
+
+    async fn add_memory_metrics(&self, snapshot: &mut buck2_data::Snapshot) {
+        #[cfg(not(unix))]
+        {
+            let _snapshot = snapshot;
+        }
+        #[cfg(unix)]
+        {
+            use buck2_resource_control::cgroup_files::MemoryStat;
+
+            fn convert_stats(stats: &MemoryStat) -> buck2_data::UnixCgroupMemoryStats {
+                buck2_data::UnixCgroupMemoryStats {
+                    anon: stats.anon,
+                    file: stats.file,
+                    kernel: stats.kernel,
+                }
+            }
+
+            // Try to read Buck2 daemon memory information from cgroup
+
+            if let Some(memory_tracker) = self.daemon.memory_tracker.as_ref() {
+                let cgroup_tree = &memory_tracker.cgroup_tree;
+                if let Ok(stat) = cgroup_tree.allprocs().read_memory_stat().await {
+                    snapshot.allprocs_cgroup = Some(convert_stats(&stat))
+                }
+
+                if let Ok(stat) = cgroup_tree
+                    .forkserver_and_actions()
+                    .read_memory_stat()
+                    .await
+                {
+                    snapshot.forkserver_actions_cgroup = Some(convert_stats(&stat))
+                }
             }
         }
     }

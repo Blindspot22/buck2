@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cfg/modifier:name.bzl", "cfg_name")
 
@@ -110,7 +111,11 @@ def _resolve(
     # Resolve constraint value overrides.
     overrides = []
     if hasattr(attrs, "constraint_overrides") and attrs.constraint_overrides != None:
-        overrides = [_check(override) for override in attrs.constraint_overrides]
+        overrides = [
+            _check(override)
+            for override in attrs.constraint_overrides
+            if override != None
+        ]
     args["constraints"] = []
     for override in overrides:
         if not hasattr(refs, override):
@@ -211,7 +216,7 @@ _python_refs = {k: v for k, v in _refs.items()}
 # @oss-disable[end= ]: _python_refs.update(python_transitions.refs())
 
 _attributes = {
-    "constraint_overrides": attrs.list(attrs.string(), default = []),
+    "constraint_overrides": attrs.list(attrs.option(attrs.string()), default = []),
     "platform_override": attrs.option(attrs.string(), default = None),
 }
 

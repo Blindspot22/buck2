@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -17,10 +18,10 @@
 #![feature(once_cell_try)]
 #![feature(try_blocks)]
 #![feature(used_with_arg)]
-#![feature(let_chains)]
 
-#[macro_use]
-pub mod error;
+// Re-export these because we don't want to make people add a dependency on this crate everywhere
+pub use buck2_env::env;
+pub use buck2_env::soft_error as error;
 
 mod ascii_char_set;
 pub mod async_once_cell;
@@ -35,24 +36,33 @@ pub mod configuration;
 pub mod content_hash;
 pub mod deferred;
 pub mod directory_digest;
-pub mod env;
 pub mod event;
 pub mod execution_types;
+pub mod faster_directories;
 pub mod fs;
 pub mod global_cfg_options;
-pub mod io_counters;
+pub use buck2_fs::io_counters;
 pub mod logging;
 pub mod package;
 pub mod pattern;
 pub mod plugins;
 pub mod provider;
+pub mod quick_debug_event;
 pub mod rollout_percentage;
 pub mod target;
 pub mod target_aliases;
 pub mod unsafe_send_future;
 
-pub use env::__macro_refs::buck2_env;
-pub use env::__macro_refs::buck2_env_name;
+// Re-export macros from buck2_env so they're available at the crate root
+pub use buck2_env::env::buck2_env;
+pub use buck2_env::env::buck2_env_name;
+// Re-export these macros at the crate root so they work like before when error was #[macro_use]
+#[doc(inline)]
+pub use buck2_env::soft_error::soft_error;
+#[doc(inline)]
+pub use buck2_env::soft_error::tag_error;
+#[doc(inline)]
+pub use buck2_env::soft_error::tag_result;
 
 /// Marker for things that are only sensible to use inside Facebook,
 /// not intended to be complete, but intended to be useful to audit

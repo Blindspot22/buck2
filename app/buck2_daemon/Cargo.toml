@@ -1,6 +1,6 @@
 [package]
 description = ""
-edition = "2021"
+edition = "2024"
 name = "buck2_daemon"
 repository = { workspace = true }
 version = "0.1.0"
@@ -26,6 +26,8 @@ buck2_core = { workspace = true }
 buck2_data = { workspace = true }
 buck2_error = { workspace = true }
 buck2_events = { workspace = true }
+buck2_fs = { workspace = true }
+buck2_resource_control = { workspace = true }
 buck2_server = { workspace = true }
 buck2_util = { workspace = true }
 
@@ -33,6 +35,7 @@ buck2_util = { workspace = true }
 nix = { workspace = true }
 
 [dev-dependencies]
+buck2_certs = { workspace = true }
 fbinit = { workspace = true }
 
 [lints.rust]

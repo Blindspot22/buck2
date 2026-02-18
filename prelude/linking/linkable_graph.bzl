@@ -1,13 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_toolchain_types.bzl", "PicBehavior")
 load("@prelude//cxx:headers.bzl", "CPrecompiledHeaderInfo")
-load("@prelude//cxx:platform.bzl", "cxx_by_platform")
 
 # TODO(mattpayne): Add this back once the type is supported by dependency mgmt
 # load("@prelude//cxx:shared_library_interface.bzl", "SharedInterfaceInfo")
@@ -17,10 +17,6 @@ load("@prelude//utils:expect.bzl", "expect")
 load(
     "@prelude//utils:graph_utils.bzl",
     "depth_first_traversal_by",
-)
-load(
-    "@prelude//utils:utils.bzl",
-    "flatten",
 )
 load(
     ":link_info.bzl",
@@ -110,12 +106,6 @@ LinkableNode = record(
     # Don't follow dependents on this node even if has preferred linkage static
     ignore_force_static_follows_dependents = field(bool),
 
-    # Shared interface provider for this node.
-    # TODO(mattpayne): This type is incompatible with Autodeps.
-    # Once the pyautotargets service is rolled out, we can change it back.
-    # It should be SharedInterfaceInfo | None
-    shared_interface_info = field(typing.Any),
-
     # Should this library only be used for build time linkage
     stub = field(bool),
 
@@ -168,8 +158,6 @@ def _get_target_sources(ctx: AnalysisContext) -> list[_TargetSourceType]:
     srcs = []
     if hasattr(ctx.attrs, "srcs"):
         srcs.extend(ctx.attrs.srcs)
-    if hasattr(ctx.attrs, "platform_srcs"):
-        srcs.extend(flatten(cxx_by_platform(ctx, ctx.attrs.platform_srcs)))
     return srcs
 
 def create_linkable_node(
@@ -185,10 +173,6 @@ def create_linkable_node(
         include_in_android_mergemap: bool = True,
         linker_flags: [LinkerFlags, None] = None,
         ignore_force_static_follows_dependents: bool = False,
-        # TODO(mattpayne): This type is incompatible with Autodeps.
-        # Once the pyautotargets service is rolled out, we can change it back.
-        # It should be SharedInterfaceInfo | None
-        shared_interface_info: typing.Any = None,
         stub: bool = False) -> LinkableNode:
     for output_style in _get_required_outputs_for_linkage(preferred_linkage):
         expect(
@@ -214,7 +198,6 @@ def create_linkable_node(
         default_soname = default_soname,
         linker_flags = linker_flags,
         ignore_force_static_follows_dependents = ignore_force_static_follows_dependents,
-        shared_interface_info = shared_interface_info,
         stub = stub,
         _private = _DisallowConstruction(),
     )
@@ -343,12 +326,6 @@ def linkable_graph(dep: Dependency) -> [LinkableGraph, None]:
     if CPrecompiledHeaderInfo in dep:
         # `cxx_precompiled_header()` does not contribute to the link, only to compile
         return None
-
-    expect(
-        LinkableGraph in dep,
-        "{} provides `MergedLinkInfo`".format(dep.label) +
-        " but doesn't also provide `LinkableGraph`",
-    )
 
     return dep[LinkableGraph]
 

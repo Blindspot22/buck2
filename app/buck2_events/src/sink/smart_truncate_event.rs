@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 fn truncate(s: &str, max_bytes: usize) -> String {
@@ -12,7 +13,7 @@ fn truncate(s: &str, max_bytes: usize) -> String {
     // to a reasonable length unconditionally
     const MAX_STRING_BYTES: usize = 20 * 1024;
 
-    buck2_util::truncate::truncate(s, max_bytes.max(MAX_STRING_BYTES))
+    buck2_util::truncate::truncate(s, max_bytes.min(MAX_STRING_BYTES))
 }
 
 #[cfg_attr(not(fbcode_build), allow(dead_code))]
@@ -20,32 +21,35 @@ pub(crate) fn smart_truncate_event(d: &mut buck2_data::buck_event::Data) {
     use buck2_data::buck_event::Data;
 
     match d {
-        Data::SpanEnd(ref mut s) => {
+        Data::SpanEnd(s) => {
             use buck2_data::span_end_event::Data;
 
             match &mut s.data {
-                Some(Data::ActionExecution(ref mut action_execution)) => {
+                Some(Data::ActionExecution(action_execution)) => {
                     truncate_action_execution_end(action_execution);
                 }
-                Some(Data::Command(ref mut command_end)) => {
+                Some(Data::Command(command_end)) => {
                     truncate_command_end(command_end, false);
                 }
-                Some(Data::TestEnd(ref mut test_end)) => {
+                Some(Data::TestEnd(test_end)) => {
                     truncate_test_end(test_end);
+                }
+                Some(Data::TestDiscovery(test_discovery_end)) => {
+                    truncate_test_discovery_end(test_discovery_end);
                 }
                 _ => {}
             };
         }
-        Data::Instant(ref mut inst) => {
+        Data::Instant(inst) => {
             use buck2_data::instant_event::Data;
             match &mut inst.data {
-                Some(Data::TargetPatterns(ref mut target_patterns)) => {
+                Some(Data::TargetPatterns(target_patterns)) => {
                     truncate_target_patterns(&mut target_patterns.target_patterns);
                 }
                 _ => {}
             }
         }
-        Data::Record(ref mut rec) => {
+        Data::Record(rec) => {
             if let Some(buck2_data::record_event::Data::InvocationRecord(invocation_record)) =
                 &mut rec.data
             {
@@ -81,7 +85,7 @@ fn truncate_invocation_record(invocation_record: &mut buck2_data::InvocationReco
             invocation_record.cli_args.truncate(index);
             invocation_record
                 .cli_args
-                .push(format!("<<Truncated (reported {} / {})>>", index, orig_len));
+                .push(format!("<<Truncated (reported {index} / {orig_len})>>"));
             break;
         }
     }
@@ -101,10 +105,13 @@ fn truncate_action_execution_end(action_execution_end: &mut buck2_data::ActionEx
 
     let truncate_cmd = |cmd: &mut buck2_data::CommandExecution, truncate_all: bool| {
         if let Some(details) = &mut cmd.details {
-            details.stderr = if truncate_all {
+            details.cmd_stderr = if truncate_all {
                 "<<omitted>>".to_owned()
             } else {
-                truncate(&details.stderr, per_command_size_budget)
+                truncate(
+                    &console::strip_ansi_codes(&details.cmd_stderr),
+                    per_command_size_budget,
+                )
             };
         }
     };
@@ -153,8 +160,7 @@ fn truncate_file_watcher_stats(file_watcher_stats: &mut buck2_data::FileWatcherS
         if bytes > MAX_FILE_CHANGE_BYTES {
             file_watcher_stats.events.truncate(index);
             file_watcher_stats.incomplete_events_reason = Some(format!(
-                "Too long file change records ({} bytes, max {} bytes)",
-                bytes, MAX_FILE_CHANGE_BYTES
+                "Too long file change records ({bytes} bytes, max {MAX_FILE_CHANGE_BYTES} bytes)"
             ));
             break;
         }
@@ -170,9 +176,35 @@ fn truncate_test_end(test_end: &mut buck2_data::TestRunEnd) {
             bytes += test_name.len();
             if bytes > MAX_TEST_NAMES_BYTES {
                 suite.test_names.truncate(index);
-                let warn = format!("<<Truncated (reported {} / {})>>", index, orig_len);
+                let warn = format!("<<Truncated (reported {index} / {orig_len})>>");
                 suite.test_names.push(warn);
                 break;
+            }
+        }
+    }
+
+    // Scribe tailer logs neither stdout nor stderr of tests, so don't send these.
+    if let Some(ref mut command_report) = test_end.command_report {
+        if let Some(ref mut details) = command_report.details {
+            if !details.cmd_stdout.is_empty() {
+                details.cmd_stdout = "<<omitted>>".to_owned();
+            }
+            if !details.cmd_stderr.is_empty() {
+                details.cmd_stderr = "<<omitted>>".to_owned();
+            }
+        }
+    }
+}
+
+fn truncate_test_discovery_end(test_discovery_end: &mut buck2_data::TestDiscoveryEnd) {
+    // Scribe tailer logs neither stdout nor stderr of test discovery, so don't send these.
+    if let Some(ref mut command_report) = test_discovery_end.command_report {
+        if let Some(ref mut details) = command_report.details {
+            if !details.cmd_stdout.is_empty() {
+                details.cmd_stdout = "<<omitted>>".to_owned();
+            }
+            if !details.cmd_stderr.is_empty() {
+                details.cmd_stderr = "<<omitted>>".to_owned();
             }
         }
     }
@@ -186,7 +218,7 @@ fn truncate_target_patterns(target_patterns: &mut Vec<buck2_data::TargetPattern>
         bytes += target.value.len();
         if bytes > MAX_TARGET_PATTERNS_BYTES {
             target_patterns.truncate(index);
-            let warn = format!("<<Truncated (reported {} / {})>>", index, orig_len);
+            let warn = format!("<<Truncated (reported {index} / {orig_len})>>");
             target_patterns.push(buck2_data::TargetPattern { value: warn });
             break;
         }
@@ -243,10 +275,17 @@ mod tests {
         })
     }
 
+    fn make_test_discovery_end(data: buck2_data::TestDiscoveryEnd) -> buck2_data::buck_event::Data {
+        buck2_data::buck_event::Data::SpanEnd(buck2_data::SpanEndEvent {
+            data: Some(buck2_data::span_end_event::Data::TestDiscovery(data)),
+            ..Default::default()
+        })
+    }
+
     fn make_command_execution_with_stderr(stderr: String) -> buck2_data::CommandExecution {
         buck2_data::CommandExecution {
             details: Some(buck2_data::CommandExecutionDetails {
-                stderr,
+                cmd_stderr: stderr,
                 ..Default::default()
             }),
             ..Default::default()
@@ -338,11 +377,11 @@ mod tests {
     fn smart_truncate_action_execution_end_long_stderr_command_truncated() {
         let command_execution_with_stderr =
             make_command_execution_with_stderr("this is a test".to_owned());
-        let mut over_sized_str = "0123456789".repeat(10 * 1024);
-        over_sized_str.push_str("0123456789"); // 100k + 10; 10-byte over
+        let mut over_sized_str = "0123456789".repeat(2 * 1024);
+        over_sized_str.push_str("0123456789"); // 20k + 10; 10-byte over
         let command_execution_with_long_stderr = make_command_execution_with_stderr(over_sized_str);
-        let mut omitted_str = "0123456789".repeat(10 * 1024);
-        omitted_str.replace_range((50 * 1024 - 6)..(50 * 1024 + 6), "<<omitted>>");
+        let mut omitted_str = "0123456789".repeat(2 * 1024);
+        omitted_str.replace_range((10 * 1024 - 6)..(10 * 1024 + 6), "<<omitted>>");
         let command_execution_stderr_partially_omitted =
             make_command_execution_with_stderr(omitted_str);
         let command_execution_stderr_all_omitted =
@@ -620,6 +659,56 @@ mod tests {
 
         let mut event_data = make_test_end(test_end);
         let event_data_expected = make_test_end(test_end_truncated);
+
+        smart_truncate_event(&mut event_data);
+
+        assert_eq!(event_data, event_data_expected);
+    }
+
+    fn make_command_execution_with_stdout(stdout: String) -> buck2_data::CommandExecution {
+        buck2_data::CommandExecution {
+            details: Some(buck2_data::CommandExecutionDetails {
+                cmd_stderr: stdout,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn smart_truncate_test_end_command_report_stdout_truncated() {
+        let test_end = buck2_data::TestRunEnd {
+            command_report: Some(make_command_execution_with_stdout("blah".to_owned())),
+            ..Default::default()
+        };
+
+        let test_end_truncated = buck2_data::TestRunEnd {
+            command_report: Some(make_command_execution_with_stdout("<<omitted>>".to_owned())),
+            ..Default::default()
+        };
+
+        let mut event_data = make_test_end(test_end);
+        let event_data_expected = make_test_end(test_end_truncated);
+
+        smart_truncate_event(&mut event_data);
+
+        assert_eq!(event_data, event_data_expected);
+    }
+
+    #[test]
+    fn smart_truncate_test_discovery_end_command_report_stdout_truncated() {
+        let test_discovery_end = buck2_data::TestDiscoveryEnd {
+            command_report: Some(make_command_execution_with_stdout("blah".to_owned())),
+            ..Default::default()
+        };
+
+        let test_discovery_end_truncated = buck2_data::TestDiscoveryEnd {
+            command_report: Some(make_command_execution_with_stdout("<<omitted>>".to_owned())),
+            ..Default::default()
+        };
+
+        let mut event_data = make_test_discovery_end(test_discovery_end);
+        let event_data_expected = make_test_discovery_end(test_discovery_end_truncated);
 
         smart_truncate_event(&mut event_data);
 

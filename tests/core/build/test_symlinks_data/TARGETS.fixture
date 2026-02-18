@@ -1,5 +1,23 @@
-load(":defs.bzl", "cp")
+load(":defs.bzl", "cp", "cp_via_builtin", "stat_path")
 
 cp(name = "cp", src = "src/link/file")
 
-cp(name = "ext", src = "ext/link/file")
+cp_via_builtin(name = "cp_src_link_via_builtin", src = "src/link")
+
+cp(name = "ext", src = "ext/link/file", local_only = True)
+
+stat_path(
+    name = "stat_symlink_in_dir",
+    path = "src",
+    project = "link",
+)
+
+stat_path(
+    name = "stat_symlink",
+    path = "src/link",
+)
+
+stub(
+    name = "symlink_dep",
+    deps = ["//testlink:dep"],
+)

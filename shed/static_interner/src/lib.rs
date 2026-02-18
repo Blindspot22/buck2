@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Intern objects in memory.
@@ -29,6 +30,14 @@ use allocative::Visitor;
 use dupe::Dupe;
 pub use equivalent::Equivalent;
 use lock_free_hashtable::sharded::ShardedLockFreeRawTable;
+use pagable::PagableDeserialize;
+use pagable::PagableDeserializer;
+use pagable::PagableSerialize;
+use pagable::PagableSerializer;
+use pagable::arc_erase::ArcErase;
+use pagable::arc_erase::ArcEraseType;
+use pagable::arc_erase::StdArcEraseType;
+use pagable::arc_erase::deserialize_arc;
 use strong_hash::StrongHash;
 
 pub struct Interner<T: 'static, H = DefaultHasher> {
@@ -53,9 +62,100 @@ pub struct Intern<T: 'static> {
     pointer: &'static InternedData<T>,
 }
 
+pub trait Internable {
+    type Hasher;
+
+    fn interner() -> &'static Interner<Self, Self::Hasher>
+    where
+        Self: Sized;
+}
+
 impl<T: StrongHash> StrongHash for Intern<T> {
     fn strong_hash<H: Hasher>(&self, hasher: &mut H) {
         self.pointer.data.strong_hash(hasher);
+    }
+}
+
+impl<
+    T: PagableSerialize
+        + for<'de> PagableDeserialize<'de>
+        + std::fmt::Debug
+        + Hash
+        + Send
+        + Sync
+        + Internable<Hasher = H>
+        + Eq
+        + 'static,
+    H: Hasher + Default + 'static,
+> ArcErase for Intern<T>
+{
+    type Weak = ();
+    fn dupe_strong(&self) -> Self {
+        *self
+    }
+
+    fn erase_type() -> impl ArcEraseType {
+        StdArcEraseType::<Self>::new()
+    }
+
+    fn identity(&self) -> usize {
+        self.pointer as *const _ as usize
+    }
+
+    fn downgrade(&self) -> Option<Self::Weak> {
+        // TODO(ctolliday): Since we never drop interned things, we could have Self::Weak = Self and return a value here
+        None
+    }
+
+    fn serialize_inner(&self, ser: &mut dyn PagableSerializer) -> pagable::Result<()> {
+        T::pagable_serialize(&self, ser)
+    }
+
+    fn deserialize_inner<'de, D: PagableDeserializer<'de> + ?Sized>(
+        deser: &mut D,
+    ) -> pagable::Result<Self> {
+        let interner = T::interner();
+        let val = T::pagable_deserialize(deser)?;
+        Ok(interner.intern(val))
+    }
+}
+
+impl<
+    T: PagableSerialize
+        + for<'de> PagableDeserialize<'de>
+        + std::fmt::Debug
+        + Send
+        + Sync
+        + Internable<Hasher = H>
+        + Eq
+        + Hash
+        + 'static,
+    H: Hasher + Default + 'static,
+> PagableSerialize for Intern<T>
+{
+    fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> pagable::Result<()> {
+        serializer.serialize_arc(self)
+    }
+}
+
+impl<
+    'de,
+    T: PagableSerialize
+        + for<'a> PagableDeserialize<'a>
+        + std::fmt::Debug
+        + Hash
+        + Send
+        + Sync
+        + Internable<Hasher = H>
+        + Eq
+        + std::any::Any,
+    H: Hasher + Default + 'static,
+> PagableDeserialize<'de> for Intern<T>
+{
+    fn pagable_deserialize<D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Self> {
+        deserialize_arc::<Self, _>(deserializer)
     }
 }
 
@@ -278,7 +378,7 @@ pub struct Iter<T: 'static, H: 'static> {
     _marker: PhantomData<H>,
 }
 
-impl<T: 'static, H> Iterator for Iter<T, H> {
+impl<T: 'static, H: 'static> Iterator for Iter<T, H> {
     type Item = Intern<T>;
 
     #[inline]
@@ -287,20 +387,95 @@ impl<T: 'static, H> Iterator for Iter<T, H> {
     }
 }
 
+/// Define a static interner and implement Internable to associate it with an interned type.
+///
+/// Without additional arguments, `interner!(STRING_INTERNER, DefaultHasher, InternString)`
+/// creates a `static STRING_INTERNER: Interner<InternString, DefaultHasher>` and implements Internable for InternString.
+///
+/// Additional arguments are used to implement convenience traits when the interned type wraps an existing type.
+/// `interner!(STRING_INTERNER, DefaultHasher, InternString, String, str, StrRef)`
+/// also implements
+///     ``Equivalent<InternString>`` for `String`
+///     ``From<String>``for `InternString`
+///     `Deref<Target = str>` for `InternString`
+/// and creates a new `StrRef<'a>(&'a str)` type that implements ``Equivalent<InternString>`` and ``From<StrRef>`` for InternString.
+#[macro_export]
+macro_rules! interner {
+    ($interner_name:ident, $hasher:ty, $type:ty) => {
+        static $interner_name: $crate::Interner<$type, $hasher> = $crate::Interner::new();
+
+        impl $crate::Internable for $type {
+            type Hasher = $hasher;
+
+            fn interner() -> &'static $crate::Interner<Self, $hasher> {
+                &$interner_name
+            }
+        }
+    };
+    ($interner_name:ident, $hasher:ty, $newtype:ident, $basetype:ty) => {
+        impl $crate::Equivalent<$newtype> for $basetype {
+            fn equivalent(&self, key: &$newtype) -> bool {
+                self == &key.0
+            }
+        }
+
+        impl From<$basetype> for $newtype {
+            fn from(value: $basetype) -> Self {
+                $newtype(value)
+            }
+        }
+
+        $crate::interner!($interner_name, $hasher, $newtype);
+    };
+    ($interner_name:ident, $hasher:ty, $newtype:ident, $basetype:ty, $basereftype:ty) => {
+        impl std::ops::Deref for $newtype {
+            type Target = $basereftype;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        $crate::interner!($interner_name, $hasher, $newtype, $basetype);
+    };
+    ($interner_name:ident, $hasher:ty, $newtype:ident, $basetype:ty, $basereftype:ty, $newreftype:ident) => {
+        #[derive(Hash, Eq, PartialEq)]
+        pub struct $newreftype<'a>(&'a $basereftype);
+
+        impl $crate::Equivalent<$newtype> for $newreftype<'_> {
+            fn equivalent(&self, key: &$newtype) -> bool {
+                self.0 == key.0
+            }
+        }
+
+        impl From<$newreftype<'_>> for $newtype {
+            fn from(value: $newreftype<'_>) -> Self {
+                $newtype(value.0.into())
+            }
+        }
+
+        $crate::interner!($interner_name, $hasher, $newtype, $basetype, $basereftype);
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-
-    use equivalent::Equivalent;
+    use std::collections::hash_map::DefaultHasher;
 
     use crate::Intern;
     use crate::InternDisposition;
-    use crate::Interner;
 
-    static STRING_INTERNER: Interner<String> = Interner::new();
-
-    #[derive(Hash, Eq, PartialEq)]
-    struct StrRef<'a>(&'a str);
+    #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct StringValue(String);
+    interner!(
+        STRING_INTERNER,
+        DefaultHasher,
+        StringValue,
+        String,
+        str,
+        StrRef
+    );
 
     #[test]
     fn test_intern() {
@@ -325,61 +500,72 @@ mod tests {
         for i in 0..100000 {
             let s = i.to_string();
             let interned = STRING_INTERNER.intern(s.clone());
-            assert_eq!(&s, &*interned);
+            assert_eq!(&s, &*interned.0);
             interned_strings.push(interned);
         }
 
         for s in &interned_strings {
-            let interned = STRING_INTERNER.intern(String::clone(s));
+            let interned = STRING_INTERNER.intern(String::clone(&s.0));
             assert_eq!(*s, interned);
         }
     }
 
-    impl Equivalent<String> for StrRef<'_> {
-        fn equivalent(&self, key: &String) -> bool {
-            self.0 == key
-        }
-    }
-
-    impl From<StrRef<'_>> for String {
-        fn from(value: StrRef<'_>) -> Self {
-            value.0.to_owned()
-        }
-    }
-
-    static TEST_DISPOSITION_STRING: Interner<String> = Interner::new();
+    #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct TestDispositionValue(String);
+    interner!(
+        TEST_DISPOSITION_INTERNER,
+        DefaultHasher,
+        TestDispositionValue,
+        String
+    );
     #[test]
     fn test_disposition() {
-        let (val, disposition) = TEST_DISPOSITION_STRING.observed_intern("hello".to_owned());
-        assert_eq!(val.to_string(), "hello".to_owned());
+        let (val, disposition) = TEST_DISPOSITION_INTERNER.observed_intern("hello".to_owned());
+        assert_eq!(val.0.to_string(), "hello".to_owned());
         assert!(std::matches!(disposition, InternDisposition::Computed));
 
-        let (val, disposition) = TEST_DISPOSITION_STRING.observed_intern("hello".to_owned());
-        assert_eq!(val.to_string(), "hello".to_owned());
+        let (val, disposition) = TEST_DISPOSITION_INTERNER.observed_intern("hello".to_owned());
+        assert_eq!(val.0.to_string(), "hello".to_owned());
         assert!(std::matches!(disposition, InternDisposition::Interned));
     }
 
-    static TEST_GET_INTERNER: Interner<String> = Interner::new();
+    #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct TestGetValue(String);
+    interner!(
+        TEST_GET_INTERNER,
+        DefaultHasher,
+        TestGetValue,
+        String,
+        str,
+        TestGetRef
+    );
     #[test]
     fn test_get() {
         let interner = &TEST_GET_INTERNER;
-        assert_eq!(interner.get(StrRef("hello")), None);
+        assert_eq!(interner.get(TestGetRef("hello")), None);
         assert_eq!(interner.get("hello".to_owned()), None);
 
         let interned = interner.intern("hello".to_owned());
-        assert_eq!(interner.get(StrRef("hello")), Some(interned));
+        assert_eq!(interner.get(TestGetRef("hello")), Some(interned));
         assert_eq!(interner.get("hello".to_owned()), Some(interned));
-        assert_eq!(interner.get(StrRef("world")), None);
+        assert_eq!(interner.get(TestGetRef("world")), None);
     }
 
-    static TEST_ITER_INTERNER: Interner<&'static str> = Interner::new();
+    #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct TestIterValue(&'static str);
+    interner!(
+        TEST_ITER_INTERNER,
+        DefaultHasher,
+        TestIterValue,
+        &'static str
+    );
     #[test]
     fn test_iter() {
         let interner = &TEST_ITER_INTERNER;
         assert_eq!(
             interner
                 .iter()
-                .map(|v| *v)
+                .map(|v| v.0)
                 .collect::<BTreeSet<&'static str>>(),
             BTreeSet::from([])
         );
@@ -390,13 +576,20 @@ mod tests {
         assert_eq!(
             interner
                 .iter()
-                .map(|v| *v)
+                .map(|v| v.0)
                 .collect::<BTreeSet<&'static str>>(),
             BTreeSet::from(["hello", "cat", "world"])
         );
     }
 
-    static TEST_POINTER_INTERNER: Interner<&'static str> = Interner::new();
+    #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct TestPointerValue(&'static str);
+    interner!(
+        TEST_POINTER_INTERNER,
+        DefaultHasher,
+        TestPointerValue,
+        &'static str
+    );
     #[test]
     fn test_pointer_roundtrip() {
         let one = TEST_POINTER_INTERNER.intern("one");

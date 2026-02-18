@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.installer.android;
@@ -33,25 +34,18 @@ public class AndroidInstallApkOptions {
   public final boolean restartAdbOnFailure;
   public final boolean stagedInstallMode;
   public final boolean skipInstallMetadata;
-  public final boolean isZstdCompressionEnabled;
-  public final int agentPortBase;
-  public final int adbMaxRetries;
-  public final long adbRetryDelayMs;
   public final boolean apexMode;
 
-  AndroidInstallApkOptions(Path jsonArtifactPath) throws RuntimeException, IOException {
+  AndroidInstallApkOptions(Path jsonArtifactPath, String adbExecutablePath)
+      throws RuntimeException, IOException {
     JsonParser parser = ObjectMappers.createParser(jsonArtifactPath);
     Map<String, String> jsonData =
         parser.readValueAs(new TypeReference<TreeMap<String, String>>() {});
-    this.adbExecutable = getAdbExecutable(jsonData);
+    this.adbExecutable = getAdbExecutable(adbExecutablePath, jsonData);
     this.restartAdbOnFailure = readBoolean(jsonData, "adb_restart_on_failure");
     this.stagedInstallMode = readBoolean(jsonData, "staged_install_mode");
     this.apexMode = readBoolean(jsonData, "apex_mode");
     this.skipInstallMetadata = readBoolean(jsonData, "skip_install_metadata");
-    this.isZstdCompressionEnabled = readBoolean(jsonData, "is_zstd_compression_enabled");
-    this.agentPortBase = readInt(jsonData, "agent_port_base", 2828);
-    this.adbMaxRetries = readInt(jsonData, "max_retries", 5);
-    this.adbRetryDelayMs = readInt(jsonData, "retry_delay_millis", 500);
   }
 
   private boolean readBoolean(Map<String, String> jsonData, String name) {
@@ -68,16 +62,17 @@ public class AndroidInstallApkOptions {
 
   /*
    * Here is the order of precedence for adb_executable:
-   * 1. adb_executable from json artifact
-   * 2. adb from PATH
-   * 3. /opt/android_sdk/platform-tools/adb
-   *
-   * --adb-executable-path command line option takes precedence over all of the above
+   * 1. --adb-executable-path from command line option
+   * 2. adb_executable from json artifact
+   * 3. adb from PATH
+   * 4. /opt/android_sdk/platform-tools/adb
    */
-  private String getAdbExecutable(Map<String, String> jsonData) {
+  private String getAdbExecutable(String adbExecutablePath, Map<String, String> jsonData) {
     String adbExecutable =
-        Optional.ofNullable(jsonData.get("adb_executable"))
-            .orElse(getAdbFromPath().orElse("/opt/android_sdk/platform-tools/adb"));
+        Optional.ofNullable(adbExecutablePath)
+            .orElse(
+                Optional.ofNullable(jsonData.get("adb_executable"))
+                    .orElse(getAdbFromPath().orElse("/opt/android_sdk/platform-tools/adb")));
     LOG.info("adbExecutable: " + adbExecutable);
     return adbExecutable;
   }
@@ -110,14 +105,6 @@ public class AndroidInstallApkOptions {
         + stagedInstallMode
         + ", skipInstallMetadata="
         + skipInstallMetadata
-        + ", isZstdCompressionEnabled="
-        + isZstdCompressionEnabled
-        + ", agentPortBase="
-        + agentPortBase
-        + ", adbMaxRetries="
-        + adbMaxRetries
-        + ", adbRetryDelayMs="
-        + adbRetryDelayMs
         + ", apexMode="
         + apexMode
         + '}';

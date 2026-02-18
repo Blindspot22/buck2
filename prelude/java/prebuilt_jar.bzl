@@ -1,12 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_providers.bzl", "merge_android_packageable_info")
-load("@prelude//java/utils:java_utils.bzl", "get_classpath_subtarget")
+load("@prelude//java/utils:java_utils.bzl", "get_classpath_subtargets")
 load(
     ":java_providers.bzl",
     "ClasspathSnapshotGranularity",
@@ -37,7 +38,7 @@ def prebuilt_jar_impl(ctx: AnalysisContext) -> list[Provider]:
             extension,
         ))
 
-    output = ctx.actions.declare_output("symlink/{}".format(binary_jar.short_path))
+    output = ctx.actions.declare_output("symlink/{}".format(binary_jar.short_path), has_content_based_path = ctx.attrs.uses_content_based_paths)
     ctx.actions.symlink_file(output, binary_jar)
 
     gwt_output = ctx.actions.declare_output("{}-gwt.jar".format(ctx.label.name))
@@ -80,7 +81,7 @@ def prebuilt_jar_impl(ctx: AnalysisContext) -> list[Provider]:
     # TODO(T107163344) this shouldn't be in prebuilt_jar itself, use overlays to remove it.
     android_packageable_info = merge_android_packageable_info(ctx.label, ctx.actions, ctx.attrs.deps)
 
-    sub_targets = get_classpath_subtarget(ctx.actions, java_packaging_info)
+    sub_targets = get_classpath_subtargets(ctx.actions, java_packaging_info)
     sub_targets["abi"] = [
         java_library_info,
         template_placeholder_info,

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_cli_proto::new_generic::ExpandExternalCellsRequest;
@@ -44,7 +45,7 @@ pub struct ExpandExternalCellsCommand {
 
 const REMINDER_TEXT: &str = "Reminder: For edits to the expanded cell to take effect on \
 your build, you must additionally remove the entry from the `external_cells` section of your \
-buckconfig";
+buckconfig\n";
 
 #[async_trait::async_trait(?Send)]
 impl StreamingCommand for ExpandExternalCellsCommand {
@@ -83,7 +84,7 @@ impl StreamingCommand for ExpandExternalCellsCommand {
         let mut lines: Vec<String> = resp
             .paths
             .into_iter()
-            .map(|(cell, path)| format!("Expanded external cell {} to {}.", cell, path))
+            .map(|(cell, path)| format!("Expanded external cell {cell} to {path}."))
             .collect();
         lines.push(String::new());
         lines.push(REMINDER_TEXT.to_owned());

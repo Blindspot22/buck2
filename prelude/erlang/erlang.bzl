@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(":erlang_application.bzl", "erlang_application_impl")
 load(":erlang_application_includes.bzl", "erlang_application_includes_impl")
@@ -42,18 +43,8 @@ def erlang_application(
         labels = [],
         includes = [],
         **kwargs):
-    if read_root_config("erlang", "application_only_dependencies"):
-        kwargs["shell_libs"] = []
-
-    normalized_applications = [
-        normalize_application(app)
-        for app in applications
-    ]
-
-    normalized_included_applications = [
-        normalize_application(app)
-        for app in included_applications
-    ]
+    normalized_applications = select_map(applications, lambda apps: map(normalize_application, apps))
+    normalized_included_applications = select_map(included_applications, lambda apps: map(normalize_application, apps))
 
     if not includes:
         return erlang_app_rule(
@@ -61,10 +52,7 @@ def erlang_application(
             app_name = app_name,
             applications = normalized_applications,
             included_applications = normalized_included_applications,
-            extra_includes = [
-                _extra_include_name(dep)
-                for dep in extra_includes
-            ],
+            extra_includes = select_map(extra_includes, lambda deps: map(_extra_include_name, deps)),
             labels = labels,
             **kwargs
         )
@@ -96,7 +84,7 @@ def erlang_application(
 # convenience macro to specify the includes-only target based on the base-application
 # target name
 def _extra_include_name(name: str) -> str:
-    return name + "_includes_only"
+    return "{}_includes_only".format(name)
 
 def erlang_tests(
         erlang_app_rule,
@@ -105,7 +93,6 @@ def erlang_tests(
         deps: list[str] = [],
         resources: list[str] = [],
         srcs: list[str] = [],
-        property_tests: list[str] = [],
         config_files: list[str] = [],
         common_app_env: dict[str, str] = {},
         **common_attributes):
@@ -119,7 +106,6 @@ def erlang_tests(
         deps = deps,
         resources = resources,
         srcs = srcs,
-        property_tests = property_tests,
         config_files = config_files,
         common_app_env = common_app_env,
         **common_attributes

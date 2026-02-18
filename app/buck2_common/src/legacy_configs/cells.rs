@@ -1,13 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use allocative::Allocative;
@@ -19,17 +21,17 @@ use buck2_core::cells::cell_root_path::CellRootPath;
 use buck2_core::cells::cell_root_path::CellRootPathBuf;
 use buck2_core::cells::external::ExternalCellOrigin;
 use buck2_core::cells::external::GitCellSetup;
+use buck2_core::cells::external::GitObjectFormat;
 use buck2_core::cells::name::CellName;
-use buck2_core::fs::paths::RelativePath;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_error::BuckErrorContext;
+use buck2_fs::paths::RelativePath;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use dice::DiceComputations;
 use dupe::Dupe;
 
-use crate::cas_digest::RawDigest;
 use crate::dice::cells::HasCellResolver;
 use crate::dice::data::HasIoProvider;
 use crate::external_cells::EXTERNAL_CELLS_IMPL;
@@ -55,7 +57,7 @@ use crate::legacy_configs::path::ProjectConfigSource;
 
 /// Buckconfigs can partially be loaded from within dice. However, some parts of what makes up the
 /// buckconfig comes from outside the buildgraph, and this type represents those parts.
-#[derive(PartialEq, Eq, Allocative)]
+#[derive(Clone, PartialEq, Eq, Allocative)]
 pub struct ExternalBuckconfigData {
     // The result of parsing the buckconfigs coming from either global (e.g. /etc/buckconfig.d) or
     // user (e.g. ~/.buckconfig.d or $home_dir/.buckconfig.local) files/dirs outside of the repo
@@ -80,27 +82,22 @@ impl ExternalBuckconfigData {
         }
     }
 
-    pub fn filter_values<F>(&self, filter: F) -> Self
+    pub fn filter_values<F>(self, filter: F) -> Self
     where
         F: Fn(&BuckconfigKeyRef) -> bool,
     {
         Self {
             external_path_configs: self
                 .external_path_configs
-                .clone()
                 .into_iter()
-                .map(|o| {
-                    let mut parse_state = o.parse_state.clone();
-                    parse_state.filter_values(&filter);
-                    ExternalPathBuckconfigData {
-                        parse_state,
-                        origin_path: o.origin_path.clone(),
-                    }
+                .map(|o| ExternalPathBuckconfigData {
+                    parse_state: o.parse_state.filter_values(&filter),
+                    origin_path: o.origin_path,
                 })
                 .collect(),
             args: self
                 .args
-                .iter()
+                .into_iter()
                 .filter(|arg| match arg {
                     ResolvedLegacyConfigArg::Flag(flag) => {
                         flag.cell.is_some()
@@ -111,7 +108,6 @@ impl ExternalBuckconfigData {
                     }
                     _ => true,
                 })
-                .cloned()
                 .collect(),
         }
     }
@@ -193,12 +189,11 @@ impl ExternalBuckconfigData {
 ///
 /// We don't (currently) enforce that all aliases appear in the root config, but
 /// unlike v1, our cells implementation works just fine if that isn't the case.
-#[derive(Clone)]
 pub struct BuckConfigBasedCells {
     pub cell_resolver: CellResolver,
     pub root_config: LegacyBuckConfig,
     pub config_paths: HashSet<ConfigPath>,
-    pub external_data: Arc<ExternalBuckconfigData>,
+    pub external_data: ExternalBuckconfigData,
 }
 
 impl BuckConfigBasedCells {
@@ -226,7 +221,7 @@ impl BuckConfigBasedCells {
         file_ops: &mut dyn ConfigParserFileOps,
         cwd: &ProjectRelativePath,
     ) -> buck2_error::Result<CellAliasResolver> {
-        let cell_name = self.cell_resolver.find(cwd)?;
+        let cell_name = self.cell_resolver.find(cwd);
         let cell_path = self.cell_resolver.get(cell_name)?.path();
 
         let follow_includes = false;
@@ -408,16 +403,17 @@ impl BuckConfigBasedCells {
             cell_resolver,
             root_config,
             config_paths: file_ops.trace,
-            external_data: Arc::new(ExternalBuckconfigData {
+            external_data: ExternalBuckconfigData {
                 external_path_configs: started_parse,
                 args: processed_config_args,
-            }),
+            },
         })
     }
 
     pub(crate) fn get_cell_aliases_from_config(
         config: &LegacyBuckConfig,
-    ) -> buck2_error::Result<impl Iterator<Item = (NonEmptyCellAlias, NonEmptyCellAlias)>> {
+    ) -> buck2_error::Result<impl Iterator<Item = (NonEmptyCellAlias, NonEmptyCellAlias)> + use<>>
+    {
         let mut aliases = Vec::new();
         if let Some(section) = config
             .get_section("cell_aliases")
@@ -519,13 +515,24 @@ impl BuckConfigBasedCells {
             Ok(ExternalCellOrigin::Bundled(cell))
         } else if value == "git" {
             let section = &format!("external_cell_{}", cell.as_str());
-            let commit: Arc<str> = get_config(section, "commit_hash")?.into();
-            // No use in storing the commit hash as a byte array, but let's reuse existing code to
-            // check for validity
-            let _ = RawDigest::parse_sha1(commit.as_bytes())?;
+            let commit = get_config(section, "commit_hash")?;
+            let object_format = match get_config(section, "object_format") {
+                Ok(s) => {
+                    let object_format = GitObjectFormat::from_str(s)?;
+                    object_format.check(commit)?;
+                    Option::Some(GitObjectFormat::from_str(s)?)
+                }
+                Err(_) => {
+                    // We pretend that the object format is SHA1 for this check only;
+                    // We do not use it when interacting with Git.
+                    GitObjectFormat::Sha1.check(commit)?;
+                    Option::None
+                }
+            };
             Ok(ExternalCellOrigin::Git(GitCellSetup {
                 git_origin: get_config(section, "git_origin")?.into(),
-                commit,
+                commit: Arc::from(commit),
+                object_format,
             }))
         } else {
             Err(ExternalCellOriginParseError::Unknown(value.to_owned()).into())
@@ -640,9 +647,9 @@ mod tests {
     use dice::DiceComputations;
     use indoc::indoc;
 
-    use crate::dice::file_ops::delegate::FileOpsDelegate;
     use crate::external_cells::EXTERNAL_CELLS_IMPL;
     use crate::external_cells::ExternalCellsImpl;
+    use crate::file_ops::delegate::FileOpsDelegate;
     use crate::legacy_configs::cells::BuckConfigBasedCells;
     use crate::legacy_configs::configs::testing::TestConfigParserFileOps;
     use crate::legacy_configs::configs::tests::assert_config_value;
@@ -1265,8 +1272,8 @@ mod tests {
             .err()
             .unwrap();
 
-        let e = format!("{:?}", e);
-        assert!(e.contains("No bundled cell"), "error: {}", e);
+        let e = format!("{e:?}");
+        assert!(e.contains("No bundled cell"), "error: {e}");
 
         Ok(())
     }
@@ -1302,6 +1309,7 @@ mod tests {
             Some(&ExternalCellOrigin::Git(GitCellSetup {
                 git_origin: "https://github.com/jeff/libfoo.git".into(),
                 commit: "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee".into(),
+                object_format: None,
             })),
         );
 
@@ -1333,8 +1341,8 @@ mod tests {
             .err()
             .unwrap();
 
-        let e = format!("{:?}", e);
-        assert!(e.contains("not a valid SHA1 digest"), "error: {}", e);
+        let e = format!("{e:?}");
+        assert!(e.contains("not a valid SHA1 digest"), "error: {e}");
 
         Ok(())
     }

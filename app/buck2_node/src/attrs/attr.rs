@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -12,12 +13,13 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use allocative::Allocative;
+use pagable::Pagable;
 
 use crate::attrs::attr_type::AttrType;
 use crate::attrs::coerced_attr::CoercedAttr;
 use crate::attrs::display::AttrDisplayWithContextExt;
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Allocative)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Pagable, Allocative)]
 enum AttributeDefault {
     No,
     Yes(Arc<CoercedAttr>),
@@ -25,7 +27,7 @@ enum AttributeDefault {
 }
 
 /// Starlark compatible container for results from e.g. `attrs.string()`
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Allocative)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Pagable, Allocative)]
 pub struct Attribute {
     /// The default value. If None, the value is not optional and must be provided by the user
     default: AttributeDefault,

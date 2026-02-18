@@ -11,7 +11,7 @@ third_party_jar(
     name = "aapt2-proto-prebuilt",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/build/aapt2-proto:aapt2-proto",
     sha1 = "605bc2d642e5812469ff0333df1b65ead289ccd8",
-    url = "mvn:com.android.tools.build:aapt2-proto:jar:8.7.3-12006047",
+    url = "mvn:https://maven.google.com:com.android.tools.build:aapt2-proto:jar:8.7.3-12006047",
 )
 
 buck_java_library(
@@ -30,7 +30,7 @@ third_party_jar(
     name = "android-annotations",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/annotations:annotations",
     sha1 = "1946e7f75bc1615b4abfc0f83899934dfcbdf1fc",
-    url = "mvn:com.android.tools:annotations:jar:31.7.3",
+    url = "mvn:https://maven.google.com:com.android.tools:annotations:jar:31.7.3",
     visibility = ["PUBLIC"],
 )
 
@@ -38,7 +38,7 @@ third_party_jar(
     name = "sdklib",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/sdklib:sdklib",
     sha1 = "0adb7cac2ab282100e2b8b6d66b997a69ed06adf",
-    url = "mvn:com.android.tools:sdklib:jar:31.7.3",
+    url = "mvn:https://maven.google.com:com.android.tools:sdklib:jar:31.7.3",
     visibility = [
         "prelude//toolchains/android/third-party/aosp:aosp",
     ],
@@ -47,8 +47,20 @@ third_party_jar(
 buck_java_library(
     name = "tools-sdk-common",
     visibility = [
-        "prelude//toolchains/android/src/...",
-        "prelude//toolchains/android/test/...",
+        "prelude//toolchains/android/src/com/facebook/buck/android/aapt:merge_android_resource_sources",
+        "prelude//toolchains/android/src/com/facebook/buck/android/manifest:manifest",
+        "prelude//toolchains/android/test/com/facebook/buck/android:testutil",
+        "prelude//toolchains/android/test/com/facebook/buck/android/manifest:manifest",
+        "prelude//toolchains/android/test/com/facebook/buck/jvm/java:java",
+        "prelude//toolchains/android/test/com/facebook/buck/jvm/java:testutil",
+        "prelude//toolchains/android/test/com/facebook/buck/jvm/java/abi:abi",
+        "prelude//toolchains/android/test/com/facebook/buck/jvm/java/abi:testutil",
+        "prelude//toolchains/android/test/com/facebook/buck/jvm/kotlin:kotlin",
+        "prelude//toolchains/android/test/com/facebook/buck/testrunner:testrunner",
+        "prelude//toolchains/android/test/com/facebook/buck/testutil:testutil_test",
+        "prelude//toolchains/android/test/com/facebook/buck/testutil/integration:util",
+        "prelude//toolchains/android/test/com/facebook/buck/util:util",
+        "prelude//toolchains/android/test/com/facebook/buck/util/xml:xml",
     ],
     deps = [
         ":layoutlib-api",
@@ -64,7 +76,7 @@ third_party_jar(
     name = "android-common",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/common:common",
     sha1 = "c3df7b51ee1a72acf051e0e5efbeb8023fb4ea57",
-    url = "mvn:com.android.tools:common:jar:31.7.3",
+    url = "mvn:https://maven.google.com:com.android.tools:common:jar:31.7.3",
     visibility = ["PUBLIC"],
 )
 
@@ -72,7 +84,10 @@ third_party_jar(
     name = "sdk-common",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/sdk-common:sdk-common",
     sha1 = "d17c3d28724a5f3e90a5ae053714627b740ff80c",
-    url = "mvn:com.android.tools:sdk-common:jar:31.7.3",
+    url = "mvn:https://maven.google.com:com.android.tools:sdk-common:jar:31.7.3",
+    visibility = [
+        "prelude//toolchains/android/third-party/aosp:aosp",
+    ],
     deps = [":guava"],
 )
 
@@ -80,7 +95,7 @@ third_party_jar(
     name = "layoutlib-api",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/layoutlib/layoutlib-api:layoutlib-api",
     sha1 = "6abada4555fa60825ea5f353443a7e561445c4f0",
-    url = "mvn:com.android.tools.layoutlib:layoutlib-api:jar:31.7.3",
+    url = "mvn:https://maven.google.com:com.android.tools.layoutlib:layoutlib-api:jar:31.7.3",
     visibility = [
         "prelude//toolchains/android/src/com/facebook/buck/android/aapt:merge_android_resource_sources",
     ],
@@ -90,13 +105,25 @@ third_party_jar(
     name = "ddmlib",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/ddms/ddmlib:ddmlib",
     sha1 = "525b44de6936a7c487095652f014d0bfc84bb9ad",
-    url = "mvn:com.android.tools.ddms:ddmlib:jar:31.7.3",
+    url = "mvn:https://maven.google.com:com.android.tools.ddms:ddmlib:jar:31.7.3",
     visibility = ["PUBLIC"],
     deps = [
         ":android-common",
         ":guava",
         ":kxml2",
         ":protobuf",
+    ],
+)
+
+third_party_jar(
+    name = "manifest-merger",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/build/manifest-merger:manifest-merger",
+    sha1 = "0d0489e76e4eb785336317add6b65d57b928a429",
+    url = "mvn:com.android.tools.build:manifest-merger:jar:31.7.3",
+    visibility = [
+        "prelude//toolchains/android/src/com/facebook/buck/android/manifest:manifest",
+        "prelude//toolchains/android/third-party:manifest-merger",
+        "prelude//toolchains/android/third-party/aosp:aosp",
     ],
 )
 # ===   End: android
@@ -152,7 +179,7 @@ third_party_jar(
     name = "bundletool-prebuilt",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/android/tools/build/bundletool:bundletool__toolchain",
     sha1 = "88e6c67d315e7d2a860bb00b1bd93914f2c4fd33",
-    url = "mvn:com.android.tools.build:bundletool:jar:1.16.0",
+    url = "mvn:https://maven.google.com:com.android.tools.build:bundletool:jar:1.16.0",
 )
 
 buck_java_library(
@@ -174,9 +201,9 @@ buck_java_library(
 
 third_party_jar(
     name = "commons-compress",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/apache/commons/commons-compress:commons-compress__toolchain",
-    sha1 = "b4b1b5a3d9573b2970fddab236102c0a4d27d35e",
-    url = "mvn:org.apache.commons:commons-compress:jar:1.24.0",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/apache/commons/commons-compress:commons-compress",
+    sha1 = "659feffdd12280201c8aacb8f7be94f9a883c824",
+    url = "mvn:org.apache.commons:commons-compress:jar:1.26.0",
     visibility = ["PUBLIC"],
 )
 # ===   End: commons-compress
@@ -329,6 +356,7 @@ third_party_jar(
     # Plus consistency across the codebase is nice.
     visibility = [
         "prelude//toolchains/android/src/com/facebook/buck/android/bundle:bundle",
+        "prelude//toolchains/android/src/com/facebook/buck/jvm/kotlin/cd/workertool:main_lib",
         "prelude//toolchains/android/third-party/aosp:aosp",  # Sad transitive deps are sad
         ":remote-apis",  # Legacy caller which should probably use Jackson
     ],
@@ -711,7 +739,6 @@ third_party_jar(
     sha1 = "8ac9e16d933b6fb43bc7f576336b8f4d7eb5ba12",
     url = "mvn:junit:junit:jar:4.13.2",
     visibility = [
-        "fbsource//xplat/buck2/platform/apple/installer/test/...",
         "prelude//toolchains/android/src/com/facebook/buck/...",
         "prelude//toolchains/android/src/com/facebook/buck/testrunner:junit",
         "prelude//toolchains/android/test/com/facebook/buck/...",
@@ -799,6 +826,14 @@ third_party_jar(
 
 third_party_jar(
     name = "kotlin-stdlib",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-stdlib__toolchain",
+    sha1 = "85f8b81009cda5890e54ba67d64b5e599c645020",
+    url = "mvn:org.jetbrains.kotlin:kotlin-stdlib:jar:2.1.0",
+    visibility = ["PUBLIC"],
+)
+
+third_party_jar(
+    name = "classic_kotlin-stdlib",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-stdlib:kotlin-stdlib__toolchain",
     sha1 = "85f8b81009cda5890e54ba67d64b5e599c645020",
     url = "mvn:org.jetbrains.kotlin:kotlin-stdlib:jar:2.1.0",
@@ -807,7 +842,7 @@ third_party_jar(
 
 third_party_jar(
     name = "jvm-abi-gen",
-    # @oss-disable[end= ]: internal_alias = "fbsource//xplat/kotlin/jvm-abi-gen:jvm-abi-gen",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:jvm-abi-gen",
     sha1 = "ec44cc7ca0ffc6c21358b0628b5eaafb34a1a20c",
     url = "mvn:org.jetbrains.kotlin:jvm-abi-gen:jar:2.1.0",
     visibility = ["PUBLIC"],
@@ -816,6 +851,14 @@ third_party_jar(
 # We need to figure out how to handle JAR patches
 third_party_jar(
     name = "kotlin-compiler-embeddable",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-compiler-embeddable__toolchain",
+    sha1 = "988bf980588bbbcfa1ba19c1ffd7aa869b335a31",
+    url = "mvn:org.jetbrains.kotlin:kotlin-compiler-embeddable:jar:2.1.0",
+    visibility = ["PUBLIC"],
+)
+
+third_party_jar(
+    name = "classic_kotlin-compiler-embeddable",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-compiler-embeddable:kotlin-compiler-embeddable__toolchain",
     sha1 = "988bf980588bbbcfa1ba19c1ffd7aa869b335a31",
     url = "mvn:org.jetbrains.kotlin:kotlin-compiler-embeddable:jar:2.1.0",
@@ -838,6 +881,14 @@ third_party_jar(
 
 third_party_jar(
     name = "kotlin-reflect",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-reflect__toolchain",
+    sha1 = "dc3753b59b67d79b7d2f546d51e22a0ec1f082d8",
+    url = "mvn:org.jetbrains.kotlin:kotlin-reflect:jar:2.1.0",
+    visibility = ["PUBLIC"],
+)
+
+third_party_jar(
+    name = "classic_kotlin-reflect",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-reflect:kotlin-reflect__toolchain",
     sha1 = "dc3753b59b67d79b7d2f546d51e22a0ec1f082d8",
     url = "mvn:org.jetbrains.kotlin:kotlin-reflect:jar:2.1.0",
@@ -846,6 +897,14 @@ third_party_jar(
 
 third_party_jar(
     name = "kotlin-script-runtime",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-script-runtime",
+    sha1 = "5909da8c57b75a117714ab0e348c86101b7a3284",
+    url = "mvn:org.jetbrains.kotlin:kotlin-script-runtime:jar:2.1.0",
+    visibility = ["PUBLIC"],
+)
+
+third_party_jar(
+    name = "classic_kotlin-script-runtime",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-script-runtime:kotlin-script-runtime",
     sha1 = "5909da8c57b75a117714ab0e348c86101b7a3284",
     url = "mvn:org.jetbrains.kotlin:kotlin-script-runtime:jar:2.1.0",
@@ -854,6 +913,14 @@ third_party_jar(
 
 third_party_jar(
     name = "kotlin-annotation-processing-embeddable",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-annotation-processing-embeddable",
+    sha1 = "5bc00235fae6530545a819fb821ca8b3df1d41d7",
+    url = "mvn:org.jetbrains.kotlin:kotlin-annotation-processing-embeddable:jar:2.1.0",
+    visibility = ["PUBLIC"],
+)
+
+third_party_jar(
+    name = "classic_kotlin-annotation-processing-embeddable",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-annotation-processing-embeddable:kotlin-annotation-processing-embeddable",
     sha1 = "5bc00235fae6530545a819fb821ca8b3df1d41d7",
     url = "mvn:org.jetbrains.kotlin:kotlin-annotation-processing-embeddable:jar:2.1.0",
@@ -862,7 +929,7 @@ third_party_jar(
 
 third_party_jar(
     name = "kotlin-build-tools-api",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-build-tools-api:kotlin-build-tools-api__toolchain",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-build-tools-api__toolchain",
     sha1 = "e6c176cdaeb5ce3751c120eb1dfd84e5cc64d369",
     url = "mvn:org.jetbrains.kotlin:kotlin-build-tools-api:jar:2.1.0",
     visibility = [
@@ -875,7 +942,7 @@ third_party_jar(
 # We need to figure out how to handle JAR patches
 third_party_jar(
     name = "kotlin-build-tools-impl",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-build-tools-impl:kotlin-build-tools-impl__toolchain",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-build-tools-impl__toolchain",
     sha1 = "a8f65725498c49ddc384d7107c3fd937c248d28d",
     url = "mvn:org.jetbrains.kotlin:kotlin-build-tools-impl:jar:2.1.0",
     visibility = ["PUBLIC"],
@@ -883,7 +950,7 @@ third_party_jar(
 
 third_party_jar(
     name = "kotlin-daemon-client",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-daemon-client:kotlin-daemon-client",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-daemon-client",
     sha1 = "2c219a5026f6c4c1188b40cb3b6bb557f16182b7",
     url = "mvn:org.jetbrains.kotlin:kotlin-daemon-client:jar:2.1.0",
     visibility = ["PUBLIC"],
@@ -891,7 +958,7 @@ third_party_jar(
 
 third_party_jar(
     name = "kotlin-metadata-jvm",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/jetbrains/kotlin/kotlin-metadata-jvm:kotlin-metadata-jvm__toolchain",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:kotlin-metadata-jvm__toolchain",
     sha1 = "950bc99bcacf2f0a2c073e53824a3f2f2086a192",
     url = "mvn:org.jetbrains.kotlin:kotlin-metadata-jvm:jar:2.1.0",
     visibility = ["PUBLIC"],
@@ -903,6 +970,22 @@ third_party_jar(
     sha1 = "2df03e8b2afdb98dda7b6b0753cd5d9b12b40031",
     url = "mvn:com.squareup:kotlinpoet-jvm:jar:1.16.0",
     visibility = ["PUBLIC"],
+)
+
+buck_java_binary(
+    name = "classic_kotlin-compiler-binary",
+    main_class = "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
+    visibility = ["PUBLIC"],
+    deps = [
+        ":classic_kotlin-compiler-embeddable",
+        ":classic_kotlin-reflect",
+        ":classic_kotlin-script-runtime",
+        ":classic_kotlin-stdlib",
+        ":guava-jar",
+        ":kotlin-annotations",
+        ":kotlinx-coroutines-core-jvm",
+        ":trove",
+    ],
 )
 
 buck_java_binary(
@@ -957,7 +1040,7 @@ third_party_jar(
 
 third_party_jar(
     name = "symbol-processing-aa-embeddable",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/google/devtools/ksp/symbol-processing-aa-embeddable:symbol-processing-aa-embeddable__toolchain",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:symbol-processing-aa-embeddable__toolchain",
     sha1 = "60b5adcf312a05e731ee457947c9c1b7719e14a8",
     url = "mvn:com.google.devtools.ksp:symbol-processing-aa-embeddable:jar:2.1.0-1.0.29",
     visibility = ["PUBLIC"],
@@ -965,7 +1048,7 @@ third_party_jar(
 
 third_party_jar(
     name = "symbol-processing-api",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/google/devtools/ksp/symbol-processing-api:symbol-processing-api",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:symbol-processing-api",
     sha1 = "f958b777b38452f8482c6cfa797600f4f085575d",
     url = "mvn:com.google.devtools.ksp:symbol-processing-api:jar:2.1.0-1.0.29",
     visibility = ["PUBLIC"],
@@ -973,7 +1056,7 @@ third_party_jar(
 
 third_party_jar(
     name = "symbol-processing-common-deps",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/google/devtools/ksp/symbol-processing-common-deps:symbol-processing-common-deps",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/kotlincd:symbol-processing-common-deps",
     sha1 = "981907d8ef3d6d20c54bef09b51b5ae4b33e2f3b",
     url = "mvn:com.google.devtools.ksp:symbol-processing-common-deps:jar:2.1.0-1.0.29",
     visibility = ["PUBLIC"],
@@ -990,17 +1073,6 @@ third_party_jar(
     visibility = ["PUBLIC"],
 )
 # ===   End: kxml2
-
-# === Begin: nuprocess
-
-third_party_jar(
-    name = "nuprocess",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/com/zaxxer/nuprocess:nuprocess__toolchain",
-    sha1 = "d98f476eb858a64d8bad10abfa320b5d04b4d707",
-    url = "mvn:com.zaxxer:nuprocess:jar:2.0.5",
-    visibility = ["PUBLIC"],
-)
-# ===   End: nuprocess
 
 # === Begin: okhttp
 
@@ -1218,22 +1290,9 @@ third_party_jar(
 
 third_party_jar(
     name = "mockito",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/mockito:mockito-robolectric",
-    sha1 = "3d1dffee9a8a1998ec782383ca2f818848f2d5f1",
-    url = "mvn:org.mockito:mockito-inline:jar:4.11.0",
-    visibility = [
-        "prelude//toolchains/android/test/...",
-    ],
-    deps = [
-        ":mockito-core",
-    ],
-)
-
-third_party_jar(
-    name = "mockito-core",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/mockito:mockito-library",
-    sha1 = "ce5226440c2ee78915716d4ce3d10aed2dbf26fb",
-    url = "mvn:org.mockito:mockito-core:jar:4.11.0",
+    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/mockito/mockito-core:mockito-core",
+    sha1 = "a32f446f38acf636363c5693db6498047731b9e0",
+    url = "mvn:org.mockito:mockito-core:jar:5.20.0",
     visibility = [
         "PUBLIC",
     ],
@@ -1245,24 +1304,14 @@ third_party_jar(
 )
 
 third_party_jar(
-    name = "mockito-inline",
-    # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/mockito/mockito-inline:mockito-inline",
-    sha1 = "3d1dffee9a8a1998ec782383ca2f818848f2d5f1",
-    url = "mvn:org.mockito:mockito-inline:jar:4.11.0",
-    visibility = ["PUBLIC"],
-    deps = [
-        ":mockito-core",
-    ],
-)
-
-third_party_jar(
     name = "mockito-kotlin",
     # @oss-disable[end= ]: internal_alias = "fbsource//third-party/java/org/mockito/kotlin/mockito-kotlin:mockito-kotlin",
-    sha1 = "a89352b80ae4a2e3ce15a8046a09c85645fabf89",
-    url = "mvn:org.mockito.kotlin:mockito-kotlin:jar:4.1.0",
+    sha1 = "6c89533c7c38b1600ceea37b806cba3d9619c1ac",
+    url = "mvn:org.mockito.kotlin:mockito-kotlin:jar:6.1.0",
     visibility = ["PUBLIC"],
     deps = [
-        ":mockito-inline",
+        ":kotlin-reflect",
+        ":mockito",
     ],
 )
 # ===   End: mockito

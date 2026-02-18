@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use dice_error::DiceError;
 use dice_error::DiceResult;
 use dupe::Dupe;
 
-use crate::DiceModern;
+use crate::Dice;
 use crate::HashMap;
 use crate::api::key::InvalidationSourcePriority;
 use crate::api::key::Key;
@@ -34,13 +35,13 @@ use crate::versions::VersionNumber;
 // TODO fill this more
 #[derive(Allocative)]
 pub(crate) struct TransactionUpdater {
-    dice: Arc<DiceModern>,
+    dice: Arc<Dice>,
     scheduled_changes: Changes,
     user_data: Arc<UserComputationData>,
 }
 
 impl TransactionUpdater {
-    pub(crate) fn new(dice: Arc<DiceModern>, user_data: Arc<UserComputationData>) -> Self {
+    pub(crate) fn new(dice: Arc<Dice>, user_data: Arc<UserComputationData>) -> Self {
         Self {
             dice: dice.dupe(),
             scheduled_changes: Changes::new(dice),
@@ -165,11 +166,11 @@ impl Drop for ActiveTransactionGuardInner {
 #[derive(Allocative)]
 struct Changes {
     changes: HashMap<DiceKey, (ChangeType, InvalidationSourcePriority)>,
-    dice: Arc<DiceModern>,
+    dice: Arc<Dice>,
 }
 
 impl Changes {
-    pub(crate) fn new(dice: Arc<DiceModern>) -> Self {
+    pub(crate) fn new(dice: Arc<Dice>) -> Self {
         Self {
             changes: HashMap::default(),
             dice,
@@ -221,14 +222,14 @@ mod tests {
     use allocative::Allocative;
     use assert_matches::assert_matches;
     use async_trait::async_trait;
-    use buck2_futures::cancellation::CancellationContext;
     use derive_more::Display;
+    use dice_futures::cancellation::CancellationContext;
 
     use crate::api::computations::DiceComputations;
     use crate::api::data::DiceData;
     use crate::api::key::InvalidationSourcePriority;
     use crate::api::key::Key;
-    use crate::impls::dice::DiceModern;
+    use crate::impls::dice::Dice;
     use crate::impls::key::CowDiceKeyHashed;
     use crate::impls::transaction::ChangeType;
     use crate::versions::VersionNumber;
@@ -255,7 +256,7 @@ mod tests {
 
     #[test]
     fn changes_are_recorded() -> anyhow::Result<()> {
-        let dice = DiceModern::new(DiceData::new());
+        let dice = Dice::new(DiceData::new());
         let mut updater = dice.updater();
 
         updater.changed(vec![K(1), K(2)])?;
@@ -264,6 +265,8 @@ mod tests {
 
         assert_matches!(
             updater
+                .0
+                .0
                 .scheduled_changes
                 .changes
                 .get(&dice.key_index.index(CowDiceKeyHashed::key(K(1)))),
@@ -271,6 +274,8 @@ mod tests {
         );
         assert_matches!(
             updater
+                .0
+                .0
                 .scheduled_changes
                 .changes
                 .get(&dice.key_index.index(CowDiceKeyHashed::key(K(2)))),
@@ -279,7 +284,7 @@ mod tests {
 
         assert_matches!(
         updater
-            .scheduled_changes
+            .0.0.scheduled_changes
             .changes
             .get(&dice.key_index.index(CowDiceKeyHashed::key(K(3)))),
         Some((ChangeType::UpdateValue(x, _), _)) if *x.downcast_ref::<usize>().unwrap() == 3
@@ -287,7 +292,7 @@ mod tests {
 
         assert_matches!(
         updater
-            .scheduled_changes
+            .0.0.scheduled_changes
             .changes
             .get(&dice.key_index.index(CowDiceKeyHashed::key(K(4)))),
         Some((ChangeType::UpdateValue(x, _), _)) if *x.downcast_ref::<usize>().unwrap() == 4
@@ -300,16 +305,16 @@ mod tests {
 
     #[tokio::test]
     async fn transaction_versions() -> anyhow::Result<()> {
-        let dice = DiceModern::new(DiceData::new());
+        let dice = Dice::new(DiceData::new());
         let mut updater = dice.updater();
 
         updater.changed(vec![K(1), K(2)])?;
 
         let ctx = updater.existing_state().await;
-        assert_eq!(ctx.get_version(), VersionNumber::new(0));
+        assert_eq!(ctx.0.get_version(), VersionNumber::new(0));
 
         let ctx = updater.commit().await;
-        assert_eq!(ctx.get_version(), VersionNumber::new(1));
+        assert_eq!(ctx.0.get_version(), VersionNumber::new(1));
 
         Ok(())
     }

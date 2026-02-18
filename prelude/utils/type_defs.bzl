@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """Provides macros for queries type information."""
 
@@ -61,6 +62,19 @@ def is_dict(arg):
       True for dict instances, False otherwise. rtype: bool
     """
     return type(arg) == _DICT_TYPE
+
+_SET_TYPE = type(set())
+
+def is_set(arg):
+    """Checks if provided instance has a set type.
+
+    Args:
+      arg: An instance to check. type: Any
+
+    Returns:
+      True for set instances, False otherwise. rtype: bool
+    """
+    return type(arg) == _SET_TYPE
 
 _TUPLE_TYPE = type(())
 
@@ -137,6 +151,20 @@ def is_function(args):
     """
     return type(args) == _FUNCTION_TYPE
 
+_RECORD = record()
+_RECORD_TYPE = type(_RECORD())
+
+def is_record(obj):
+    """Checks if provided instance is a record value.
+
+    Args:
+      arg: An instance to check. type: Any
+
+    Returns:
+      True for record values, False otherwise. rtype: bool
+    """
+    return type(obj) == _RECORD_TYPE
+
 type_utils = struct(
     is_bool = is_bool,
     is_number = is_number,
@@ -144,9 +172,11 @@ type_utils = struct(
     is_unicode = is_unicode,
     is_list = is_list,
     is_dict = is_dict,
+    is_set = is_set,
     is_tuple = is_tuple,
     is_collection = is_collection,
     is_select = is_select,
     is_struct = is_struct,
     is_function = is_function,
+    is_record = is_record,
 )

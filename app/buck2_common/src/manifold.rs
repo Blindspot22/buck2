@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io;
@@ -12,12 +13,12 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use buck2_core::fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::abs_path::AbsPath;
 use buck2_http::HttpClient;
 use buck2_http::HttpClientBuilder;
-use buck2_http::retries::AsBuck2Error;
 use buck2_http::retries::HttpError;
 use buck2_http::retries::HttpErrorForRetry;
+use buck2_http::retries::IntoBuck2Error;
 use buck2_http::retries::http_retry;
 use bytes::Bytes;
 use dupe::Dupe;
@@ -89,14 +90,14 @@ impl HttpErrorForRetry for HttpAppendError {
     }
 }
 
-impl AsBuck2Error for HttpWriteError {
-    fn as_buck2_error(self) -> buck2_error::Error {
+impl IntoBuck2Error for HttpWriteError {
+    fn into_buck2_error(self) -> buck2_error::Error {
         buck2_error::Error::from(self)
     }
 }
 
-impl AsBuck2Error for HttpAppendError {
-    fn as_buck2_error(self) -> buck2_error::Error {
+impl IntoBuck2Error for HttpAppendError {
+    fn into_buck2_error(self) -> buck2_error::Error {
         buck2_error::Error::from(self)
     }
 }
@@ -162,7 +163,7 @@ impl Bucket {
 
 fn manifold_url(bucket: &Bucket, filename: String) -> String {
     let full_path = format!("{}/{}", bucket.name, filename);
-    format!("https://www.internalfb.com/manifold/explorer/{}", full_path)
+    format!("https://www.internalfb.com/manifold/explorer/{full_path}")
 }
 
 /// Return the place to upload logs, or None to not upload logs at all

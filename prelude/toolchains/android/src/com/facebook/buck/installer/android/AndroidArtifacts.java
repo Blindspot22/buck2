@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.installer.android;
@@ -17,7 +18,6 @@ class AndroidArtifacts {
   private AbsPath androidManifestPath;
   private AndroidInstallApkOptions apkOptions;
   private AbsPath apk;
-  private Optional<AbsPath> agentApk = Optional.empty();
   private Optional<AbsPath> secondaryDexExopackageInfoDirectory = Optional.empty();
   private Optional<AbsPath> secondaryDexExopackageInfoMetadata = Optional.empty();
   private Optional<AbsPath> nativeLibraryExopackageInfoDirectory = Optional.empty();
@@ -49,14 +49,6 @@ class AndroidArtifacts {
 
   public void setApk(AbsPath apk) {
     this.apk = apk;
-  }
-
-  public Optional<AbsPath> getAgentApk() {
-    return agentApk;
-  }
-
-  public void setAgentApk(Optional<AbsPath> agentApk) {
-    this.agentApk = agentApk;
   }
 
   public Optional<AbsPath> getSecondaryDexExopackageInfoDirectory() {

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.util.zip;
@@ -14,7 +15,6 @@ import static com.facebook.buck.util.zip.ZipOutputStreams.appendJarOutputStream;
 import static com.facebook.buck.util.zip.ZipOutputStreams.newJarOutputStream;
 import static java.util.Comparator.comparing;
 
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
@@ -84,7 +84,8 @@ public class JarBuilder {
                       propName, mergedValues == null ? values : mergedValues + "," + values);
                 }
               } catch (IOException ex) {
-                throw new HumanReadableException("Unable to merge properties", file, ex);
+                throw new RuntimeException(
+                    String.format("Unable to merge properties for file %s", file), ex);
               }
             }
             ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
@@ -92,7 +93,7 @@ public class JarBuilder {
               mergedProps.store(byteArrayOutputStream, "");
               return byteArrayOutputStream.toByteArray();
             } catch (IOException ex) {
-              throw new HumanReadableException("Unable to merge properties", ex);
+              throw new RuntimeException("Unable to merge properties", ex);
             }
           }
         };
@@ -154,6 +155,7 @@ public class JarBuilder {
   private final List<JarEntryContainer> overrideSourceContainers = new ArrayList<>();
   private final Set<String> alreadyAddedEntries = new HashSet<>();
   private final Map<String, Set<String>> mergeableResources = new HashMap<>();
+  private final List<JarEntrySupplier> additionalEntries = new ArrayList<>();
 
   protected Path getAppendJar() {
     return appendJar;
@@ -208,6 +210,13 @@ public class JarBuilder {
 
   public JarBuilder addEntry(JarEntrySupplier supplier) {
     sourceContainers.add(new SingletonJarEntryContainer(supplier));
+    return this;
+  }
+
+  public JarBuilder addEntries(List<JarEntrySupplier> suppliers) {
+    for (JarEntrySupplier supplier : suppliers) {
+      addEntry(supplier);
+    }
     return this;
   }
 
@@ -291,7 +300,7 @@ public class JarBuilder {
     addMergeableResources(jar);
 
     if (mainClass != null && !classPresent(mainClass)) {
-      throw new HumanReadableException("ERROR: Main class %s does not exist.", mainClass);
+      throw new RuntimeException(String.format("ERROR: Main class %s does not exist.", mainClass));
     }
 
     // Clean up any open file handles that we may have
@@ -346,15 +355,15 @@ public class JarBuilder {
 
   private void writeManifest(CustomJarOutputStream jar) throws IOException {
     mkdirs("META-INF/", jar);
-    DeterministicManifest manifest = jar.getManifest();
+
+    final DeterministicManifest manifest = jar.getManifest();
+    final JarManifestMerger manifestMerger = JarManifestMerger.get();
+
     manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
 
     if (shouldMergeManifests) {
       for (JarEntryContainer sourceContainer : sourceContainers) {
-        Manifest readManifest = sourceContainer.getManifest();
-        if (readManifest != null) {
-          merge(manifest, readManifest);
-        }
+        manifestMerger.merge(manifest, sourceContainer.getManifest());
       }
     }
 
@@ -362,8 +371,7 @@ public class JarBuilder {
     // so that values from the user overwrite values from merged manifests.
     for (Path manifestFile : manifestFiles) {
       try (InputStream stream = Files.newInputStream(manifestFile)) {
-        Manifest readManifest = new Manifest(stream);
-        merge(manifest, readManifest);
+        manifestMerger.merge(manifest, new Manifest(stream));
       }
     }
 
@@ -393,7 +401,7 @@ public class JarBuilder {
     return entry;
   }
 
-  protected void addEntriesToJar(Iterable<JarEntrySupplier> entries, CustomJarOutputStream jar)
+  private void addEntriesToJar(Iterable<JarEntrySupplier> entries, CustomJarOutputStream jar)
       throws IOException {
     for (JarEntrySupplier entrySupplier : entries) {
       addEntryToJar(entrySupplier, jar);
@@ -485,34 +493,6 @@ public class JarBuilder {
       length = name.lastIndexOf('/', length - 2) + 1;
     }
     return name.substring(0, length);
-  }
-
-  /**
-   * Merge entries from two Manifests together, with existing attributes being overwritten.
-   *
-   * @param into The Manifest to modify.
-   * @param from The Manifest to copy from.
-   */
-  private void merge(Manifest into, Manifest from) {
-
-    Attributes attributes = from.getMainAttributes();
-    if (attributes != null) {
-      for (Map.Entry<Object, Object> attribute : attributes.entrySet()) {
-        into.getMainAttributes().put(attribute.getKey(), attribute.getValue());
-      }
-    }
-
-    Map<String, Attributes> entries = from.getEntries();
-    if (entries != null) {
-      for (Map.Entry<String, Attributes> entry : entries.entrySet()) {
-        Attributes existing = into.getAttributes(entry.getKey());
-        if (existing == null) {
-          existing = new Attributes();
-          into.getEntries().put(entry.getKey(), existing);
-        }
-        existing.putAll(entry.getValue());
-      }
-    }
   }
 
   private boolean isDuplicateAllowed(String name) {

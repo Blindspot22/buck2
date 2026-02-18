@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_build_api::interpreter::rule_defs::register_rule_defs;
@@ -22,7 +23,7 @@ fn new_tester() -> Tester {
 }
 
 #[test]
-fn test_construction() -> anyhow::Result<()> {
+fn test_construction() -> buck2_error::Result<()> {
     let mut tester = new_tester();
     let test = indoc!(
         r#"
@@ -38,7 +39,7 @@ fn test_construction() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_missing_fields_validation() -> anyhow::Result<()> {
+fn test_missing_fields_validation() -> buck2_error::Result<()> {
     let mut tester = new_tester();
     {
         let test = indoc!(
@@ -79,7 +80,7 @@ fn test_validation_1() {
     expect_error(
         tester.run_starlark_bzl_test(test),
         test,
-        "Expected type `CellPath | CellRoot | Label",
+        "Expected type `Artifact | CellPath | CellRoot",
     );
 }
 
@@ -186,7 +187,7 @@ fn test_validation_7() {
 }
 
 #[test]
-fn test_validation_at_freeze() -> anyhow::Result<()> {
+fn test_validation_at_freeze() -> buck2_error::Result<()> {
     let mut tester = new_tester();
     let test = indoc!(
         r#"

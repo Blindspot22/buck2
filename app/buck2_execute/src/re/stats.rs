@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future::Future;
@@ -126,6 +127,10 @@ pub(super) struct LocalCacheStats {
     hits_bytes: AtomicI64,
     misses_files: AtomicI64,
     misses_bytes: AtomicI64,
+    hits_from_memory: AtomicI64,
+    hits_from_fs: AtomicI64,
+    cache_lookups: AtomicI64,
+    cache_lookup_latency_microseconds: AtomicI64,
 }
 
 impl LocalCacheStats {
@@ -138,6 +143,18 @@ impl LocalCacheStats {
             .fetch_add(stat.misses_files, Ordering::Relaxed);
         self.misses_bytes
             .fetch_add(stat.misses_bytes, Ordering::Relaxed);
+        self.hits_from_memory.fetch_add(
+            stat.cache_funnel_stats.digests_served_from_memory,
+            Ordering::Relaxed,
+        );
+        self.hits_from_fs.fetch_add(
+            stat.cache_funnel_stats.digests_served_from_fs,
+            Ordering::Relaxed,
+        );
+        self.cache_lookups
+            .fetch_add(stat.total_cache_lookup_attempts, Ordering::Relaxed);
+        self.cache_lookup_latency_microseconds
+            .fetch_add(stat.cache_lookup_latency_microseconds, Ordering::Relaxed);
     }
 }
 
@@ -147,6 +164,10 @@ pub struct LocalCacheRemoteExecutionClientStats {
     pub hits_bytes: i64,
     pub misses_files: i64,
     pub misses_bytes: i64,
+    pub hits_from_memory: i64,
+    pub hits_from_fs: i64,
+    pub cache_lookups: i64,
+    pub cache_lookup_latency_microseconds: i64,
 }
 
 impl From<&'_ LocalCacheStats> for LocalCacheRemoteExecutionClientStats {
@@ -156,6 +177,12 @@ impl From<&'_ LocalCacheStats> for LocalCacheRemoteExecutionClientStats {
             hits_bytes: stats.hits_bytes.load(Ordering::Relaxed),
             misses_files: stats.misses_files.load(Ordering::Relaxed),
             misses_bytes: stats.misses_bytes.load(Ordering::Relaxed),
+            hits_from_memory: stats.hits_from_memory.load(Ordering::Relaxed),
+            hits_from_fs: stats.hits_from_fs.load(Ordering::Relaxed),
+            cache_lookups: stats.cache_lookups.load(Ordering::Relaxed),
+            cache_lookup_latency_microseconds: stats
+                .cache_lookup_latency_microseconds
+                .load(Ordering::Relaxed),
         }
     }
 }

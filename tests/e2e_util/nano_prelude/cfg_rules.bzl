@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # This is copy-paste from `prelude/configurations/util.bzl`
 
@@ -104,8 +105,18 @@ def _execution_platform(ctx):
             label = ctx.label.raw_target(),
             configuration = ctx.attrs.platform[PlatformInfo].configuration,
             executor_config = CommandExecutorConfig(
-                local_enabled = True,
-                remote_enabled = False,
+                local_enabled = ctx.attrs.local_enabled,
+                remote_enabled = ctx.attrs.remote_enabled,
+                remote_execution_properties = {
+                    "platform": "linux-remote-execution",
+                },
+                remote_execution_max_input_files_mebibytes = 1,
+                use_limited_hybrid = True,
+                allow_limited_hybrid_fallbacks = False,
+                allow_hybrid_fallbacks_on_failure = False,
+                remote_execution_use_case = "buck2-testing",
+                allow_cache_uploads = False,
+                max_cache_upload_mebibytes = 1,
             ),
         ),
     ]
@@ -113,6 +124,8 @@ def _execution_platform(ctx):
 execution_platform = rule(
     impl = _execution_platform,
     attrs = {
+        "local_enabled": attrs.bool(default = True),
         "platform": attrs.dep(providers = [PlatformInfo]),
+        "remote_enabled": attrs.bool(default = False),
     },
 )

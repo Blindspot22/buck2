@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Translation between buck core data and the test spec data types
 
-use anyhow::Context;
-use buck2_common::file_ops::FileDigest;
+use buck2_common::file_ops::metadata::FileDigest;
 use buck2_core::cells::CellResolver;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_data::ToProtoMessage;
@@ -28,7 +28,9 @@ pub(crate) fn build_configured_target_handle(
     target: ConfiguredProvidersLabel,
     session: &TestSession,
     cell_resolver: &CellResolver,
-) -> anyhow::Result<ConfiguredTarget> {
+    test_config_unification_rollout: bool,
+    package_oncall: Option<String>,
+) -> buck2_error::Result<ConfiguredTarget> {
     let label = target.target().unconfigured();
     let cell = label.pkg().cell_name().to_string();
     let package = label.pkg().cell_relative_path().to_string();
@@ -40,7 +42,7 @@ pub(crate) fn build_configured_target_handle(
     let configuration = target.cfg().to_string();
     let package_project_relative_path = cell_resolver
         .resolve_path(label.pkg().as_cell_path())
-        .buck_error_context_anyhow("Failed to resolve the project relative path of package")?;
+        .buck_error_context("Failed to resolve the project relative path of package")?;
 
     Ok(ConfiguredTarget {
         handle: session.register(target),
@@ -49,13 +51,15 @@ pub(crate) fn build_configured_target_handle(
         target: target_name,
         configuration,
         package_project_relative_path: package_project_relative_path.into(),
+        test_config_unification_rollout,
+        package_oncall,
     })
 }
 
 pub(crate) fn convert_test_result(
     test_result: buck2_test_api::data::TestResult,
     session: &TestSession,
-) -> anyhow::Result<buck2_data::TestResult> {
+) -> buck2_error::Result<buck2_data::TestResult> {
     let buck2_test_api::data::TestResult {
         name,
         status,
@@ -70,7 +74,7 @@ pub(crate) fn convert_test_result(
 
     Ok(buck2_data::TestResult {
         name,
-        status: status.try_into().context("Invalid `status`")?,
+        status: status.try_into().buck_error_context("Invalid `status`")?,
         msg: msg.map(|msg| buck2_data::test_result::OptionalMsg { msg }),
         duration: duration.and_then(|d| d.try_into().ok()),
         details,

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.util.zip;
@@ -44,7 +45,22 @@ public class IncrementalJarOutputStreamImpl extends AppendingZipOutputStreamImpl
       final FileChannel dstChannel = FileChannel.open(dst, CREATE, WRITE);
 
       // copy the block of files that exists in the input jar
-      dstChannel.transferFrom(srcChannel, 0, centralDirectory.getEntryOffset());
+      // transferFrom may not transfer all requested bytes in a single call,
+      // so we need to loop until all bytes are transferred
+      long bytesToTransfer = centralDirectory.getEntryOffset();
+      long position = 0;
+      while (position < bytesToTransfer) {
+        long transferred =
+            dstChannel.transferFrom(srcChannel, position, bytesToTransfer - position);
+        if (transferred == 0) {
+          throw new IOException(
+              "Failed to transfer bytes from source jar: transferred 0 bytes at position "
+                  + position
+                  + " of "
+                  + bytesToTransfer);
+        }
+        position += transferred;
+      }
       dstChannel.position(centralDirectory.getEntryOffset());
 
       return new IncrementalJarOutputStreamImpl(

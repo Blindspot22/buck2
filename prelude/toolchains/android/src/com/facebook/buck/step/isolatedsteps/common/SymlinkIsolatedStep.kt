@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.step.isolatedsteps.common
@@ -32,7 +33,11 @@ data class SymlinkIsolatedStep(val existingPath: RelPath, val desiredPath: RelPa
     val desiredAbsPath = ProjectFilesystemUtils.getAbsPathForRelativePath(ruleCellRoot, desiredPath)
 
     ProjectFilesystemUtils.createSymLink(
-        ruleCellRoot, desiredAbsPath.path, existingAbsPath.path, /* force */ true)
+        ruleCellRoot,
+        desiredAbsPath.path,
+        existingAbsPath.path, /* force */
+        true,
+    )
 
     return StepExecutionResults.SUCCESS
   }
@@ -45,6 +50,7 @@ data class SymlinkIsolatedStep(val existingPath: RelPath, val desiredPath: RelPa
         "-f",
         "-s",
         ProjectFilesystemUtils.getAbsPathForRelativePath(ruleCellRoot, existingPath).toString(),
-        ProjectFilesystemUtils.getAbsPathForRelativePath(ruleCellRoot, desiredPath).toString())
+        ProjectFilesystemUtils.getAbsPathForRelativePath(ruleCellRoot, desiredPath).toString(),
+    )
   }
 }

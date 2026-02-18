@@ -1,6 +1,6 @@
 [package]
 description = "Code supporting buck2 event log handling"
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_event_log"
 repository = { workspace = true }
@@ -16,6 +16,7 @@ gazebo = { workspace = true }
 itertools = { workspace = true }
 pin-project = { workspace = true }
 prost = { workspace = true }
+prost-types = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -32,6 +33,7 @@ buck2_data = { workspace = true }
 buck2_error = { workspace = true }
 buck2_event_observer = { workspace = true }
 buck2_events = { workspace = true }
+buck2_fs = { workspace = true }
 buck2_util = { workspace = true }
 buck2_wrapper_common = { workspace = true }
 

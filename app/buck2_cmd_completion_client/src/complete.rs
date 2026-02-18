@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 mod package;
@@ -18,13 +19,14 @@ use std::time::Duration;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
 use buck2_client_ctx::command_outcome::CommandOutcome;
 use buck2_client_ctx::common::BuckArgMatches;
-use buck2_client_ctx::exit_result::ExitCode;
+use buck2_client_ctx::events_ctx::EventsCtx;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_core::buck2_env;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_error::ErrorTag;
 use buck2_error::buck2_error;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_path::AbsPath;
 use package::PackageCompleter;
 use target::CompleteTargetCommand;
 
@@ -75,31 +77,36 @@ pub struct CompleteCommand {
 ///    make the corrections first, then next-step completions in a second
 ///    stage.
 impl CompleteCommand {
-    pub fn exec(self, matches: BuckArgMatches<'_>, ctx: ClientCommandContext<'_>) -> ExitResult {
+    pub fn exec(
+        self,
+        matches: BuckArgMatches<'_>,
+        ctx: ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
+    ) -> ExitResult {
         let lockfile = buck2_env!("COMPLETION_VERIFY_LOCKFILE", applicability = testing)?
             .map(AbsPath::new)
             .transpose()?;
 
         if let Some(lockfile) = lockfile {
-            drop(fs_util::write(lockfile, ""));
+            drop(fs_util::write(lockfile, "").categorize_internal());
         }
 
         let timeout = Duration::from_millis(self.timeout_ms);
 
         let res = ctx.with_runtime(|ctx| {
-            let fut = self.exec_no_lockfile(matches, ctx);
+            let fut = self.exec_no_lockfile(matches, ctx, events_ctx);
             // Note: This `async` block is necessary - tokio timeout futures care about being
             // created within the context of a tokio runtime.
             async move { tokio::time::timeout(timeout, fut).await }
         });
 
         if let Some(lockfile) = lockfile {
-            drop(fs_util::remove_file(lockfile));
+            drop(fs_util::remove_file(lockfile).categorize_internal());
         }
 
         match res {
             Ok(val) => val,
-            Err(_) => ExitResult::status(ExitCode::Timeout),
+            Err(_) => ExitResult::timeout(),
         }
     }
 
@@ -107,8 +114,9 @@ impl CompleteCommand {
         self,
         matches: BuckArgMatches<'_>,
         ctx: ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
-        let exit_result = match self.partial_target.split(':').collect::<Vec<_>>()[..] {
+        match self.partial_target.split(':').collect::<Vec<_>>()[..] {
             // Package completion is performed locally and called here directly
             [given_partial_package] => {
                 let roots = &ctx.paths()?.roots;
@@ -121,17 +129,15 @@ impl CompleteCommand {
                     &ctx.working_dir,
                     given_package.to_owned(),
                     given_partial_target.to_owned(),
-                    print_completions,
                 );
-                ctx.exec_async(completer, matches).await
+                ctx.exec_async(completer, matches, events_ctx).await
             }
             _ => buck2_error!(
                 ErrorTag::Input,
                 "Malformed target string (expected [[cell]//][path/to/package][:target_name])",
             )
             .into(),
-        };
-        exit_result
+        }
     }
 }
 

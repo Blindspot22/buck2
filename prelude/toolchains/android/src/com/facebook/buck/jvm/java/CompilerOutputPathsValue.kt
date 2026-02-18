@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java
@@ -19,7 +20,7 @@ data class CompilerOutputPathsValue(
     val libraryTargetFullyQualifiedName: String,
     val libraryCompilerOutputPath: CompilerOutputPaths,
     val sourceAbiCompilerOutputPath: CompilerOutputPaths,
-    val sourceOnlyAbiCompilerOutputPath: CompilerOutputPaths
+    val sourceOnlyAbiCompilerOutputPath: CompilerOutputPaths,
 ) {
   /** Returns [CompilerOutputPaths] by given `type` */
   fun getByType(type: BuildTargetValue.Type): CompilerOutputPaths {
@@ -41,13 +42,14 @@ data class CompilerOutputPathsValue(
         libraryTargetFullyQualifiedName: String,
         libraryCompilerOutputPath: CompilerOutputPaths,
         sourceAbiCompilerOutputPath: CompilerOutputPaths,
-        sourceOnlyAbiCompilerOutputPath: CompilerOutputPaths
+        sourceOnlyAbiCompilerOutputPath: CompilerOutputPaths,
     ): CompilerOutputPathsValue {
       return CompilerOutputPathsValue(
           libraryTargetFullyQualifiedName,
           libraryCompilerOutputPath,
           sourceAbiCompilerOutputPath,
-          sourceOnlyAbiCompilerOutputPath)
+          sourceOnlyAbiCompilerOutputPath,
+      )
     }
   }
 }

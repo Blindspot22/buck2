@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -40,7 +41,6 @@ use std::time::SystemTime;
 
 use buck2_cli_proto::CommandResult;
 use buck2_cli_proto::PartialResult;
-use buck2_error::BuckErrorContext;
 use buck2_wrapper_common::invocation_id::TraceId;
 use derive_more::From;
 use gazebo::variants::UnpackVariants;
@@ -151,7 +151,7 @@ impl BuckEvent {
                 match span_start_event
                     .data
                     .as_ref()
-                    .with_buck_error_context(|| BuckEventError::MissingField(self.clone()))?
+                    .ok_or_else(|| BuckEventError::MissingField(self.clone()))?
                 {
                     buck2_data::span_start_event::Data::Command(command_start) => {
                         Ok(Some(command_start))
@@ -179,10 +179,7 @@ impl TryFrom<Box<buck2_data::BuckEvent>> for BuckEvent {
         }
         Ok(Self {
             timestamp: SystemTime::try_from(
-                event
-                    .timestamp
-                    .clone()
-                    .ok_or(BuckEventError::MissingTimestamp)?,
+                event.timestamp.ok_or(BuckEventError::MissingTimestamp)?,
             )?,
             span_id: new_span_id(event.span_id),
             parent_id: new_span_id(event.parent_id),
@@ -300,8 +297,6 @@ pub fn init_late_bindings() {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use buck2_data::CommandStart;
     use buck2_data::SpanStartEvent;
 
@@ -317,8 +312,7 @@ mod tests {
             SpanStartEvent {
                 data: Some(
                     CommandStart {
-                        data: None,
-                        metadata: HashMap::new(),
+                        ..Default::default()
                     }
                     .into(),
                 ),
@@ -335,10 +329,10 @@ mod tests {
     fn trace_id_hash_produces_a_reasonable_number() {
         let trace_id = TraceId::from_str("0436430c-2b02-624c-2032-570501212b57").unwrap();
         let hash = trace_id.hash();
-        assert_eq!(5739261098605499414, hash);
+        assert_eq!(3365465628718372403, hash);
 
         let other_trace_id = TraceId::from_str("586615bb-f57a-45a6-8804-3c6fcb0347de").unwrap();
         let hash = other_trace_id.hash();
-        assert_eq!(8717222666446319742, hash);
+        assert_eq!(-386302638890495926, hash);
     }
 }

@@ -4,14 +4,11 @@ Replay an event log.
 
 This command allows visualizing an existing event log in a Superconsole.
 
-Usage: buck2 log replay [OPTIONS] [PATH] [OVERRIDE_ARGS]...
+Usage: buck2 log replay [OPTIONS] [PATH]
 
 Arguments:
   [PATH]
           A path to an event-log file to read from
-
-  [OVERRIDE_ARGS]...
-          Override the arguments
 
 Options:
       --recent <NUMBER>
@@ -29,8 +26,21 @@ Options:
       --speed <NUMBER>
           Control the playback speed using a float (i.e. 0.5, 2, etc)
 
+          [default: 1.0]
+
+      --seek <SEEK>
+          Skip to the given number of seconds after the start of the command before starting the
+          replay
+
+      --seek-absolute <SEEK_ABSOLUTE>
+          Skip to the given unixtime number of seconds (floating point) or nanoseconds (integral)
+          before starting the replay
+
       --preload
           Preload the event log. This is typically only useful for benchmarking
+
+      --start-paused
+          Start the replay in a paused state, press 'y' to resume
 
   -h, --help
           Print help (see a summary with '-h')
@@ -66,6 +76,18 @@ Console Options:
           [env: BUCK_NO_INTERACTIVE_CONSOLE=]
 
 Universal Options:
+      --isolation-dir <ISOLATION_DIR>
+          The name of the directory that Buck2 creates within buck-out for writing outputs and
+          daemon information. If one is not provided, Buck2 creates a directory with the default
+          name.
+
+          Instances of Buck2 share a daemon if and only if their isolation directory is identical.
+          The isolation directory also influences the output paths provided by Buck2, and as a
+          result using a non-default isolation dir will cause cache misses (and slower builds).
+
+          [env: BUCK_ISOLATION_DIR=]
+          [default: v2]
+
   -v, --verbose <VERBOSITY>
           How verbose buck should be while logging.
 
@@ -76,6 +98,7 @@ Universal Options:
           actions, status, stats, success) to fine-tune the verbosity of the log. Example usage
           "-v=1,stderr"
 
+          [env: BUCK_VERBOSE=]
           [default: 1]
 
       --oncall <ONCALL>

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -14,7 +15,6 @@ use buck2_data::ActionKind;
 use buck2_data::ActionName;
 use buck2_data::BuckEvent;
 use buck2_data::StarlarkUserEvent;
-use buck2_error::BuckErrorContext;
 use buck2_event_observer::display::TargetDisplayOptions;
 use buck2_event_observer::display::display_action_owner;
 use serde::Deserialize;
@@ -85,21 +85,20 @@ pub(crate) fn try_get_user_event(buck_event: &BuckEvent) -> buck2_error::Result<
     let timestamp = buck_event
         .timestamp
         .as_ref()
-        .buck_error_context(SerializeUserEventError::MissingTimestamp)?;
+        .ok_or(SerializeUserEventError::MissingTimestamp)?;
     let epoch_millis = timestamp.seconds as u64 * 1000 + timestamp.nanos as u64 / 1_000_000;
 
     match buck_event
         .data
         .as_ref()
-        .buck_error_context(SerializeUserEventError::MissingData("BuckEvent".to_owned()))?
+        .ok_or_else(|| SerializeUserEventError::MissingData("BuckEvent".to_owned()))?
     {
-        buck2_data::buck_event::Data::Instant(ref instant) => {
+        buck2_data::buck_event::Data::Instant(instant) => {
             match instant
                 .data
                 .as_ref()
-                .buck_error_context(SerializeUserEventError::MissingData(
-                    "InstantEvent".to_owned(),
-                ))? {
+                .ok_or_else(|| SerializeUserEventError::MissingData("InstantEvent".to_owned()))?
+            {
                 buck2_data::instant_event::Data::StarlarkUserEvent(event) => Ok(Some(UserEvent {
                     data: UserEventData::StarlarkUserEvent(event.clone()),
                     epoch_millis,
@@ -107,17 +106,19 @@ pub(crate) fn try_get_user_event(buck_event: &BuckEvent) -> buck2_error::Result<
                 _ => Ok(None),
             }
         }
-        buck2_data::buck_event::Data::SpanEnd(ref span_end_event) => {
+        buck2_data::buck_event::Data::SpanEnd(span_end_event) => {
             let duration_millis = span_end_event
                 .duration
                 .as_ref()
-                .buck_error_context(SerializeUserEventError::MissingTimestamp)?
+                .ok_or(SerializeUserEventError::MissingTimestamp)?
                 .try_into_duration()?
                 .as_millis() as u64;
 
-            match span_end_event.data.as_ref().buck_error_context(
-                SerializeUserEventError::MissingData("SpanEndEvent".to_owned()),
-            )? {
+            match span_end_event
+                .data
+                .as_ref()
+                .ok_or_else(|| SerializeUserEventError::MissingData("SpanEndEvent".to_owned()))?
+            {
                 buck2_data::span_end_event::Data::ActionExecution(action_execution) => {
                     let mut input_materialization_duration_millis = 0;
 
@@ -127,12 +128,12 @@ pub(crate) fn try_get_user_event(buck_event: &BuckEvent) -> buck2_error::Result<
                             input_materialization_duration_millis = details
                                 .metadata
                                 .as_ref()
-                                .buck_error_context(
+                                .ok_or(
                                     SerializeUserEventError::MissingInputMaterializationDuration,
                                 )?
                                 .input_materialization_duration
                                 .as_ref()
-                                .buck_error_context(
+                                .ok_or(
                                     SerializeUserEventError::MissingInputMaterializationDuration,
                                 )?
                                 .try_into_duration()?
@@ -144,10 +145,10 @@ pub(crate) fn try_get_user_event(buck_event: &BuckEvent) -> buck2_error::Result<
                     let owner = action_execution
                         .key
                         .as_ref()
-                        .buck_error_context(SerializeUserEventError::MalformedActionKey)?
+                        .ok_or(SerializeUserEventError::MalformedActionKey)?
                         .owner
                         .as_ref()
-                        .buck_error_context(SerializeUserEventError::MalformedActionKey)?;
+                        .ok_or(SerializeUserEventError::MalformedActionKey)?;
 
                     // Let's just show the unconfigured label for simplicity
                     let owner = display_action_owner(owner, TargetDisplayOptions::for_log())?;
@@ -157,7 +158,7 @@ pub(crate) fn try_get_user_event(buck_event: &BuckEvent) -> buck2_error::Result<
                         name: action_execution
                             .name
                             .as_ref()
-                            .buck_error_context(SerializeUserEventError::MissingName)?
+                            .ok_or(SerializeUserEventError::MissingName)?
                             .clone(),
                         duration_millis,
                         output_size: action_execution.output_size,

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::path::Path;
@@ -16,14 +17,13 @@ use buck2_cli_proto::TargetCfg;
 use buck2_cli_proto::profile_request::ProfileOpts;
 use buck2_cli_proto::target_profile::Action;
 use buck2_common::pattern::parse_from_cli::parse_and_resolve_patterns_from_cli_args;
-use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_core::package::PackageLabel;
 use buck2_core::pattern::pattern_type::ConfiguredProvidersPatternExtra;
 use buck2_core::pattern::pattern_type::TargetPatternExtra;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
-use buck2_futures::spawn::spawn_dropcancel;
+use buck2_fs::paths::abs_path::AbsPath;
 use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_interpreter::starlark_profiler::config::GetStarlarkProfilerInstrumentation;
 use buck2_interpreter::starlark_profiler::config::StarlarkProfilerConfiguration;
@@ -40,6 +40,7 @@ use buck2_server_ctx::target_resolution_config::TargetResolutionConfig;
 use buck2_server_ctx::template::ServerCommandTemplate;
 use buck2_server_ctx::template::run_server_command;
 use dice::DiceTransaction;
+use dice_futures::spawn::spawn_dropcancel;
 use dupe::Dupe;
 use futures::future::FutureExt;
 
@@ -60,7 +61,7 @@ async fn generate_profile_analysis(
         .try_compute_join(targets, |ctx, label| {
             async move {
                 target_resolution_config
-                    .get_configured_target(ctx, &label.target_label)
+                    .get_configured_target(ctx, &label.target_label, None)
                     .await
             }
             .boxed()
@@ -102,7 +103,7 @@ async fn generate_profile_loading(
     let starlark_profile = &eval_result
         .starlark_profile
         .as_ref()
-        .internal_error("profile result must be set")?;
+        .ok_or_else(|| internal_error!("profile result must be set"))?;
     Ok(StarlarkProfileDataAndStats::downcast(&***starlark_profile)?.clone())
 }
 
@@ -152,7 +153,7 @@ impl ServerCommandTemplate for ProfileServerCommand {
                     &opts.target_patterns,
                     opts.target_cfg
                         .as_ref()
-                        .internal_error("target_cfg not set")?,
+                        .ok_or_else(|| internal_error!("target_cfg not set"))?,
                     &opts.target_universe,
                     action,
                     &profile_mode,
@@ -173,11 +174,6 @@ impl ServerCommandTemplate for ProfileServerCommand {
                 ));
             }
         }
-    }
-
-    fn is_success(&self, _response: &Self::Response) -> bool {
-        // No response if we failed.
-        true
     }
 }
 
@@ -217,11 +213,14 @@ async fn generate_profile(
             let ctx_data = ctx.per_transaction_data();
 
             let profiles = buck2_util::future::try_join_all(resolved.specs.into_iter().map(
-                |(package, _spec)| {
+                |(package_with_modifiers, _spec)| {
                     let ctx = ctx.dupe();
                     spawn_dropcancel(
                         move |_cancel| {
-                            async move { generate_profile_loading(&ctx, package).await }.boxed()
+                            async move {
+                                generate_profile_loading(&ctx, package_with_modifiers.package).await
+                            }
+                            .boxed()
                         },
                         &*ctx_data.spawner,
                         ctx_data,

@@ -1,40 +1,40 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use std::collections::HashSet;
 use std::fmt;
-use std::hash::BuildHasherDefault;
-use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use base64::Engine;
 use buck2_core::configuration::compatibility::MaybeCompatible;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
-use buck2_error::conversion::from_any_with_tag;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::configured_frontend::ConfiguredTargetNodeCalculation;
 use buck2_util::commas::commas;
-use buck2_util::strong_hasher::Blake3StrongHasher;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
 use dupe::Dupe;
-use probminhash::setsketcher::SetSketchParams;
-use probminhash::setsketcher::SetSketcher;
-use ref_cast::RefCast;
-use strong_hash::UseStrongHashing;
+use futures::FutureExt;
+
+use crate::build::detailed_aggregated_metrics::buck2_sketches::AnalysisGraphPropertiesKey;
+use crate::build::detailed_aggregated_metrics::buck2_sketches::compute_configured_graph_sketch;
+use crate::build::sketch_impl::MergeableGraphSketch;
 
 #[derive(Copy, Clone, Dupe, Debug, Eq, Hash, PartialEq, Allocative, Default)]
 pub struct GraphPropertiesOptions {
     pub configured_graph_size: bool,
     pub configured_graph_sketch: bool,
+    pub total_configured_graph_sketch: bool,
+    pub retained_analysis_memory_sketch: bool,
+    pub action_graph_sketch: bool,
 }
 
 impl fmt::Display for GraphPropertiesOptions {
@@ -42,6 +42,9 @@ impl fmt::Display for GraphPropertiesOptions {
         let Self {
             configured_graph_size,
             configured_graph_sketch,
+            total_configured_graph_sketch,
+            retained_analysis_memory_sketch,
+            action_graph_sketch,
         } = *self;
 
         let mut comma = commas();
@@ -53,7 +56,22 @@ impl fmt::Display for GraphPropertiesOptions {
 
         if configured_graph_sketch {
             comma(f)?;
-            write!(f, "configured_graph_size")?;
+            write!(f, "configured_graph_sketch")?;
+        }
+
+        if total_configured_graph_sketch {
+            comma(f)?;
+            write!(f, "total_configured_graph_sketch")?;
+        }
+
+        if retained_analysis_memory_sketch {
+            comma(f)?;
+            write!(f, "retained_analysis_memory_sketch")?;
+        }
+
+        if action_graph_sketch {
+            comma(f)?;
+            write!(f, "action_graph_sketch")?;
         }
 
         Ok(())
@@ -65,30 +83,33 @@ impl GraphPropertiesOptions {
         let Self {
             configured_graph_size,
             configured_graph_sketch,
+            total_configured_graph_sketch,
+            retained_analysis_memory_sketch,
+            action_graph_sketch,
         } = self;
 
-        !configured_graph_size && !configured_graph_sketch
+        !configured_graph_size
+            && !configured_graph_sketch
+            && !total_configured_graph_sketch
+            && !retained_analysis_memory_sketch
+            && !action_graph_sketch
+    }
+
+    pub(crate) fn should_compute_configured_graph_sketch(self) -> bool {
+        self.configured_graph_sketch || self.total_configured_graph_sketch
     }
 }
 
-#[derive(Clone, Dupe, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Debug, Eq, PartialEq, Allocative)]
+pub struct ConfiguredGraphPropertiesValues {
+    pub configured_graph_size: u64,
+    pub configured_graph_sketch: Option<MergeableGraphSketch<ConfiguredTargetLabel>>,
+}
+
+#[derive(Clone, Dupe, Debug, Eq, PartialEq, Allocative)]
 pub struct GraphPropertiesValues {
-    pub configured_graph_size: Option<u64>,
-    pub configured_graph_sketch: Option<ConfiguredGraphSketch>,
-}
-
-#[derive(Clone, Dupe, Debug, Eq, Hash, PartialEq, Allocative)]
-pub struct ConfiguredGraphSketch {
-    version: SketchVersion,
-    signature: Arc<Vec<u8>>,
-}
-
-impl ConfiguredGraphSketch {
-    pub fn serialize(&self) -> String {
-        let mut res = format!("{}:", self.version);
-        base64::engine::general_purpose::STANDARD_NO_PAD.encode_string(&*self.signature, &mut res);
-        res
-    }
+    pub configured: ConfiguredGraphPropertiesValues,
+    pub retained_analysis_memory_sketch: Option<MergeableGraphSketch<StarlarkEvalKind>>,
 }
 
 #[derive(
@@ -101,15 +122,19 @@ impl ConfiguredGraphSketch {
     PartialEq,
     Allocative
 )]
-#[display("GraphPropertiesKey: {} {}", label, properties)]
-struct GraphPropertiesKey {
+#[display(
+    "GraphPropertiesKey: {}, configured_graph_sketch={}",
+    label,
+    configured_graph_sketch
+)]
+struct ConfiguredGraphPropertiesKey {
     label: ConfiguredTargetLabel,
-    properties: GraphPropertiesOptions,
+    configured_graph_sketch: bool,
 }
 
 #[async_trait]
-impl Key for GraphPropertiesKey {
-    type Value = buck2_error::Result<MaybeCompatible<GraphPropertiesValues>>;
+impl Key for ConfiguredGraphPropertiesKey {
+    type Value = buck2_error::Result<MaybeCompatible<ConfiguredGraphPropertiesValues>>;
 
     async fn compute(
         &self,
@@ -117,7 +142,9 @@ impl Key for GraphPropertiesKey {
         _cancellation: &CancellationContext,
     ) -> Self::Value {
         let configured_node = ctx.get_configured_target_node(&self.label).await?;
-        debug_compute_configured_graph_properties_uncached(configured_node, self.properties)
+        Ok(configured_node.map(|configured_node| {
+            compute_configured_graph_sketch(configured_node, self.configured_graph_sketch)
+        }))
     }
 
     fn equality(a: &Self::Value, b: &Self::Value) -> bool {
@@ -128,100 +155,54 @@ impl Key for GraphPropertiesKey {
     }
 }
 
-#[derive(
-    Copy,
-    Clone,
-    Dupe,
-    Debug,
-    Eq,
-    Hash,
-    PartialEq,
-    Allocative,
-    derive_more::Display
-)]
-enum SketchVersion {
-    V1,
-}
-
-impl SketchVersion {
-    fn create_sketcher(self) -> VersionedSketcher {
-        let sketcher = match self {
-            Self::V1 => SetSketcher::<u16, _, _>::new(
-                // TODO (stansw): Are these params right?
-                SetSketchParams::default(),
-                BuildHasherDefault::<Blake3StrongHasher>::new(), // We want a predictable hash here.
-            ),
-        };
-
-        VersionedSketcher {
-            version: self,
-            sketcher,
-        }
-    }
-}
-
-struct VersionedSketcher {
-    version: SketchVersion,
-    sketcher: SetSketcher<u16, UseStrongHashing<ConfiguredTargetLabel>, Blake3StrongHasher>,
-}
-
 /// Returns the total graph size for all dependencies of a target.
-pub async fn get_configured_graph_properties(
+pub async fn get_graph_properties(
     ctx: &mut DiceComputations<'_>,
     label: &ConfiguredTargetLabel,
-    properties: GraphPropertiesOptions,
+    configured_graph_sketch: bool,
+    retained_analysis_memory_sketch: bool,
 ) -> buck2_error::Result<MaybeCompatible<GraphPropertiesValues>> {
-    ctx.compute(&GraphPropertiesKey {
-        label: label.dupe(),
-        properties,
-    })
-    .await?
+    let (conf, analysis) = ctx
+        .try_compute2(
+            |ctx| {
+                async {
+                    ctx.compute(&ConfiguredGraphPropertiesKey {
+                        label: label.dupe(),
+                        configured_graph_sketch,
+                    })
+                    .await?
+                }
+                .boxed()
+            },
+            |ctx| {
+                async {
+                    if retained_analysis_memory_sketch {
+                        Ok(Some(
+                            ctx.compute(&AnalysisGraphPropertiesKey {
+                                label: label.dupe(),
+                            })
+                            .await??,
+                        ))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                .boxed()
+            },
+        )
+        .await?;
+    Ok(conf.map(|conf| GraphPropertiesValues {
+        configured: conf,
+        retained_analysis_memory_sketch: analysis.map(|a| a.require_compatible().unwrap()),
+    }))
 }
 
 /// Returns the total graph size for all dependencies of a target without caching the result on the DICE graph.
 /// The cost of storing this on DICE is extremely low, so there's almost no reason to use this function (we currently
 /// expose it just for performance testing).
 pub fn debug_compute_configured_graph_properties_uncached(
-    node: MaybeCompatible<ConfiguredTargetNode>,
-    properties: GraphPropertiesOptions,
-) -> buck2_error::Result<MaybeCompatible<GraphPropertiesValues>> {
-    node.try_map(|node| {
-        let mut queue = vec![&node];
-        let mut visited: HashSet<_, fxhash::FxBuildHasher> = HashSet::default();
-        visited.insert(&node);
-
-        let mut sketch = if properties.configured_graph_sketch {
-            Some(SketchVersion::V1.create_sketcher())
-        } else {
-            None
-        };
-
-        while let Some(item) = queue.pop() {
-            for d in item.deps() {
-                if visited.insert(d) {
-                    queue.push(d);
-                }
-            }
-
-            if let Some(sketch) = sketch.as_mut() {
-                let label = UseStrongHashing::ref_cast(item.label());
-                sketch
-                    .sketcher
-                    .sketch(label)
-                    .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::BuildSketchError))?;
-            }
-        }
-
-        Ok(GraphPropertiesValues {
-            configured_graph_size: Some(visited.len() as _),
-            configured_graph_sketch: sketch.map(|sketch| {
-                let signature = sketch.sketcher.get_signature();
-                let signature = signature.iter().flat_map(|v| v.to_ne_bytes()).collect();
-                ConfiguredGraphSketch {
-                    version: sketch.version,
-                    signature: Arc::new(signature),
-                }
-            }),
-        })
-    })
+    node: ConfiguredTargetNode,
+    configured_graph_sketch: bool,
+) -> ConfiguredGraphPropertiesValues {
+    compute_configured_graph_sketch(node, configured_graph_sketch)
 }

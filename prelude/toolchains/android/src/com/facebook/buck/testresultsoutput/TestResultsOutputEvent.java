@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testresultsoutput;
@@ -35,13 +36,18 @@ public class TestResultsOutputEvent {
   public static class StartEvent {
     public String name;
 
+    /** The time at which the test started, in milliseconds since Unix epoch. */
+    public Long startedTime;
+
     /**
-     * Creates a new start event with the given name.
+     * Creates a new start event with the given name and started time.
      *
      * @param name the name of the test
+     * @param startedTime the time at which the test started, in milliseconds since Unix epoch
      */
-    public StartEvent(String name) {
+    public StartEvent(String name, long startedTime) {
       this.name = name;
+      this.startedTime = startedTime;
     }
 
     /**
@@ -56,6 +62,69 @@ public class TestResultsOutputEvent {
         generator.writeStartObject();
         generator.writeObjectFieldStart("start");
         generator.writeStringField("name", name);
+        generator.writeNumberField("started_time", startedTime);
+        generator.writeEndObject();
+        generator.writeEndObject();
+      }
+      return outputStream.toByteArray();
+    }
+  }
+
+  /** Status of a run failure. */
+  public enum RunFailureStatus {
+    TIMEOUT(1),
+    FATAL(2);
+
+    private final int value;
+
+    RunFailureStatus(int value) {
+      this.value = value;
+    }
+
+    public int getValue() {
+      return value;
+    }
+  }
+
+  /** Represents a run failure event (not specific to any test case). */
+  public static class RunFailureEvent {
+    public RunFailureStatus status;
+    public long time;
+    public String details;
+    public String stacktrace;
+
+    /**
+     * Creates a new run failure event with the given parameters.
+     *
+     * @param status the status of the run failure (TIMEOUT or FATAL)
+     * @param time the time the failure occurred, in milliseconds since Unix epoch
+     * @param details human-readable description of the failure
+     * @param stacktrace optional stack trace (can be null)
+     */
+    public RunFailureEvent(RunFailureStatus status, long time, String details, String stacktrace) {
+      this.status = status;
+      this.time = time;
+      this.details = details;
+      this.stacktrace = stacktrace;
+    }
+
+    /**
+     * Serializes this run failure event to a JSON byte array.
+     *
+     * @return the JSON byte array
+     * @throws IOException if there is an error serializing the event
+     */
+    public byte[] toJsonBytes() throws IOException {
+      ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+      try (JsonGenerator generator = jsonFactory.createGenerator(outputStream)) {
+        generator.writeStartObject();
+        generator.writeObjectFieldStart("run_failure");
+        generator.writeNumberField("status", status.getValue());
+        generator.writeNumberField("time", time);
+        generator.writeStringField("details", details);
+        if (stacktrace != null) {
+          generator.writeStringField("stacktrace", stacktrace);
+        }
         generator.writeEndObject();
         generator.writeEndObject();
       }
@@ -67,7 +136,8 @@ public class TestResultsOutputEvent {
   public enum TestStatus {
     PASS(0),
     FAIL(1),
-    SKIP(2);
+    SKIP(2),
+    OMIT(4);
 
     private final int value;
 

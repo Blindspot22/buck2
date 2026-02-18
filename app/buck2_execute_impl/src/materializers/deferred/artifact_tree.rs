@@ -1,20 +1,21 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 
-use buck2_common::directory_metadata::DirectoryMetadata;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::soft_error;
 use buck2_directory::directory::directory_ref::DirectoryRef;
 use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::directory::ActionDirectoryEntry;
 use buck2_execute::directory::ActionDirectoryMember;
@@ -34,17 +35,20 @@ use tracing::instrument;
 
 use crate::materializers::deferred::SharedMaterializingError;
 use crate::materializers::deferred::WriteFile;
+use crate::materializers::deferred::directory_metadata::DirectoryMetadata;
 use crate::materializers::deferred::file_tree::FileTree;
-use crate::materializers::sqlite::MaterializerState;
-use crate::materializers::sqlite::MaterializerStateSqliteDb;
+use crate::sqlite::materializer_db::MaterializerState;
+use crate::sqlite::materializer_db::MaterializerStateEntry;
+use crate::sqlite::materializer_db::MaterializerStateSqliteDb;
 
 /// A future that is materializing on a separate task spawned by the materializer
-pub type MaterializingFuture = Shared<BoxFuture<'static, Result<(), SharedMaterializingError>>>;
+pub(crate) type MaterializingFuture =
+    Shared<BoxFuture<'static, Result<(), SharedMaterializingError>>>;
 /// A future that is cleaning paths on a separate task spawned by the materializer
-pub type CleaningFuture = Shared<BoxFuture<'static, buck2_error::Result<()>>>;
+pub(crate) type CleaningFuture = Shared<BoxFuture<'static, buck2_error::Result<()>>>;
 
 #[derive(Clone)]
-pub enum ProcessingFuture {
+pub(crate) enum ProcessingFuture {
     Materializing(MaterializingFuture),
     Cleaning(CleaningFuture),
 }
@@ -52,7 +56,7 @@ pub enum ProcessingFuture {
 /// Tree that stores materialization data for each artifact. Used internally by
 /// the `DeferredMaterializer` to keep track of artifacts and how to
 /// materialize them.
-pub type ArtifactTree = FileTree<Box<ArtifactMaterializationData>>;
+pub(crate) type ArtifactTree = FileTree<Box<ArtifactMaterializationData>>;
 
 /// The Version of a processing future associated with an artifact. We use this to know if we can
 /// clear the processing field when a callback is received, or if more work is expected.
@@ -61,13 +65,13 @@ pub struct Version(pub u64);
 
 pub struct ArtifactMaterializationData {
     /// Taken from `deps` of `ArtifactValue`. Used to materialize deps of the artifact.
-    pub deps: Option<ActionSharedDirectory>,
-    pub stage: ArtifactMaterializationStage,
+    pub(crate) deps: Option<ActionSharedDirectory>,
+    pub(crate) stage: ArtifactMaterializationStage,
     /// An optional future that may be processing something at the current path
     /// (for example, materializing or deleting). Any other future that needs to process
     /// this path would need to wait on the existing future to finish.
     /// TODO(scottcao): Turn this into a queue of pending futures.
-    pub processing: Processing,
+    pub(crate) processing: Processing,
 }
 
 /// Represents a processing future + the version at which it was issued. When receiving
@@ -77,7 +81,7 @@ pub struct ArtifactMaterializationData {
 /// The version is an internal counter that is shared between the current processing_fut and
 /// this data. When multiple operations are queued on a ArtifactMaterializationData, this
 /// allows us to identify which one is current.
-pub enum Processing {
+pub(crate) enum Processing {
     Done(Version),
     Active {
         future: ProcessingFuture,
@@ -86,7 +90,7 @@ pub enum Processing {
 }
 
 impl Processing {
-    pub fn current_version(&self) -> Version {
+    pub(crate) fn current_version(&self) -> Version {
         match self {
             Self::Done(version) => *version,
             Self::Active { version, .. } => *version,
@@ -101,20 +105,22 @@ impl Processing {
     }
 }
 
-/// Metadata used to identify an artifact entry without all of its content. Stored on materialized
-/// artifacts to check matching artifact optimizations. For `ActionSharedDirectory`, we use its fingerprint,
+/// Metadata used to identify an artifact entry and stored for every materialized artifact.
+/// For directory entries it might only store their fingerprints for optimization purposes.
 /// For everything else (files, symlinks, and external symlinks), we use `ActionDirectoryMember`
-/// as is because it already holds the metadata we need.
-#[derive(Clone, Dupe, Debug)]
-pub struct ArtifactMetadata(pub ActionDirectoryEntry<DirectoryMetadata>);
+/// as is.
+#[derive(Clone, Dupe, Debug, Display)]
+pub struct ArtifactMetadata(pub(crate) ActionDirectoryEntry<DirectoryMetadata>);
 
 impl ArtifactMetadata {
-    pub fn matches_entry(&self, entry: &ActionDirectoryEntry<ActionSharedDirectory>) -> bool {
+    pub(crate) fn matches_entry(
+        &self,
+        entry: &ActionDirectoryEntry<ActionSharedDirectory>,
+    ) -> bool {
         match (&self.0, entry) {
-            (
-                DirectoryEntry::Dir(DirectoryMetadata { fingerprint, .. }),
-                DirectoryEntry::Dir(dir),
-            ) => fingerprint == dir.fingerprint(),
+            (DirectoryEntry::Dir(d1), DirectoryEntry::Dir(d2)) => {
+                d1.fingerprint() == d2.fingerprint()
+            }
             (DirectoryEntry::Leaf(l1), DirectoryEntry::Leaf(l2)) => {
                 // In Windows, the 'executable bit' absence can cause Buck2 to re-download identical artifacts.
                 // To avoid this, we exclude the executable bit from the comparison.
@@ -133,20 +139,27 @@ impl ArtifactMetadata {
         }
     }
 
-    pub fn new(entry: &ActionDirectoryEntry<ActionSharedDirectory>) -> Self {
+    pub(crate) fn new(entry: &ActionDirectoryEntry<ActionSharedDirectory>, compact: bool) -> Self {
         let new_entry = match entry {
-            DirectoryEntry::Dir(dir) => DirectoryEntry::Dir(DirectoryMetadata {
-                fingerprint: dir.fingerprint().dupe(),
-                total_size: entry.calc_output_count_and_bytes().bytes,
-            }),
+            DirectoryEntry::Dir(dir) => {
+                let metadata = if compact {
+                    DirectoryMetadata::Compact {
+                        fingerprint: dir.fingerprint().dupe(),
+                        total_size: entry.calc_output_count_and_bytes().bytes,
+                    }
+                } else {
+                    DirectoryMetadata::Full(dir.dupe())
+                };
+                DirectoryEntry::Dir(metadata)
+            }
             DirectoryEntry::Leaf(leaf) => DirectoryEntry::Leaf(leaf.dupe()),
         };
         Self(new_entry)
     }
 
-    pub fn size(&self) -> u64 {
+    pub(crate) fn size(&self) -> u64 {
         match &self.0 {
-            DirectoryEntry::Dir(dir) => dir.total_size,
+            DirectoryEntry::Dir(dir) => dir.size(),
             DirectoryEntry::Leaf(ActionDirectoryMember::File(file_metadata)) => {
                 file_metadata.digest.size()
             }
@@ -164,6 +177,7 @@ pub enum ArtifactMaterializationStage {
         /// Taken from `entry` of `ArtifactValue`. Used to materialize the actual artifact.
         entry: ActionDirectoryEntry<ActionSharedDirectory>,
         method: Arc<ArtifactMaterializationMethod>,
+        persist_full_directory_structure: bool,
     },
     /// This artifact was materialized
     Materialized {
@@ -236,10 +250,15 @@ impl MaterializationMethodToProto for ArtifactMaterializationMethod {
 }
 
 impl ArtifactTree {
-    pub fn initialize(sqlite_state: Option<MaterializerState>) -> Self {
+    pub(crate) fn initialize(sqlite_state: Option<MaterializerState>) -> Self {
         let mut tree = ArtifactTree::new();
         if let Some(sqlite_state) = sqlite_state {
-            for (path, (metadata, last_access_time)) in sqlite_state.into_iter() {
+            for entry in sqlite_state.into_iter() {
+                let MaterializerStateEntry {
+                    path,
+                    metadata,
+                    last_access_time,
+                } = entry;
                 tree.insert(
                     path.iter().map(|f| f.to_owned()),
                     Box::new(ArtifactMaterializationData {
@@ -263,7 +282,7 @@ impl ArtifactTree {
     ///
     /// Note that the returned `contents_path` could be the same as `path`.
     #[instrument(level = "trace", skip(self), fields(path = %path))]
-    pub fn file_contents_path(
+    pub(crate) fn file_contents_path(
         &self,
         path: ProjectRelativePathBuf,
         digest_config: DigestConfig,
@@ -278,9 +297,11 @@ impl ArtifactTree {
             ArtifactMaterializationStage::Materialized { .. } => {
                 return Ok(path);
             }
-            ArtifactMaterializationStage::Declared { entry, method } => {
-                (entry.dupe(), method.dupe())
-            }
+            ArtifactMaterializationStage::Declared {
+                entry,
+                method,
+                persist_full_directory_structure: _,
+            } => (entry.dupe(), method.dupe()),
         };
         match method.as_ref() {
             ArtifactMaterializationMethod::CasDownload { info } => {
@@ -334,8 +355,7 @@ impl ArtifactTree {
                         // is a bug somewhere else. Panic to prevent the bug from
                         // propagating.
                         Some(part) => panic!(
-                            "While getting materialized path of {:?}: path {:?} is a file, so subpath {:?} doesn't exist within.",
-                            path, src_path, part,
+                            "While getting materialized path of {path:?}: path {src_path:?} is a file, so subpath {part:?} doesn't exist within.",
                         ),
                     },
                 }
@@ -346,7 +366,7 @@ impl ArtifactTree {
     }
 
     #[instrument(level = "debug", skip(self, result), fields(path = %artifact_path))]
-    pub fn cleanup_finished(
+    pub(crate) fn cleanup_finished(
         &mut self,
         artifact_path: ProjectRelativePathBuf,
         version: Version,
@@ -354,7 +374,7 @@ impl ArtifactTree {
     ) {
         match self
             .prefix_get_mut(&mut artifact_path.iter())
-            .buck_error_context("Path is vacant")
+            .ok_or_else(|| internal_error!("Path is vacant"))
         {
             Ok(info) => {
                 if info.processing.current_version() > version {
@@ -372,7 +392,7 @@ impl ArtifactTree {
             }
             Err(e) => {
                 // NOTE: This shouldn't normally happen?
-                soft_error!("cleanup_finished_vacant", e.into(), quiet: true).unwrap();
+                soft_error!("cleanup_finished_vacant", e, quiet: true).unwrap();
             }
         }
     }
@@ -380,7 +400,7 @@ impl ArtifactTree {
     /// Removes paths from tree and returns a pair of two vecs.
     /// First vec is a list of paths removed. Second vec is a list of
     /// pairs of removed paths to futures that haven't finished.
-    pub fn invalidate_paths_and_collect_futures(
+    pub(crate) fn invalidate_paths_and_collect_futures(
         &mut self,
         paths: Vec<ProjectRelativePathBuf>,
         sqlite_db: Option<&mut MaterializerStateSqliteDb>,

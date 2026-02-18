@@ -1,15 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.dex;
 
 import com.facebook.buck.android.apkmodule.APKModule;
+import com.facebook.infer.annotation.Nullsafe;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.ByteStreams;
@@ -23,6 +25,7 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import org.jetbrains.annotations.Nullable;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
@@ -31,23 +34,30 @@ import org.tukaani.xz.XZ;
 import org.tukaani.xz.XZOutputStream;
 
 /** Executable for compressing secondary dex files. */
+@Nullsafe(Nullsafe.Mode.LOCAL)
 public class SecondaryDexCompressionExecutableMain {
   @Option(name = "--secondary-dex-output-dir", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String secondaryDexOutputDirString;
 
   @Option(name = "--raw-secondary-dexes-dir", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String rawSecondaryDexesDir;
 
   @Option(name = "--module", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String module;
 
+  @Nullable
   @Option(name = "--module-deps")
-  private String moduleDepsPathString;
+  private String moduleDepsPathString = null;
 
   @Option(name = "--canary-class-name", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String canaryClassName;
 
   @Option(name = "--compression", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String compression;
 
   @Option(name = "--xz-compression-level")
@@ -55,8 +65,9 @@ public class SecondaryDexCompressionExecutableMain {
 
   // Optional, if this is the main module there may be N dex files that are being treated as
   // preceding these given secondary dex files.
+  @Nullable
   @Option(name = "--bootstrap-dexes-dir")
-  private String bootstrapDexDirString;
+  private String bootstrapDexDirString = null;
 
   // Defaulted to 1 for the primary dex (classes.dex) upon which these secondaries will be numbered
   // after. If enabling bootstrap dex files, secondaries could start at a higher index.
@@ -70,7 +81,7 @@ public class SecondaryDexCompressionExecutableMain {
       main.run();
       System.exit(0);
     } catch (CmdLineException e) {
-      System.err.println(e.getMessage());
+      System.err.println(e.toString());
       parser.printUsage(System.err);
       System.exit(1);
     }
@@ -79,10 +90,13 @@ public class SecondaryDexCompressionExecutableMain {
   private void run() throws IOException {
     Path rawSecondaryDexesDirPath = Paths.get(rawSecondaryDexesDir);
     Preconditions.checkState(
-        ImmutableList.of("raw", "jar", "xz", "xzs").contains(compression),
-        "Only raw, jar, xz and xzs compression is supported!");
+        ImmutableList.of("raw", "raw_subdir", "jar", "xz", "xzs").contains(compression),
+        "Only raw, raw_subdir, jar, xz and xzs compression is supported!");
     Preconditions.checkState(
-        compression.equals("raw") || compression.equals("jar") || xzCompressionLevel != -1,
+        compression.equals("raw")
+            || compression.equals("raw_subdir")
+            || compression.equals("jar")
+            || xzCompressionLevel != -1,
         "Must specify a valid compression level when xz or xzs compression is used!");
 
     if (bootstrapDexDirString != null) {
@@ -109,16 +123,21 @@ public class SecondaryDexCompressionExecutableMain {
               .collect(ImmutableList.toImmutableList()));
     }
 
-    if (compression.equals("raw")) {
-      if (APKModule.isRootModule(module)) {
+    if (compression.equals("raw") || compression.equals("raw_subdir")) {
+      if (APKModule.isRootModule(module) && compression.equals("raw")) {
         metadataLines.add(".root_relative");
       }
       for (int i = 0; i < secondaryDexCount; i++) {
         String secondaryDexName = getRawSecondaryDexName(module, i);
-        Path secondaryDexSubDir =
-            secondaryDexOutputDir.resolve(D8Utils.getRawSecondaryDexSubDir(module));
-        Path copiedDex = secondaryDexSubDir.resolve(secondaryDexName);
-        Files.copy(rawSecondaryDexesDirPath.resolve(secondaryDexName), copiedDex);
+        Path rawSecondaryDexPath = rawSecondaryDexesDirPath.resolve(secondaryDexName);
+        Path copiedDex =
+            compression.equals("raw")
+                ? secondaryDexOutputDir
+                    .resolve(D8Utils.getRawSecondaryDexSubDir(module))
+                    .resolve(secondaryDexName)
+                : secondaryDexSubdir.resolve(getSecondaryDexName(module, i, ""));
+        ;
+        Files.copy(rawSecondaryDexPath, copiedDex);
         metadataLines.add(
             D8Utils.getSecondaryDexMetadataString(
                 copiedDex, CanaryUtils.getFullyQualifiedCanaryClassName(canaryClassName, i)));
@@ -132,9 +151,8 @@ public class SecondaryDexCompressionExecutableMain {
             Files.exists(rawSecondaryDexPath), "Expected file to exist at: " + rawSecondaryDexPath);
         Path secondaryDexOutputJarPath =
             compression.equals("xzs")
-                ? secondaryDexSubdir.resolve(
-                    String.format("%s.xzs.tmp~", getSecondaryDexJarName(module, i)))
-                : secondaryDexSubdir.resolve(getSecondaryDexJarName(module, i));
+                ? secondaryDexSubdir.resolve(getSecondaryDexName(module, i, ".jar.xzs.tmp~"))
+                : secondaryDexSubdir.resolve(getSecondaryDexName(module, i, ".jar"));
         secondaryDexJarPaths.add(secondaryDexOutputJarPath);
 
         Path metadataPath =
@@ -152,7 +170,8 @@ public class SecondaryDexCompressionExecutableMain {
 
         metadataLines.add(
             D8Utils.getSecondaryDexMetadataString(
-                secondaryDexOutput, String.format("%s.dex%02d.Canary", canaryClassName, i + 1)));
+                secondaryDexOutput,
+                CanaryUtils.getFullyQualifiedCanaryClassName(canaryClassName, i)));
       }
 
       if (compression.equals("xzs")) {
@@ -181,9 +200,9 @@ public class SecondaryDexCompressionExecutableMain {
     }
   }
 
-  private String getSecondaryDexJarName(String module, int index) {
+  private String getSecondaryDexName(String module, int index, String suffix) {
     return String.format(
-        "%s-%d.dex.jar", APKModule.isRootModule(module) ? "secondary" : module, index + 1);
+        "%s-%d.dex%s", APKModule.isRootModule(module) ? "secondary" : module, index + 1, suffix);
   }
 
   private Path doXzCompression(Path secondaryDexOutputJarPath) throws IOException {

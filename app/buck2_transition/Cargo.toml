@@ -1,6 +1,6 @@
 [package]
 description = "Implementation of configuration transition"
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_transition"
 repository = { workspace = true }
@@ -26,6 +26,6 @@ buck2_build_api_derive = { workspace = true }
 buck2_core = { workspace = true }
 buck2_error = { workspace = true }
 buck2_events = { workspace = true }
-buck2_futures = { workspace = true }
 buck2_interpreter = { workspace = true }
 buck2_node = { workspace = true }
+dice_futures = { workspace = true }

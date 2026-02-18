@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ops::Deref;
@@ -79,11 +80,11 @@ impl<T> AtomicValue for Arc<T> {
 
     #[inline]
     unsafe fn from_raw(raw: Self::Raw) -> Self {
-        Arc(triomphe::Arc::from_raw(raw))
+        Arc(unsafe { triomphe::Arc::from_raw(raw) })
     }
 
     #[inline]
     unsafe fn deref<'a>(raw: Self::Raw) -> Self::Ref<'a> {
-        &*raw
+        unsafe { &*raw }
     }
 }

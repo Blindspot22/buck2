@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -20,7 +21,7 @@ use buck2_core::cells::instance;
 use buck2_core::cells::name::CellName;
 use buck2_core::cells::nested::NestedCells;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use instance::CellInstance;
 
 /// Errors from cell creation
@@ -121,7 +122,7 @@ impl CellsAggregator {
         let info = self
             .cell_infos
             .get_mut(&cell)
-            .internal_error("cell name is not a cell")?;
+            .ok_or_else(|| internal_error!("cell name is not a cell"))?;
         if info.external.is_some() {
             return Err(CellError::DuplicateExternalCell(cell).into());
         }

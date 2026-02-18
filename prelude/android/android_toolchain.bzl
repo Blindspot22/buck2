@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 AndroidPlatformInfo = provider(fields = {
     "name": provider_field(typing.Any, default = None),
@@ -17,6 +18,8 @@ AndroidToolchainInfo = provider(
         "adb": provider_field(typing.Any, default = None),
         "aidl": provider_field(typing.Any, default = None),
         "android_bootclasspath": provider_field(typing.Any, default = None),
+        "android_bootclasspath_snapshots": provider_field(typing.Any, default = []),
+        "android_error_handler": provider_field(typing.Any, default = None),
         "android_jar": provider_field(typing.Any, default = None),
         "android_optional_jars": provider_field(typing.Any, default = None),
         "apk_builder": provider_field(typing.Any, default = None),
@@ -25,16 +28,17 @@ AndroidToolchainInfo = provider(
         "bundle_apks_builder": provider_field(typing.Any, default = None),
         "bundle_builder": provider_field(typing.Any, default = None),
         "combine_native_library_dirs": provider_field(typing.Any, default = None),
+        "consolidate_class_names": provider_field(typing.Any, default = None),
         "copy_string_resources": provider_field(typing.Any, default = None),
         "cross_module_native_deps_check": provider_field(typing.Any, default = None),
         "d8_command": provider_field(typing.Any, default = None),
         "duplicate_class_checker": provider_field(typing.Any, default = None),
         "exo_resources_rewriter": provider_field(typing.Any, default = None),
-        "exopackage_agent_apk": provider_field(typing.Any, default = None),
         "filter_dex_class_names": provider_field(typing.Any, default = None),
         "filter_prebuilt_native_library_dir": provider_field(typing.Any, default = None),
         "filter_resources": provider_field(typing.Any, default = None),
         "framework_aidl_file": provider_field(typing.Any, default = None),
+        # @oss-disable[end= ]: "gatorade_mergemap_tool": provider_field(typing.Any, default = None),
         "generate_build_config": provider_field(typing.Any, default = None),
         "generate_manifest": provider_field(typing.Any, default = None),
         "installer": provider_field(typing.Any, default = None),
@@ -42,6 +46,7 @@ AndroidToolchainInfo = provider(
         "instrumentation_test_runner_classpath": provider_field(typing.Any, default = None),
         "instrumentation_test_runner_main_class": provider_field(typing.Any, default = None),
         "jar_splitter_command": provider_field(typing.Any, default = None),
+        "jdk_system_image": provider_field(typing.Any, default = None),
         "manifest_utils": provider_field(typing.Any, default = None),
         "merge_android_resource_sources": provider_field(typing.Any, default = None),
         "merge_android_resources": provider_field(typing.Any, default = None),

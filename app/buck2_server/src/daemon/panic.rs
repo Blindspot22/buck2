@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Daemon-only panic hooks.
@@ -36,7 +37,7 @@ fn get_panic_dump_dir() -> PathBuf {
 }
 
 async fn remove_old_panic_dumps() -> buck2_error::Result<()> {
-    const MAX_PANIC_AGE: Duration = Duration::from_secs(60 * 60 * 24); // 1 day
+    const MAX_PANIC_AGE: Duration = Duration::from_hours(24); // 1 day
     let dump_dir = get_panic_dump_dir();
     let now = SystemTime::now();
     if let Ok(dir_result) = std::fs::read_dir(dump_dir) {
@@ -91,13 +92,12 @@ fn maybe_dice_dump(
         .location()
         .is_some_and(|loc| loc.file().split(&['/', '\\']).any(|x| x == "dice"));
     if is_dice_panic {
-        let dice_dump_folder = get_panic_dump_dir().join(format!("dice-dump-{}", panic_id));
+        let dice_dump_folder = get_panic_dump_dir().join(format!("dice-dump-{panic_id}"));
         eprintln!(
-            "Buck2 panicked and DICE may be responsible. Please be patient as we try to dump DICE graph to `{:?}` and create an archive file",
-            dice_dump_folder
+            "Buck2 panicked and DICE may be responsible. Please be patient as we try to dump DICE graph to `{dice_dump_folder:?}` and create an archive file"
         );
         if let Err(e) = daemon_state.dice_dump(&dice_dump_folder, DiceDumpFormat::Tsv) {
-            eprintln!("Failed to dump DICE graph: {:#}", e);
+            eprintln!("Failed to dump DICE graph: {e:#}");
         } else {
             if let Err(e) = tar_dice_dump(&dice_dump_folder) {
                 eprintln!(
@@ -117,8 +117,7 @@ fn maybe_dice_dump(
                 "".to_owned()
             };
             eprintln!(
-                "DICE graph dumped to `{:?}`. {}DICE dumps can take up a lot of disk space, you should delete the dump after reporting.",
-                dice_dump_folder, maybe_report_msg
+                "DICE graph dumped to `{dice_dump_folder:?}`. {maybe_report_msg}DICE dumps can take up a lot of disk space, you should delete the dump after reporting."
             );
         }
     }

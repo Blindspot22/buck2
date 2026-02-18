@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Arguments;
@@ -17,7 +18,7 @@ pub fn buck2_error_impl(tag: crate::ErrorTag, args: Arguments) -> crate::Error {
     let source_location =
         crate::source_location::SourceLocation::new(std::panic::Location::caller().file())
             .with_source_line(line_number);
-    crate::Error::new(format!("{}", args), tag, source_location, None)
+    crate::Error::new(format!("{args}"), tag, source_location, None)
 }
 
 #[doc(hidden)]

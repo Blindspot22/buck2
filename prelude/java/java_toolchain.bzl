@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 AbiGenerationMode = enum("class", "none", "source", "source_only")
 
@@ -19,7 +20,6 @@ JavaPlatformInfo = provider(
 )
 
 JavaToolchainInfo = provider(
-    # @unsorted-dict-items
     doc = "Java toolchain info",
     fields = {
         "abi_generation_mode": provider_field(typing.Any, default = None),
@@ -45,12 +45,17 @@ JavaToolchainInfo = provider(
         "java_for_tests": provider_field(typing.Any, default = None),
         "javac": provider_field(typing.Any, default = None),
         "javac_protocol": provider_field(typing.Any, default = None),
+        "javacd": provider_field(typing.Any, default = None),
         "javacd_debug_port": provider_field(typing.Any, default = None),
         "javacd_debug_target": provider_field(typing.Any, default = None),
         "javacd_jvm_args": provider_field(typing.Any, default = None),
         "javacd_jvm_args_target": provider_field(typing.Any, default = None),
         "javacd_main_class": provider_field(typing.Any, default = None),
+        "javacd_remote_worker": provider_field(typing.Any, default = None),
         "javacd_worker": provider_field(typing.Any, default = None),
+        "jlink": provider_field(typing.Any, default = None),
+        "jmod": provider_field(typing.Any, default = None),
+        "jrt_fs_jar": provider_field(typing.Any, default = None),
         "merge_class_to_source_maps": provider_field(typing.Any, default = None),
         "nullsafe": provider_field(typing.Any, default = None),
         "nullsafe_extra_args": provider_field(typing.Any, default = None),
@@ -58,17 +63,19 @@ JavaToolchainInfo = provider(
         "postprocessor_runner": provider_field(typing.Any, default = None),
         "proguard_jar": provider_field(typing.Any, default = None),
         "proguard_max_heap_size": provider_field(typing.Any, default = None),
+        "semanticdb_javac": provider_field(typing.Any, default = None),
+        "semanticdb_sourceroot": provider_field(typing.Any, default = None),
         "source_level": provider_field(typing.Any, default = None),
         "src_root_elements": provider_field(typing.Any, default = None),
         "src_root_prefixes": provider_field(typing.Any, default = None),
         "target_level": provider_field(typing.Any, default = None),
         "track_class_usage": provider_field(bool, default = True),
+        "uses_content_based_paths": provider_field(bool, default = True),
         "zip_scrubber": provider_field(typing.Any, default = None),
     },
 )
 
 JavaTestToolchainInfo = provider(
-    # @unsorted-dict-items
     doc = "Java test toolchain info",
     fields = {
         "junit5_test_runner_main_class_args": provider_field(typing.Any, default = None),

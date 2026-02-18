@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::any::Any;
@@ -14,26 +15,16 @@ use std::time::Instant;
 
 use allocative::Allocative;
 use buck2_common::starlark_profiler::StarlarkProfileDataAndStatsDyn;
-use buck2_core::package::PackageLabel;
-use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use starlark::eval::ProfileData;
 
-#[derive(Clone, Debug, derive_more::Display, Allocative)]
-pub enum ProfileTarget {
-    #[display("analysis:{}", _0)]
-    Analysis(ConfiguredTargetLabel),
-    #[display("loading:{}", _0)]
-    Loading(PackageLabel),
-    #[display("bxl")]
-    Bxl,
-}
+use crate::dice::starlark_provider::StarlarkEvalKind;
 
 #[derive(Debug, Clone, Allocative)]
 pub struct StarlarkProfileDataAndStats {
     #[allocative(skip)] // OK to skip because used only when profiling enabled.
     pub profile_data: ProfileData,
-    pub targets: Vec<ProfileTarget>,
+    pub targets: Vec<StarlarkEvalKind>,
     pub(crate) initialized_at: Instant,
     pub(crate) finalized_at: Instant,
     pub(crate) total_retained_bytes: usize,
@@ -46,7 +37,7 @@ impl StarlarkProfileDataAndStatsDyn for StarlarkProfileDataAndStats {
 }
 
 impl StarlarkProfileDataAndStats {
-    pub fn elapsed(&self) -> Duration {
+    pub fn duration(&self) -> Duration {
         self.finalized_at.duration_since(self.initialized_at)
     }
 
@@ -61,7 +52,7 @@ impl StarlarkProfileDataAndStats {
         let mut iter = datas.iter().copied();
         let first = iter
             .next()
-            .buck_error_context("empty collection of profile data")?;
+            .ok_or_else(|| internal_error!("empty collection of profile data"))?;
         let mut total_retained_bytes = first.total_retained_bytes;
         let mut initialized_at = first.initialized_at;
         let mut finalized_at = first.finalized_at;
@@ -89,9 +80,8 @@ impl StarlarkProfileDataAndStats {
     pub fn downcast(
         profile_data: &dyn StarlarkProfileDataAndStatsDyn,
     ) -> buck2_error::Result<&Self> {
-        profile_data
-            .as_any()
-            .downcast_ref::<Self>()
-            .internal_error("There's only one implementation of StarlarkProfileDataAndStatsDyn")
+        profile_data.as_any().downcast_ref::<Self>().ok_or_else(|| {
+            internal_error!("There's only one implementation of StarlarkProfileDataAndStatsDyn")
+        })
     }
 }

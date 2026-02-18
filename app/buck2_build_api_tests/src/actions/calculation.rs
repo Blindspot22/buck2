@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -44,8 +45,8 @@ use buck2_build_api::spawner::BuckSpawner;
 use buck2_common::dice::cells::SetCellResolver;
 use buck2_common::dice::data::testing::SetTestingIoProvider;
 use buck2_common::external_symlink::ExternalSymlink;
-use buck2_common::file_ops::FileMetadata;
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_common::file_ops::testing::TestFileOps;
 use buck2_common::http::SetHttpClient;
 use buck2_common::legacy_configs::configs::LegacyBuckConfig;
@@ -64,7 +65,6 @@ use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_core::fs::project::ProjectRootTemp;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::package::source_path::SourcePath;
@@ -86,6 +86,7 @@ use buck2_execute::execute::output::CommandStdStreams;
 use buck2_execute::execute::prepared::NoOpCommandOptionalExecutor;
 use buck2_execute::execute::request::CommandExecutionOutput;
 use buck2_execute::execute::request::OutputType;
+use buck2_execute::execute::result::CommandExecutionMetadata;
 use buck2_execute::execute::result::CommandExecutionReport;
 use buck2_execute::execute::result::CommandExecutionStatus;
 use buck2_execute::execute::testing_dry_run::DryRunEntry;
@@ -94,8 +95,10 @@ use buck2_execute::materialize::materializer::SetMaterializer;
 use buck2_execute::materialize::nodisk::NoDiskMaterializer;
 use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
 use buck2_file_watcher::mergebase::SetMergebase;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_http::HttpClientBuilder;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
+use buck2_util::time_span::TimeSpan;
 use dice::DiceTransaction;
 use dice::UserComputationData;
 use dice::testing::DiceBuilder;
@@ -182,7 +185,7 @@ async fn make_default_dice_state(
     dry_run_tracker: Arc<Mutex<Vec<DryRunEntry>>>,
     temp_fs: &ProjectRootTemp,
     mocks: Vec<Box<dyn FnOnce(DiceBuilder) -> DiceBuilder>>,
-) -> anyhow::Result<DiceTransaction> {
+) -> buck2_error::Result<DiceTransaction> {
     let fs = temp_fs.path().dupe();
 
     let cell_resolver = CellResolver::testing_with_name_and_path(
@@ -224,6 +227,10 @@ async fn make_default_dice_state(
                 remote_dep_file_cache_checker: Arc::new(NoOpCommandOptionalExecutor {}),
                 platform: Default::default(),
                 cache_uploader: Arc::new(NoOpCacheUploader {}),
+                output_trees_download_config:
+                    buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig::new(
+                        None, true,
+                    ),
             })
         }
     }
@@ -240,7 +247,7 @@ async fn make_default_dice_state(
     extra.data.set(RunActionKnobs::default());
     extra.spawner = Arc::new(BuckSpawner::current_runtime().unwrap());
 
-    let mut computations = dice_builder.build(extra)?;
+    let mut computations = dice_builder.build(extra).unwrap();
     inject_legacy_config_for_test(
         &mut computations,
         CellName::testing_new("root"),
@@ -253,7 +260,8 @@ async fn make_default_dice_state(
 }
 
 #[tokio::test]
-async fn test_get_action_for_artifact() -> anyhow::Result<()> {
+async fn test_get_action_for_artifact() -> buck2_error::Result<()> {
+    buck2_certs::certs::maybe_setup_cryptography();
     let build_artifact = create_test_build_artifact();
     let registered_action = registered_action(
         build_artifact.dupe(),
@@ -273,7 +281,8 @@ async fn test_get_action_for_artifact() -> anyhow::Result<()> {
         registered_action.dupe(),
     );
     let mut dice_computations = dice_builder
-        .build(UserComputationData::new())?
+        .build(UserComputationData::new())
+        .unwrap()
         .commit()
         .await;
 
@@ -287,7 +296,8 @@ async fn test_get_action_for_artifact() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_build_action() -> anyhow::Result<()> {
+async fn test_build_action() -> buck2_error::Result<()> {
+    buck2_certs::certs::maybe_setup_cryptography();
     let temp_fs = ProjectRootTemp::new()?;
     let build_artifact = create_test_build_artifact();
     let registered_action = registered_action(
@@ -327,6 +337,7 @@ async fn test_build_action() -> anyhow::Result<()> {
             outputs: vec![CommandExecutionOutput::BuildArtifact {
                 path: build_artifact.get_path().dupe(),
                 output_type: OutputType::File,
+                supports_incremental_remote: false,
             }],
             env: sorted_vector_map![]
         }
@@ -336,7 +347,8 @@ async fn test_build_action() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_build_artifact() -> anyhow::Result<()> {
+async fn test_build_artifact() -> buck2_error::Result<()> {
+    buck2_certs::certs::maybe_setup_cryptography();
     let temp_fs = ProjectRootTemp::new()?;
     let build_artifact = create_test_build_artifact();
     let registered_action = registered_action(
@@ -375,6 +387,7 @@ async fn test_build_artifact() -> anyhow::Result<()> {
             outputs: vec![CommandExecutionOutput::BuildArtifact {
                 path: build_artifact.get_path().dupe(),
                 output_type: OutputType::File,
+                supports_incremental_remote: false,
             }],
             env: sorted_vector_map![]
         }
@@ -383,7 +396,8 @@ async fn test_build_artifact() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_ensure_artifact_build_artifact() -> anyhow::Result<()> {
+async fn test_ensure_artifact_build_artifact() -> buck2_error::Result<()> {
+    buck2_certs::certs::maybe_setup_cryptography();
     let temp_fs = ProjectRootTemp::new()?;
     let build_artifact = create_test_build_artifact();
     let registered_action = registered_action(
@@ -423,6 +437,7 @@ async fn test_ensure_artifact_build_artifact() -> anyhow::Result<()> {
             outputs: vec![CommandExecutionOutput::BuildArtifact {
                 path: build_artifact.get_path().dupe(),
                 output_type: OutputType::File,
+                supports_incremental_remote: false,
             }],
             env: sorted_vector_map![]
         }
@@ -432,7 +447,8 @@ async fn test_ensure_artifact_build_artifact() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_ensure_artifact_source_artifact() -> anyhow::Result<()> {
+async fn test_ensure_artifact_source_artifact() -> buck2_error::Result<()> {
+    buck2_certs::certs::maybe_setup_cryptography();
     let digest_config = DigestConfig::testing_default();
 
     let path = CellPath::new(
@@ -451,7 +467,8 @@ async fn test_ensure_artifact_source_artifact() -> anyhow::Result<()> {
     let file_ops = TestFileOps::new_with_files_metadata(btreemap![path => metadata.dupe()]);
     let mut dice_computations = file_ops
         .mock_in_cell(CellName::testing_new("cell"), dice_builder)
-        .build(UserComputationData::new())?
+        .build(UserComputationData::new())
+        .unwrap()
         .commit()
         .await;
 
@@ -480,7 +497,8 @@ async fn test_ensure_artifact_source_artifact() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_ensure_artifact_external_symlink() -> anyhow::Result<()> {
+async fn test_ensure_artifact_external_symlink() -> buck2_error::Result<()> {
+    buck2_certs::certs::maybe_setup_cryptography();
     let path = CellPath::new(
         CellName::testing_new("cell"),
         CellRelativePathBuf::unchecked_new("proj/to_gvfs/include".to_owned()),
@@ -500,7 +518,8 @@ async fn test_ensure_artifact_external_symlink() -> anyhow::Result<()> {
     let file_ops = TestFileOps::new_with_symlinks(btreemap![path => symlink.dupe()]);
     let mut dice_computations = file_ops
         .mock_in_cell(CellName::testing_new("cell"), dice_builder)
-        .build(UserComputationData::new())?
+        .build(UserComputationData::new())
+        .unwrap()
         .commit()
         .await;
 
@@ -532,6 +551,7 @@ async fn test_ensure_artifact_external_symlink() -> anyhow::Result<()> {
 async fn test_command_details_omission() {
     use buck2_data::command_execution_kind::Command;
 
+    buck2_certs::certs::maybe_setup_cryptography();
     let digest_config = DigestConfig::testing_default();
 
     let mut report = CommandExecutionReport {
@@ -543,26 +563,29 @@ async fn test_command_details_omission() {
                 env: sorted_vector_map![],
             },
         },
-        timing: Default::default(),
+        timing: CommandExecutionMetadata::empty(TimeSpan::empty_now()),
         std_streams: CommandStdStreams::Local {
             stdout: "stdout".to_owned().into_bytes(),
             stderr: "stderr".to_owned().into_bytes(),
         },
         exit_code: Some(1),
         additional_message: None,
+        inline_environment_metadata: buck2_data::InlineCommandExecutionEnvironmentMetadata {
+            sandcastle_instance_id: Some(123),
+        },
     };
 
     let proto = command_details(&report, false).await;
     let command_kind = proto.command_kind.unwrap();
     assert_matches!(command_kind.command, Some(Command::LocalCommand(..)));
-    assert_eq!(&proto.stdout, "stdout");
-    assert_eq!(&proto.stderr, "stderr");
+    assert_eq!(&proto.cmd_stdout, "stdout");
+    assert_eq!(&proto.cmd_stderr, "stderr");
 
     let proto = command_details(&report, true).await;
     let command_kind = proto.command_kind.unwrap();
     assert_matches!(command_kind.command, Some(Command::OmittedLocalCommand(..)));
-    assert_eq!(&proto.stdout, "");
-    assert_eq!(&proto.stderr, "stderr");
+    assert_eq!(&proto.cmd_stdout, "");
+    assert_eq!(&proto.cmd_stderr, "stderr");
 
     report.status = CommandExecutionStatus::Failure {
         execution_kind: CommandExecutionKind::Local {
@@ -574,6 +597,6 @@ async fn test_command_details_omission() {
     let proto = command_details(&report, true).await;
     let command_kind = proto.command_kind.unwrap();
     assert_matches!(command_kind.command, Some(Command::LocalCommand(..)));
-    assert_eq!(&proto.stdout, "stdout");
-    assert_eq!(&proto.stderr, "stderr");
+    assert_eq!(&proto.cmd_stdout, "stdout");
+    assert_eq!(&proto.cmd_stderr, "stderr");
 }

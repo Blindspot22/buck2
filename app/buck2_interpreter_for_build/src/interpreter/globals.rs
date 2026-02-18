@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_interpreter::downstream_crate_starlark_defs::REGISTER_BUCK2_ACTION_IMPL_GLOBALS;
@@ -18,6 +19,7 @@ use buck2_interpreter::starlark_promise::register_promise;
 use buck2_interpreter::types::cell_path::register_cell_path;
 use buck2_interpreter::types::cell_root::register_cell_root;
 use buck2_interpreter::types::configured_providers_label::register_providers_label;
+use buck2_interpreter::types::package_path::register_package_path;
 use buck2_interpreter::types::project_root::register_project_root;
 use buck2_interpreter::types::regex::register_buck_regex;
 use buck2_interpreter::types::target_label::register_target_label;
@@ -75,6 +77,7 @@ pub fn register_load_natives(builder: &mut GlobalsBuilder) {
     register_providers_label(builder);
     register_cell_path(builder);
     register_cell_root(builder);
+    register_package_path(builder);
     register_project_root(builder);
     register_target_label(builder);
     register_path(builder);

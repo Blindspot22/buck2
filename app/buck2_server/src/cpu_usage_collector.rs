@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -26,7 +27,7 @@ pub(crate) struct CpuUsageCollector {
 }
 
 impl CpuUsageCollector {
-    pub(crate) fn new() -> anyhow::Result<Self> {
+    pub(crate) fn new() -> buck2_error::Result<Self> {
         let start = Arc::new(Mutex::new(None));
         let handle = start.dupe();
         tokio::task::spawn_blocking(move || {
@@ -36,9 +37,7 @@ impl CpuUsageCollector {
     }
 
     /// Returns the CPU usage since the collector was created.
-    pub(crate) fn get_usage_since_command_start(
-        &self,
-    ) -> anyhow::Result<HostCpuUsageSinceCmdStart> {
+    pub(crate) fn get_usage_since_command_start(&self) -> Option<HostCpuUsageSinceCmdStart> {
         let start = self.start.lock().expect("Poisoned lock");
         if let Some(start) = &*start {
             if let Ok(current_usage) = HostCpuUsage::get() {
@@ -48,13 +47,13 @@ impl CpuUsageCollector {
                     current_usage.user_millis.checked_sub(start.user_millis),
                     current_usage.system_millis.checked_sub(start.system_millis),
                 ) {
-                    return Ok(HostCpuUsageSinceCmdStart {
+                    return Some(HostCpuUsageSinceCmdStart {
                         user_millis,
                         system_millis,
                     });
                 }
             }
         }
-        Err(anyhow::anyhow!("Failed to get CPU usage"))
+        None
     }
 }

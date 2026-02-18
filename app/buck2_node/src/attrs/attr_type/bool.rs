@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -13,11 +14,14 @@ use std::fmt::Formatter;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
+use serde::Deserialize;
 use serde::Serialize;
+use strong_hash::StrongHash;
 
 use crate::attrs::attr_type::any_matches::AnyMatches;
 
-#[derive(Debug, Eq, PartialEq, Hash, Allocative, Clone, Copy, Dupe)]
+#[derive(Debug, Eq, PartialEq, Hash, Pagable, Allocative, Clone, Copy, Dupe)]
 pub struct BoolAttrType;
 
 #[derive(
@@ -28,9 +32,11 @@ pub struct BoolAttrType;
     Eq,
     PartialEq,
     Hash,
+    StrongHash,
     Allocative,
     Serialize,
-    strong_hash::StrongHash
+    Deserialize,
+    Pagable
 )]
 #[serde(transparent)]
 pub struct BoolLiteral(pub bool);

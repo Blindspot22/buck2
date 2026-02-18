@@ -1,15 +1,19 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 import os
+import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from buck2.tests.core.common.io.file_watcher import (
     FileWatcherEvent,
@@ -18,7 +22,6 @@ from buck2.tests.core.common.io.file_watcher import (
     FileWatcherProvider,
     get_file_watcher_events,
 )
-
 from buck2.tests.core.common.io.file_watcher_dir_tests import (
     run_create_directory_test,
     run_remove_directory_test,
@@ -38,14 +41,17 @@ from buck2.tests.core.common.io.file_watcher_scm_tests import (
     run_restack_with_mergebase_test,
     setup_file_watcher_scm_test,
 )
+from buck2.tests.core.common.io.file_watcher_symlink_tests import (
+    run_change_symlink_target_test,
+    run_create_symlink_test,
+    run_replace_file_with_symlink_test,
+)
 from buck2.tests.core.common.io.file_watcher_tests import (
     FileSystemType,
     setup_file_watcher_test,
     verify_results,
 )
-
 from buck2.tests.e2e_util.api.buck import Buck
-from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test
 from buck2.tests.e2e_util.helper.utils import filter_events
 
@@ -136,6 +142,27 @@ async def test_edenfs_restack_with_mergebase(buck: Buck) -> None:
 
 
 @buck_test(setup_eden=True)
+async def test_edenfs_create_symlink_test(buck: Buck) -> None:
+    await run_create_symlink_test(
+        buck, FileSystemType.EDEN_FS, FileWatcherProvider.EDEN_FS
+    )
+
+
+@buck_test(setup_eden=True)
+async def test_edenfs_replace_file_with_symlink_test(buck: Buck) -> None:
+    await run_replace_file_with_symlink_test(
+        buck, FileSystemType.EDEN_FS, FileWatcherProvider.EDEN_FS
+    )
+
+
+@buck_test(setup_eden=True)
+async def test_edenfs_change_symlink_target_test(buck: Buck) -> None:
+    await run_change_symlink_target_test(
+        buck, FileSystemType.EDEN_FS, FileWatcherProvider.EDEN_FS
+    )
+
+
+@buck_test(setup_eden=True)
 async def test_edenfs_truncate_journal(buck: Buck) -> None:
     await setup_file_watcher_test(buck)
     subprocess.run(["edenfsctl", "debug", "flush_journal"], cwd=buck.cwd)
@@ -194,6 +221,8 @@ async def test_edenfs_files_report_on_fresh_instance(buck: Buck) -> None:
     # and redirect only that buck-out and not buck-out in subproject.
     # So, ignore soft errors that buck-out isn't redirected
     allow_soft_errors=True,
+    # test is flaky on windows
+    skip_for_os=["windows"],
 )
 async def test_edenfs_changes_in_subproject(buck: Buck) -> None:
     cwd = Path("subproject")
@@ -222,6 +251,8 @@ async def test_edenfs_changes_in_subproject(buck: Buck) -> None:
     # and redirect only that buck-out and not buck-out in subproject.
     # So, ignore soft errors that buck-out isn't redirected
     allow_soft_errors=True,
+    # test is flaky on windows
+    skip_for_os=["windows"],
 )
 async def test_edenfs_changes_outside_subproject(buck: Buck) -> None:
     cwd = Path("subproject")
@@ -302,3 +333,103 @@ async def test_edenfs_directory_rename(buck: Buck) -> None:
     # FIXME(JakobDegen): Bug: This directory doesn't exist.
     # Note: Also repros with watchman
     await buck.targets("root//d1:")
+
+
+# Dir replace is not supported on Windows
+@buck_test(setup_eden=True, skip_for_os=["windows"])
+async def test_edenfs_directory_replace(buck: Buck) -> None:
+    await setup_file_watcher_test(buck)
+    (buck.cwd / "d1").mkdir()
+    (buck.cwd / "d2").mkdir()
+    # it's only possible to replace a dir
+    # if newname exists and is an empty directory
+    (buck.cwd / "d1").rename(buck.cwd / "d2")
+
+    # we should get `create` for the newname
+    # and `delete` for the oldname
+    required = [
+        FileWatcherEvent(
+            FileWatcherEventType.CREATE, FileWatcherKind.DIRECTORY, "root//d2"
+        ),
+        FileWatcherEvent(
+            FileWatcherEventType.DELETE, FileWatcherKind.DIRECTORY, "root//d1"
+        ),
+    ]
+
+    _, results = await get_file_watcher_events(buck)
+    verify_results(results, required)
+
+
+@buck_test(setup_eden=True)
+async def test_edenfs_duplicated_notifications(buck: Buck) -> None:
+    await setup_file_watcher_test(buck)
+
+    with open(buck.cwd / "files" / "abc", "a") as f:
+        f.write("test")
+
+    with open(buck.cwd / "files" / "bcd", "a"):
+        pass
+
+    with open(buck.cwd / "files" / "abc", "a") as f:
+        f.write("test1")
+
+    _, results = await get_file_watcher_events(buck)
+    # eden watcher doesn't report duplicates
+    assert results == [
+        FileWatcherEvent(
+            FileWatcherEventType.MODIFY, FileWatcherKind.FILE, "root//files/abc"
+        ),
+        FileWatcherEvent(
+            FileWatcherEventType.CREATE, FileWatcherKind.FILE, "root//files/bcd"
+        ),
+    ]
+
+
+def get_eden_version(buck: Buck) -> Optional[datetime]:
+    eden_out = subprocess.check_output(["eden", "-v"], cwd=buck.cwd).decode()
+    match = re.search(r"Running:\s*(\d+)", eden_out)
+    if match:
+        return datetime.strptime(match.group(1).strip(), "%Y%m%d")
+    else:
+        # if eden is not running, take installed version
+        match = re.search(r"Installed:\s*(\d+)", eden_out)
+        if match:
+            return datetime.strptime(match.group(1).strip(), "%Y%m%d")
+    return None
+
+
+@buck_test(setup_eden=True)
+async def test_edenfs_hg_clean_update(buck: Buck) -> None:
+    await setup_file_watcher_test(buck)
+
+    with open(buck.cwd / "files" / "abc", "a") as f:
+        f.write("test")
+
+    _, results = await get_file_watcher_events(buck)
+    required = [
+        FileWatcherEvent(
+            FileWatcherEventType.MODIFY,
+            FileWatcherKind.FILE,
+            "root//files/abc",
+        ),
+    ]
+    verify_results(results, required)
+
+    subprocess.run(["hg", "up", "-C", "."], cwd=buck.cwd)
+
+    eden_version = get_eden_version(buck)
+    assert eden_version is not None, "Failed to get eden version"
+
+    expected_result = []
+    if eden_version >= datetime(2025, 6, 12, 0, 0, 0):
+        # hg up -C . deletes all the changes and eden should report modification in `root//files/abc`
+        expected_result.append(
+            FileWatcherEvent(
+                FileWatcherEventType.MODIFY,
+                FileWatcherKind.FILE,
+                "root//files/abc",
+            )
+        )
+
+    _, results = await get_file_watcher_events(buck)
+    assert results == expected_result

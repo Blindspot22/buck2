@@ -1,38 +1,140 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     ":erlang_info.bzl",
     "ErlangAppIncludeInfo",
     "ErlangAppInfo",
+    "ErlangDependencyInfo",
     "ErlangTestInfo",
+)
+
+def _erlang_deps_impl(ctx: AnalysisContext) -> list[Provider]:
+    dependencies = {}
+    _flatten_dependencies(ctx.attrs.deps, dependencies)
+    _flatten_dependencies(ctx.attrs.applications, dependencies)
+    _flatten_dependencies(ctx.attrs.included_applications, dependencies)
+    _flatten_dependencies(ctx.attrs.extra_includes, dependencies)
+
+    all_includes = {}
+    includes = {}
+    include_dirs = {}
+    header_deps_files = {}
+    private_includes = {}
+    private_include_dirs = {}
+    beams = {}
+    all_beams = {}
+    ebin_code_path = []
+    plain_code_path = []
+
+    for name in dependencies:
+        dep = dependencies[name]
+
+        if ErlangAppInfo in dep:
+            dep_info = dep[ErlangAppInfo]
+
+            if dep_info.virtual:
+                # virtual applications don't directories we need to include
+                # we skip this entire step
+                continue
+
+            # collect beams
+            if dep_info.beams:
+                new_beams = dep_info.beams
+                for mod in new_beams:
+                    if mod in all_beams:
+                        fail_dep_conflict("module", mod, all_beams[mod], name)
+                    all_beams[mod] = name
+                beams[name] = new_beams
+
+            # collect private includes
+            if dep_info.private_include_dir:
+                private_include_dirs[name] = dep_info.private_include_dir
+                new_includes = dep_info.private_includes
+                for hrl in new_includes:
+                    if hrl in all_includes:
+                        fail_dep_conflict("header", hrl, all_includes[hrl], name)
+                    all_includes[hrl] = name
+                private_includes[name] = new_includes
+
+            # collect code path
+            ebin_code_path.append(dep_info.app_folder)
+
+        elif ErlangAppIncludeInfo in dep:
+            dep_info = dep[ErlangAppIncludeInfo]
+
+        elif ErlangTestInfo in dep:
+            # for test deps we only care about code path
+
+            dep_info = dep[ErlangTestInfo]
+            plain_code_path.append(dep_info.output_dir)
+            continue
+        else:
+            fail("invalid dep {}", dep)
+
+        # collect includes
+        if dep_info.include_dir:
+            include_dirs[name] = dep_info.include_dir
+            new_includes = dep_info.includes
+            for hrl in new_includes:
+                if hrl in all_includes:
+                    fail_dep_conflict("header", hrl, all_includes[hrl], name)
+                all_includes[hrl] = name
+            includes[name] = new_includes
+
+        # collect header_deps_files
+        if dep_info.header_deps_file:
+            header_deps_files[name] = dep_info.header_deps_file
+
+    code_path = cmd_args(plain_code_path, cmd_args(ebin_code_path, format = "{}/ebin"))
+
+    dependency_info = ErlangDependencyInfo(
+        dependencies = dependencies,
+        includes = includes,
+        include_dirs = include_dirs,
+        private_includes = private_includes,
+        private_include_dirs = private_include_dirs,
+        header_deps_files = header_deps_files,
+        beams = beams,
+        code_path = code_path,
+    )
+
+    return [DefaultInfo(), dependency_info]
+
+def fail_dep_conflict(kind: str, name: str, app1: str, app2: str) -> None:
+    fail("conflicting {} `{}` found, defined in applications '{}' and '{}'".format(kind, name, app1, app2))
+
+erlang_deps_rule = anon_rule(
+    impl = _erlang_deps_impl,
+    attrs = {
+        "applications": attrs.set(attrs.dep(), default = []),
+        "deps": attrs.set(attrs.dep(), default = []),
+        "extra_includes": attrs.set(attrs.dep(), default = []),
+        "included_applications": attrs.set(attrs.dep(), default = []),
+    },
+    artifact_promise_mappings = {},
 )
 
 ErlAppDependencies = dict[str, Dependency]
 
-def check_dependencies(in_deps: list[Dependency], allowlist: list):
-    """enforce all dependencies implement one of the expected providers"""
-    for dep in in_deps:
-        passed = False
-        for dep_type in allowlist:
-            if dep_type in dep:
-                passed = True
-                break
-        if not passed:
-            _bad_dependency_error(dep)
+def flatten_dependencies(deps: list[Dependency]) -> ErlAppDependencies:
+    dependencies = {}
+    _flatten_dependencies(deps, dependencies)
+    return dependencies
 
-def flatten_dependencies(_ctx: AnalysisContext, deps: list[Dependency]) -> ErlAppDependencies:
+# mutates dependencies in place
+def _flatten_dependencies(deps: list[Dependency], dependencies: ErlAppDependencies):
     """ collect transitive dependencies
 
     Flatten all transitive dependencies and merge together with the direct
     ones. This is done at every step (with each `erlang_application_impl ` call),
     so we only need to look one hop away.
     """
-    dependencies = {}
     for dep in deps:
         if ErlangAppInfo in dep:
             # handle transitive deps
@@ -45,7 +147,8 @@ def flatten_dependencies(_ctx: AnalysisContext, deps: list[Dependency]) -> ErlAp
 
     return dependencies
 
-def _safe_add_dependency(dependencies: ErlAppDependencies, dep: Dependency) -> ErlAppDependencies:
+# mutates dependencies in place
+def _safe_add_dependency(dependencies: ErlAppDependencies, dep: Dependency):
     """Adds ErlangAppInfo and ErlangAppIncludeInfo dependencies
 
     ErlangAppInfo (full) application dependencies overwrite include_only dependencies,
@@ -68,9 +171,3 @@ def _safe_add_dependency(dependencies: ErlAppDependencies, dep: Dependency) -> E
     elif dep[ErlangAppIncludeInfo].name not in dependencies:
         dependencies[dep[ErlangAppIncludeInfo].name] = dep
     return dependencies
-
-def _bad_dependency_error(dep: Dependency):
-    fail((
-        "unsupported dependency through target `%s`: " +
-        "the target needs to define an Erlang application"
-    ) % (str(dep.label),))

@@ -5,7 +5,10 @@
 %%% License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 %%% of this source tree.
 
+%% @format
 -module(cth_tpx_server).
+-compile([warn_missing_spec_all]).
+
 -behaviour(gen_server).
 
 %% Public API
@@ -35,7 +38,6 @@
     get
     | {modify, fun((state()) -> {term(), state()})}.
 
-
 %% ---- PUBLIC API ---------
 -spec start_link(InitialState :: state()) -> handle().
 start_link(InitialState) ->
@@ -50,7 +52,6 @@ get(Handle) ->
 modify(Handle, Fun) ->
     call(Handle, {modify, Fun}).
 
-
 %% ---- gen_server callbacks ----------
 
 -spec call(Handle :: handle(), Req :: call_reqs()) -> dynamic().
@@ -61,8 +62,8 @@ call(Handle, Req) ->
 init(InitialState) ->
     {ok, InitialState}.
 
--spec handle_call
-    (Req :: call_reqs(), From :: term(), State :: state()) -> {reply, Reply :: term(), NewState :: state()}.
+-spec handle_call(Req :: call_reqs(), From :: term(), State :: state()) ->
+    {reply, Reply :: term(), NewState :: state()}.
 handle_call(get, _From, State) ->
     {reply, State, State};
 handle_call({modify, Fun}, _From, State) ->

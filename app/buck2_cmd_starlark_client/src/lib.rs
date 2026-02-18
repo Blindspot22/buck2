@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -128,15 +129,27 @@ impl StreamingCommand for StarlarkSubcommand {
 }
 
 impl StarlarkCommand {
-    pub fn exec(self, matches: BuckArgMatches<'_>, ctx: ClientCommandContext<'_>) -> ExitResult {
+    pub fn exec(
+        self,
+        matches: BuckArgMatches<'_>,
+        ctx: ClientCommandContext<'_>,
+        events_ctx: &mut EventsCtx,
+    ) -> ExitResult {
         let matches = matches.unwrap_subcommand();
         match self {
-            StarlarkCommand::Opaque(cmd) => ctx.exec(cmd, matches),
-            StarlarkCommand::DebugAttach(cmd) => ctx.exec(cmd, matches),
+            StarlarkCommand::Opaque(cmd) => ctx.exec(cmd, matches, events_ctx),
+            StarlarkCommand::DebugAttach(cmd) => ctx.exec(cmd, matches, events_ctx),
         }
     }
 
     pub fn sanitize_argv(&self, argv: Argv) -> SanitizedArgv {
         argv.no_need_to_sanitize()
+    }
+
+    pub fn command_name(&self) -> &'static str {
+        match self {
+            StarlarkCommand::Opaque(_) => "starlark",
+            StarlarkCommand::DebugAttach(_) => "starlark-debug-attach",
+        }
     }
 }

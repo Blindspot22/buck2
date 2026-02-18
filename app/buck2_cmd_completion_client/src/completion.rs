@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_client_ctx::client_ctx::ClientCommandContext;
@@ -33,9 +34,11 @@ enum Shell {
 #[clap(name = "completion", verbatim_doc_comment)]
 /// Print completion configuration for shell
 ///
-/// For a one-time setup, run one of the following commands:
-///     source <(buck2 completion bash)
-///     source <(buck2 completion zsh)
+/// For a one-time setup, run the one of the following commands appropriate for the shell you're
+/// using:
+/// - `source <(buck2 completion bash)`
+/// - `source <(buck2 completion zsh)`
+/// - `source (buck2 completion fish | psub)`
 pub struct CompletionCommand {
     #[clap(
         value_enum,
@@ -62,9 +65,14 @@ impl CompletionCommand {
     }
 }
 
-const GENERATED_INSERTION_POINT: &str = "# %INSERT_GENERATED_LINE%";
-const GENERATED_TAG: &str = concat!("@", "generated");
-const COMPLETION_INSERTION_POINT: &str = "# %INSERT_OPTION_COMPLETION%";
+// Use 'static here to avoid rust-analyzer crash when pattern matching
+// on these string literals. https://github.com/rust-lang/rust-analyzer/issues/20149
+#[allow(clippy::redundant_static_lifetimes)]
+const GENERATED_INSERTION_POINT: &'static str = "# %INSERT_GENERATED_LINE%";
+#[allow(clippy::redundant_static_lifetimes)]
+const GENERATED_TAG: &'static str = concat!("@", "generated");
+#[allow(clippy::redundant_static_lifetimes)]
+const COMPLETION_INSERTION_POINT: &'static str = "# %INSERT_OPTION_COMPLETION%";
 
 fn completion_wrapper(shell: Shell) -> &'static str {
     #[cfg(buck_build)]

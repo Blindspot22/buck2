@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Parses imports for load_file() calls in build files.
@@ -16,8 +17,8 @@ use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::cell_path_with_allowed_relative_dir::CellPathWithAllowedRelativeDir;
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::cells::paths::CellRelativePathBuf;
-use buck2_core::fs::paths::RelativePath;
-use buck2_core::fs::paths::file_name::FileName;
+use buck2_fs::paths::RelativePath;
+use buck2_fs::paths::file_name::FileName;
 
 #[derive(buck2_error::Error, Debug)]
 #[buck2(input)]
@@ -276,10 +277,10 @@ mod tests {
             },
             &path,
         ) {
-            Ok(import) => panic!("Expected parse failure for {}, got result {}", path, import),
+            Ok(import) => panic!("Expected parse failure for {path}, got result {import}"),
             Err(e) => {
                 assert_eq!(
-                    format!("{:#}", e),
+                    format!("{e:#}"),
                     ImportParseError::EmptyFileName(path.to_owned()).to_string()
                 );
             }
@@ -300,7 +301,7 @@ mod tests {
             },
             &path,
         ) {
-            Ok(import) => panic!("Expected parse failure for {}, got result {}", path, import),
+            Ok(import) => panic!("Expected parse failure for {path}, got result {import}"),
             Err(_) => {
                 // TODO: should we verify the contents of the error?
             }
@@ -410,13 +411,10 @@ mod tests {
             },
         );
         match res {
-            Ok(res) => panic!(
-                "Expected parse failure for {}, got result {}",
-                imported_file, res
-            ),
+            Ok(res) => panic!("Expected parse failure for {imported_file}, got result {res}"),
             Err(e) => {
                 assert_eq!(
-                    format!("{:#}", e),
+                    format!("{e:#}"),
                     ImportParseError::ProhibitedRelativeImport(imported_file.to_owned())
                         .to_string()
                 );

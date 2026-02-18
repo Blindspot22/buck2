@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
@@ -48,14 +49,6 @@ public interface ResolvedJavac {
   /** Returns a short name of the tool */
   String getShortName();
 
-  /** Enum that specify a type of java compiler. */
-  enum Source {
-    /** Shell out to the javac in the JDK */
-    EXTERNAL,
-    /** Run javac in-process, loading it from the JRE in which Buck is running. */
-    JDK,
-  }
-
   /** Interface that defines invocation object created during java compilation. */
   interface Invocation extends AutoCloseable {
 
@@ -63,7 +56,7 @@ public interface ResolvedJavac {
      * Produces a source-only ABI jar. {@link #buildClasses} may not be called on an invocation on
      * which this has been called.
      */
-    int buildSourceOnlyAbiJar() throws InterruptedException;
+    int buildSourceOnlyAbiJar(boolean isMixedModule) throws InterruptedException;
 
     /** Produces a source ABI jar. Must be called before {@link #buildClasses} */
     int buildSourceAbiJar() throws InterruptedException;

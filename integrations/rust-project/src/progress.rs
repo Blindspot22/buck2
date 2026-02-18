@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io::Write;
@@ -29,8 +30,13 @@ impl<S, W> ProgressLayer<S, W> {
     }
 }
 
+/// Discover events that are consumed by rust-analyzer.
+///
+/// <https://rust-analyzer.github.io/book/configuration.html#workspace-discovery-protocol>
 #[derive(Serialize, Debug, Clone, PartialEq)]
-struct Out<'a> {
+struct DiscoverProjectEvent<'a> {
+    /// "progress" or "error".
+    kind: serde_json::Value,
     #[serde(flatten)]
     event_fields: &'a FxHashMap<String, serde_json::Value>,
     #[serde(flatten)]
@@ -68,9 +74,9 @@ where
         let mut visitor = JsonVisitor(&mut event_fields);
         event.record(&mut visitor);
 
-        if !event_fields.contains_key("kind") {
+        let Some(kind) = event_fields.remove("kind") else {
             return;
-        }
+        };
 
         let span_fields = match ctx.lookup_current() {
             Some(span) => {
@@ -84,13 +90,14 @@ where
             _ => FxHashMap::default(),
         };
 
-        let out = Out {
+        let discover_event = DiscoverProjectEvent {
+            kind,
             event_fields: &event_fields,
             span_fields: &span_fields,
         };
-        let out = serde_json::to_string(&out).unwrap();
+        let discover_event = serde_json::to_string(&discover_event).unwrap();
         let mut writer = self.writer.make_writer();
-        writeln!(writer, "{}", out).expect("unable to write");
+        writeln!(writer, "{discover_event}").expect("unable to write");
     }
 }
 
@@ -110,7 +117,7 @@ impl tracing::field::Visit for JsonVisitor<'_> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         self.0.insert(
             field.name().to_owned(),
-            serde_json::Value::from(format!("{:?}", value)),
+            serde_json::Value::from(format!("{value:?}")),
         );
     }
 }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -18,22 +19,24 @@ use std::sync::Mutex;
 use allocative::Allocative;
 use async_trait::async_trait;
 use blake3::Hash;
-use buck2_common::dice::file_ops::FileChangeTracker;
-use buck2_common::file_ops::FileType;
+use buck2_common::file_ops::dice::FileChangeTracker;
+use buck2_common::file_ops::metadata::FileType;
 use buck2_common::ignores::ignore_set::IgnoreSet;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::name::CellName;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_data::FileWatcherEventType;
 use buck2_data::FileWatcherKind;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::dispatch::span_async;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::file_name::FileNameBuf;
 use compact_str::CompactString;
 use dice::DiceTransactionUpdater;
 use dupe::Dupe;
@@ -153,14 +156,30 @@ impl FsSnapshot {
         for (cell_path, prev_info) in self.0.iter() {
             if let Some(current_info) = new_snapshot.0.get(cell_path) {
                 match (current_info, prev_info) {
-                    (EntryInfo::File(cur), EntryInfo::File(prev)) if cur != prev => {
+                    (EntryInfo::File(cur), EntryInfo::File(prev)) => {
+                        if cur != prev {
+                            events.push(FsEvent {
+                                cell_path: cell_path.to_owned(),
+                                event: FileWatcherEventType::Modify,
+                                kind: prev_info.to_file_watcher_kind(),
+                            });
+                        }
+                    }
+                    (EntryInfo::Directory, EntryInfo::Directory) => (),
+                    // FIXME(JakobDegen): Track symlink targets
+                    (EntryInfo::Symlink, EntryInfo::Symlink) => (),
+                    (current_info, prev_info) => {
                         events.push(FsEvent {
                             cell_path: cell_path.to_owned(),
-                            event: FileWatcherEventType::Modify,
+                            event: FileWatcherEventType::Delete,
                             kind: prev_info.to_file_watcher_kind(),
                         });
+                        events.push(FsEvent {
+                            cell_path: cell_path.to_owned(),
+                            event: FileWatcherEventType::Create,
+                            kind: current_info.to_file_watcher_kind(),
+                        });
                     }
-                    _ => (),
                 }
             } else {
                 events.push(FsEvent {
@@ -209,28 +228,29 @@ impl FsSnapshot {
                     FileWatcherEventType::Create,
                     FileWatcherKind::File | FileWatcherKind::Symlink,
                 ) => {
-                    changed.file_added(event.cell_path);
+                    changed.file_added_or_removed(event.cell_path);
                 }
                 (FileWatcherEventType::Create, FileWatcherKind::Directory) => {
-                    changed.dir_added(event.cell_path);
+                    changed.dir_added_or_removed(event.cell_path);
                 }
                 (
                     FileWatcherEventType::Modify,
                     FileWatcherKind::File | FileWatcherKind::Symlink,
                 ) => {
-                    changed.file_changed(event.cell_path);
+                    changed.file_contents_changed(event.cell_path);
                 }
                 (FileWatcherEventType::Modify, FileWatcherKind::Directory) => {
-                    changed.dir_changed(event.cell_path);
+                    // FIXME(JakobDegen): This should not be needed
+                    changed.dir_entries_changed_force_invalidate(event.cell_path);
                 }
                 (
                     FileWatcherEventType::Delete,
                     FileWatcherKind::File | FileWatcherKind::Symlink,
                 ) => {
-                    changed.file_removed(event.cell_path);
+                    changed.file_added_or_removed(event.cell_path);
                 }
                 (FileWatcherEventType::Delete, FileWatcherKind::Directory) => {
-                    changed.dir_removed(event.cell_path);
+                    changed.dir_added_or_removed(event.cell_path);
                 }
             }
         }
@@ -244,7 +264,7 @@ impl FsSnapshot {
         cells: &CellResolver,
         disk_path: &AbsNormPath,
     ) -> buck2_error::Result<()> {
-        for file in fs_util::read_dir(disk_path)? {
+        for file in fs_util::read_dir(disk_path).categorize_internal()? {
             let file = file?;
             let filetype = file.file_type()?;
             let filename = file.file_name();
@@ -252,13 +272,13 @@ impl FsSnapshot {
             let filename = FileNameBuf::try_from(CompactString::new(
                 filename
                     .to_str()
-                    .buck_error_context("Filename is not UTF-8")?,
+                    .ok_or_else(|| internal_error!("Filename is not UTF-8"))?,
             ))
             .with_buck_error_context(|| format!("Invalid filename: {}", disk_path.display()))?;
 
             let disk_path = disk_path.join(filename);
             let rel_path = root.relativize(&disk_path)?;
-            let cell_path = cells.get_cell_path(&rel_path)?;
+            let cell_path = cells.get_cell_path(&rel_path);
 
             // We ignore buck-out and .hg dirs, as those are uninteresting events caused by us.
             if rel_path.starts_with(InvocationPaths::buck_out_dir_prefix())
@@ -311,13 +331,13 @@ mod tests {
     use buck2_core::cells::cell_path::CellPath;
     use buck2_core::cells::cell_root_path::CellRootPathBuf;
     use buck2_core::cells::name::CellName;
-    use buck2_core::fs::fs_util;
-    use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-    use buck2_core::fs::paths::abs_path::AbsPathBuf;
     use buck2_core::fs::project::ProjectRoot;
     use buck2_core::fs::project_rel_path::ProjectRelativePath;
     use buck2_data::FileWatcherEventType;
     use buck2_data::FileWatcherKind;
+    use buck2_fs::fs_util::uncategorized as fs_util;
+    use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+    use buck2_fs::paths::abs_path::AbsPathBuf;
 
     use crate::fs_hash_crawler::FsEvent;
     use crate::fs_hash_crawler::FsSnapshot;
@@ -334,7 +354,7 @@ mod tests {
 
         let get_path = |path| -> buck2_error::Result<(AbsPathBuf, CellPath)> {
             let path = ProjectRelativePath::new(path).unwrap();
-            let cell_path = cell_resolver.get_cell_path(path)?;
+            let cell_path = cell_resolver.get_cell_path(path);
             Ok((proj_root.resolve(path).into_abs_path_buf(), cell_path))
         };
         let dir1 = proj_root.resolve(ProjectRelativePath::new("dir1")?);

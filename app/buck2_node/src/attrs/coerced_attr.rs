@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use core::fmt;
@@ -19,16 +20,19 @@ use buck2_core::package::PackageLabel;
 use buck2_core::package::source_path::SourcePathRef;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersLabel;
+use buck2_core::soft_error;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_data::error::ErrorTag;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_error::internal_error;
 use buck2_util::arc_str::ArcSlice;
+use buck2_util::arc_str::ArcStr;
 use display_container::fmt_keyed_container;
 use dupe::Dupe;
 use gazebo::prelude::SliceExt;
 use itertools::Itertools;
+use pagable::Pagable;
 use serde::Serialize;
 use serde::Serializer;
 use serde_json::to_value;
@@ -87,7 +91,7 @@ impl fmt::Display for CoercedSelectorKeyRef<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Allocative)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Allocative, Pagable)]
 pub struct CoercedSelector {
     pub(crate) entries: ArcSlice<(ConfigurationSettingKey, CoercedAttr)>,
     pub(crate) default: Option<CoercedAttr>,
@@ -104,7 +108,7 @@ impl AttrDisplayWithContext for CoercedSelector {
             self.all_entries().map(|(k, v)| {
                 (
                     match k {
-                        CoercedSelectorKeyRef::Target(k) => format!("\"{}\"", k),
+                        CoercedSelectorKeyRef::Target(k) => format!("\"{k}\""),
                         CoercedSelectorKeyRef::Default => "\"DEFAULT\"".to_owned(),
                     },
                     v.as_display(ctx),
@@ -122,7 +126,7 @@ impl AttrSerializeWithContext for CoercedSelector {
         S: Serializer,
     {
         self.to_json(ctx)
-            .map_err(|e| serde::ser::Error::custom(format!("{}", e)))?
+            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?
             .serialize(s)
     }
 }
@@ -179,7 +183,7 @@ impl CoercedSelector {
         Ok(())
     }
 
-    pub fn all_entries(&self) -> impl Iterator<Item = (CoercedSelectorKeyRef, &CoercedAttr)> {
+    pub fn all_entries(&self) -> impl Iterator<Item = (CoercedSelectorKeyRef<'_>, &CoercedAttr)> {
         self.entries
             .iter()
             .map(|(k, v)| (CoercedSelectorKeyRef::Target(k), v))
@@ -216,9 +220,22 @@ impl CoercedSelector {
             ("entries".to_owned(), select),
         ])))
     }
+
+    fn fail_to_json(message: &ArcStr) -> Result<serde_json::Value, buck2_error::Error> {
+        Ok(serde_json::Value::Object(serde_json::Map::from_iter([
+            (
+                "__type".to_owned(),
+                serde_json::Value::String("select_fail".to_owned()),
+            ),
+            (
+                "message".to_owned(),
+                serde_json::Value::String(message.to_string()),
+            ),
+        ])))
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Allocative)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Allocative, Pagable)]
 pub struct CoercedConcat(pub Box<[CoercedAttr]>);
 
 impl Deref for CoercedConcat {
@@ -256,7 +273,7 @@ impl AttrSerializeWithContext for CoercedConcat {
         S: Serializer,
     {
         self.to_json(ctx)
-            .map_err(|e| serde::ser::Error::custom(format!("{}", e)))?
+            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?
             .serialize(s)
     }
 }
@@ -272,21 +289,14 @@ impl AttrSerializeWithContext for CoercedConcat {
 /// CoercedData::Concat supports a representation for when a selectable is added
 /// to something. Not all types support this case and those will return an error
 /// during coercion and not ever use the ::Concat case.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Allocative)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Allocative, Pagable)]
 pub enum CoercedAttr {
     Selector(Box<CoercedSelector>),
+    SelectFail(ArcStr),
     Concat(CoercedConcat),
 
     Bool(BoolLiteral),
     Int(i64),
-    // Note we store `String`, not `Arc<str>` here, because we store full attributes
-    // in unconfigured target node, but configured target node is basically a pair
-    // (reference to unconfigured target node, configuration).
-    //
-    // Configured attributes are created on demand and destroyed immediately after use.
-    //
-    // So when working with configured attributes with pay with CPU for string copies,
-    // but don't increase total memory usage, because these string copies are short living.
     String(StringLiteral),
     // Like String, but drawn from a set of variants, so doesn't support concat
     EnumVariant(StringLiteral),
@@ -332,12 +342,13 @@ impl AttrDisplayWithContext for CoercedAttr {
     fn fmt(&self, ctx: &AttrFmtContext, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CoercedAttr::Selector(s) => s.fmt(ctx, f),
+            CoercedAttr::SelectFail(s) => write!(f, "select_fail(\"{}\")", &s),
             CoercedAttr::Concat(c) => c.fmt(ctx, f),
             CoercedAttr::Bool(v) => {
-                write!(f, "{}", v)
+                write!(f, "{v}")
             }
             CoercedAttr::Int(v) => {
-                write!(f, "{}", v)
+                write!(f, "{v}")
             }
             CoercedAttr::String(v) | CoercedAttr::EnumVariant(v) => {
                 AttrDisplayWithContext::fmt(v, ctx, f)
@@ -352,17 +363,17 @@ impl AttrDisplayWithContext for CoercedAttr {
             CoercedAttr::ExplicitConfiguredDep(e) => Display::fmt(e, f),
             CoercedAttr::SplitTransitionDep(e) => Display::fmt(e, f),
             CoercedAttr::TransitionDep(e) => Display::fmt(e, f),
-            CoercedAttr::ConfiguredDepForForwardNode(e) => write!(f, "\"{}\"", e),
-            CoercedAttr::ConfigurationDep(e) => write!(f, "\"{}\"", e),
-            CoercedAttr::PluginDep(e) => write!(f, "\"{}\"", e),
-            CoercedAttr::Dep(e) => write!(f, "\"{}\"", e),
-            CoercedAttr::SourceLabel(e) => write!(f, "\"{}\"", e),
-            CoercedAttr::Label(e) => write!(f, "\"{}\"", e),
-            CoercedAttr::Arg(e) => write!(f, "\"{}\"", e),
+            CoercedAttr::ConfiguredDepForForwardNode(e) => write!(f, "\"{e}\""),
+            CoercedAttr::ConfigurationDep(e) => write!(f, "\"{e}\""),
+            CoercedAttr::PluginDep(e) => write!(f, "\"{e}\""),
+            CoercedAttr::Dep(e) => write!(f, "\"{e}\""),
+            CoercedAttr::SourceLabel(e) => write!(f, "\"{e}\""),
+            CoercedAttr::Label(e) => write!(f, "\"{e}\""),
+            CoercedAttr::Arg(e) => write!(f, "\"{e}\""),
             CoercedAttr::Query(e) => write!(f, "\"{}\"", e.query.query),
             CoercedAttr::SourceFile(e) => write!(f, "\"{}\"", source_file_display(ctx, e)),
-            CoercedAttr::Metadata(m) => write!(f, "{}", m),
-            CoercedAttr::TargetModifiers(m) => write!(f, "{}", m),
+            CoercedAttr::Metadata(m) => write!(f, "{m}"),
+            CoercedAttr::TargetModifiers(m) => write!(f, "{m}"),
         }
     }
 }
@@ -374,7 +385,7 @@ impl AttrSerializeWithContext for CoercedAttr {
     {
         // TODO this is inefficient. We should impl Serialize and derive value from this instead.
         self.to_json(ctx)
-            .map_err(|e| serde::ser::Error::custom(format!("{}", e)))?
+            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?
             .serialize(s)
     }
 }
@@ -387,6 +398,9 @@ impl CoercedAttr {
     pub fn to_json(&self, ctx: &AttrFmtContext) -> buck2_error::Result<serde_json::Value> {
         match self {
             CoercedAttr::Selector(s) => s.to_json(ctx),
+            CoercedAttr::SelectFail(string_literal) => {
+                CoercedSelector::fail_to_json(string_literal)
+            }
             CoercedAttr::Concat(c) => c.to_json(ctx),
             CoercedAttr::Bool(v) => Ok(to_value(v)?),
             CoercedAttr::Int(v) => Ok(to_value(v)?),
@@ -450,6 +464,7 @@ impl CoercedAttr {
                 }
                 Ok(())
             }
+            CoercedAttrWithType::SelectFail(..) => Ok(()),
 
             CoercedAttrWithType::None => Ok(()),
             CoercedAttrWithType::Some(attr, t) => attr.traverse(&t.inner, pkg, traversal),
@@ -504,7 +519,9 @@ impl CoercedAttr {
             }
 
             CoercedAttrWithType::OneOf(l, i, t) => {
-                let item_type = t.xs.get(i as usize).buck_error_context("invalid enum")?;
+                let item_type =
+                    t.xs.get(i as usize)
+                        .ok_or_else(|| internal_error!("invalid enum"))?;
                 l.traverse(item_type, pkg, traversal)
             }
             CoercedAttrWithType::Visibility(..) => Ok(()),
@@ -573,6 +590,19 @@ impl CoercedAttr {
         Ok(Some(matching.2))
     }
 
+    /// Select the first matching entry without considering specificity.
+    pub fn select_the_first_match<'a, 'x>(
+        select_entries: impl IntoIterator<
+            Item = (
+                &'x ConfigurationSettingKey,
+                &'x ConfigSettingData,
+                &'a CoercedAttr,
+            ),
+        >,
+    ) -> Option<&'a CoercedAttr> {
+        select_entries.into_iter().next().map(|(_, _, v)| v)
+    }
+
     fn select_the_most_specific_slow<'a>(
         select_entries: SmallVec<
             [(
@@ -599,10 +629,25 @@ impl CoercedAttr {
                 "no entries after slow select the most specific"
             )),
             [(.., x)] => Ok(Some(x)),
-            [(x, ..), (y, ..), ..] => Err(buck2_error!(
-                buck2_error::ErrorTag::Input,
-                "Both select keys `{x}` and `{y}` match the configuration, but neither is more specific"
-            )),
+            multiple_entries => {
+                // Check if all entries have the same value
+                let (first_key, _, first_value) = &multiple_entries[0];
+                // Find the first entry with a different value, if any
+                let different_value_entry = multiple_entries
+                    .iter()
+                    .skip(1)
+                    .find(|(_, _, v)| v != first_value);
+                if let Some((different_key, _, _)) = different_value_entry {
+                    // Report the ambiguity error with the specific keys that have different values
+                    Err(buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "Both select keys `{first_key}` and `{different_key}` match the configuration, but neither is more specific and they have different values"
+                    ))
+                } else {
+                    // If all values are the same, return that value
+                    Ok(Some(first_value))
+                }
+            }
         }
     }
 
@@ -612,10 +657,29 @@ impl CoercedAttr {
     ) -> buck2_error::Result<&'a CoercedAttr> {
         let CoercedSelector { entries, default } = select;
         let matched_cfg_keys = ctx.matched_cfg_keys();
-        let resolved_entries = entries
+        let resolved_entries: Vec<_> = entries
             .iter()
-            .filter_map(|(k, v)| matched_cfg_keys.setting_matches(k).map(|conf| (k, conf, v)));
-        if let Some(v) = Self::select_the_most_specific(resolved_entries)? {
+            .filter_map(|(k, v)| matched_cfg_keys.setting_matches(k).map(|conf| (k, conf, v)))
+            .collect();
+
+        if let Some(v) = Self::select_the_most_specific(resolved_entries.iter().copied())? {
+            // Compute first match for comparison (data collection for future migration)
+            let first_match = Self::select_the_first_match(resolved_entries.iter().copied());
+            // Compare with first match and emit soft error if they differ
+            match first_match {
+                Some(first) if first != v => {
+                    let _unused = soft_error!(
+                        "select_first_match_differs",
+                        buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "First matching select key has different value than most specific match: {}",
+                            select.as_display_no_ctx()
+                        ),
+                        quiet: true,
+                    );
+                }
+                _ => {}
+            }
             Ok(v)
         } else {
             default.as_ref().ok_or_else(|| {
@@ -624,7 +688,7 @@ impl CoercedAttr {
                     "None of {} conditions matched configuration `{}` and no default was set:\n{}",
                     entries.len(),
                     ctx.cfg().cfg(),
-                    entries.iter().map(|(s, _)| format!("  {}", s)).join("\n"),
+                    entries.iter().map(|(s, _)| format!("  {s}")).join("\n"),
                 )
             })
         }
@@ -654,14 +718,21 @@ impl CoercedAttr {
             CoercedAttrWithType::Concat(items, t) => {
                 let singleton = items.len() == 1;
                 let mut it = items.iter().map(|item| item.configure(t, ctx));
-                let first = it.next().internal_error("concat with no items")??;
+                let first = it
+                    .next()
+                    .ok_or_else(|| internal_error!("concat with no items"))??;
                 if singleton {
                     first
                 } else {
                     first.concat(t, &mut it)?
                 }
             }
-
+            CoercedAttrWithType::SelectFail(message, _) => {
+                return Err(buck2_error!(
+                    buck2_error::ErrorTag::Input,
+                    "select resolved to select_fail(): {message}"
+                ));
+            }
             CoercedAttrWithType::AnyList(list) => ConfiguredAttr::List(ListLiteral(
                 list.try_map(|v| v.configure(AttrType::any_ref(), ctx))?
                     .into(),
@@ -767,6 +838,7 @@ impl CoercedAttr {
                 }
                 Ok(false)
             }
+            CoercedAttr::SelectFail(_) => Ok(false),
             CoercedAttr::String(v) | CoercedAttr::EnumVariant(v) => filter(v),
             CoercedAttr::List(vals) => vals.any_matches(filter),
             CoercedAttr::Tuple(vals) => vals.any_matches(filter),
@@ -831,7 +903,7 @@ mod tests {
         let mut long = (0..100)
             .map(|i| {
                 (
-                    ConfigurationSettingKey::testing_parse(&format!("foo//:{}", i)),
+                    ConfigurationSettingKey::testing_parse(&format!("foo//:{i}")),
                     attr.clone(),
                 )
             })

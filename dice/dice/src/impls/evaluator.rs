@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use crate::ctx::DiceComputationsImpl;
 use crate::impls::ctx::ModernComputeCtx;
 use crate::impls::ctx::SharedLiveTransactionCtx;
 use crate::impls::deps::graph::SeriesParallelDeps;
-use crate::impls::dice::DiceModern;
+use crate::impls::dice::Dice;
 use crate::impls::key::DiceKey;
 use crate::impls::key::DiceKeyErased;
 use crate::impls::key::ParentKey;
@@ -38,7 +39,7 @@ use crate::impls::worker::state::DiceWorkerStateFinishedEvaluating;
 pub(crate) struct AsyncEvaluator {
     pub(super) per_live_version_ctx: SharedLiveTransactionCtx,
     pub(super) user_data: Arc<UserComputationData>,
-    pub(super) dice: Arc<DiceModern>,
+    pub(super) dice: Arc<Dice>,
 }
 
 impl AsyncEvaluator {
@@ -61,19 +62,16 @@ impl AsyncEvaluator {
 
         match key_erased {
             DiceKeyErased::Key(key_dyn) => {
-                let mut new_ctx =
-                    DiceComputations(DiceComputationsImpl::Modern(ModernComputeCtx::new(
-                        ParentKey::Some(key), // within this key's compute, this key is the parent
-                        cycles,
-                        self.dupe(),
-                    )));
+                let mut new_ctx = DiceComputations(DiceComputationsImpl(ModernComputeCtx::new(
+                    ParentKey::Some(key), // within this key's compute, this key is the parent
+                    cycles,
+                    self.dupe(),
+                )));
 
                 let value = key_dyn
                     .compute(&mut new_ctx, &handle.cancellation_ctx())
                     .await;
-                let (recorded_deps, evaluation_data, cycles) = match new_ctx.0 {
-                    DiceComputationsImpl::Modern(new_ctx) => new_ctx.finalize(),
-                };
+                let (recorded_deps, evaluation_data, cycles) = new_ctx.0.0.finalize();
 
                 state.finished(
                     handle,
@@ -125,7 +123,7 @@ impl AsyncEvaluator {
 #[derive(Clone, Dupe)]
 pub(crate) struct SyncEvaluator {
     user_data: Arc<UserComputationData>,
-    dice: Arc<DiceModern>,
+    dice: Arc<Dice>,
     base: MaybeValidDiceValue,
     base_invalidation_paths: TrackedInvalidationPaths,
 }
@@ -133,7 +131,7 @@ pub(crate) struct SyncEvaluator {
 impl SyncEvaluator {
     pub(crate) fn new(
         user_data: Arc<UserComputationData>,
-        dice: Arc<DiceModern>,
+        dice: Arc<Dice>,
         base: MaybeValidDiceValue,
         base_invalidation_paths: TrackedInvalidationPaths,
     ) -> Self {

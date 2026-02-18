@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -23,7 +24,7 @@
 //! will be created for each buck2 command and put in the dice per-transaction data. Code
 //! that needs to do starlark evaluation can then use this to setup their Evaluator
 //! appropriately (though this is really just an implementation detail hidden in the
-//! helper [buck2_interpreter::dice::starlark_provider::with_starlark_eval_provider]).
+//! helper [buck2_interpreter::factory::StarlarkEvaluatorProvider]).
 //!
 //! [CURRENT_DEBUGGER] holds a global reference for the currently attached debugger and
 //! vends out handles (through [create_debugger_handle]).

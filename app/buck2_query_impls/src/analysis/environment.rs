@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -27,12 +28,11 @@ use buck2_build_api::interpreter::rule_defs::cmd_args::SimpleCommandLineArtifact
 use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::template_placeholder_info::FrozenTemplatePlaceholderInfo;
 use buck2_build_api::interpreter::rule_defs::transitive_set::TransitiveSet;
-use buck2_build_api::query::analysis::CLASSPATH_FOR_TARGETS;
 use buck2_core::configuration::compatibility::MaybeCompatible;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::configured_node_ref::ConfiguredTargetNodeRefNode;
 use buck2_node::nodes::configured_node_ref::ConfiguredTargetNodeRefNodeDeps;
@@ -417,7 +417,7 @@ pub(crate) async fn get_from_template_placeholder_info<'x>(
                     queue.push_back(tset_value.to_value());
                     while let Some(v) = queue.pop_front() {
                         let as_tset = TransitiveSet::from_value(v)
-                            .buck_error_context("invalid tset structure")?;
+                            .ok_or_else(|| internal_error!("invalid tset structure"))?;
 
                         // Visit the projection value itself. As this is an opaque cmdargs-like thing, it may contain more top-level tset node
                         // references that need to be pushed into the outer queue.
@@ -426,21 +426,27 @@ pub(crate) async fn get_from_template_placeholder_info<'x>(
                                 &'a mut VecDeque<(ConfiguredTargetLabel, ArtifactGroup)>,
                                 ConfiguredTargetLabel,
                             );
-                            impl CommandLineArtifactVisitor for Visitor<'_> {
+                            impl<'v> CommandLineArtifactVisitor<'v> for Visitor<'_> {
                                 fn visit_input(
                                     &mut self,
                                     input: ArtifactGroup,
-                                    _tag: Option<&ArtifactTag>,
+                                    _tags: Vec<&ArtifactTag>,
                                 ) {
                                     self.0.push_back((self.1.dupe(), input));
                                 }
 
-                                fn visit_output(
+                                fn visit_declared_output(
                                     &mut self,
-                                    _artifact: OutputArtifact,
-                                    _tag: Option<&ArtifactTag>,
+                                    _artifact: OutputArtifact<'v>,
+                                    _tags: Vec<&ArtifactTag>,
                                 ) {
-                                    // ignored
+                                }
+
+                                fn visit_frozen_output(
+                                    &mut self,
+                                    _artifact: Artifact,
+                                    _tags: Vec<&ArtifactTag>,
+                                ) {
                                 }
                             }
                             ValueAsCommandLineLike::unpack_value_err(v)?
@@ -451,7 +457,7 @@ pub(crate) async fn get_from_template_placeholder_info<'x>(
                         // Enqueue any children we haven't yet seen (and mark them seen).
                         for child in as_tset.children.iter() {
                             let child_as_tset = TransitiveSet::from_value(*child)
-                                .buck_error_context("Invalid deferred")?;
+                                .ok_or_else(|| internal_error!("Invalid deferred"))?;
                             let projection_key =
                                 child_as_tset.get_projection_key(tset_key.projection);
                             if seen.insert(projection_key) {
@@ -464,15 +470,4 @@ pub(crate) async fn get_from_template_placeholder_info<'x>(
         }
     }
     Ok(label_to_artifact)
-}
-
-/// Used by `audit classpath`
-pub(crate) fn init_classpath_for_targets() {
-    CLASSPATH_FOR_TARGETS.init(|ctx, targets| {
-        Box::pin(get_from_template_placeholder_info(
-            ctx,
-            "classpath",
-            targets,
-        ))
-    })
 }

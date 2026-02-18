@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![cfg(test)]
@@ -160,8 +161,8 @@ fn test_source_metadata_are_included() {
     assert!(e.has_tag(crate::ErrorTag::WatchmanTimeout));
     assert!(e.has_tag(crate::ErrorTag::WatchmanRequestError));
 
-    assert!(format!("{:?}", e).contains("Unused"));
-    assert!(format!("{:?}", e).contains("WatchmanError"));
+    assert!(format!("{e:?}").contains("Unused"));
+    assert!(format!("{e:?}").contains("WatchmanError"));
 }
 
 #[test]
@@ -242,7 +243,7 @@ fn test_error_message_with_provided_field() {
     struct SomeError(String, String);
 
     let t: crate::Error = SomeError("test123".to_owned(), "test222".to_owned()).into();
-    assert!(format!("{:?}", t).contains("Some message test123"));
+    assert!(format!("{t:?}").contains("Some message test123"));
 }
 
 #[test]
@@ -263,7 +264,7 @@ fn test_recovery_through_transparent_buck2_error() {
     let base: crate::Error = crate::Error::from(BaseError).tag([crate::ErrorTag::StarlarkFail]);
     let wrapped_direct: crate::Error = PartiallyStructured::Other(base.clone()).into();
 
-    assert!(format!("{:?}", wrapped_direct).contains("base_display"));
+    assert!(format!("{wrapped_direct:?}").contains("base_display"));
     assert_eq!(
         &wrapped_direct.tags()[..],
         &[

@@ -1,15 +1,17 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:http_file.bzl", "http_file_shared")
 load("@prelude//utils:expect.bzl", "expect")
 load("@prelude//utils:utils.bzl", "value_or")
 
 _DEFAULT_MAVEN_REPO = read_config("http", "maven_repo", "https://repo1.maven.org/maven2")
+_MAVEN_REPO_OVERRIDE = read_config("http", "maven_repo_override")
 
 def _from_mvn_url(url: str) -> str:
     """
@@ -31,6 +33,7 @@ def _from_mvn_url(url: str) -> str:
         repo = repo_protocol + ":" + repo_host
     elif count == 7:
         mvn, repo_protocol, repo_host, group, id, typ, mod, version = url.split(":")
+        mod = "-" + mod
         repo = repo_protocol + ":" + repo_host
     else:
         fail("Unsupported mvn URL scheme: " + url + " (" + str(count) + ")")
@@ -43,6 +46,9 @@ def _from_mvn_url(url: str) -> str:
         ext = "-sources.jar"
     else:
         ext = "." + typ
+
+    if _MAVEN_REPO_OVERRIDE:
+        repo = _MAVEN_REPO_OVERRIDE
 
     return "{repo}/{group}/{id}/{version}/{id}-{version}{mod}{ext}".format(
         repo = repo,
@@ -68,5 +74,6 @@ def remote_file_impl(ctx: AnalysisContext) -> list[Provider]:
         unzip_tool = ctx.attrs._unzip_tool[RunInfo],
         sha1 = ctx.attrs.sha1,
         sha256 = ctx.attrs.sha256,
-        size_bytes = None,
+        size_bytes = ctx.attrs.size_bytes,
+        has_content_based_path = ctx.attrs.has_content_based_path,
     )

@@ -49,6 +49,8 @@ pub struct DocString {
     /// The contents of a doc string that follow the summary, and a single blank line.
     /// This also has whitespace trimmed from it, and it is dedented.
     pub details: Option<String>,
+    /// Examples provided as a part of the doc string. It's separated by a 'Examples:' string
+    pub examples: Option<String>,
 }
 
 /// The documentation for a module/namespace.
@@ -87,7 +89,8 @@ pub struct DocFunction {
     /// they are present.
     pub docs: Option<DocString>,
     /// The parameters that this function takes. Docs for these parameters should generally be
-    /// extracted from the main docstring's details.
+    /// extracted from the main docstring's details, but may be extracted from the definition if the
+    /// docstring is not present.
     pub params: DocParams,
     /// Details about what this function returns.
     pub ret: DocReturn,
@@ -199,6 +202,7 @@ pub struct DocProperty {
 }
 
 /// A named member of an object.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Allocative)]
 pub enum DocMember {
     Property(DocProperty),

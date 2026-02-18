@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@fbcode//buck2/cfg/experimental:modifiers.bzl", "modifiers")
 
@@ -44,7 +45,7 @@ def buck2_modifiers():
                         "DEFAULT": "ovr_config//build_mode/constraints:static",
                         "ovr_config//build_mode:dev": "ovr_config//build_mode/constraints:shared",
                     }),
-                    "ovr_config//build_mode:asan": "ovr_config//build_mode/constraints:static_pic",
+                    "ovr_config//build_mode:sanitizer_type[asan]": "ovr_config//build_mode/constraints:static_pic",
                 }),
             }),
         }),
@@ -61,7 +62,7 @@ def buck2_modifiers():
         modifiers.conditional({
             "DEFAULT": None,
             "ovr_config//build_mode/default_opt_cxx:enabled": (
-                "ovr_config//build_mode:no-san"
+                "ovr_config//build_mode:sanitizer_type[no-san]"
             ),
         }),
         modifiers.conditional({
@@ -98,7 +99,10 @@ def buck2_modifiers():
                 "DEFAULT": None,
                 "ovr_config//runtime:fbcode": modifiers.conditional({
                     "ovr_config//cpu:arm64": "ovr_config//runtime/constraints:platform010-aarch64",
-                    "ovr_config//cpu:x86_64": "ovr_config//runtime/constraints:platform010",
+                    "ovr_config//cpu:x86_64": modifiers.conditional({
+                        "DEFAULT": "ovr_config//runtime/constraints:platform010",
+                        "ovr_config//cpp/constraints:libc++": "ovr_config//runtime/constraints:platform010-libcxx",
+                    }),
                 }),
             }),
         }),

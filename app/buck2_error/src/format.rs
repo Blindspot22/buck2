@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::error::Error as StdError;
@@ -63,16 +64,16 @@ pub(crate) fn into_anyhow_for_format(
             continue;
         }
         if let Some(ctx) = starlark_error {
-            out = out.context(format!("{}", ctx));
+            out = out.context(format!("{ctx}"));
             starlark_error = None;
         }
-        if context.should_display() {
-            out = out.context(format!("{}", context));
+        if let Some(s) = context.display() {
+            out = out.context(s);
         }
     }
 
     if let Some(ctx) = starlark_error {
-        out = out.context(format!("{}", ctx));
+        out = out.context(format!("{ctx}"));
     }
     (out, was_late_formatted)
 }

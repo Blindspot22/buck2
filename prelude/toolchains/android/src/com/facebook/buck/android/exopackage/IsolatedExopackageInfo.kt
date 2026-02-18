@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.exopackage
@@ -20,7 +21,7 @@ import java.util.Optional
 data class IsolatedExopackageInfo(
     val dexInfo: Optional<IsolatedDexInfo>,
     val nativeLibsInfo: Optional<IsolatedNativeLibsInfo>,
-    val resourcesInfo: Optional<IsolatedResourcesInfo>
+    val resourcesInfo: Optional<IsolatedResourcesInfo>,
 ) {
   /** Isolated DexInfo */
   data class IsolatedDexInfo(val metadata: AbsPath, val directory: AbsPath)
@@ -29,9 +30,7 @@ data class IsolatedExopackageInfo(
   data class IsolatedNativeLibsInfo(val metadata: AbsPath, val directory: AbsPath)
 
   /** Isolated ResourcesInfo */
-  data class IsolatedResourcesInfo(
-      val resourcesPaths: ImmutableList<IsolatedExopackagePathAndHash>
-  )
+  data class IsolatedResourcesInfo(val resourcesPaths: ImmutableList<IsolatedExopackagePathAndHash>)
 
   /** Isolated ExopackagePathAndHash */
   data class IsolatedExopackagePathAndHash(val path: AbsPath, val hashPath: AbsPath)

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -77,7 +78,7 @@ impl AttrSerializeWithContext for AnonTargetAttr {
     {
         // TODO this is inefficient. We should impl Serialize and derive value from this instead.
         self.to_json(ctx)
-            .map_err(|e| serde::ser::Error::custom(format!("{}", e)))?
+            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?
             .serialize(s)
     }
 }
@@ -86,10 +87,10 @@ impl AttrDisplayWithContext for AnonTargetAttr {
     fn fmt(&self, ctx: &AttrFmtContext, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AnonTargetAttr::Bool(v) => {
-                write!(f, "{}", v)
+                write!(f, "{v}")
             }
             AnonTargetAttr::Int(v) => {
-                write!(f, "{}", v)
+                write!(f, "{v}")
             }
             AnonTargetAttr::String(v) | AnonTargetAttr::EnumVariant(v) => {
                 AttrDisplayWithContext::fmt(v, ctx, f)
@@ -99,11 +100,11 @@ impl AttrDisplayWithContext for AnonTargetAttr {
             AnonTargetAttr::Dict(v) => AttrDisplayWithContext::fmt(v, ctx, f),
             AnonTargetAttr::None => write!(f, "None"),
             AnonTargetAttr::OneOf(box l, _) => AttrDisplayWithContext::fmt(l, ctx, f),
-            AnonTargetAttr::Dep(e) => write!(f, "\"{}\"", e),
-            AnonTargetAttr::Artifact(e) => write!(f, "\"{}\"", e),
-            AnonTargetAttr::Arg(e) => write!(f, "\"{}\"", e),
-            AnonTargetAttr::PromiseArtifact(e) => write!(f, "\"{}\"", e),
-            AnonTargetAttr::Label(e) => write!(f, "\"{}\"", e),
+            AnonTargetAttr::Dep(e) => write!(f, "\"{e}\""),
+            AnonTargetAttr::Artifact(e) => write!(f, "\"{e}\""),
+            AnonTargetAttr::Arg(e) => write!(f, "\"{e}\""),
+            AnonTargetAttr::PromiseArtifact(e) => write!(f, "\"{e}\""),
+            AnonTargetAttr::Label(e) => write!(f, "\"{e}\""),
         }
     }
 }
@@ -138,8 +139,8 @@ impl ToJsonWithContext for AnonTargetAttr {
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
 pub(crate) enum AnonTargetFromCoercedAttrError {
-    #[error("Anon targets do not support default values for `{0}`")]
-    DefaultAttrTypeNotSupported(String),
+    #[error("Anon targets do not support default values for `{0}`, specify `{1}` explicitly")]
+    DefaultAttrTypeNotSupported(String, String),
 }
 
 impl AnonTargetAttr {
@@ -236,23 +237,24 @@ impl AnonTargetAttr {
 
     // TODO(@wendyy) - find a way to coerce attr defaults used in anon targets directly to AnonTargetAttr
     pub fn from_coerced_attr(
+        attr_name: &str,
         attr: &CoercedAttr,
         ty: &AttrType,
     ) -> buck2_error::Result<AnonTargetAttr> {
         Ok(match CoercedAttrWithType::pack(attr, ty)? {
             CoercedAttrWithType::AnyList(list) => AnonTargetAttr::List(ListLiteral(
-                list.try_map(|v| AnonTargetAttr::from_coerced_attr(v, ty))?
+                list.try_map(|v| AnonTargetAttr::from_coerced_attr(attr_name, v, ty))?
                     .into(),
             )),
             CoercedAttrWithType::AnyTuple(tuple) => AnonTargetAttr::Tuple(TupleLiteral(
                 tuple
-                    .try_map(|v| AnonTargetAttr::from_coerced_attr(v, ty))?
+                    .try_map(|v| AnonTargetAttr::from_coerced_attr(attr_name, v, ty))?
                     .into(),
             )),
             CoercedAttrWithType::AnyDict(dict) => AnonTargetAttr::Dict(DictLiteral(
                 dict.try_map(|(k, v)| {
-                    let k2 = AnonTargetAttr::from_coerced_attr(k, ty)?;
-                    let v2 = AnonTargetAttr::from_coerced_attr(v, ty)?;
+                    let k2 = AnonTargetAttr::from_coerced_attr(attr_name, k, ty)?;
+                    let v2 = AnonTargetAttr::from_coerced_attr(attr_name, v, ty)?;
                     buck2_error::Ok((k2, v2))
                 })?
                 .into(),
@@ -263,7 +265,7 @@ impl AnonTargetAttr {
             CoercedAttrWithType::String(v, _t) => AnonTargetAttr::String(v.dupe()),
             CoercedAttrWithType::EnumVariant(v, _t) => AnonTargetAttr::EnumVariant(v.dupe()),
             CoercedAttrWithType::List(list, t) => AnonTargetAttr::List(ListLiteral(
-                list.try_map(|v| AnonTargetAttr::from_coerced_attr(v, &t.inner))?
+                list.try_map(|v| AnonTargetAttr::from_coerced_attr(attr_name, v, &t.inner))?
                     .into(),
             )),
             CoercedAttrWithType::Tuple(list, t) => {
@@ -273,30 +275,31 @@ impl AnonTargetAttr {
                 AnonTargetAttr::Tuple(TupleLiteral(
                     list.iter()
                         .zip(&t.xs)
-                        .map(|(v, vt)| AnonTargetAttr::from_coerced_attr(v, vt))
+                        .map(|(v, vt)| AnonTargetAttr::from_coerced_attr(attr_name, v, vt))
                         .collect::<buck2_error::Result<_>>()?,
                 ))
             }
             CoercedAttrWithType::Dict(dict, t) => AnonTargetAttr::Dict(DictLiteral(
                 dict.try_map(|(k, v)| {
-                    let k2 = AnonTargetAttr::from_coerced_attr(k, &t.key)?;
-                    let v2 = AnonTargetAttr::from_coerced_attr(v, &t.value)?;
+                    let k2 = AnonTargetAttr::from_coerced_attr(attr_name, k, &t.key)?;
+                    let v2 = AnonTargetAttr::from_coerced_attr(attr_name, v, &t.value)?;
                     buck2_error::Ok((k2, v2))
                 })?
                 .into(),
             )),
             CoercedAttrWithType::None => AnonTargetAttr::None,
             CoercedAttrWithType::Some(attr, t) => {
-                AnonTargetAttr::from_coerced_attr(attr, &t.inner)?
+                AnonTargetAttr::from_coerced_attr(attr_name, attr, &t.inner)?
             }
             CoercedAttrWithType::OneOf(l, i, t) => {
                 let item_ty = &t.xs[i as usize];
-                let configured = AnonTargetAttr::from_coerced_attr(l, item_ty)?;
+                let configured = AnonTargetAttr::from_coerced_attr(attr_name, l, item_ty)?;
                 AnonTargetAttr::OneOf(Box::new(configured), i)
             }
             _ => {
                 return Err(AnonTargetFromCoercedAttrError::DefaultAttrTypeNotSupported(
                     ty.to_string(),
+                    attr_name.to_owned(),
                 )
                 .into());
             }

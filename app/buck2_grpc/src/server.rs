@@ -1,13 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use anyhow::Context;
+use buck2_error::BuckErrorContext;
 use futures::future;
 use futures::stream;
 use futures::stream::StreamExt;
@@ -15,8 +16,8 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tonic::service::Routes;
 use tonic::transport::server::Router;
-use tonic::transport::server::Routes;
 use tower::Service;
 use tower::layer::Layer;
 
@@ -25,19 +26,21 @@ use self::drop_notifier::DropNotifier;
 
 pub struct ServerHandle {
     channel: DropNotifier,
-    handle: JoinHandle<anyhow::Result<()>>,
+    handle: JoinHandle<buck2_error::Result<()>>,
 }
 
 impl ServerHandle {
     /// Tell the server to shutdown and wait for it to exit.
-    pub async fn shutdown(self) -> anyhow::Result<()> {
+    pub async fn shutdown(self) -> buck2_error::Result<()> {
         self.channel.notify_now();
-        self.handle.await.context("Failed to join task")?
+        self.handle
+            .await
+            .buck_error_context("Failed to join task")?
     }
 
     /// Obtain the JoinHandle to the task driving the server, without asking the server to
     /// shutdown.
-    pub fn into_join_handle(self) -> JoinHandle<anyhow::Result<()>> {
+    pub fn into_join_handle(self) -> JoinHandle<buck2_error::Result<()>> {
         self.channel.cancel();
         self.handle
     }
@@ -48,14 +51,14 @@ where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static + tonic::transport::server::Connected,
     L: Layer<Routes> + Send + 'static,
     L::Service: Service<
-            http::Request<tonic::transport::Body>,
-            Response = http::Response<tonic::body::BoxBody>,
+            hyper::Request<tonic::body::BoxBody>,
+            Response = hyper::Response<tonic::body::BoxBody>,
         > + Clone
         + Send
         + 'static,
-    <<L as Layer<Routes>>::Service as Service<http::Request<tonic::transport::Body>>>::Future:
+    <<L as Layer<Routes>>::Service as Service<hyper::Request<tonic::body::BoxBody>>>::Future:
         Send + 'static,
-    <<L as Layer<Routes>>::Service as Service<http::Request<tonic::transport::Body>>>::Error:
+    <<L as Layer<Routes>>::Service as Service<hyper::Request<tonic::body::BoxBody>>>::Error:
         Into<Box<dyn std::error::Error + Send + Sync>> + Send,
 {
     // We reserve 2 slots here: one for the connection and one for the ServerHandle's
@@ -81,7 +84,7 @@ where
                 let _ignored = recv.recv().await;
             })
             .await
-            .context("Server exited with an error")?;
+            .buck_error_context("Server exited with an error")?;
 
         Ok(())
     };

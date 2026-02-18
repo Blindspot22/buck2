@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::Cell;
@@ -12,11 +13,34 @@ use std::future::Future;
 use std::hint;
 use std::pin::Pin;
 use std::pin::pin;
+use std::sync::OnceLock;
 use std::task::Poll;
 use std::thread;
 
-use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
+
+/// Get the available parallelism
+///
+/// This value is cached for the lifetime of the process. The reason is that there are various
+/// components that cannot be updated to reflect the new value if it changes during the lifetime of
+/// the daemon. Caching this sacrifices some accuracy of this value in exchange for putting the
+/// daemon into a more predictable state.
+///
+/// Use `available_parallelism_fresh` if the caching is not desired
+pub fn available_parallelism() -> usize {
+    static PARALLELISM: OnceLock<usize> = OnceLock::new();
+
+    *PARALLELISM.get_or_init(available_parallelism_fresh)
+}
+
+/// Get the available parallelism
+///
+/// Unlike `available_parallelism`, this is not cached - callers using this should ensure that this
+/// value is logged somewhere
+pub fn available_parallelism_fresh() -> usize {
+    // NB: num_cpus and tokio both also use 1 as the default in case of an error
+    std::thread::available_parallelism().map_or(1, |v| v.get())
+}
 
 /// Default stack size for buck2.
 ///
@@ -115,7 +139,9 @@ pub(crate) fn on_thread_stop() {
 }
 
 pub fn check_stack_overflow() -> buck2_error::Result<()> {
-    let stack_range = STACK_RANGE.get().internal_error("stack range not set")?;
+    let stack_range = STACK_RANGE
+        .get()
+        .ok_or_else(|| internal_error!("stack range not set"))?;
     let stack_pointer = stack_pointer();
     if stack_pointer > stack_range.start {
         return Err(internal_error!("stack underflow, should not happen"));

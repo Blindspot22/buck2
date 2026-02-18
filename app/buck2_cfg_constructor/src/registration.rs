@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -152,11 +153,11 @@ pub(crate) fn register_set_cfg_constructor(globals: &mut GlobalsBuilder) {
     /// This function can only be called from the repository root `PACKAGE` file.
     ///
     /// Parameters:
-    ///   stage0: The first cfg constructor that will be invoked before configuration rules are analyzed.
-    ///   stage1: The second cfg constructor that will be invoked after configuration rules are analyzed.
-    ///   key: The key for cfg modifiers on PACKAGE values and metadata.
-    ///   aliases: The aliases map to use for input modifiers.
-    ///   extra_data: Some extra data that may be used by `set_cfg_constructor` implementation that is
+    ///   * `stage0`: The first cfg constructor that will be invoked before configuration rules are analyzed.
+    ///   * `stage1`: The second cfg constructor that will be invoked after configuration rules are analyzed.
+    ///   * `key`: The key for cfg modifiers on PACKAGE values and metadata.
+    ///   * `aliases`: The aliases map to use for input modifiers.
+    ///   * `extra_data`: Some extra data that may be used by `set_cfg_constructor` implementation that is
     ///     custom to our implementation and may not be used in other context like open-source.
     fn set_cfg_constructor<'v>(
         #[starlark(require=named)] stage0: Value<'v>,

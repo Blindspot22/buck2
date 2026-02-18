@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Instant;
@@ -51,12 +52,8 @@ fn starlark_instant_methods(builder: &mut MethodsBuilder) {
     ///     ctx.output.print(time_b)
     /// ```
     fn elapsed_secs<'v>(this: Value<'v>) -> starlark::Result<f64> {
-        let secs = this
-            .downcast_ref::<StarlarkInstant>()
-            .unwrap()
-            .0
-            .elapsed()
-            .as_secs() as f64;
+        let secs =
+            (Instant::now() - this.downcast_ref::<StarlarkInstant>().unwrap().0).as_secs() as f64;
 
         Ok(secs)
     }
@@ -75,12 +72,8 @@ fn starlark_instant_methods(builder: &mut MethodsBuilder) {
     ///     ctx.output.print(time_b)
     /// ```
     fn elapsed_millis<'v>(this: Value<'v>) -> starlark::Result<f64> {
-        let millis = this
-            .downcast_ref::<StarlarkInstant>()
-            .unwrap()
-            .0
-            .elapsed()
-            .as_millis() as f64;
+        let millis =
+            (Instant::now() - this.downcast_ref::<StarlarkInstant>().unwrap().0).as_millis() as f64;
 
         Ok(millis)
     }

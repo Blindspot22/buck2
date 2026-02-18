@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -148,6 +149,19 @@ impl Span {
         }
     }
 
+    /// Create a Span that allows all whitespace characters, specially for emit/emit_aux scenarios.
+    ///
+    /// **Note:** This method bypass whitespace validation, and should not be used for layout
+    /// components. It's specially designed for emit/emit_aux where content is displayed above the
+    /// canvas and doesn't require percise characters alignment.
+    pub fn new_styled_raw(span: StyledContent<String>) -> Self {
+        Self {
+            content: Cow::Owned(span.content().clone()),
+            style: *span.style(),
+            hyperlink: None,
+        }
+    }
+
     pub fn new_colored(text: &str, color: Color) -> Result<Self, SpanError> {
         Self::new_styled(StyledContent::new(
             ContentStyle {
@@ -279,8 +293,8 @@ impl Span {
                         | Color::DarkCyan => {
                             write!(f, "{}", to_snake_case(&format!("{:?}", self.0)))
                         }
-                        Color::Rgb { r, g, b } => write!(f, "rgb({}, {}, {})", r, g, b),
-                        Color::AnsiValue(v) => write!(f, "ansi({})", v),
+                        Color::Rgb { r, g, b } => write!(f, "rgb({r}, {g}, {b})"),
+                        Color::AnsiValue(v) => write!(f, "ansi({v})"),
                     }
                 }
             }
@@ -307,12 +321,12 @@ impl Span {
                         let mut a = self.0.style.attributes;
                         for known in Attribute::iterator() {
                             if a.has(known) {
-                                write!(f, " {}", to_snake_case(&format!("{:?}", known)))?;
+                                write!(f, " {}", to_snake_case(&format!("{known:?}")))?;
                                 a.unset(known);
                             }
                         }
                         if !a.is_empty() {
-                            write!(f, " unknown_attributes={:?}", a)?;
+                            write!(f, " unknown_attributes={a:?}")?;
                         }
                     }
                     write!(f, ">")?;

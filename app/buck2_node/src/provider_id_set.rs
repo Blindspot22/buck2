@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::slice;
@@ -13,16 +14,11 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_core::provider::id::ProviderId;
 use dupe::Dupe;
+use pagable::Pagable;
+use strong_hash::StrongHash;
 
 #[derive(
-    Debug,
-    Eq,
-    PartialEq,
-    Hash,
-    Clone,
-    Dupe,
-    Allocative,
-    strong_hash::StrongHash
+    Debug, Eq, PartialEq, Hash, StrongHash, Clone, Dupe, Allocative, Pagable
 )]
 pub struct ProviderIdSet(Option<Arc<Vec<Arc<ProviderId>>>>);
 

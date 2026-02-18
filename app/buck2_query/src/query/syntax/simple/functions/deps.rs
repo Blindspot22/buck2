@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -124,7 +125,7 @@ impl<'a, Env: QueryEnvironment> DepsFunction<Env> {
                 }
 
                 Some(Filter::<'a, Env> {
-                    inner_env: &env,
+                    inner_env: env,
                     functions,
                     expr,
                 })
@@ -141,7 +142,7 @@ impl<'a, Env: QueryEnvironment> DepsFunction<Env> {
         depth: Option<i32>,
         captured_expr: Option<&CapturedExpr<'_>>,
     ) -> buck2_error::Result<TargetSet<Env::Target>> {
-        let filter = self.make_filter(&env, functions, captured_expr);
+        let filter = self.make_filter(env, functions, captured_expr);
         let filter_ref = filter
             .as_ref()
             .map(|v| v as &dyn TraversalFilter<Env::Target>);
@@ -158,7 +159,7 @@ impl<'a, Env: QueryEnvironment> DepsFunction<Env> {
         depth: Option<i32>,
         captured_expr: Option<&CapturedExpr<'_>>,
     ) -> buck2_error::Result<TargetSet<Env::Target>> {
-        let filter = self.make_filter(&env, functions, captured_expr);
+        let filter = self.make_filter(env, functions, captured_expr);
         let filter_ref = filter
             .as_ref()
             .map(|v| v as &dyn TraversalFilter<Env::Target>);
@@ -174,7 +175,7 @@ impl<'a, Env: QueryEnvironment> DepsFunction<Env> {
         to: &TargetSet<Env::Target>,
         captured_expr: Option<&CapturedExpr<'_>>,
     ) -> buck2_error::Result<TargetSet<Env::Target>> {
-        let filter = self.make_filter(&env, functions, captured_expr);
+        let filter = self.make_filter(env, functions, captured_expr);
         let filter_ref = filter
             .as_ref()
             .map(|v| v as &dyn TraversalFilter<Env::Target>);
@@ -190,7 +191,7 @@ impl<'a, Env: QueryEnvironment> DepsFunction<Env> {
         to: &TargetSet<Env::Target>,
         captured_expr: Option<&CapturedExpr<'_>>,
     ) -> buck2_error::Result<TargetSet<Env::Target>> {
-        let filter = self.make_filter(&env, functions, captured_expr);
+        let filter = self.make_filter(env, functions, captured_expr);
         let filter_ref = filter
             .as_ref()
             .map(|v| v as &dyn TraversalFilter<Env::Target>);

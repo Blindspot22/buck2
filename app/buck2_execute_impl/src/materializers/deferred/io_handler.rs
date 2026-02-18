@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -14,12 +15,8 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_common::file_ops::FileDigest;
+use buck2_common::file_ops::metadata::FileDigest;
 use buck2_core::buck2_env;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::fs_util::IoError;
-use buck2_core::fs::fs_util::ReadDir;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::directory::Directory;
@@ -47,10 +44,14 @@ use buck2_execute::materialize::materializer::WriteRequest;
 use buck2_execute::output_size::OutputSize;
 use buck2_execute::re::error::RemoteExecutionError;
 use buck2_execute::re::manager::ReConnectionManager;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::fs_util::ReadDir;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_http::HttpClient;
 use chrono::Duration;
 use chrono::Utc;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::future::BoxFuture;
 use futures::future::Future;
@@ -108,7 +109,7 @@ pub trait IoHandler: Sized + Sync + Send + 'static {
 
     async fn immediate_write<'a>(
         self: &Arc<Self>,
-        gen: Box<dyn FnOnce() -> buck2_error::Result<Vec<WriteRequest>> + Send + 'a>,
+        generate: Box<dyn FnOnce() -> buck2_error::Result<Vec<WriteRequest>> + Send + 'a>,
     ) -> buck2_error::Result<Vec<ArtifactValue>>;
 
     fn clean_path<'a>(
@@ -140,7 +141,7 @@ pub trait IoHandler: Sized + Sync + Send + 'static {
         min_ttl: Duration,
     ) -> Option<BoxFuture<'static, buck2_error::Result<()>>>;
 
-    fn read_dir(&self, path: &AbsNormPathBuf) -> Result<ReadDir, IoError>;
+    fn read_dir(&self, path: &AbsNormPathBuf) -> buck2_error::Result<ReadDir>;
     fn buck_out_path(&self) -> &ProjectRelativePathBuf;
     fn re_client_manager(&self) -> &Arc<ReConnectionManager>;
     fn fs(&self) -> &ProjectRoot;
@@ -227,11 +228,11 @@ impl DefaultIoHandler {
                 let connection = self.re_client_manager.get_re_connection();
                 let re_client = connection.get_client().with_use_case(info.re_use_case);
 
-                re_client.materialize_files(files).await.map_err(|e| {
-                    let e: buck2_error::Error = e.into();
-                    match e.find_typed_context::<RemoteExecutionError>() {
+                re_client
+                    .materialize_files(files)
+                    .await
+                    .map_err(|e| match e.find_typed_context::<RemoteExecutionError>() {
                         Some(re_error) if re_error.code == TCode::NOT_FOUND => {
-                            let e: buck2_error::Error = e.into();
                             MaterializeEntryError::NotFound(CasNotFoundError {
                                 path: Arc::from(path),
                                 info: info.dupe(),
@@ -240,13 +241,9 @@ impl DefaultIoHandler {
                             })
                         }
                         _ => MaterializeEntryError::Error(e.context({
-                            format!(
-                                "Error materializing files declared by action: {}",
-                                info.origin
-                            )
+                            format!("Error materializing files declared by action: {info}")
                         })),
-                    }
-                })?;
+                    })?;
             }
             ArtifactMaterializationMethod::HttpDownload { info } => {
                 async {
@@ -298,6 +295,7 @@ impl DefaultIoHandler {
                                 a.dest_entry.as_ref(),
                                 &self.fs.root().join(&a.src),
                                 &self.fs.root().join(&a.dest),
+                                a.executable_bit_override,
                             )?;
                         }
                         Ok(())
@@ -343,19 +341,19 @@ impl IoHandler for DefaultIoHandler {
                 }),
                 cancellations,
             )
-            .map_err(|e| SharedMaterializingError::Error(e.into()))
+            .map_err(SharedMaterializingError::Error)
             .boxed()
     }
 
     async fn immediate_write<'a>(
         self: &Arc<Self>,
-        gen: Box<dyn FnOnce() -> buck2_error::Result<Vec<WriteRequest>> + Send + 'a>,
+        generate: Box<dyn FnOnce() -> buck2_error::Result<Vec<WriteRequest>> + Send + 'a>,
     ) -> buck2_error::Result<Vec<ArtifactValue>> {
         immediate::write_to_disk(
             self.fs(),
             self.io_executor.as_ref(),
             self.digest_config(),
-            gen,
+            generate,
         )
         .await
     }
@@ -376,7 +374,7 @@ impl IoHandler for DefaultIoHandler {
                 }),
                 cancellations,
             )
-            .map(|r| r.map_err(buck2_error::Error::from))
+            .map(|r| r)
             .boxed()
     }
 
@@ -420,7 +418,7 @@ impl IoHandler for DefaultIoHandler {
                 let res = self
                     .materialize_entry_span(path, method.dupe(), entry, &mut stat, cancellations)
                     .await;
-                let error = res.as_ref().err().map(|e| format!("{:#}", e));
+                let error = res.as_ref().err().map(|e| format!("{e:#}"));
 
                 (
                     res,
@@ -448,8 +446,8 @@ impl IoHandler for DefaultIoHandler {
             .map(|f| f.boxed())
     }
 
-    fn read_dir(&self, path: &AbsNormPathBuf) -> Result<ReadDir, IoError> {
-        fs_util::read_dir(path)
+    fn read_dir(&self, path: &AbsNormPathBuf) -> buck2_error::Result<ReadDir> {
+        fs_util::read_dir(path).categorize_internal()
     }
 
     fn buck_out_path(&self) -> &ProjectRelativePathBuf {
@@ -480,7 +478,7 @@ fn maybe_tombstone_digest(digest: &FileDigest) -> buck2_error::Result<&FileDiges
             .map(|digest| {
                 let digest = TDigest::from_str(digest)
                     .map_err(|e| from_any_with_tag(e, ErrorTag::InvalidDigest))
-                    .with_buck_error_context(|| format!("Invalid digest: `{}`", digest))?;
+                    .with_buck_error_context(|| format!("Invalid digest: `{digest}`"))?;
                 // This code is only used by E2E tests, so while it's not *a test*, testing_default
                 // is an OK choice here.
                 let digest = FileDigest::from_re(&digest, DigestConfig::testing_default())?;
@@ -510,14 +508,18 @@ pub(super) fn create_ttl_refresh(
     re_manager: &Arc<ReConnectionManager>,
     min_ttl: Duration,
     digest_config: DigestConfig,
-) -> Option<impl Future<Output = buck2_error::Result<()>>> {
+) -> Option<impl Future<Output = buck2_error::Result<()>> + use<>> {
     let mut digests_to_refresh = HashMap::<_, HashSet<_>>::new();
 
     let ttl_deadline = Utc::now() + min_ttl;
 
     for data in tree.iter_without_paths() {
         match &data.stage {
-            ArtifactMaterializationStage::Declared { entry, method } => match method.as_ref() {
+            ArtifactMaterializationStage::Declared {
+                entry,
+                method,
+                persist_full_directory_structure: _,
+            } => match method.as_ref() {
                 ArtifactMaterializationMethod::CasDownload { info } => {
                     let mut walk = unordered_entry_walk(entry.as_ref().map_dir(Directory::as_ref));
                     while let Some((_entry_path, entry)) = walk.next() {
@@ -629,9 +631,7 @@ impl IoRequest for WriteIoRequest {
     fn execute(self: Box<Self>, project_fs: &ProjectRoot) -> buck2_error::Result<()> {
         // NOTE: No spans here! We should perhaps add one, but this needs to be considered
         // carefully as it's a lot of spans, and we haven't historically emitted those for writes.
-        let res = self
-            .execute_inner(project_fs)
-            .map_err(buck2_error::Error::from);
+        let res = self.execute_inner(project_fs);
 
         // If the materializer has shut down, we ignore this.
         let _ignored = self.command_sender.send_low_priority(
@@ -657,7 +657,7 @@ impl IoRequest for CleanIoRequest {
     fn execute(self: Box<Self>, project_fs: &ProjectRoot) -> buck2_error::Result<()> {
         // NOTE: No spans here! We should perhaps add one, but this needs to be considered
         // carefully as it's a lot of spans, and we haven't historically emitted those for writes.
-        let res = cleanup_path(project_fs, &self.path).map_err(buck2_error::Error::from);
+        let res = cleanup_path(project_fs, &self.path);
 
         // If the materializer has shut down, we ignore this.
         let _ignored = self.command_sender.send_low_priority(

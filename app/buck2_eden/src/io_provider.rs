@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 // Eden's Thrift API does sometime want &Vec<...>.
@@ -13,12 +14,12 @@
 use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_common::cas_digest::CasDigestConfig;
-use buck2_common::file_ops::FileDigest;
-use buck2_common::file_ops::FileMetadata;
-use buck2_common::file_ops::FileType;
-use buck2_common::file_ops::RawDirEntry;
-use buck2_common::file_ops::RawPathMetadata;
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::FileType;
+use buck2_common::file_ops::metadata::RawDirEntry;
+use buck2_common::file_ops::metadata::RawPathMetadata;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_common::io::IoProvider;
 use buck2_common::io::fs::FsIoProvider;
 use buck2_common::io::fs::ReadUncheckedOptions;
@@ -30,6 +31,7 @@ use buck2_core::io_counters::IoCounterKey;
 use buck2_core::soft_error;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
+use buck2_error::internal_error;
 use compact_str::CompactString;
 use dupe::Dupe;
 use edenfs::FileAttributes;
@@ -161,13 +163,13 @@ impl EdenIoProvider {
             .res
             .into_iter()
             .next()
-            .buck_error_context("Eden did not return file info")?
+            .ok_or_else(|| internal_error!("Eden did not return file info"))?
             .into_result()
         {
             Ok(data) => {
                 let source_control_type = data
                     .sourceControlType
-                    .buck_error_context("Eden did not return a type")?
+                    .ok_or_else(|| internal_error!("Eden did not return a type"))?
                     .into_result()
                     .buck_error_context("Eden returned an error for sourceControlType")?;
 
@@ -190,9 +192,8 @@ impl EdenIoProvider {
                         .await
                         .with_buck_error_context(|| {
                             format!(
-                                "Eden returned that `{}` was a symlink, but it was not.  \
-                                This path may have changed during the build",
-                                path
+                                "Eden returned that `{path}` was a symlink, but it was not.  \
+                                This path may have changed during the build"
                             )
                         })?;
 
@@ -201,7 +202,7 @@ impl EdenIoProvider {
 
                 let size = data
                     .size
-                    .buck_error_context("Eden did not return a size")?
+                    .ok_or_else(|| internal_error!("Eden did not return a size"))?
                     .into_result()
                     .buck_error_context("Eden returned an error for size")?
                     .try_into()
@@ -212,23 +213,23 @@ impl EdenIoProvider {
                     Digest::Sha1 => {
                         let sha1 = data
                             .sha1
-                            .buck_error_context("Eden did not return a sha1")?
+                            .ok_or_else(|| internal_error!("Eden did not return a sha1"))?
                             .into_result()
                             .buck_error_context("Eden returned an error for sha1")?
                             .try_into()
                             .ok()
-                            .buck_error_context("Eden returned an invalid sha1")?;
+                            .ok_or_else(|| internal_error!("Eden returned an invalid sha1"))?;
                         FileDigest::new_sha1(sha1, size)
                     }
                     Digest::Blake3Keyed => {
                         let blake3 = data
                             .blake3
-                            .buck_error_context("Eden did not return a blake3")?
+                            .ok_or_else(|| internal_error!("Eden did not return a blake3"))?
                             .into_result()
                             .buck_error_context("Eden returned an error for blake3")?
                             .try_into()
                             .ok()
-                            .buck_error_context("Eden returned an invalid blake3")?;
+                            .ok_or_else(|| internal_error!("Eden returned an invalid blake3"))?;
                         FileDigest::new_blake3_keyed(blake3, size)
                     }
                 };
@@ -278,13 +279,31 @@ impl EdenIoProvider {
                 eden.readdir(&params)
             })
             .await?
-            .dirLists;
-
-        let data = res
+            .dirLists
             .into_iter()
             .next()
-            .buck_error_context("Eden did not return a directory result")?
-            .into_result()?;
+            .ok_or_else(|| internal_error!("Eden did not return a directory result"))?;
+
+        let data = match res {
+            edenfs::DirListAttributeDataOrError::dirListAttributeData(data) => data,
+            edenfs::DirListAttributeDataOrError::error(err) => {
+                match err.errorCode {
+                    Some(libc::ENOENT) => return Err(EdenError::from(err).into()),
+                    Some(libc::EINVAL) | Some(libc::ENOTDIR) => {
+                        // Fallback to regular file I/O if we get EINVAL or ENOTDIR because that means it's a symlink
+                        return self.fs.read_dir_impl(path).await;
+                    }
+                    _ => return Err(EdenError::from(err).into()),
+                }
+            }
+            edenfs::DirListAttributeDataOrError::UnknownField(code) => {
+                return Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::IoEden,
+                    "Eden ReadDir returned with unknown field code: {}",
+                    code
+                ));
+            }
+        };
 
         tracing::debug!("readdir({}): {} entries", path, data.len());
 
@@ -297,7 +316,7 @@ impl EdenIoProvider {
                 let source_control_type = attrs
                     .into_result()?
                     .sourceControlType
-                    .buck_error_context("Missing sourceControlType")?
+                    .ok_or_else(|| internal_error!("Missing sourceControlType"))?
                     .into_result()?;
 
                 let file_type = match source_control_type {
@@ -370,11 +389,17 @@ impl EdenIoProvider {
 
                             return self.fs.read_file_if_exists_impl(path).await;
                         }
+                        EdenError::PosixError { code, .. }
+                            if code == libc::EINVAL || code == libc::ENOTDIR =>
+                        {
+                            // Fallback to regular file I/O if we get EINVAL or ENOTDIR because that means it's a symlink
+                            return self.fs.read_file_if_exists_impl(path).await;
+                        }
                         _ => Err(eden_error.into()),
                     }
                 }
                 ScmBlobOrError::UnknownField(code) => Err(buck2_error::buck2_error!(
-                    buck2_error::ErrorTag::IoEden,
+                    buck2_error::ErrorTag::IoEdenUnknownField,
                     "Eden getFileContent thrift call failed with unknown field code: {}",
                     code
                 )),

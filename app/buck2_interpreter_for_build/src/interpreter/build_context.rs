@@ -1,16 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::OnceCell;
 use std::fmt::Debug;
 
 use buck2_core::bxl::BxlFilePath;
+use buck2_core::bzl::ImportPath;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::build_file_cell::BuildFileCell;
 use buck2_core::cells::cell_path::CellPath;
@@ -19,7 +21,6 @@ use buck2_interpreter::build_context::STARLARK_PATH_FROM_BUILD_CONTEXT;
 use buck2_interpreter::file_type::StarlarkFileType;
 use buck2_interpreter::paths::path::StarlarkPath;
 use starlark::any::ProvidesStaticType;
-use starlark::environment::Module;
 use starlark::eval::Evaluator;
 
 use crate::interpreter::buckconfig::BuckConfigsViewForStarlark;
@@ -55,6 +56,7 @@ enum BuildContextError {
     BasePathOnlyDefinedForPackageOrBuildFile(StarlarkFileType),
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum PerFileTypeContext {
     /// Context for evaluating `BUCK` files.
@@ -64,15 +66,20 @@ pub enum PerFileTypeContext {
     /// Context for evaluating `bzl` files.
     Bzl(BzlEvalCtx),
     Bxl(BxlFilePath),
+    /// Context for evaluating `json` files.
+    Json(ImportPath),
+    Toml(ImportPath),
 }
 
 impl PerFileTypeContext {
-    pub(crate) fn starlark_path(&self) -> StarlarkPath {
+    pub(crate) fn starlark_path(&self) -> StarlarkPath<'_> {
         match self {
             PerFileTypeContext::Build(module) => StarlarkPath::BuildFile(module.buildfile_path()),
             PerFileTypeContext::Package(package) => StarlarkPath::PackageFile(&package.path),
             PerFileTypeContext::Bzl(path) => StarlarkPath::LoadFile(&path.bzl_path),
             PerFileTypeContext::Bxl(path) => StarlarkPath::BxlFile(path),
+            PerFileTypeContext::Json(path) => StarlarkPath::JsonFile(path),
+            PerFileTypeContext::Toml(path) => StarlarkPath::TomlFile(path),
         }
     }
 
@@ -173,15 +180,14 @@ pub struct BuildContext<'a> {
 
 impl<'a> BuildContext<'a> {
     /// Create a build context for the given module.
-    pub(crate) fn new_for_module(
-        module: &'a Module,
+    pub(crate) fn new(
         cell_info: &'a InterpreterCellInfo,
         buckconfigs: &'a mut dyn BuckConfigsViewForStarlark,
         host_info: &'a HostInfo,
         additional: PerFileTypeContext,
         ignore_attrs_for_profiling: bool,
     ) -> BuildContext<'a> {
-        let buckconfigs = LegacyBuckConfigsForStarlark::new(module, buckconfigs);
+        let buckconfigs = LegacyBuckConfigsForStarlark::new(buckconfigs);
         BuildContext {
             cell_info,
             buckconfigs,
@@ -218,7 +224,7 @@ impl<'a> BuildContext<'a> {
         }
     }
 
-    pub fn starlark_path(&self) -> StarlarkPath {
+    pub fn starlark_path(&self) -> StarlarkPath<'_> {
         self.additional.starlark_path()
     }
 

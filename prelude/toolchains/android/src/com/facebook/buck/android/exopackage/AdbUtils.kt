@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.exopackage
@@ -19,7 +20,7 @@ class AdbCommandFailedException(message: String) : Exception(message)
 
 enum class SetDebugAppMode {
   SKIP,
-  SET
+  SET,
 }
 
 class AdbUtils(val adb: String, val adbServerPort: Int) {
@@ -27,26 +28,31 @@ class AdbUtils(val adb: String, val adbServerPort: Int) {
   fun executeAdbShellCommand(
       command: String,
       deviceId: String,
-      ignoreFailure: Boolean = false
+      ignoreFailure: Boolean = false,
   ): String {
     return executeAdbCommand("shell $command", deviceId, ignoreFailure)
   }
 
-  fun executeAdbCommand(command: String, deviceId: String, ignoreFailure: Boolean = false): String {
+  fun executeAdbCommand(
+      command: String,
+      deviceId: String?,
+      ignoreFailure: Boolean = false,
+  ): String {
     val adbCommandResult: AdbCommandResult =
         try {
-          runAdbCommand("-s $deviceId $command")
+          runAdbCommand((deviceId?.let { "-s $deviceId " } ?: "") + command)
         } catch (e: Exception) {
           error("Failed to execute adb command 'adb $command' on device $deviceId.\n${e.message}")
         }
     return if (adbCommandResult.exitCode != 0) {
       val error =
           "Executing 'adb $command' on $deviceId failed with code ${adbCommandResult.exitCode}." +
-              (adbCommandResult.error?.let { "\nError: $it" } ?: "")
+              (adbCommandResult.error?.let { "\nError:\n$it" } ?: "")
       if (!ignoreFailure) {
+        LOG.error(error)
         throw AdbCommandFailedException(error)
       } else {
-        LOG.warn(error)
+        LOG.info("ignoreFailure=true: " + error)
         adbCommandResult.output
       }
     } else {
@@ -79,7 +85,23 @@ class AdbUtils(val adb: String, val adbServerPort: Int) {
     return AdbCommandResult(
         exitCode,
         output = output.toString().trim(),
-        error = if (errorOutput.isNotEmpty()) errorOutput.toString() else null)
+        error = if (errorOutput.isNotEmpty()) errorOutput.toString() else null,
+    )
+  }
+
+  fun getDevices(): List<AndroidDevice> {
+    val devicesOutput: String = executeAdbCommand("devices", null)
+    val devices: List<String> = devicesOutput.split("\n").drop(1).filter { it.isNotBlank() }
+    return if (devices.isEmpty()) {
+      emptyList()
+    } else {
+      devices.map { AndroidDeviceImpl(it.split("\\s+".toRegex())[0], this) }
+    }
+  }
+
+  fun restart() {
+    executeAdbCommand("kill-server", null)
+    executeAdbCommand("start-server", null)
   }
 
   /**

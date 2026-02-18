@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//cxx:cxx_toolchain_types.bzl",
@@ -49,13 +50,18 @@ load(
 )
 load("@prelude//linking:strip.bzl", "strip_debug_info")
 load("@prelude//linking:types.bzl", "Linkage")
+load(
+    "@prelude//third-party:build.bzl",
+    "create_third_party_build_info",
+)
 load("@prelude//unix:providers.bzl", "UnixEnv", "create_unix_env_info")
 load("@prelude//utils:expect.bzl", "expect")
-load("@prelude//utils:utils.bzl", "flatten_dict")
+load("@prelude//utils:utils.bzl", "filter_and_map_idx", "flatten_dict")
 load(":cxx_context.bzl", "get_cxx_toolchain_info")
 load(
     ":cxx_library_utility.bzl",
     "cxx_attr_dep_metadata",
+    "cxx_attr_use_content_based_paths",
     "cxx_inherited_link_info",
     "cxx_use_shlib_intfs",
 )
@@ -157,7 +163,7 @@ def _get_static_link_infos(
             expect(macro == "lib")
             lib = libs[int(param)]
             linkables.append(archive_linkable(lib))
-            linkables_stripped.append(archive_linkable(strip_debug_info(ctx, lib.short_path, lib, anonymous = True)))
+            linkables_stripped.append(archive_linkable(strip_debug_info(ctx.actions, lib.short_path, lib, anonymous = True, cxx_toolchain = ctx.attrs._cxx_toolchain, has_content_based_path = cxx_attr_use_content_based_paths(ctx))))
         elif linkables:
             # If we've already seen linkables, put remaining flags/args into
             # post-linker flags.
@@ -267,6 +273,7 @@ def _get_shared_link_infos(
 #
 def prebuilt_cxx_library_group_impl(ctx: AnalysisContext) -> list[Provider]:
     providers = []
+    sub_targets = {}
 
     deps = ctx.attrs.deps
     exported_deps = ctx.attrs.exported_deps
@@ -276,9 +283,9 @@ def prebuilt_cxx_library_group_impl(ctx: AnalysisContext) -> list[Provider]:
     args.extend(ctx.attrs.exported_preprocessor_flags)
     for inc_dir in ctx.attrs.include_dirs:
         args += ["-isystem", inc_dir]
-    preprocessor = CPreprocessor(args = CPreprocessorArgs(args = args))
+    preprocessor = CPreprocessor(args = CPreprocessorArgs(args = args, precompile_args = args))
     inherited_pp_info = cxx_inherited_preprocessor_infos(exported_deps)
-    providers.append(cxx_merge_cpreprocessors(ctx, [preprocessor], inherited_pp_info))
+    providers.append(cxx_merge_cpreprocessors(ctx.actions, [preprocessor], inherited_pp_info))
 
     # Figure out all the link styles we'll be building archives/shlibs for.
     preferred_linkage = _linkage(ctx)
@@ -326,10 +333,6 @@ def prebuilt_cxx_library_group_impl(ctx: AnalysisContext) -> list[Provider]:
     # This code is already compiled, so, the argument (probably) has little/no value.
     pic_behavior = PicBehavior("supported")
 
-    # prebuilt_cxx_library_group default output is always the output used for the "static" link strategy.
-    static_output_style = get_lib_output_style(LinkStrategy("static"), preferred_linkage, pic_behavior)
-    providers.append(DefaultInfo(default_outputs = outputs[static_output_style]))
-
     # Provider for native link.
     providers.append(create_merged_link_info(
         ctx,
@@ -348,7 +351,7 @@ def prebuilt_cxx_library_group_impl(ctx: AnalysisContext) -> list[Provider]:
     providers.append(merge_shared_libraries(
         ctx.actions,
         shared_libs,
-        filter(None, [x.get(SharedLibraryInfo) for x in deps + exported_deps]),
+        filter_and_map_idx(SharedLibraryInfo, deps + exported_deps),
     ))
 
     # Create, augment and provide the linkable graph.
@@ -384,5 +387,27 @@ def prebuilt_cxx_library_group_impl(ctx: AnalysisContext) -> list[Provider]:
             deps = deps + exported_deps,
         ),
     )
+
+    # Third-party provider.
+    third_party_build_info = create_third_party_build_info(
+        ctx = ctx,
+        #cxx_headers = [propagated_preprocessor],
+        shared_libs = shared_libs.libraries,
+        cxx_header_dirs = [inc_dir.short_path for inc_dir in ctx.attrs.include_dirs],
+        deps = deps + exported_deps,
+    )
+    providers.append(third_party_build_info)
+    sub_targets["third-party-build"] = [
+        DefaultInfo(
+            default_output = third_party_build_info.build.root.artifact,
+            sub_targets = dict(
+                manifest = [DefaultInfo(default_output = third_party_build_info.build.manifest)],
+            ),
+        ),
+    ]
+
+    # prebuilt_cxx_library_group default output is always the output used for the "static" link strategy.
+    static_output_style = get_lib_output_style(LinkStrategy("static"), preferred_linkage, pic_behavior)
+    providers.append(DefaultInfo(default_outputs = outputs[static_output_style], sub_targets = sub_targets))
 
     return providers

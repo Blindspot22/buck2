@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -37,11 +38,9 @@ impl StarlarkServerCommand for StarlarkServerCommandImpl {
         partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::StdoutBytes>,
         req: buck2_cli_proto::GenericRequest,
     ) -> buck2_error::Result<buck2_cli_proto::GenericResponse> {
-        let start_event = buck2_data::CommandStart {
-            metadata: ctx.request_metadata().await?,
-            data: Some(buck2_data::StarlarkCommandStart {}.into()),
-        };
-
+        let start_event = ctx
+            .command_start_event(buck2_data::StarlarkCommandStart {}.into())
+            .await?;
         span_async(
             start_event,
             server_starlark_command_inner(ctx, partial_result_dispatcher, req),
@@ -68,14 +67,10 @@ async fn server_starlark_command_inner(
     buck2_error::Result<buck2_cli_proto::GenericResponse>,
     buck2_data::CommandEnd,
 ) {
-    let result = parse_command_and_execute(context, partial_result_dispatcher, req)
-        .await
-        .map_err(Into::into);
+    let result = parse_command_and_execute(context, partial_result_dispatcher, req).await;
     let end_event = command_end(&result, buck2_data::StarlarkCommandEnd {});
 
-    let result = result
-        .map(|()| buck2_cli_proto::GenericResponse {})
-        .map_err(Into::into);
+    let result = result.map(|()| buck2_cli_proto::GenericResponse {});
 
     (result, end_event)
 }

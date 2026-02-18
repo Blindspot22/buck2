@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin;
@@ -48,6 +49,7 @@ public class Ksp1Step extends KotlincStep {
       ImmutableMap<String, AbsPath> resolvedKosabiPluginOptionPath,
       @Nullable String kosabiEarlyTerminationMessagePrefix,
       ImmutableList<AbsPath> sourceOnlyAbiClasspath,
+      boolean shouldTrackClassUsage,
       KotlinCDAnalytics kotlinCDAnalytics) {
     super(
         invokingRule,
@@ -61,7 +63,7 @@ public class Ksp1Step extends KotlincStep {
         extraArguments,
         ImmutableList.of(VERBOSE),
         outputPaths,
-        false,
+        shouldTrackClassUsage,
         configuredBuckOut,
         resolvedKosabiPluginOptionPath,
         kosabiEarlyTerminationMessagePrefix,
@@ -73,7 +75,8 @@ public class Ksp1Step extends KotlincStep {
         KotlincMode.NonIncremental.INSTANCE,
         kotlinCDAnalytics,
         // force K1 for KSP1
-        LanguageVersion.Companion.getK1());
+        LanguageVersion.Companion.getK1(),
+        false);
   }
 
   @Override

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cmp;
@@ -26,7 +27,8 @@ pub async fn get_channel_uds(
     unix_socket: &Path,
     change_to_parent_dir: bool,
 ) -> buck2_error::Result<Channel> {
-    use buck2_core::fs::fs_util;
+    use buck2_fs::error::IoResultExt;
+    use buck2_fs::fs_util;
 
     use crate::home_buck_tmp::home_buck_tmp_dir;
     use crate::temp_path::TempPath;
@@ -37,7 +39,7 @@ pub async fn get_channel_uds(
     if change_to_parent_dir {
         let symlink = TempPath::new_in(home_buck_tmp_dir()?)?;
 
-        fs_util::symlink(unix_socket, symlink.path())?;
+        fs_util::symlink(unix_socket, symlink.path()).categorize_internal()?;
 
         let r = get_channel_uds_no_symlink(symlink.path())
             .await
@@ -71,6 +73,11 @@ async fn get_channel_uds_no_symlink(connect_to: &Path) -> buck2_error::Result<Ch
 
     let io = tokio::net::UnixStream::connect(&connect_to).await?;
 
+    // tokio provides a UnixStream that has implementations for AsyncRead/AsyncWrite,
+    // but its own connect_with_connector uses the hyper equivalents
+    // Use the hyper interop wrapper to paper over this discrepancy
+    let io = hyper_util::rt::tokio::TokioIo::new(io);
+
     let mut io = Some(io);
     // This URL string is not relevant to the connection. Some URL is required for the function to work but the closure running inside connect_with_connector()
     // deals with connecting to the unix domain socket.
@@ -78,7 +85,7 @@ async fn get_channel_uds_no_symlink(connect_to: &Path) -> buck2_error::Result<Ch
         .connect_with_connector(service_fn(move |_: Uri| {
             let io = io
                 .take()
-                .with_buck_error_context_anyhow(|| "Cannot reconnect after connection loss to uds");
+                .ok_or_else(|| "Cannot reconnect after connection loss to uds".to_owned());
             futures::future::ready(io)
         }))
         .await
@@ -97,11 +104,11 @@ pub async fn get_channel_uds(
 }
 
 pub async fn get_channel_tcp(socket_addr: Ipv4Addr, port: u16) -> buck2_error::Result<Channel> {
-    Endpoint::try_from(format!("http://{}:{}", socket_addr, port))?
+    Endpoint::try_from(format!("http://{socket_addr}:{port}"))?
         .connect()
         .await
         .tag(ErrorTag::ServerTransportError)
-        .with_buck_error_context(|| format!("failed to connect to port {}", port))
+        .with_buck_error_context(|| format!("failed to connect to port {port}"))
 }
 
 #[derive(buck2_error::Error, Debug)]

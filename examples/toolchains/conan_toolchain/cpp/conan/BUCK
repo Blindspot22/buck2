@@ -7,6 +7,8 @@ load(
 )
 load("//:test_utils.bzl", "assert_output")
 
+oncall("build_infra")
+
 conan_lock(
     name = "lock",
     conanfile = "conanfile.txt",

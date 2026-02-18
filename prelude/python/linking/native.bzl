@@ -1,18 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx.bzl", "create_shared_lib_link_group_specs")
 load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
 load("@prelude//cxx:cxx_executable.bzl", "CxxExecutableOutput", "cxx_executable")
 load("@prelude//cxx:cxx_sources.bzl", "CxxSrcWithFlags")
+load("@prelude//cxx:cxx_toolchain_types.bzl", "LinkerType")
 load(
     "@prelude//cxx:cxx_types.bzl",
     "CxxRuleConstructorParams",
 )
+load("@prelude//cxx:cxx_utility.bzl", "cxx_attrs_get_allow_cache_upload")
 load(
     "@prelude//cxx:groups_types.bzl",
     "Group",
@@ -61,6 +64,7 @@ load(
     "traverse_shared_library_info",
 )
 load("@prelude//linking:types.bzl", "Linkage")
+load("@prelude//python:internal_tools.bzl", "PythonInternalToolsInfo")
 load("@prelude//python:toolchain.bzl", "PackageStyle")
 load("@prelude//utils:argfile.bzl", "at_argfile")
 load(":native_python_util.bzl", "CxxExtensionLinkInfo", "CxxExtensionLinkInfoReduced", "merge_cxx_extension_info", "reduce_cxx_extension_info")  # @unused Used as a type
@@ -241,6 +245,9 @@ def _compute_cxx_extension_info(ctx, deps) -> (CxxExtensionLinkInfo, CxxExtensio
     extension_info_reduced = reduce_cxx_extension_info(extension_info)
     return extension_info, extension_info_reduced
 
+def _cxx_exe_allow_cache_upload(ctx) -> bool:
+    return hasattr(ctx.attrs, "exe_allow_cache_upload") and bool(ctx.attrs.exe_allow_cache_upload)
+
 def _compute_cxx_executable_info(
         ctx,
         extension_info_reduced,
@@ -251,7 +258,7 @@ def _compute_cxx_executable_info(
         allow_cache_upload) -> CxxExecutableOutput:
     cxx_executable_srcs = [
         CxxSrcWithFlags(file = ctx.attrs.cxx_main, flags = []),
-        CxxSrcWithFlags(file = ctx.attrs.static_extension_utils, flags = []),
+        CxxSrcWithFlags(file = ctx.attrs.static_extension_utils, flags = ["-DOSS_PYTHON=1"] if ctx.attrs.use_oss_python else []),
         CxxSrcWithFlags(file = static_extension_info_out, flags = []),
     ]
 
@@ -273,14 +280,36 @@ def _compute_cxx_executable_info(
 
     extra_binary_link_flags.extend(python_toolchain.binary_linker_flags)
 
+    # Force the linker to retain all PyInit symbols for embeddable C extensions.
+    # The generated static_extension_info.cpp references these symbols via asm
+    # directives, but the linker may still drop archive members that define them
+    # if nothing else references them (e.g. when link groups or --gc-sections
+    # are in play). Adding -u flags ensures the linker treats them as undefined
+    # entry points and pulls in the necessary object files from archives.
+    pyinit_symbols = extension_info_reduced.python_module_names.values()
+    if pyinit_symbols:
+        pyinit_argsfile = ctx.actions.write(
+            "__pyinit_undefined_symbols__.argsfile",
+            cmd_args(["-u" + sym for sym in pyinit_symbols]),
+        )
+        extra_binary_link_flags.append(cmd_args(pyinit_argsfile, format = "@{}"))
+
+    linker_info = get_cxx_toolchain_info(ctx).linker_info
+
     # Set rpaths to find 1) the shared libs dir and the 2) runtime libs dir.
-    rpath_ref = get_rpath_origin(get_cxx_toolchain_info(ctx).linker_info.type)
+    rpath_ref = get_rpath_origin(linker_info.type)
     rpath_ldflag = "-Wl,-rpath,{}/".format(rpath_ref)
     if package_style == PackageStyle("standalone"):
         extra_binary_link_flags.append(rpath_ldflag + "../..")
         extra_binary_link_flags.append(rpath_ldflag + "../lib")
     else:
-        rpath_ldflag_prefix = rpath_ldflag + "{}#link-tree".format(ctx.attrs.name)
+        use_anon_target = getattr(ctx.attrs, "use_anon_target_for_analysis", False)
+        if use_anon_target:
+            link_tree_name = getattr(ctx.attrs, "name", ctx.attrs.rpath)
+        else:
+            link_tree_name = ctx.attrs.name
+
+        rpath_ldflag_prefix = rpath_ldflag + "{}#link-tree".format(link_tree_name)
         extra_binary_link_flags.append(rpath_ldflag_prefix + "/runtime/lib")
         extra_binary_link_flags.append(rpath_ldflag_prefix)
 
@@ -295,7 +324,8 @@ def _compute_cxx_executable_info(
         extra_link_deps = link_deps,
         exe_shared_libs_link_tree = False,
         force_full_hybrid_if_capable = True,
-        prefer_stripped_objects = ctx.attrs.prefer_stripped_native_objects,
+        # Darwin requires inputs ordering for binary size and historical reasons, the ordering functions do not support stripped objects yet.
+        prefer_stripped_objects = linker_info.type != LinkerType("darwin") and ctx.attrs.prefer_stripped_native_objects,
         link_group_info = link_group_info,
         auto_link_group_specs = auto_link_group_specs,
         exe_category_suffix = "python_exe",
@@ -305,6 +335,7 @@ def _compute_cxx_executable_info(
                 deps =
                     [d.shared_library_info for d in extension_info_reduced.shared_only_libs],
             ),
+            transformation_provider = None,
         ),
         extra_link_roots = (
             extension_info_reduced.unembeddable_extensions.values() +
@@ -312,21 +343,26 @@ def _compute_cxx_executable_info(
             extension_info_reduced.shared_only_libs +
             linkables(ctx.attrs.link_group_deps)
         ),
-        exe_allow_cache_upload = allow_cache_upload,
+        exe_allow_cache_upload = bool(allow_cache_upload) or _cxx_exe_allow_cache_upload(ctx),
         compiler_flags = ctx.attrs.compiler_flags,
         lang_compiler_flags = ctx.attrs.lang_compiler_flags,
-        platform_compiler_flags = ctx.attrs.platform_compiler_flags,
-        lang_platform_compiler_flags = ctx.attrs.lang_platform_compiler_flags,
         preprocessor_flags = ctx.attrs.preprocessor_flags,
         lang_preprocessor_flags = ctx.attrs.lang_preprocessor_flags,
-        platform_preprocessor_flags = ctx.attrs.platform_preprocessor_flags,
-        lang_platform_preprocessor_flags = ctx.attrs.lang_platform_preprocessor_flags,
         error_handler = python_toolchain.python_error_handler,
+        allow_cache_upload = cxx_attrs_get_allow_cache_upload(ctx.attrs, get_cxx_toolchain_info(ctx).cxx_compiler_info.allow_cache_upload),
+        precompiled_header = ctx.attrs.precompiled_header,
+        _cxx_toolchain = ctx.attrs._cxx_toolchain,
     )
 
     return cxx_executable(ctx, impl_params)
 
-def process_native_linking(ctx, deps, python_toolchain, package_style, allow_cache_upload) -> (
+def process_native_linking(
+        ctx,
+        deps,
+        python_toolchain,
+        python_internal_tools: PythonInternalToolsInfo,
+        package_style,
+        allow_cache_upload) -> (
     list[(SharedLibrary, str)],
     dict[str, (LinkedObject, Label)],
     list[LinkArgs],
@@ -353,7 +389,7 @@ def process_native_linking(ctx, deps, python_toolchain, package_style, allow_cac
         ),
     )
     cmd = cmd_args()
-    cmd.add(cmd_args(python_toolchain.generate_static_extension_info[RunInfo]))
+    cmd.add(cmd_args(python_internal_tools.generate_static_extension_info[RunInfo]))
     cmd.add(cmd_args(argfile))
     cmd.add(cmd_args(static_extension_info_out.as_output(), format = "--output={}"))
 

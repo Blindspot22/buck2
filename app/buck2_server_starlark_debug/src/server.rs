@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeSet;
@@ -14,13 +15,13 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
-use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_events::dispatch::EventDispatcher;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use buck2_interpreter::starlark_debug::StarlarkDebugController;
 use debugserver_types as dap;
 use dupe::Dupe;
@@ -123,7 +124,7 @@ impl BuckStarlarkDebuggerServer {
         // passed in as we should at the least respect any `-j` flag.
         Self {
             to_state,
-            eval_semaphore: Arc::new(Semaphore::new(num_cpus::get())),
+            eval_semaphore: Arc::new(Semaphore::new(buck2_util::threads::available_parallelism())),
             next_handle_id: AtomicU32::new(0),
         }
     }
@@ -532,10 +533,12 @@ impl DebugServer for ServerState {
                     .adapter
                     .inspect_variable(path.to_owned())
                     .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::StarlarkServer))?;
-                let current_frame_vars = self
-                    .variables_by_thread
-                    .get_mut(&thread_id)
-                    .buck_error_context("variables cache must exist in this codepath")?;
+                let current_frame_vars =
+                    self.variables_by_thread
+                        .get_mut(&thread_id)
+                        .ok_or_else(|| {
+                            internal_error!("variables cache must exist in this codepath")
+                        })?;
 
                 for child in inspect_result.sub_values {
                     let child_path = path.make_child(child.name.clone());
@@ -653,7 +656,7 @@ impl DebugServer for ServerState {
                 indexed_variables: None,
                 named_variables: None,
                 presentation_hint: None,
-                result: format!("{:#}", er),
+                result: format!("{er:#}"),
                 type_: None,
                 variables_reference: 0.0,
             }),
@@ -708,7 +711,7 @@ impl ServerState {
                         snapshot.this_handle = id.0;
                         state.events.instant_event(snapshot.clone());
                     }
-                    next_snapshot = Instant::now() + Duration::from_secs(60);
+                    next_snapshot = Instant::now() + Duration::from_mins(1);
                 }
                 msg = recv.next() => {
                     match msg {
@@ -996,7 +999,7 @@ fn describe_frame(frame: dap::StackFrame) -> String {
             line,
             ..
         } => {
-            format!("{}:{}", path, line)
+            format!("{path}:{line}")
         }
         _ => "???".to_owned(),
     }
@@ -1009,10 +1012,7 @@ mod tests {
     fn check_variable_err(is_top_frame: bool, thread_id: u32, variable_id: u32) {
         assert!(
             VariableId::new(is_top_frame, thread_id, variable_id).is_err(),
-            "Expecting error for values ({}, {}, {})",
-            is_top_frame,
-            thread_id,
-            variable_id
+            "Expecting error for values ({is_top_frame}, {thread_id}, {variable_id})"
         );
     }
 

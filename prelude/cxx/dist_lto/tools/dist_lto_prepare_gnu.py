@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """
 Prepares for an object-only ThinLTO link by extracting a given archive and
@@ -41,13 +42,20 @@ def _gen_filename(filename: str, num_of_instance: int) -> str:
     # for 2nd instance, it's file_1.o
     if num_of_instance > 1:
         basename, extension = os.path.splitext(filename)
-        return f"{basename}_{num_of_instance-1}{extension}"
+        return f"{basename}_{num_of_instance - 1}{extension}"
     else:
         return filename
 
 
 def identify_file(path: str) -> Tuple[ArchiveKind, str]:
     path = os.path.realpath(path)
+
+    if path.endswith(".rlib"):
+        # `file -b` sometimes misfires and reports a Rust rlib
+        # as "DOS/MBR boot sector"
+        output = "current ar archive\n"
+        return (ArchiveKind.ARCHIVE, output)
+
     output = subprocess.check_output(["file", "-b", path]).decode()
     if "ar archive" in output:
         return (ArchiveKind.ARCHIVE, output)

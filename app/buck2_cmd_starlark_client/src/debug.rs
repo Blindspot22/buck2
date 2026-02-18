@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io::Write;
@@ -171,7 +172,7 @@ impl StreamingCommand for StarlarkDebugAttachCommand {
                         column: None,
                         data: None,
                         line: None,
-                        output: format!("{}\n", msg),
+                        output: format!("{msg}\n"),
                         source: None,
                         variables_reference: None,
                     },
@@ -220,10 +221,8 @@ impl StreamingCommand for StarlarkDebugAttachCommand {
                 &mut self,
                 error: &buck2_error::Error,
             ) -> buck2_error::Result<()> {
-                Ok(self.write_console(&format!(
-                    "buck2 starlark-attach debugserver error: {}",
-                    error
-                ))?)
+                Ok(self
+                    .write_console(&format!("buck2 starlark-attach debugserver error: {error}"))?)
             }
         }
 

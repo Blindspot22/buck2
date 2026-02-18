@@ -47,7 +47,7 @@ use crate::values::type_repr::StarlarkTypeRepr;
 /// use starlark::values::structs::AllocStruct;
 ///
 /// # use starlark::values::{FrozenHeap, Heap};
-/// # fn alloc(heap: &Heap, frozen_heap: &FrozenHeap) {
+/// # fn alloc(heap: Heap<'_>, frozen_heap: &FrozenHeap) {
 /// let s = heap.alloc(AllocStruct([("a", 1), ("b", 2)]));
 /// let fs = frozen_heap.alloc(AllocStruct([("a", 1), ("b", 2)]));
 /// # }
@@ -76,14 +76,14 @@ where
     K: AllocStringValue<'v>,
     V: AllocValue<'v>,
 {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         let iter = self.0.into_iter();
         let mut fields = SmallMap::with_capacity(iter.size_hint().0);
         for (k, v) in iter {
             let k = k.alloc_string_value(heap);
             let v = v.alloc_value(heap);
             let prev = fields.insert(k, v);
-            assert!(prev.is_none(), "non-unique key: {}", k);
+            assert!(prev.is_none(), "non-unique key: {k}");
         }
         heap.alloc(Struct::new(fields))
     }
@@ -102,7 +102,7 @@ where
             let k = k.alloc_frozen_string_value(heap);
             let v = v.alloc_frozen_value(heap);
             let prev = fields.insert(k, v);
-            assert!(prev.is_none(), "non-unique key: {}", k);
+            assert!(prev.is_none(), "non-unique key: {k}");
         }
         heap.alloc(FrozenStruct::new(fields))
     }

@@ -1,14 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::hash::Hasher;
-use std::sync::OnceLock;
 
 #[derive(Default)]
 pub struct Blake3StrongHasher(blake3::Hasher);
@@ -16,6 +16,10 @@ pub struct Blake3StrongHasher(blake3::Hasher);
 impl Blake3StrongHasher {
     pub fn new() -> Self {
         Self(blake3::Hasher::new())
+    }
+
+    pub fn finalize(&self) -> blake3::Hash {
+        self.0.finalize()
     }
 }
 
@@ -31,5 +35,3 @@ impl Hasher for Blake3StrongHasher {
         u64::from_be_bytes(bytes)
     }
 }
-
-pub static USE_CORRECT_ANON_TARGETS_HASH: OnceLock<bool> = OnceLock::new();

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
@@ -13,13 +14,13 @@
 use std::borrow::Cow;
 
 use allocative::Allocative;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileNameBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 
 use crate::daemon_dir::DaemonDir;
 use crate::invocation_roots::InvocationRoots;
@@ -56,7 +57,7 @@ impl InvocationPaths {
     pub fn daemon_dir(&self) -> buck2_error::Result<DaemonDir> {
         #[cfg(windows)]
         let root_relative: Cow<ForwardRelativePath> = {
-            use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathNormalizer;
+            use buck2_fs::paths::forward_rel_path::ForwardRelativePathNormalizer;
 
             // Get drive letter, network share name, etc.
             // Network share contains '\' therefore it needs to be normalized.
@@ -71,7 +72,7 @@ impl InvocationPaths {
             .roots
             .project_root
             .root()
-            .strip_prefix(buck2_core::fs::paths::abs_norm_path::AbsNormPath::new("/")?)?;
+            .strip_prefix(buck2_fs::paths::abs_norm_path::AbsNormPath::new("/")?)?;
 
         let path = self
             .roots
@@ -145,6 +146,12 @@ impl InvocationPaths {
             .join(self.materializer_state_dir_name())
     }
 
+    /// Subdirectory of `cache_dir` responsible for storing content-based incremental path state
+    pub fn incremental_state_path(&self) -> AbsNormPathBuf {
+        self.cache_dir_path()
+            .join(self.incremental_state_dir_name())
+    }
+
     /// This is used by the forkserver to write the miniperf wrapper binary (if used), as well as
     /// temporary files used by miniperf. We put this in buck-out because that directory gets
     /// allowlisted for execution (because we write lots of tools there).
@@ -153,12 +160,36 @@ impl InvocationPaths {
             .join(ForwardRelativePath::unchecked_new("forkserver"))
     }
 
-    pub fn materializer_state_dir_name(&self) -> &FileName {
+    fn materializer_state_dir_name(&self) -> &FileName {
         FileName::unchecked_new("materializer_state")
     }
 
+    fn incremental_state_dir_name(&self) -> &FileName {
+        FileName::unchecked_new("incremental_state")
+    }
+
     pub fn valid_cache_dirs(&self) -> Vec<&FileName> {
-        vec![self.materializer_state_dir_name()]
+        vec![
+            self.materializer_state_dir_name(),
+            self.incremental_state_dir_name(),
+        ]
+    }
+
+    /// This is used by the health check server and client to preserve states across runs, and for temporary files.
+    pub fn health_check_state_dir(&self) -> AbsNormPathBuf {
+        self.buck_out_path()
+            .join(ForwardRelativePath::unchecked_new("health_check"))
+    }
+
+    /// Trash directory for background clean operations.
+    /// Files moved here can be deleted asynchronously without blocking the main clean operation.
+    /// This points to buck-out/tmp/stale-buck-out which is used as the trash directory.
+    pub fn trash_dir(&self) -> AbsNormPathBuf {
+        self.roots
+            .project_root
+            .root()
+            .join(Self::buck_out_dir_prefix())
+            .join(ForwardRelativePath::unchecked_new("tmp/stale-buck-out"))
     }
 }
 
@@ -166,13 +197,13 @@ impl InvocationPaths {
 mod tests {
     use std::ffi::OsStr;
 
-    use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-    use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-    use buck2_core::fs::paths::file_name::FileNameBuf;
-    use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
     use buck2_core::fs::project::ProjectRoot;
     use buck2_core::fs::project_rel_path::ProjectRelativePath;
     use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
+    use buck2_fs::paths::abs_norm_path::AbsNormPath;
+    use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+    use buck2_fs::paths::file_name::FileNameBuf;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 
     use crate::invocation_paths::InvocationPaths;
     use crate::invocation_roots::InvocationRoots;
@@ -256,6 +287,16 @@ mod tests {
         };
         assert_eq!(
             paths.materializer_state_path().as_os_str(),
+            OsStr::new(expected_path),
+        );
+
+        let expected_path = if cfg!(windows) {
+            "C:\\my\\project\\buck-out\\isolation\\health_check"
+        } else {
+            "/my/project/buck-out/isolation/health_check"
+        };
+        assert_eq!(
+            paths.health_check_state_dir().as_os_str(),
             OsStr::new(expected_path),
         );
     }

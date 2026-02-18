@@ -1,26 +1,26 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import pytest
-
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.api.fixtures import Fixture, Span
 from buck2.tests.e2e_util.api.lsp import LSPResponseError
 from buck2.tests.e2e_util.buck_workspace import buck_test
 
 
-def _assert_range(range: Dict[str, Any], expected: Optional[Span]) -> None:
+def _assert_range(range: dict[str, Any], expected: Optional[Span]) -> None:
     """Assert that this Span is equal to an LSP range dict"""
     if expected is None:
         expected = Span(0, 0, 0, 0)
@@ -41,7 +41,7 @@ def _assert_uris(actual: str, expected: str) -> None:
 
 
 def _assert_goto_result(
-    res: List[Dict[str, Any]],
+    res: list[dict[str, Any]],
     expected_src: Span,
     expected_dest_path: Path,
     expected_dest: Optional[Span],

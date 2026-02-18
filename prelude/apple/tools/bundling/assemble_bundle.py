@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -177,9 +178,9 @@ def _assemble_incrementally(
             old_digest = old_digests.get(dst, None)
             is_changed = new_digest != old_digest
         else:
-            assert (
-                item.resolved_symlink is not None
-            ), "Expected item to represent a symlink when digest is missing"
+            assert item.resolved_symlink is not None, (
+                "Expected item to represent a symlink when digest is missing"
+            )
             new_resolved_symlink = item.resolved_symlink
             old_resolved_symlink = old_symlink_destinations.get(dst, None)
             is_changed = new_resolved_symlink != old_resolved_symlink

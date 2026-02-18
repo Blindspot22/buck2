@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -14,10 +15,11 @@ use buck2_core::configuration::pair::ConfigurationNoExec;
 use buck2_core::configuration::pair::ConfigurationWithExec;
 use buck2_core::configuration::transition::applied::TransitionApplied;
 use buck2_core::configuration::transition::id::TransitionId;
+use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::target::label::label::TargetLabel;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use dupe::Dupe;
 use starlark_map::ordered_map::OrderedMap;
 use starlark_map::sorted_map::SortedMap;
@@ -39,7 +41,7 @@ pub trait AttrConfigurationContext {
 
     fn cfg(&self) -> ConfigurationNoExec;
 
-    fn exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec>;
+    fn base_exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec>;
 
     /// Must be equal to `(cfg, Some(exec_cfg))`.
     fn toolchain_cfg(&self) -> ConfigurationWithExec;
@@ -60,7 +62,7 @@ pub trait AttrConfigurationContext {
         &self,
         label: &ProvidersLabel,
     ) -> buck2_error::Result<ConfiguredProvidersLabel> {
-        Ok(label.configure_pair(self.exec_cfg()?.cfg_pair().dupe()))
+        Ok(label.configure_pair(self.base_exec_cfg()?.cfg_pair().dupe()))
     }
 
     fn configure_toolchain_target(&self, label: &ProvidersLabel) -> ConfiguredProvidersLabel {
@@ -79,7 +81,7 @@ pub trait AttrConfigurationContext {
         let cfg = self
             .resolved_transitions()?
             .get(tr)
-            .buck_error_context("internal error: no resolved transition")?;
+            .ok_or_else(|| internal_error!("internal error: no resolved transition"))?;
         Ok(label.configure(cfg.single()?.dupe()))
     }
 
@@ -91,7 +93,7 @@ pub trait AttrConfigurationContext {
         let cfg = self
             .resolved_transitions()?
             .get(tr)
-            .buck_error_context("internal error: no resolved transition")?;
+            .ok_or_else(|| internal_error!("internal error: no resolved transition"))?;
         let split = cfg.split()?;
         Ok(split
             .iter()
@@ -102,26 +104,29 @@ pub trait AttrConfigurationContext {
 
 pub struct AttrConfigurationContextImpl<'b> {
     resolved_cfg: &'b MatchedConfigurationSettingKeysWithCfg,
-    exec_cfg: ConfigurationNoExec,
     /// Must be equal to `(cfg, Some(exec_cfg))`.
     toolchain_cfg: ConfigurationWithExec,
     resolved_transitions: &'b OrderedMap<Arc<TransitionId>, Arc<TransitionApplied>>,
     platform_cfgs: &'b OrderedMap<TargetLabel, ConfigurationData>,
+    /// The execution platform resolution, which contains per-exec_dep configurations
+    /// when in the Resolved state.
+    execution_platform_resolution: &'b ExecutionPlatformResolution,
 }
 
 impl<'b> AttrConfigurationContextImpl<'b> {
     pub fn new(
         resolved_cfg: &'b MatchedConfigurationSettingKeysWithCfg,
-        exec_cfg: ConfigurationNoExec,
+        execution_platform_resolution: &'b ExecutionPlatformResolution,
         resolved_transitions: &'b OrderedMap<Arc<TransitionId>, Arc<TransitionApplied>>,
         platform_cfgs: &'b OrderedMap<TargetLabel, ConfigurationData>,
     ) -> AttrConfigurationContextImpl<'b> {
+        let exec_cfg = execution_platform_resolution.base_cfg();
         AttrConfigurationContextImpl {
             resolved_cfg,
             toolchain_cfg: resolved_cfg.cfg().make_toolchain(&exec_cfg),
-            exec_cfg,
             resolved_transitions,
             platform_cfgs,
+            execution_platform_resolution,
         }
     }
 }
@@ -135,8 +140,18 @@ impl AttrConfigurationContext for AttrConfigurationContextImpl<'_> {
         self.resolved_cfg.cfg().dupe()
     }
 
-    fn exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec> {
-        Ok(self.exec_cfg.dupe())
+    fn base_exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec> {
+        Ok(self.execution_platform_resolution.base_cfg())
+    }
+
+    fn configure_exec_target(
+        &self,
+        label: &ProvidersLabel,
+    ) -> buck2_error::Result<ConfiguredProvidersLabel> {
+        let cfg = self
+            .execution_platform_resolution
+            .cfg_for_exec_dep(label.target())?;
+        Ok(label.configure(cfg))
     }
 
     fn toolchain_cfg(&self) -> ConfigurationWithExec {

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Arguments;
@@ -35,7 +36,7 @@ macro_rules! rtabort {
 
 #[cold]
 pub fn rtabort_impl_fixed_string(file: &str, line: u32, message: &str) -> ! {
-    rtabort_impl(file, line, format_args!("{}", message));
+    rtabort_impl(file, line, format_args!("{message}"));
 }
 
 #[cold]
@@ -46,7 +47,7 @@ pub fn rtabort_impl(file: &str, line: u32, msg: Arguments) -> ! {
     // `eprintln!` followed by `abort` does not print anything in tests.
     io::Write::write_fmt(
         &mut io::stderr(),
-        format_args!("{}:{}: abort: {}\n", file, line, msg),
+        format_args!("{file}:{line}: abort: {msg}\n"),
     )
     .ok();
 

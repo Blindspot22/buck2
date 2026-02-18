@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::OnceCell;
@@ -94,6 +95,11 @@ pub fn new_dynamic_actions_callable<'v>(
 pub(crate) fn register_dynamic_actions(globals: &mut GlobalsBuilder) {
     /// Create new dynamic action callable. Returned object will be callable,
     /// and the result of calling it can be passed to `ctx.actions.dynamic_output_new`.
+    ///
+    /// Be aware that the context argument of the called impl function differs between
+    /// [`dynamic_actions`](../#dynamic_actions) where it is [`actions: AnalysisActions`](./AnalysisActions)
+    /// and [`bxl.dynamic_actions`](../../bxl/#dynamic_actions)
+    /// where it is [`bxl_ctx: bxl.Context`](../bxl/Context).
     fn dynamic_actions<'v>(
         #[starlark(require = named)] r#impl: StarlarkCallableChecked<
             'v,

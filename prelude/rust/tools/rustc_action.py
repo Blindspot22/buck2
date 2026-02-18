@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Wrapper for rustc (or similar, like rustdoc). This wrapper does a few pieces
 # of post-processing on the json-formatted diagnostics:
@@ -26,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, IO, List, NamedTuple, Optional, Tuple
+from typing import Any, IO, NamedTuple, Optional
 
 DEBUG = False
 
@@ -93,11 +94,11 @@ def eprint(*args: Any, **kwargs: Any) -> None:
 
 if sys.version_info[:2] < (3, 7):
     eprint("Python 3.7 or newer is required!")
-    eprint("Using {} from {}".format(platform.python_version(), sys.executable))
+    eprint(f"Using {platform.python_version()} from {sys.executable}")
     sys.exit(1)
 
 
-def key_value_arg(s: str) -> Tuple[str, str]:
+def key_value_arg(s: str) -> tuple[str, str]:
     s = arg_eval(s)
     key_value = s.split("=", maxsplit=1)
     if len(key_value) == 2:
@@ -108,15 +109,15 @@ def key_value_arg(s: str) -> Tuple[str, str]:
 class Args(NamedTuple):
     diag_json: Optional[IO[bytes]]
     diag_txt: Optional[IO[bytes]]
-    env: Optional[List[Tuple[str, str]]]
-    path_env: Optional[List[Tuple[str, str]]]
+    env: Optional[list[tuple[str, str]]]
+    path_env: Optional[list[tuple[str, str]]]
     remap_cwd_prefix: Optional[str]
-    crate_map: Optional[List[Tuple[str, str]]]
+    crate_map: Optional[list[tuple[str, str]]]
     buck_target: Optional[str]
     failure_filter: Optional[IO[bytes]]
-    required_output: Optional[List[Tuple[str, str]]]
+    required_output: Optional[list[tuple[str, str]]]
     echo: Optional[IO[bytes]]
-    rustc: List[str]
+    rustc: list[str]
 
 
 def arg_parse() -> Args:
@@ -193,23 +194,34 @@ def arg_parse() -> Args:
 
 def arg_eval(arg: str) -> str:
     """
-    Expand an argument such as --extern=$(cat buck-out/v2/gen/foo.txt)=buck-out/dev/gen/libfoo.rlib
+    Expand the following two special cases:
+        --extern=$(cat buck-out/v2/gen/foo.txt)=buck-out/dev/gen/libfoo.rlib
+        --env-set=FOO=$(abspath buck-out/v2/gen/foo.txt)
     """
     expanded = ""
 
     while True:
-        begin = arg.find("$(cat ")
+        begin = arg.find("$(")
         if begin == -1:
             return expanded + arg
         expanded += arg[:begin]
-        begin += len("$(cat ")
-        path, rest = arg[begin:].split(")", maxsplit=1)
-        with open(path, encoding="utf-8") as f:
-            expanded += f.read().strip()
-        arg = rest
+        if arg[begin:].startswith("$(cat "):
+            begin += len("$(cat ")
+            path, rest = arg[begin:].split(")", maxsplit=1)
+            with open(path, encoding="utf-8") as f:
+                expanded += f.read().strip()
+            arg = rest
+        elif arg[begin:].startswith("$(abspath "):
+            begin += len("$(abspath ")
+            path, rest = arg[begin:].split(")", maxsplit=1)
+            expanded += os.path.abspath(path)
+            arg = rest
+        else:
+            expanded += "$("
+            arg = arg[begin + len("$(") :]
 
 
-def inherited_env() -> Dict[str, str]:
+def inherited_env() -> dict[str, str]:
     env = {}
     for pattern in INHERITED_ENV:
         if pattern.endswith("*"):
@@ -224,7 +236,7 @@ def inherited_env() -> Dict[str, str]:
 async def handle_output(  # noqa: C901
     proc: asyncio.subprocess.Process,
     args: Args,
-    crate_map: Dict[str, str],
+    crate_map: dict[str, str],
 ) -> bool:
     got_error_diag = False
 
@@ -263,9 +275,9 @@ async def handle_output(  # noqa: C901
                 rendered_unused = []
                 for name in unused_names:
                     if name in crate_map:
-                        rendered_unused.append("{}: {}".format(crate_map[name], name))
+                        rendered_unused.append(f"{crate_map[name]}: {name}")
                     else:
-                        rendered_unused.append("{}".format(name))
+                        rendered_unused.append(f"{name}")
                 rendered_unused.sort()
                 rendered_unused = "\n    ".join(rendered_unused)
 
@@ -326,27 +338,38 @@ async def main() -> int:  # noqa: C901
         print(f"args {repr(args)} env {env} crate_map {crate_map}", end="\n")
 
     separator = args.rustc.index("--rustc-action-separator")
-    rustc_cmd, rustc_args = args.rustc[:separator], args.rustc[separator + 1 :]
+    rustc_cmd, rustc_args_orig = args.rustc[:separator], args.rustc[separator + 1 :]
 
-    # Build.bzl uses the following expression to generate remap flags:
-    #   cmd_args("--remap-path-prefix=", ... "=", ctx.label.path, path_sep, delimiter = "")
-    # The ctx.label.path (which is of type StarlarkCellPath) has the
-    # inconvenient behavior that if the label's package has fewer than two
-    # components, it gets an extra "./" prepended. So for targets //:repro and
-    # //one:repro and //one/two:repro we would get remap flags with the
-    # right-hand side as "./" and "./one/" and "one/two/". In compiler
-    # diagnostics we would never want this leading "./" so strip it off.
-    for i, arg in enumerate(rustc_args):
+    rustc_args = []
+    for arg in rustc_args_orig:
+        # Build.bzl uses the following expression to generate remap flags:
+        #   cmd_args("--remap-path-prefix=", ... "=", ctx.label.path, path_sep, delimiter = "")
+        # The ctx.label.path (which is of type StarlarkCellPath) has the
+        # inconvenient behavior that if the label's package has fewer than two
+        # components, it gets an extra "./" prepended. So for targets //:repro
+        # and //one:repro and //one/two:repro we would get remap flags with the
+        # right-hand side as "./" and "./one/" and "one/two/". In compiler
+        # diagnostics we would never want this leading "./" so strip it off.
         if arg.startswith("--remap-path-prefix="):
             flag, buck_out, mapped = arg.split("=", 2)
             if mapped.startswith("./"):
                 mapped = mapped[2:]
-            rustc_args[i] = "{}={}={}".format(flag, buck_out, mapped)
+            arg = f"{flag}={buck_out}={mapped}"
+
+        # While the env-set feature is unstable, allow it to be used with stable
+        # rustc by translating from a rustc flag to environment variables set
+        # during the execution of the rustc subprocess. Our handling of Cargo
+        # build scripts relies on `--env-set` as the implementation of "cargo:rustc-env".
+        # Tracking issue: https://github.com/rust-lang/rust/issues/118372
+        if arg.startswith("--env-set="):
+            flag, key, value = arg.split("=", 3)
+            env[key] = value
+            continue
+
+        rustc_args.append(arg)
 
     if args.remap_cwd_prefix is not None:
-        rustc_args.append(
-            "--remap-path-prefix={}={}".format(os.getcwd(), args.remap_cwd_prefix)
-        )
+        rustc_args.append(f"--remap-path-prefix={os.getcwd()}={args.remap_cwd_prefix}")
         rustc_args.append(
             "--remap-path-prefix={}={}".format(
                 os.path.realpath(os.getcwd()), args.remap_cwd_prefix
@@ -396,7 +419,7 @@ async def main() -> int:  # noqa: C901
 
     # Check for death by signal - this is always considered a failure
     if res < 0:
-        cmdline = " ".join(shlex.quote(arg) for arg in rustc_cmd + rustc_args)
+        cmdline = shlex.join(rustc_cmd + rustc_args)
         eprint(f"Command exited with signal {-res}: command line: {cmdline}")
     elif args.failure_filter:
         # If failure filtering is enabled, then getting an error diagnostic is also

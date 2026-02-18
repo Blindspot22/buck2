@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fs::File;
@@ -59,20 +60,14 @@ impl BuckVersion {
         let file_m = match unsafe { memmap2::Mmap::map(&file) } {
             Ok(mmap) => mmap,
             Err(err) => {
-                panic!(
-                    "Failed to map buck2 binary for version extraction: {:?}",
-                    err
-                );
+                panic!("Failed to map buck2 binary for version extraction: {err:?}");
             }
         };
 
         let file_object = match object::File::parse(&*file_m) {
             Ok(file) => file,
             Err(err) => {
-                panic!(
-                    "Failed to parse buck2 file for version extraction: {:?}",
-                    err
-                );
+                panic!("Failed to parse buck2 file for version extraction: {err:?}");
             }
         };
 
@@ -92,7 +87,7 @@ impl BuckVersion {
         let version = if let Some(version) = buck2_build_info::revision() {
             version.to_owned()
         } else {
-            format!("{} {}", internal_exe_hash, internal_exe_hash_kind)
+            format!("{internal_exe_hash} {internal_exe_hash_kind}")
         };
 
         BuckVersion {

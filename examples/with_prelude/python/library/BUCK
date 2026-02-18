@@ -1,3 +1,5 @@
+oncall("build_infra")
+
 python_library(
     name = "printlib",
     srcs = ["print.py"],

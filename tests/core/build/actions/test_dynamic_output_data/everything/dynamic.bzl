@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Basic test
 def _basic(ctx: AnalysisContext) -> list[Provider]:
@@ -83,7 +84,7 @@ def _command(ctx: AnalysisContext) -> list[Provider]:
             "  f.write('Hello\\n')",
         ],
     )
-    ctx.actions.run(cmd_args(["python3", write_hello], hidden = hello.as_output()), category = "test_category")
+    ctx.actions.run(cmd_args(["fbpython", write_hello], hidden = hello.as_output()), category = "test_category")
 
     world = ctx.actions.declare_output("world")
     universe = ctx.actions.declare_output("universe")
@@ -103,7 +104,7 @@ def _command(ctx: AnalysisContext) -> list[Provider]:
         src = artifacts[hello].read_string().strip()
         assert_eq(src, "Hello")
         ctx.actions.run(
-            cmd_args(["python3", script, src, outputs[world].as_output(), outputs[universe].as_output()]),
+            cmd_args(["fbpython", script, src, outputs[world].as_output(), outputs[universe].as_output()]),
             category = "dynamic_check",
         )
 
@@ -191,7 +192,7 @@ def _assert_output_value_impl(ctx: AnalysisContext) -> list[Provider]:
             "  f.write('Success\\n')",
         ],
     )
-    ctx.actions.run(cmd_args(["python3", run, value, produced, output.as_output()]), category = "test_category")
+    ctx.actions.run(cmd_args(["fbpython", run, value, produced, output.as_output()]), category = "test_category")
     return [DefaultInfo(default_output = output)]
 
 assert_output_value = rule(impl = _assert_output_value_impl, attrs = {
@@ -205,7 +206,7 @@ def _proto_genrule_impl(ctx):
         "OUT": cmd_args(out_artifact.as_output()),
     }
     ctx.actions.run(
-        cmd_args(["python3", "-c", ctx.attrs.python]),
+        cmd_args(["fbpython", "-c", ctx.attrs.python]),
         env = env_vars,
         category = "genrule",
     )

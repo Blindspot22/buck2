@@ -1,17 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::SystemTime;
 
 use buck2_cli_proto::ClientContext;
+use buck2_cli_proto::client_context::ExitWhen as GrpcExitWhen;
 use buck2_cli_proto::client_context::HostArchOverride as GrpcHostArchOverride;
 use buck2_cli_proto::client_context::HostPlatformOverride as GrpcHostPlatformOverride;
 use buck2_cli_proto::client_context::PreemptibleWhen as GrpcPreemptibleWhen;
@@ -20,18 +21,18 @@ use buck2_common::init::LogDownloadMethod;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_common::invocation_paths_result::InvocationPathsResult;
 use buck2_core::error::buck2_hard_error_env;
-use buck2_core::fs::paths::file_name::FileNameBuf;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::BuckErrorContext;
 use buck2_event_observer::verbosity::Verbosity;
+use buck2_fs::paths::file_name::FileNameBuf;
+use buck2_fs::working_dir::AbsWorkingDir;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex;
 
 use crate::client_metadata::ClientMetadata;
 use crate::common::BuckArgMatches;
 use crate::common::CommonEventLogOptions;
+use crate::common::ExitWhen;
 use crate::common::HostArchOverride;
 use crate::common::HostPlatformOverride;
 use crate::common::PreemptibleWhen;
@@ -44,8 +45,6 @@ use crate::immediate_config::ImmediateConfigContext;
 use crate::restarter::Restarter;
 use crate::stdin::Stdin;
 use crate::streaming::StreamingCommand;
-use crate::subscribers::recorder::get_invocation_recorder;
-use crate::subscribers::subscribers::EventSubscribers;
 
 pub struct ClientCommandContext<'a> {
     init: fbinit::FacebookInit,
@@ -53,6 +52,7 @@ pub struct ClientCommandContext<'a> {
     paths: InvocationPathsResult,
     pub working_dir: AbsWorkingDir,
     pub verbosity: Verbosity,
+    pub start_time: SystemTime,
     /// When set, this function is called to launch in process daemon.
     /// The function returns `Ok` when daemon successfully started
     /// and ready to accept connections.
@@ -62,12 +62,10 @@ pub struct ClientCommandContext<'a> {
     pub trace_id: TraceId,
     stdin: &'a mut Stdin,
     pub(crate) restarter: &'a mut Restarter,
-    pub(crate) restarted_trace_id: Option<TraceId>,
     runtime: &'a Runtime,
     oncall: Option<String>,
     pub(crate) client_metadata: Vec<ClientMetadata>,
     pub(crate) isolation: FileNameBuf,
-    pub(crate) start_time: u64,
 }
 
 impl<'a> ClientCommandContext<'a> {
@@ -77,17 +75,16 @@ impl<'a> ClientCommandContext<'a> {
         paths: InvocationPathsResult,
         working_dir: AbsWorkingDir,
         verbosity: Verbosity,
+        start_time: SystemTime,
         start_in_process_daemon: Option<Box<dyn FnOnce() -> buck2_error::Result<()> + Send + Sync>>,
         argv: Argv,
         trace_id: TraceId,
         stdin: &'a mut Stdin,
         restarter: &'a mut Restarter,
-        restarted_trace_id: Option<TraceId>,
         runtime: &'a Runtime,
         oncall: Option<String>,
         client_metadata: Vec<ClientMetadata>,
         isolation: FileNameBuf,
-        start_time: u64,
     ) -> Self {
         ClientCommandContext {
             init,
@@ -95,17 +92,16 @@ impl<'a> ClientCommandContext<'a> {
             paths,
             working_dir,
             verbosity,
+            start_time,
             start_in_process_daemon,
             argv,
             trace_id,
             stdin,
             restarter,
-            restarted_trace_id,
             runtime,
             oncall,
             client_metadata,
             isolation,
-            start_time,
         }
     }
 
@@ -117,7 +113,7 @@ impl<'a> ClientCommandContext<'a> {
         match &self.paths {
             InvocationPathsResult::Paths(p) => Ok(p),
             InvocationPathsResult::OutsideOfRepo(e) | InvocationPathsResult::OtherError(e) => {
-                Err(e.dupe().into())
+                Err(e.dupe())
             }
         }
     }
@@ -126,7 +122,7 @@ impl<'a> ClientCommandContext<'a> {
         match &self.paths {
             InvocationPathsResult::Paths(p) => Ok(Some(p)),
             InvocationPathsResult::OutsideOfRepo(_) => Ok(None), // commands like log don't need a root but still need to create an invocation record
-            InvocationPathsResult::OtherError(e) => Err(e.dupe().into()),
+            InvocationPathsResult::OtherError(e) => Err(e.dupe()),
         }
     }
 
@@ -138,8 +134,13 @@ impl<'a> ClientCommandContext<'a> {
         self.runtime.block_on(func(self))
     }
 
-    pub fn exec<T: BuckSubcommand>(self, cmd: T, matches: BuckArgMatches<'_>) -> ExitResult {
-        self.with_runtime(|ctx| ctx.exec_async(cmd, matches))
+    pub fn exec<T: BuckSubcommand>(
+        self,
+        cmd: T,
+        matches: BuckArgMatches<'_>,
+        events_ctx: &mut EventsCtx,
+    ) -> ExitResult {
+        self.with_runtime(|ctx| ctx.exec_async(cmd, matches, events_ctx))
     }
 
     // Handles setting up subscribers, executing a command and finalizing logging.
@@ -147,56 +148,16 @@ impl<'a> ClientCommandContext<'a> {
         self,
         cmd: T,
         matches: BuckArgMatches<'_>,
+        events_ctx: &mut EventsCtx,
     ) -> ExitResult {
-        let buck_log_dir = self.paths().map(|paths| paths.log_dir()).ok();
-        let command_report_path = cmd
+        cmd.update_events_ctx(matches, &self, events_ctx);
+        events_ctx.buck_log_dir = self.paths().map(|paths| paths.log_dir()).ok();
+        events_ctx.command_report_path = cmd
             .event_log_opts()
             .command_report_path
             .as_ref()
             .map(|path| path.resolve(&self.working_dir));
-        let trace_id = self.trace_id.clone();
-
-        let events_ctx = Arc::new(Mutex::new(EventsCtx::new(cmd.subscribers(matches, &self))));
-        let exec_events_ctx = events_ctx.dupe();
-
-        let result = async {
-            let mut events_ctx = exec_events_ctx.lock().await;
-            let is_streaming_command = cmd.is_streaming_command();
-            let result = cmd.exec_impl(matches, self, &mut events_ctx).await;
-            events_ctx.subscribers.handle_exit_result(&result);
-
-            // TODO(ctolliday) always send ExitResult to recorder and remove this check.
-            if !is_streaming_command {
-                events_ctx
-                    .subscribers
-                    .handle_instant_command_outcome(result.is_success());
-            }
-            result
-        }
-        .await;
-
-        let finalize_events = async {
-            let mut events_ctx = events_ctx.lock().await;
-            events_ctx.finalize().await
-        };
-
-        let logging_timeout = Duration::from_secs(30);
-        let finalizing_errors = tokio::time::timeout(logging_timeout, finalize_events)
-            .await
-            .unwrap_or_else(|_| {
-                vec![format!(
-                    "Timeout after {:?} waiting for logging cleanup",
-                    logging_timeout
-                )]
-            });
-        // Don't fail the command if command report fails to write. TODO(ctolliday) show a warning?
-        let _unused = result.write_command_report(
-            trace_id,
-            buck_log_dir,
-            command_report_path,
-            finalizing_errors,
-        );
-        result
+        cmd.exec_impl(matches, self, events_ctx).await
     }
 
     pub fn stdin(&mut self) -> &mut Stdin {
@@ -227,7 +188,7 @@ impl<'a> ClientCommandContext<'a> {
         Ok(ClientContext {
             config_overrides: config_opts.config_overrides(
                 arg_matches,
-                &self.immediate_config,
+                self.immediate_config,
                 &self.working_dir,
             )?,
             host_platform: match config_opts.host_platform_override() {
@@ -249,7 +210,6 @@ impl<'a> ClientCommandContext<'a> {
             skip_targets_with_duplicate_names: starlark_opts.skip_targets_with_duplicate_names,
             reuse_current_config: config_opts.reuse_current_config,
             sanitized_argv: cmd.sanitize_argv(self.argv.clone()).argv,
-            exit_when_different_state: config_opts.exit_when_different_state,
             preemptible: match config_opts.preemptible {
                 None => GrpcPreemptibleWhen::Never,
                 Some(PreemptibleWhen::Never) => GrpcPreemptibleWhen::Never,
@@ -265,6 +225,14 @@ impl<'a> ClientCommandContext<'a> {
                 .collect(),
             target_call_stacks: starlark_opts.target_call_stacks,
             representative_config_flags: arg_matches.get_representative_config_flags_by_source(),
+            exit_when: match config_opts.exit_when {
+                None => GrpcExitWhen::ExitNever,
+                Some(ExitWhen::Never) => GrpcExitWhen::ExitNever,
+                Some(ExitWhen::DifferentState) => GrpcExitWhen::ExitDifferentState,
+                Some(ExitWhen::NotIdle) => GrpcExitWhen::ExitNotIdle,
+            }
+            .into(),
+            profile_pattern_opts: starlark_opts.profile_pattern_opts(&self.working_dir),
             ..self.empty_client_context(cmd.logging_name())?
         })
     }
@@ -299,7 +267,6 @@ impl<'a> ClientCommandContext<'a> {
             argfiles: Vec::new(),
             buck2_hard_error: buck2_hard_error_env()?.unwrap_or_default().to_owned(),
             command_name: command_name.to_owned(),
-            exit_when_different_state: false,
             client_metadata: self
                 .client_metadata
                 .iter()
@@ -307,6 +274,8 @@ impl<'a> ClientCommandContext<'a> {
                 .collect(),
             preemptible: Default::default(),
             representative_config_flags: Vec::new(),
+            exit_when: Default::default(),
+            profile_pattern_opts: None,
         })
     }
 
@@ -338,37 +307,28 @@ pub trait BuckSubcommand {
     }
 
     // Don't return an error, all logging will break if this fails.
-    fn subscribers(
+    fn update_events_ctx(
         &self,
         _matches: BuckArgMatches<'_>,
         ctx: &ClientCommandContext,
-    ) -> EventSubscribers {
+        events_ctx: &mut EventsCtx,
+    ) {
         let paths = ctx.paths().ok();
-        let mut recorder = get_invocation_recorder(
-            ctx,
-            self.event_log_opts(),
-            None,
-            self.logging_name(),
-            std::env::args().collect(),
-            Vec::new(),
-            None,
-            None,
-            paths,
-        );
-
-        recorder.update_metadata_from_client_metadata(&ctx.client_metadata);
-
-        EventSubscribers::new(vec![recorder])
+        if let Some(recorder) = events_ctx.recorder.as_mut() {
+            recorder.update_for_command(
+                ctx,
+                self.event_log_opts(),
+                ctx.argv.argv.clone(),
+                None,
+                Vec::new(),
+                None,
+                None,
+                paths,
+            );
+        }
     }
 
     fn event_log_opts(&self) -> &CommonEventLogOptions {
         CommonEventLogOptions::no_event_log_ref()
-    }
-
-    // The outcome of a streaming command is based on the CommandEnd event.
-    // If a command is not a streaming command it should send instant_command_success.
-    // TODO(ctolliday): send ExitResult and clean this up.
-    fn is_streaming_command(&self) -> bool {
-        false
     }
 }

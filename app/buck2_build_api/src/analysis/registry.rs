@@ -1,14 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -22,11 +24,11 @@ use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
-use buck2_error::BuckErrorContext;
+use buck2_core::fs::buck_out_path::BuckOutPathKind;
 use buck2_error::internal_error;
 use buck2_execute::execute::request::OutputType;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use derivative::Derivative;
 use dupe::Dupe;
 use indexmap::IndexSet;
@@ -36,6 +38,7 @@ use starlark::codemap::FileSpan;
 use starlark::environment::FrozenModule;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
+use starlark::values::DynStarlark;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::FreezeResult;
@@ -67,7 +70,6 @@ use crate::analysis::anon_targets_registry::ANON_TARGET_REGISTRY_NEW;
 use crate::analysis::anon_targets_registry::AnonTargetsRegistryDyn;
 use crate::analysis::extra_v::AnalysisExtraValue;
 use crate::analysis::extra_v::FrozenAnalysisExtraValue;
-use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::deferred::TransitiveSetIndex;
 use crate::artifact_groups::deferred::TransitiveSetKey;
 use crate::artifact_groups::promise::PromiseArtifact;
@@ -90,10 +92,11 @@ use crate::interpreter::rule_defs::transitive_set::TransitiveSet;
 #[derivative(Debug)]
 pub struct AnalysisRegistry<'v> {
     #[derivative(Debug = "ignore")]
-    pub actions: ActionsRegistry,
-    pub anon_targets: Box<dyn AnonTargetsRegistryDyn<'v>>,
+    pub actions: ActionsRegistry<'v>,
+    pub anon_targets: Box<DynStarlark<'v, dyn AnonTargetsRegistryDyn<'v>>>,
     pub analysis_value_storage: AnalysisValueStorage<'v>,
     pub short_path_assertions: HashMap<PromiseArtifactId, ForwardRelativePathBuf>,
+    pub content_based_path_assertions: HashSet<PromiseArtifactId>,
 }
 
 #[derive(buck2_error::Error, Debug)]
@@ -101,6 +104,10 @@ pub struct AnalysisRegistry<'v> {
 enum DeclaredArtifactError {
     #[error("Can't declare an artifact with an empty filename component")]
     DeclaredEmptyFileName,
+    #[error(
+        "Artifact `{0}` was declared with `has_content_based_path = {1}`, but is now being used with `has_content_based_path = {2}`"
+    )]
+    AlreadyDeclaredWithDifferentContentBasedPathHashing(String, bool, bool),
 }
 
 impl<'v> AnalysisRegistry<'v> {
@@ -120,6 +127,7 @@ impl<'v> AnalysisRegistry<'v> {
             anon_targets: (ANON_TARGET_REGISTRY_NEW.get()?)(PhantomData, execution_platform),
             analysis_value_storage: AnalysisValueStorage::new(self_key),
             short_path_assertions: HashMap::new(),
+            content_based_path_assertions: HashSet::new(),
         })
     }
 
@@ -138,8 +146,9 @@ impl<'v> AnalysisRegistry<'v> {
     pub fn declare_dynamic_output(
         &mut self,
         artifact: &BuildArtifact,
-    ) -> buck2_error::Result<DeclaredArtifact> {
-        self.actions.declare_dynamic_output(artifact)
+        heap: Heap<'v>,
+    ) -> buck2_error::Result<DeclaredArtifact<'v>> {
+        self.actions.declare_dynamic_output(artifact, heap)
     }
 
     pub fn declare_output(
@@ -148,7 +157,9 @@ impl<'v> AnalysisRegistry<'v> {
         filename: &str,
         output_type: OutputType,
         declaration_location: Option<FileSpan>,
-    ) -> buck2_error::Result<DeclaredArtifact> {
+        path_resolution_method: BuckOutPathKind,
+        heap: Heap<'v>,
+    ) -> buck2_error::Result<DeclaredArtifact<'v>> {
         // We don't allow declaring `` as an output, although technically there's nothing preventing
         // that
         if filename.is_empty() {
@@ -160,8 +171,14 @@ impl<'v> AnalysisRegistry<'v> {
             None => None,
             Some(x) => Some(ForwardRelativePath::new(x)?.to_owned()),
         };
-        self.actions
-            .declare_artifact(prefix, path, output_type, declaration_location)
+        self.actions.declare_artifact(
+            prefix,
+            path,
+            output_type,
+            declaration_location,
+            path_resolution_method,
+            heap,
+        )
     }
 
     /// Takes a string or artifact/output artifact and converts it into an output artifact
@@ -176,25 +193,36 @@ impl<'v> AnalysisRegistry<'v> {
     ///  - `str`: A new file is declared with this name.
     ///  - `StarlarkOutputArtifact`: The original artifact is returned
     ///  - `StarlarkArtifact`/`StarlarkDeclaredArtifact`: If the artifact is already bound, an error is raised. Otherwise we proceed with the original artifact.
-    pub fn get_or_declare_output<'v2>(
+    pub fn get_or_declare_output(
         &mut self,
-        eval: &Evaluator<'v2, '_, '_>,
-        value: OutputArtifactArg<'v2>,
+        eval: &Evaluator<'v, '_, '_>,
+        value: OutputArtifactArg<'v>,
         output_type: OutputType,
-    ) -> buck2_error::Result<(ArtifactDeclaration<'v2>, OutputArtifact)> {
+        has_content_based_path: Option<bool>,
+    ) -> buck2_error::Result<(ArtifactDeclaration<'v>, OutputArtifact<'v>)> {
         let declaration_location = eval.call_stack_top_location();
         let heap = eval.heap();
         let declared_artifact = match value {
             OutputArtifactArg::Str(path) => {
-                let artifact =
-                    self.declare_output(None, path, output_type, declaration_location.dupe())?;
+                let artifact = self.declare_output(
+                    None,
+                    path,
+                    output_type,
+                    declaration_location.dupe(),
+                    match has_content_based_path {
+                        Some(true) => BuckOutPathKind::ContentHash,
+                        Some(false) => BuckOutPathKind::Configuration,
+                        None => BuckOutPathKind::default(),
+                    },
+                    heap,
+                )?;
                 heap.alloc_typed(StarlarkDeclaredArtifact::new(
                     declaration_location,
                     artifact,
                     AssociatedArtifacts::new(),
                 ))
             }
-            OutputArtifactArg::OutputArtifact(output) => output.inner()?,
+            OutputArtifactArg::OutputArtifact(output) => output.inner(),
             OutputArtifactArg::DeclaredArtifact(artifact) => artifact,
             OutputArtifactArg::WrongArtifact(artifact) => {
                 return Err(artifact.0.as_output_error());
@@ -203,6 +231,20 @@ impl<'v> AnalysisRegistry<'v> {
 
         let output = declared_artifact.output_artifact();
         output.ensure_output_type(output_type)?;
+
+        if let Some(has_content_based_path) = has_content_based_path {
+            if has_content_based_path != output.has_content_based_path() {
+                return Err(
+                    DeclaredArtifactError::AlreadyDeclaredWithDifferentContentBasedPathHashing(
+                        format!("{output}"),
+                        output.has_content_based_path(),
+                        has_content_based_path,
+                    )
+                    .into(),
+                );
+            }
+        }
+
         Ok((
             ArtifactDeclaration {
                 artifact: declared_artifact,
@@ -214,18 +256,14 @@ impl<'v> AnalysisRegistry<'v> {
 
     pub fn register_action<A: UnregisteredAction + 'static>(
         &mut self,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<OutputArtifact>,
         action: A,
         associated_value: Option<Value<'v>>,
         error_handler: Option<StarlarkCallable<'v>>,
     ) -> buck2_error::Result<()> {
-        let id = self.actions.register(
-            &self.analysis_value_storage.self_key,
-            inputs,
-            outputs,
-            action,
-        )?;
+        let id = self
+            .actions
+            .register(&self.analysis_value_storage.self_key, outputs, action)?;
         self.analysis_value_storage
             .set_action_data(id, (associated_value, error_handler))?;
         Ok(())
@@ -264,6 +302,14 @@ impl<'v> AnalysisRegistry<'v> {
             .insert(promise_artifact_id, short_path);
     }
 
+    pub fn record_has_content_based_path_assertion(
+        &mut self,
+        promise_artifact_id: PromiseArtifactId,
+    ) {
+        self.content_based_path_assertions
+            .insert(promise_artifact_id);
+    }
+
     pub fn assert_no_promises(&self) -> buck2_error::Result<()> {
         self.anon_targets.assert_no_promises()
     }
@@ -280,16 +326,19 @@ impl<'v> AnalysisRegistry<'v> {
     /// It requires both to get the lifetimes to line up.
     pub fn finalize(
         self,
-        env: &'v Module,
+        env: &Module<'v>,
     ) -> buck2_error::Result<
-        impl FnOnce(&FrozenModule) -> buck2_error::Result<RecordedAnalysisValues> + 'static,
+        impl FnOnce(&FrozenModule) -> buck2_error::Result<RecordedAnalysisValues> + use<>,
     > {
         let AnalysisRegistry {
             actions,
             anon_targets: _,
             analysis_value_storage,
             short_path_assertions: _,
+            content_based_path_assertions: _,
         } = self;
+
+        let finalize_actions = actions.finalize()?;
 
         let self_key = analysis_value_storage.self_key.dupe();
         analysis_value_storage.write_to_module(env)?;
@@ -298,7 +347,7 @@ impl<'v> AnalysisRegistry<'v> {
                 self_key,
                 frozen_module: Some(frozen_env.dupe()),
             };
-            let actions = actions.ensure_bound(&analysis_value_fetcher)?;
+            let actions = (finalize_actions)(&analysis_value_fetcher)?;
             let recorded_values = analysis_value_fetcher.get_recorded_values(actions)?;
 
             Ok(recorded_values)
@@ -311,15 +360,15 @@ impl<'v> AnalysisRegistry<'v> {
 }
 
 pub struct ArtifactDeclaration<'v> {
-    artifact: ValueTyped<'v, StarlarkDeclaredArtifact>,
-    heap: &'v Heap,
+    artifact: ValueTyped<'v, StarlarkDeclaredArtifact<'v>>,
+    heap: Heap<'v>,
 }
 
 impl<'v> ArtifactDeclaration<'v> {
     pub fn into_declared_artifact(
         self,
         extra_associated_artifacts: AssociatedArtifacts,
-    ) -> ValueTyped<'v, StarlarkDeclaredArtifact> {
+    ) -> ValueTyped<'v, StarlarkDeclaredArtifact<'v>> {
         self.heap.alloc_typed(
             self.artifact
                 .with_extended_associated_artifacts(extra_associated_artifacts),
@@ -342,7 +391,7 @@ pub struct AnalysisValueStorage<'v> {
     pub self_key: DeferredHolderKey,
     action_data: SmallMap<ActionIndex, (Option<Value<'v>>, Option<StarlarkCallable<'v>>)>,
     transitive_sets: Vec<ValueTyped<'v, TransitiveSet<'v>>>,
-    pub lambda_params: Box<dyn DynamicLambdaParamsStorage<'v>>,
+    pub lambda_params: Box<DynStarlark<'v, dyn DynamicLambdaParamsStorage<'v>>>,
     result_value: OnceCell<ValueTypedComplex<'v, ProviderCollection<'v>>>,
 }
 
@@ -442,7 +491,7 @@ impl<'v> AnalysisValueStorage<'v> {
     }
 
     /// Write self to `module` extra value.
-    fn write_to_module(self, module: &'v Module) -> buck2_error::Result<()> {
+    fn write_to_module(self, module: &Module<'v>) -> buck2_error::Result<()> {
         let extra_v = AnalysisExtraValue::get_or_init(module)?;
         let res = extra_v.analysis_value_storage.set(
             module
@@ -507,7 +556,7 @@ impl AnalysisValueFetcher {
                 let analysis_extra_value = FrozenAnalysisExtraValue::get(module)?
                     .value
                     .analysis_value_storage
-                    .internal_error("analysis_value_storage not set")?
+                    .ok_or_else(|| internal_error!("analysis_value_storage not set"))?
                     .as_ref();
                 Ok(Some((&analysis_extra_value.value, module.frozen_heap())))
             }
@@ -552,7 +601,7 @@ impl AnalysisValueFetcher {
             Some(module) => Some(FrozenAnalysisExtraValue::get(module)?.try_map(|v| {
                 v.value
                     .analysis_value_storage
-                    .internal_error("analysis_value_storage not set")
+                    .ok_or_else(|| internal_error!("analysis_value_storage not set"))
             })?),
         };
 
@@ -573,6 +622,16 @@ pub struct RecordedAnalysisValues {
 }
 
 impl RecordedAnalysisValues {
+    /// Creates a minimal RecordedAnalysisValues for testing action lookups only.
+    /// This version doesn't require DYNAMIC_LAMBDA_PARAMS_STORAGES to be initialized.
+    pub fn testing_new_actions_only(self_key: DeferredHolderKey, actions: RecordedActions) -> Self {
+        Self {
+            self_key,
+            analysis_storage: None,
+            actions,
+        }
+    }
+
     pub fn testing_new(
         self_key: DeferredHolderKey,
         transitive_sets: Vec<(TransitiveSetKey, OwnedFrozenValueTyped<FrozenTransitiveSet>)>,
@@ -599,7 +658,7 @@ impl RecordedAnalysisValues {
                 lambda_params: DYNAMIC_LAMBDA_PARAMS_STORAGES
                     .get()
                     .unwrap()
-                    .new_frozen_dynamic_lambda_params_storage(self_key.dupe()),
+                    .new_frozen_dynamic_lambda_params_storage(),
                 result_value: Some(
                     FrozenValueTyped::<FrozenProviderCollection>::new(heap.alloc(providers))
                         .unwrap(),
@@ -630,9 +689,9 @@ impl RecordedAnalysisValues {
         }
         self.analysis_storage
             .as_ref()
-            .with_internal_error(|| format!("Missing analysis storage for `{key}`"))?
+            .ok_or_else(|| internal_error!("Missing analysis storage for `{key}`"))?
             .maybe_map(|v| v.value.transitive_sets.get(key.index().0 as usize).copied())
-            .with_internal_error(|| format!("Missing transitive set `{key}`"))
+            .ok_or_else(|| internal_error!("Missing transitive set `{key}`"))
     }
 
     pub fn lookup_action(&self, key: &ActionKey) -> buck2_error::Result<ActionLookup> {
@@ -657,7 +716,7 @@ impl RecordedAnalysisValues {
         Ok(self
             .analysis_storage
             .as_ref()
-            .internal_error("missing analysis storage")?
+            .ok_or_else(|| internal_error!("missing analysis storage"))?
             .as_owned_ref_frozen_ref()
             .map(|v| &v.value))
     }
@@ -673,12 +732,12 @@ impl RecordedAnalysisValues {
         let analysis_storage = self
             .analysis_storage
             .as_ref()
-            .internal_error("missing analysis storage")?;
+            .ok_or_else(|| internal_error!("missing analysis storage"))?;
         let value = analysis_storage
             .as_ref()
             .value
             .result_value
-            .internal_error("missing provider collection")?;
+            .ok_or_else(|| internal_error!("missing provider collection"))?;
         unsafe {
             Ok(FrozenProviderCollectionValueRef::new(
                 analysis_storage.owner(),
@@ -691,7 +750,7 @@ impl RecordedAnalysisValues {
         Ok(self
             .analysis_storage
             .as_ref()
-            .internal_error("missing analysis storage")?
+            .ok_or_else(|| internal_error!("missing analysis storage"))?
             .owner()
             .allocated_bytes())
     }

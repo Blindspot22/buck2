@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.aapt;
@@ -12,6 +13,7 @@ package com.facebook.buck.android.aapt;
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.core.filesystems.RelPath;
 import com.facebook.buck.util.ThrowingPrintWriter;
+import com.facebook.infer.annotation.Nullsafe;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -29,15 +31,19 @@ import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 
 /** Main entry point for executing {@link MiniAapt} calls. */
+@Nullsafe(Nullsafe.Mode.LOCAL)
 public class MiniAaptExecutableMain {
 
   @Option(name = "--resource-paths", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String resourcePathsDir;
 
   @Option(name = "--dep-symbol-paths", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String depSymbolsPathsList;
 
   @Option(name = "--output-path", required = true)
+  // NULLSAFE_FIXME[Field Not Initialized]
   private String outputPath;
 
   public static void main(String[] args) throws IOException {
@@ -48,7 +54,7 @@ public class MiniAaptExecutableMain {
       main.run();
       System.exit(0);
     } catch (CmdLineException e) {
-      System.err.println(e.getMessage());
+      System.err.println(e.toString());
       parser.printUsage(System.err);
       System.exit(1);
     }

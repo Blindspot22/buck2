@@ -1,17 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
 
-use anyhow::Context as _;
+use buck2_error::BuckErrorContext as _;
+use buck2_events::metadata::username;
 use buck2_util::process::async_background_command;
 use futures::future::Either;
 use tokio::net::TcpListener;
@@ -19,11 +21,15 @@ use tokio::net::TcpStream;
 
 use crate::executor_launcher::ExecutorFuture;
 
+/// Environment variable used to pass the actual username from Buck2 client to the test executor.
+/// This is necessary because in some scenarios buck2d may run as a different user than the user who invoked `buck2 test`.
+const BUCK2_TEST_EXECUTOR_USER_ENV_VAR: &str = "BUCK2_TEST_EXECUTOR_USER";
+
 pub(crate) async fn spawn(
     executable: &Path,
     args: Vec<String>,
     tpx_args: Vec<String>,
-) -> anyhow::Result<(ExecutorFuture, TcpStream, TcpStream)> {
+) -> buck2_error::Result<(ExecutorFuture, TcpStream, TcpStream)> {
     // Use TCPStream via TCPListener with accept to establish a duplex connection. We set up the
     // listeners, our client connects to both, and that gets us two duplex streams.
     let (executor_addr, executor_tcp_listener) = create_tcp_listener().await?;
@@ -42,7 +48,12 @@ pub(crate) async fn spawn(
         .arg("--")
         .args(tpx_args);
 
-    let proc = command.spawn().with_context(|| {
+    // Pass the actual username from Buck2 client to the executor.
+    if let Ok(Some(user)) = username() {
+        command.env(BUCK2_TEST_EXECUTOR_USER_ENV_VAR, user);
+    }
+
+    let proc = command.spawn().with_buck_error_context(|| {
         format!(
             "Failed to start {} for OutOfProcessTestExecutor",
             &executable.display()
@@ -58,14 +69,14 @@ pub(crate) async fn spawn(
             executor_tcp_listener.accept(),
         )
         .await
-        .with_context(|| {
+        .with_buck_error_context(|| {
             format!(
                 "Failed to accept TCP connection from {}",
                 &executable.display()
             )
         })?;
 
-        anyhow::Ok((orchestrator_tcp_stream, executor_tcp_stream))
+        buck2_error::Ok((orchestrator_tcp_stream, executor_tcp_stream))
     };
 
     futures::pin_mut!(conns);
@@ -73,7 +84,7 @@ pub(crate) async fn spawn(
     // Wait for our connections to come up, but also check that the child hasn't exited before we
     // get there.
     match futures::future::select(exec, conns).await {
-        Either::Left((output, _)) => Err(anyhow::anyhow!(
+        Either::Left((output, _)) => Err(buck2_error::internal_error!(
             "Executor exited before connecting: {}",
             output?
         )),
@@ -84,8 +95,8 @@ pub(crate) async fn spawn(
     }
 }
 
-async fn create_tcp_listener() -> anyhow::Result<(String, TcpListener)> {
-    let addr: SocketAddr = "127.0.0.1:0".parse()?;
+async fn create_tcp_listener() -> buck2_error::Result<(String, TcpListener)> {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let tcp_listener = TcpListener::bind(addr).await?;
     let local_addr = tcp_listener.local_addr()?;
     Ok((local_addr.to_string(), tcp_listener))

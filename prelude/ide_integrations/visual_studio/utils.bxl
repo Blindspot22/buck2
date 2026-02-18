@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # hyperscript inspired helper function to simplify creation of XML.
 # https://github.com/hyperhype/hyperscript
@@ -178,15 +179,64 @@ def get_output_path(target_node: bxl.ConfiguredTargetNode, bxl_ctx) -> str:
 
     return get_path_without_materialization(default_outputs[0], bxl_ctx, abs = True)
 
-def infer_settings_by_modes(settings, mode_files, mode_hashes) -> dict[str, typing.Any]:
+# Check if the input is possibly a hash string in content-based path (hacky!).
+def _is_possibly_hash(input):
+    return len(input) == 16 and all(map(lambda c: c.islower() or c.isdigit(), input.elems()))
+
+# Translate content based path to configuration based path as VS relies on stable paths to launch and debug binaries.
+def translate_content_based_path(content_based_path: str, target_label, cli_args) -> str:
+    default_mode_file = cli_args.mode_files[0]
+    default_mode_hash = cli_args.mode_hashes.get(default_mode_file) or {}
+    if target_label in default_mode_hash:
+        default_mode_hash = default_mode_hash[target_label]
+    else:
+        default_mode_hash = default_mode_hash["default"]
+
+    found_cell = False
+    found_target = False
+    skip_next = False
+    config_based_path = []
+    for component in content_based_path.split("\\"):
+        if skip_next:
+            if not _is_possibly_hash(component):
+                # Not a content-based path.
+                return content_based_path
+            skip_next = False
+
+            # Skip SHA component in content-based path.
+            continue
+
+        config_based_path += [component]
+        if (not found_cell) and component == target_label.cell:
+            found_cell = True
+            config_based_path += [default_mode_hash]
+        if (not found_target) and component.startswith("__") and component.endswith("__"):
+            found_target = True
+            skip_next = True
+
+    return "\\".join(config_based_path)
+
+def infer_settings_by_modes(target_label, settings, mode_files, mode_hashes) -> dict[str, typing.Any]:
+    if len(mode_files) == 1:
+        settings_by_modes = {mode_files[0]: settings}
+        return settings_by_modes
+
     mode_hashes = mode_hashes or {}
     default_mode_file = mode_files[0]
-    default_mode_hash = mode_hashes.get(default_mode_file)
+    default_mode_hash = mode_hashes.get(default_mode_file) or {}
+    if target_label in default_mode_hash:
+        default_mode_hash = default_mode_hash[target_label]
+    else:
+        default_mode_hash = default_mode_hash["default"]
     settings_json = json.encode(settings)
 
     settings_by_modes = {default_mode_file: settings}
     for mode_file in mode_files[1:]:
-        mode_hash = mode_hashes.get(mode_file)
+        mode_hash = mode_hashes.get(mode_file) or {}
+        if target_label in mode_hash:
+            mode_hash = mode_hash[target_label]
+        else:
+            mode_hash = mode_hash["default"]
 
         # We're ignoring the suggestion that don't rely on buck-out implementation detail here,
         # as we have no way to get the buck-out under a different mode than current one using to run the BXL script.
@@ -214,8 +264,9 @@ def dedupe_by_value(list):
             map[item] = True
     return uniques
 
+# Replace problematic characters when used as filename. https://en.wikipedia.org/wiki/Filename#Problematic_characters
 def sanitize(input):
-    return input.replace("/", "_").replace("-", "_").replace(".", "_")
+    return input.replace("/", "_").replace(".", "_")
 
 # https://en.wikipedia.org/wiki/XML#Escaping
 # TODO: apply escape in more places.

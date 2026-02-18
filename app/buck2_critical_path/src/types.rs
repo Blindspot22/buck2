@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -135,7 +136,7 @@ where
         Self(v, PhantomData)
     }
 
-    pub fn keys(&self) -> impl DoubleEndedIterator<Item = AbstractVertexId<Kind>> {
+    pub fn keys(&self) -> impl DoubleEndedIterator<Item = AbstractVertexId<Kind>> + use<T, Kind> {
         // By construction the length of this is always less than the maximum vertex id.
         let len: u32 = self.0.len().try_into().unwrap();
         (0..len).map(AbstractVertexId::new)

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 // https://github.com/rust-lang/rust-clippy/issues/12806
@@ -14,6 +15,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt::Display;
 use std::ops::ControlFlow;
@@ -22,17 +24,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use allocative::Allocative;
-use anyhow::Context;
 use async_trait::async_trait;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_build_api::actions::execute::dice_data::CommandExecutorResponse;
 use buck2_build_api::actions::execute::dice_data::DiceHasCommandExecutor;
 use buck2_build_api::actions::execute::dice_data::GetReClient;
+use buck2_build_api::actions::impls::run_action_knobs::HasRunActionKnobs;
 use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
 use buck2_build_api::artifact_groups::ArtifactGroup;
+use buck2_build_api::artifact_groups::ArtifactGroupValues;
 use buck2_build_api::artifact_groups::calculation::ArtifactGroupCalculation;
+use buck2_build_api::build_signals::HasBuildSignals;
 use buck2_build_api::context::HasBuildContextData;
 use buck2_build_api::interpreter::rule_defs::cmd_args::AbsCommandLineContext;
+use buck2_build_api::interpreter::rule_defs::cmd_args::ArtifactPathMapperImpl;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineBuilder;
@@ -42,11 +47,12 @@ use buck2_build_api::interpreter::rule_defs::cmd_args::SimpleCommandLineArtifact
 use buck2_build_api::interpreter::rule_defs::cmd_args::space_separated::SpaceSeparatedCommandLineBuilder;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::external_runner_test_info::FrozenExternalRunnerTestInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::external_runner_test_info::TestCommandMember;
+use buck2_build_api::interpreter::rule_defs::provider::builtin::local_resource_info::FrozenLocalResourceInfo;
+use buck2_build_api::keep_going::KeepGoing;
+use buck2_build_signals::env::NodeDuration;
+use buck2_build_signals::env::WaitingData;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::events::HasEvents;
-use buck2_common::legacy_configs::dice::HasLegacyConfigs;
-use buck2_common::legacy_configs::key::BuckconfigKeyRef;
-use buck2_common::legacy_configs::view::LegacyBuckConfigView;
 use buck2_common::liveliness_observer::LivelinessObserver;
 use buck2_common::local_resource_state::LocalResourceState;
 use buck2_core::cells::cell_root_path::CellRootPathBuf;
@@ -59,13 +65,8 @@ use buck2_core::execution_types::executor_config::PathSeparatorKind;
 use buck2_core::execution_types::executor_config::RemoteExecutorCustomImage;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::buck_out_path::BuckOutTestPath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
-use buck2_core::pattern::pattern::ParsedPattern;
-use buck2_core::pattern::pattern_type::TargetPatternExtra;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
-use buck2_core::target::configured_or_unconfigured::ConfiguredOrUnconfiguredTargetLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_data::EndOfTestResults;
 use buck2_data::SetupLocalResourcesEnd;
@@ -81,6 +82,7 @@ use buck2_data::ToProtoMessage;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::artifact_value::ArtifactValue;
@@ -115,9 +117,12 @@ use buck2_execute_impl::executors::local::EnvironmentBuilder;
 use buck2_execute_impl::executors::local::apply_local_execution_environment;
 use buck2_execute_impl::executors::local::create_output_dirs;
 use buck2_execute_impl::executors::local::materialize_inputs;
-use buck2_futures::cancellation::CancellationContext;
+use buck2_execute_impl::executors::local::prep_scratch_path;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::configured_frontend::ConfiguredTargetNodeCalculation;
+use buck2_resource_control::HasResourceControl;
 use buck2_test_api::data::ArgValue;
 use buck2_test_api::data::ArgValueContent;
 use buck2_test_api::data::ConfiguredTargetHandle;
@@ -135,11 +140,13 @@ use buck2_test_api::data::PrepareForLocalExecutionResult;
 use buck2_test_api::data::RequiredLocalResources;
 use buck2_test_api::data::TestResult;
 use buck2_test_api::data::TestStage;
+use buck2_test_api::data::convert::host_sharing_requirements_to_grpc;
 use buck2_test_api::protocol::TestOrchestrator;
 use derive_more::From;
 use dice::DiceComputations;
 use dice::DiceTransaction;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use display_container::fmt_container;
 use display_container::fmt_keyed_container;
 use dupe::Dupe;
@@ -147,19 +154,20 @@ use futures::FutureExt;
 use futures::channel::mpsc::UnboundedSender;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
+use fxhash::FxHashMap;
 use host_sharing::HostSharingRequirements;
 use indexmap::IndexMap;
 use indexmap::IndexSet;
 use indexmap::indexset;
+use itertools::Itertools;
 use sorted_vector_map::SortedVectorMap;
 use starlark::values::OwnedFrozenValueTyped;
 use uuid::Uuid;
 
 use crate::local_resource_api::LocalResourcesSetupResult;
 use crate::local_resource_registry::HasLocalResourceRegistry;
-use crate::local_resource_setup::LocalResourceSetupContext;
 use crate::local_resource_setup::TestStageSimple;
-use crate::local_resource_setup::required_local_resources_setup_contexts;
+use crate::local_resource_setup::required_providers;
 use crate::remote_storage;
 use crate::session::TestSession;
 use crate::session::TestSessionOptions;
@@ -177,10 +185,11 @@ pub enum ExecutorMessage {
 pub struct BuckTestOrchestrator<'a: 'static> {
     dice: DiceTransaction,
     session: Arc<TestSession>,
-    results_channel: UnboundedSender<anyhow::Result<ExecutorMessage>>,
+    results_channel: UnboundedSender<buck2_error::Result<ExecutorMessage>>,
     events: EventDispatcher,
     liveliness_observer: Arc<dyn LivelinessObserver>,
     cancellations: &'a CancellationContext,
+    re_client: Arc<remote_storage::ReClientWithCache>,
 }
 
 impl<'a> BuckTestOrchestrator<'a> {
@@ -188,10 +197,13 @@ impl<'a> BuckTestOrchestrator<'a> {
         dice: DiceTransaction,
         session: Arc<TestSession>,
         liveliness_observer: Arc<dyn LivelinessObserver>,
-        results_channel: UnboundedSender<anyhow::Result<ExecutorMessage>>,
+        results_channel: UnboundedSender<buck2_error::Result<ExecutorMessage>>,
         cancellations: &'a CancellationContext,
-    ) -> anyhow::Result<BuckTestOrchestrator<'a>> {
+    ) -> buck2_error::Result<BuckTestOrchestrator<'a>> {
         let events = dice.per_transaction_data().get_dispatcher().dupe();
+        let re_client = Arc::new(remote_storage::ReClientWithCache::new(
+            dice.per_transaction_data().get_re_client(),
+        ));
         Ok(Self::from_parts(
             dice,
             session,
@@ -199,6 +211,7 @@ impl<'a> BuckTestOrchestrator<'a> {
             results_channel,
             events,
             cancellations,
+            re_client,
         ))
     }
 
@@ -206,9 +219,10 @@ impl<'a> BuckTestOrchestrator<'a> {
         dice: DiceTransaction,
         session: Arc<TestSession>,
         liveliness_observer: Arc<dyn LivelinessObserver>,
-        results_channel: UnboundedSender<anyhow::Result<ExecutorMessage>>,
+        results_channel: UnboundedSender<buck2_error::Result<ExecutorMessage>>,
         events: EventDispatcher,
         cancellations: &'a CancellationContext,
+        re_client: Arc<remote_storage::ReClientWithCache>,
     ) -> BuckTestOrchestrator<'a> {
         Self {
             dice,
@@ -217,6 +231,7 @@ impl<'a> BuckTestOrchestrator<'a> {
             events,
             liveliness_observer,
             cancellations,
+            re_client,
         }
     }
 
@@ -248,12 +263,7 @@ impl<'a> BuckTestOrchestrator<'a> {
 
         let test_target = self.session.get(test_target)?;
 
-        let fs = self
-            .dice
-            .clone()
-            .get_artifact_fs()
-            .await
-            .map_err(anyhow::Error::from)?;
+        let fs = self.dice.clone().get_artifact_fs().await?;
         let pre_create_dirs = Arc::new(pre_create_dirs);
 
         let ExecuteData {
@@ -311,13 +321,11 @@ impl<'a> BuckTestOrchestrator<'a> {
                 // RE? Alternatively, when we make buck upload local testing
                 // artifacts to CAS, we can remove this condition altogether.
                 (true, Some(CommandExecutionKind::Remote { .. }), Some(remote_object)) => {
+                    let re_client = self.re_client.clone();
                     let future = async move {
-                        let _unused = remote_storage::apply_config(
-                            self.dice.per_transaction_data().get_re_client(),
-                            &artifact,
-                            &remote_storage_config,
-                        )
-                        .await;
+                        let _unused = re_client
+                            .apply_config(&artifact, &remote_storage_config)
+                            .await;
                         (output_name, remote_object)
                     };
                     remote_storage_config_update_futures.push(future);
@@ -341,7 +349,7 @@ impl<'a> BuckTestOrchestrator<'a> {
             .get_materializer()
             .ensure_materialized(paths_to_materialize)
             .await
-            .buck_error_context_anyhow("Error materializing test outputs")?;
+            .buck_error_context("Error materializing test outputs")?;
 
         Ok(ExecutionResult2 {
             status,
@@ -376,7 +384,7 @@ impl<'a> BuckTestOrchestrator<'a> {
             timeout,
             host_sharing_requirements,
         } = key;
-        let fs = dice.get_artifact_fs().await.map_err(anyhow::Error::from)?;
+        let fs = dice.get_artifact_fs().await?;
         let test_info = Self::get_test_info(dice, &test_target).await?;
         let test_executor = Self::get_test_executor(
             dice,
@@ -404,11 +412,22 @@ impl<'a> BuckTestOrchestrator<'a> {
             cwd,
             cmd: expanded_cmd,
             env: expanded_env,
-            inputs,
+            ensured_inputs,
             supports_re,
             declared_outputs,
             worker,
         } = test_executable_expanded;
+
+        let input_deps_action_keys: Vec<_> = ensured_inputs
+            .iter()
+            .flat_map(|(_, agv)| {
+                agv.iter()
+                    .filter_map(|(artifact, _)| artifact.action_key().map(|k| k.dupe()))
+            })
+            .collect::<HashSet<_>>() // dedupe
+            .into_iter()
+            .collect();
+
         let executor_preference = Self::executor_preference(options, supports_re)?;
         let required_resources = if test_executor
             .executor()
@@ -417,22 +436,15 @@ impl<'a> BuckTestOrchestrator<'a> {
             let setup_local_resources_executor = Self::get_local_executor(dice, &fs).await?;
             let simple_stage = stage.as_ref().into();
 
-            let setup_contexts = {
-                let executor_fs = setup_local_resources_executor.executor_fs();
-                required_local_resources_setup_contexts(
-                    dice,
-                    &executor_fs,
-                    &test_info,
-                    &required_local_resources,
-                    &simple_stage,
-                )
-                .await?
+            let required_providers = {
+                required_providers(dice, &test_info, &required_local_resources, &simple_stage)
+                    .await?
             };
             // If some timeout is neeeded, use the same value as for the test itself which is better than nothing.
             Self::setup_local_resources(
                 dice,
                 cancellation,
-                setup_contexts,
+                required_providers,
                 setup_local_resources_executor,
                 timeout,
                 liveliness_observer.dupe(),
@@ -446,7 +458,7 @@ impl<'a> BuckTestOrchestrator<'a> {
             cwd,
             expanded_cmd,
             expanded_env,
-            inputs,
+            ensured_inputs,
             declared_outputs,
             &fs,
             Some(timeout),
@@ -471,6 +483,40 @@ impl<'a> BuckTestOrchestrator<'a> {
         )
         .boxed()
         .await?;
+
+        if let Some(signals) = dice.per_transaction_data().get_build_signals() {
+            let duration = NodeDuration {
+                user: result.timing.execution_time,
+                total: result.timing.time_span,
+                queue: result.timing.queue_duration,
+            };
+
+            match stage.as_ref() {
+                TestStage::Listing { suite, .. } => {
+                    signals.test_listing(
+                        test_target.target().dupe(),
+                        suite.to_owned(),
+                        duration.to_owned(),
+                        &input_deps_action_keys,
+                    );
+                }
+                TestStage::Testing {
+                    suite,
+                    testcases,
+                    variant,
+                } => {
+                    signals.test_execution(
+                        test_target.target().dupe(),
+                        suite.to_owned(),
+                        &testcases,
+                        variant.to_owned(),
+                        duration,
+                        &input_deps_action_keys,
+                    );
+                }
+            }
+        }
+
         Ok(result)
     }
 }
@@ -509,45 +555,35 @@ impl Display for TestExecutionPrefix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TestExecutionPrefix::Listing => write!(f, "Listing"),
-            TestExecutionPrefix::Testing(prefix) => write!(f, "Testing({})", prefix),
+            TestExecutionPrefix::Testing(prefix) => write!(f, "Testing({prefix})"),
         }
     }
 }
 
 #[async_trait]
 impl Key for TestExecutionKey {
-    type Value = buck2_error::Result<Arc<ExecuteData>>;
+    type Value = Result<Arc<ExecuteData>, ExecuteError>;
 
     async fn compute(
         &self,
         ctx: &mut DiceComputations,
         cancellations: &CancellationContext,
     ) -> Self::Value {
-        Ok(cancellations
+        cancellations
             .with_structured_cancellation(|observer| {
                 async move {
-                    let result = BuckTestOrchestrator::prepare_and_execute_no_dice(
+                    BuckTestOrchestrator::prepare_and_execute_no_dice(
                         ctx,
                         self.dupe(),
                         Arc::new(observer),
                         cancellations,
                     )
-                    .await;
-                    let result: anyhow::Result<Arc<ExecuteData>> = match result {
-                        Ok(ok) => Ok(Arc::new(ok)),
-                        Err(err) => match err {
-                            ExecuteError::Error(err) => Err(err)?,
-                            ExecuteError::Cancelled(_) => {
-                                Err(buck2_error::Error::from(ExecuteDiceErr::Cancelled))?
-                            }
-                        },
-                    };
-                    result
+                    .await
                 }
                 .boxed()
             })
             .await
-            .map_err(|e| from_any_with_tag(e, ErrorTag::TestOrchestrator))?)
+            .map(Arc::new)
     }
 
     fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
@@ -568,13 +604,7 @@ async fn prepare_and_execute(
     liveliness_observer: Arc<dyn LivelinessObserver>,
 ) -> Result<ExecuteData, ExecuteError> {
     let execute_on_dice = match key.stage.as_ref() {
-        TestStage::Listing { cacheable, .. } => {
-            if *cacheable {
-                check_cache_listings_experiment(ctx, &key.test_target).await?
-            } else {
-                false
-            }
-        }
+        TestStage::Listing { cacheable, .. } => *cacheable,
         TestStage::Testing { .. } => false,
     };
     if execute_on_dice {
@@ -602,18 +632,7 @@ async fn prepare_and_execute_dice(
     ctx: &mut DiceComputations<'_>,
     key: &TestExecutionKey,
 ) -> Result<Arc<ExecuteData>, ExecuteError> {
-    let result = ctx.compute(key).await;
-    let result = result.map_err(anyhow::Error::from)?;
-
-    result.map_err(anyhow::Error::from).map_err(|err| {
-        if err.downcast_ref::<ExecuteDiceErr>().is_some() {
-            ExecuteError::Cancelled(Cancelled {
-                ..Default::default()
-            })
-        } else {
-            ExecuteError::Error(err)
-        }
-    })
+    ctx.compute(key).await.map_err(buck2_error::Error::from)?
 }
 
 impl Display for TestExecutionKey {
@@ -651,29 +670,22 @@ struct PreparedLocalResourceSetupContext {
     pub env_var_mapping: IndexMap<String, String>,
 }
 
+#[derive(Clone, Dupe, Allocative)]
 enum CancellationReason {
     NotSpecified,
     ReQueueTimeout,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Dupe, Allocative)]
 struct Cancelled {
     reason: Option<CancellationReason>,
 }
 
 // NOTE: This doesn't implement Error so that we can't accidentally lose the Cancelled variant.
-#[derive(From)]
+#[derive(From, Clone, Dupe, Allocative)]
 enum ExecuteError {
-    Error(anyhow::Error),
+    Error(buck2_error::Error),
     Cancelled(Cancelled),
-}
-
-#[derive(From, Debug, buck2_error::Error)]
-#[buck2(tag = Environment)]
-/// Used to support the same ExecuteError's api via dice
-enum ExecuteDiceErr {
-    #[error("Cancelled")]
-    Cancelled,
 }
 
 #[async_trait]
@@ -689,7 +701,7 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         pre_create_dirs: Vec<DeclaredOutput>,
         executor_override: Option<ExecutorConfigOverride>,
         required_local_resources: RequiredLocalResources,
-    ) -> anyhow::Result<ExecuteResponse> {
+    ) -> buck2_error::Result<ExecuteResponse> {
         let res = BuckTestOrchestrator::execute2(
             self,
             stage,
@@ -721,7 +733,7 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         }
     }
 
-    async fn report_test_result(&self, r: TestResult) -> anyhow::Result<()> {
+    async fn report_test_result(&self, r: TestResult) -> buck2_error::Result<()> {
         let event = buck2_data::instant_event::Data::TestResult(translations::convert_test_result(
             r.clone(),
             &self.session,
@@ -729,7 +741,9 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         self.events.instant_event(event);
         self.results_channel
             .unbounded_send(Ok(ExecutorMessage::TestResult(r)))
-            .map_err(|_| anyhow::Error::msg("Test result was received after end-of-tests"))?;
+            .map_err(|_| {
+                buck2_error::internal_error!("Test result was received after end-of-tests")
+            })?;
         Ok(())
     }
 
@@ -738,7 +752,7 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         test_target: ConfiguredTargetHandle,
         suite: String,
         names: Vec<String>,
-    ) -> anyhow::Result<()> {
+    ) -> buck2_error::Result<()> {
         let test_target = self.session.get(test_target)?;
 
         self.events.instant_event(TestDiscovery {
@@ -752,7 +766,7 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         Ok(())
     }
 
-    async fn report_test_session(&self, session_info: String) -> anyhow::Result<()> {
+    async fn report_test_session(&self, session_info: String) -> buck2_error::Result<()> {
         self.events.instant_event(TestDiscovery {
             data: Some(buck2_data::test_discovery::Data::Session(TestSessionInfo {
                 info: session_info,
@@ -762,11 +776,11 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         Ok(())
     }
 
-    async fn end_of_test_results(&self, exit_code: i32) -> anyhow::Result<()> {
+    async fn end_of_test_results(&self, exit_code: i32) -> buck2_error::Result<()> {
         self.events.instant_event(EndOfTestResults { exit_code });
         self.results_channel
             .unbounded_send(Ok(ExecutorMessage::ExitCode(exit_code)))
-            .map_err(|_| anyhow::Error::msg("end_of_tests was received twice"))?;
+            .map_err(|_| buck2_error::internal_error!("end_of_tests was received twice"))?;
         self.results_channel.close_channel();
         Ok(())
     }
@@ -779,7 +793,7 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         env: SortedVectorMap<String, ArgValue>,
         pre_create_dirs: Vec<DeclaredOutput>,
         required_local_resources: RequiredLocalResources,
-    ) -> anyhow::Result<PrepareForLocalExecutionResult> {
+    ) -> buck2_error::Result<PrepareForLocalExecutionResult> {
         let test_target = self.session.get(test_target)?;
 
         let fs = self.dice.clone().get_artifact_fs().await?;
@@ -790,11 +804,9 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         // We leave that decision to actual local execution runner that requests local execution preparation.
         let setup_local_resources_executor =
             Self::get_local_executor(self.dice.dupe().deref_mut(), &fs).await?;
-        let setup_contexts = {
-            let executor_fs = setup_local_resources_executor.executor_fs();
-            required_local_resources_setup_contexts(
+        let providers = {
+            required_providers(
                 self.dice.dupe().deref_mut(),
-                &executor_fs,
                 &test_info,
                 &required_local_resources,
                 &TestStageSimple::Testing,
@@ -805,10 +817,18 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
             .dice
             .dupe()
             .deref_mut()
-            .try_compute_join(setup_contexts, |dice, context| {
+            .try_compute_join(providers, |dice, provider| {
                 let fs = fs.clone();
+                let executor_fs = setup_local_resources_executor.executor_fs();
                 async move {
-                    Self::prepare_local_resource(dice, context, &fs, Duration::default()).await
+                    Self::prepare_local_resource(
+                        dice,
+                        provider,
+                        &fs,
+                        &executor_fs,
+                        Duration::default(),
+                    )
+                    .await
                 }
                 .boxed()
             })
@@ -841,7 +861,7 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
             cwd,
             cmd: expanded_cmd,
             env: expanded_env,
-            inputs,
+            ensured_inputs,
             supports_re: _,
             declared_outputs,
             worker,
@@ -852,7 +872,7 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
             cwd,
             expanded_cmd,
             expanded_env,
-            inputs,
+            ensured_inputs,
             declared_outputs,
             &fs,
             None,
@@ -868,7 +888,15 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         let materializer = self.dice.per_transaction_data().get_materializer();
         let blocking_executor = self.dice.get_blocking_executor();
 
-        materialize_inputs(&fs, materializer.as_ref(), &execution_request).await?;
+        let materialized_inputs = materialize_inputs(
+            &fs,
+            materializer.as_ref(),
+            &execution_request,
+            self.dice.global_data().get_digest_config(),
+        )
+        .await?;
+
+        prep_scratch_path(&materialized_inputs.scratch, &fs).await?;
 
         create_output_dirs(
             &fs,
@@ -880,13 +908,16 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         .await?;
 
         for local_resource_setup_command in setup_commands.iter() {
-            materialize_inputs(
+            let materialized_inputs = materialize_inputs(
                 &fs,
                 materializer.as_ref(),
                 &local_resource_setup_command.execution_request,
+                self.dice.global_data().get_digest_config(),
             )
             .await?;
             let blocking_executor = self.dice.get_blocking_executor();
+
+            prep_scratch_path(&materialized_inputs.scratch, &fs).await?;
 
             create_output_dirs(
                 &fs,
@@ -905,10 +936,10 @@ impl TestOrchestrator for BuckTestOrchestrator<'_> {
         ))
     }
 
-    async fn attach_info_message(&self, message: String) -> anyhow::Result<()> {
+    async fn attach_info_message(&self, message: String) -> buck2_error::Result<()> {
         self.results_channel
             .unbounded_send(Ok(ExecutorMessage::InfoMessage(message)))
-            .map_err(|_| anyhow::Error::msg("Message received after end-of-tests"))?;
+            .map_err(|_| buck2_error::internal_error!("Message received after end-of-tests"))?;
         Ok(())
     }
 }
@@ -926,7 +957,7 @@ impl BuckTestOrchestrator<'_> {
     fn executor_preference(
         opts: TestSessionOptions,
         test_supports_re: bool,
-    ) -> anyhow::Result<ExecutorPreference> {
+    ) -> buck2_error::Result<ExecutorPreference> {
         let mut executor_preference = ExecutorPreference::Default;
 
         if !opts.allow_re {
@@ -959,6 +990,7 @@ impl BuckTestOrchestrator<'_> {
             Box::new(MutexClaimManager::new()),
             events.dupe(),
             liveliness_observer.dupe(),
+            WaitingData::new(),
         );
         let digest_config = dice.global_data().get_digest_config();
 
@@ -969,9 +1001,9 @@ impl BuckTestOrchestrator<'_> {
 
         // For test execution, we currently do not do any cache queries
 
-        let prepared_action = match executor.prepare_action(&request, digest_config) {
+        let prepared_action = match executor.prepare_action(&request, digest_config, false) {
             Ok(prepared_action) => prepared_action,
-            Err(e) => return Err(ExecuteError::Error(e.into())),
+            Err(e) => return Err(ExecuteError::Error(e)),
         };
         let prepared_command = PreparedCommand {
             target: &test_target as _,
@@ -985,6 +1017,7 @@ impl BuckTestOrchestrator<'_> {
         let command_exec_result = match stage {
             TestStage::Listing { suite, cacheable } => {
                 let start = TestDiscoveryStart {
+                    target_label: Some(test_target.target.as_proto()),
                     suite_name: suite.clone(),
                 };
                 let (result, cached) = events
@@ -1010,24 +1043,28 @@ impl BuckTestOrchestrator<'_> {
                         };
                         let end = TestDiscoveryEnd {
                             suite_name: suite.clone(),
+                            target_label: Some(test_target.target.as_proto()),
                             command_report: Some(
                                 result
                                     .report
                                     .to_command_execution_proto(true, true, false)
                                     .await,
                             ),
+                            command_host_sharing_requirements: host_sharing_requirements_to_grpc(
+                                prepared_command.request.host_sharing_requirements().clone(),
+                            )
+                            .ok(),
                             re_cache_enabled: *cacheable && re_cache_enabled,
                         };
                         ((result, cached), end)
                     })
                     .await;
-                if !cached
-                    && *cacheable
-                    && check_cache_listings_experiment(dice, &test_target_label).await?
-                {
+                if !cached && *cacheable {
                     let info = CacheUploadInfo {
                         target: &test_target as _,
                         digest_config,
+                        mergebase: &None,
+                        re_platform: executor.re_platform(),
                     };
                     let _result = match executor
                         .cache_upload(
@@ -1040,7 +1077,7 @@ impl BuckTestOrchestrator<'_> {
                         .await
                     {
                         Ok(result) => result,
-                        Err(e) => return Err(ExecuteError::Error(e.into())),
+                        Err(e) => return Err(ExecuteError::Error(e)),
                     };
                 }
                 result
@@ -1068,6 +1105,10 @@ impl BuckTestOrchestrator<'_> {
                                     .to_command_execution_proto(true, true, false)
                                     .await,
                             ),
+                            command_host_sharing_requirements: host_sharing_requirements_to_grpc(
+                                prepared_command.request.host_sharing_requirements().clone(),
+                            )
+                            .ok(),
                         };
                         (result, end)
                     })
@@ -1097,9 +1138,13 @@ impl BuckTestOrchestrator<'_> {
         let std_streams = std_streams
             .into_bytes()
             .await
-            .buck_error_context_anyhow("Error accessing test output")?;
+            .buck_error_context("Error accessing test output")?;
         let stdout = ExecutionStream::Inline(std_streams.stdout);
         let stderr = ExecutionStream::Inline(std_streams.stderr);
+
+        // If we are shutting down, we may have terminated executions and caused
+        // the outcomes we are reporting (typically w/ a worker failure).
+        Self::require_alive(liveliness_observer.dupe()).await?;
 
         Ok(match status {
             CommandExecutionStatus::Success { execution_kind } => ExecuteData {
@@ -1112,13 +1157,6 @@ impl BuckTestOrchestrator<'_> {
                 execution_kind: Some(execution_kind),
                 outputs,
             },
-            CommandExecutionStatus::WorkerFailure {
-                execution_kind: CommandExecutionKind::LocalWorker { .. },
-            } => {
-                return Err(ExecuteError::Cancelled(Cancelled {
-                    ..Default::default()
-                }));
-            }
             CommandExecutionStatus::Failure { execution_kind }
             | CommandExecutionStatus::WorkerFailure { execution_kind } => ExecuteData {
                 stdout,
@@ -1147,7 +1185,7 @@ impl BuckTestOrchestrator<'_> {
                 ..
             } => ExecuteData {
                 stdout: ExecutionStream::Inline(Default::default()),
-                stderr: ExecutionStream::Inline(format!("{:?}", error).into_bytes()),
+                stderr: ExecutionStream::Inline(format!("{error:?}").into_bytes()),
                 status: ExecutionStatus::Finished {
                     exitcode: exit_code.unwrap_or(1),
                 },
@@ -1155,7 +1193,10 @@ impl BuckTestOrchestrator<'_> {
                 execution_kind,
                 outputs,
             },
-            CommandExecutionStatus::Cancelled { reason } => {
+            CommandExecutionStatus::Cancelled {
+                execution_kind: _,
+                reason,
+            } => {
                 let reason = reason.map(|reason| match reason {
                     CommandCancellationReason::NotSpecified => CancellationReason::NotSpecified,
                     CommandCancellationReason::ReQueueTimeout => CancellationReason::ReQueueTimeout,
@@ -1169,13 +1210,13 @@ impl BuckTestOrchestrator<'_> {
         test_target_node: &'a ConfiguredTargetNode,
         executor_override: Option<&'a CommandExecutorConfig>,
         stage: &TestStage,
-    ) -> anyhow::Result<Cow<'a, CommandExecutorConfig>> {
+    ) -> buck2_error::Result<Cow<'a, CommandExecutorConfig>> {
         let executor_config = match executor_override {
             Some(o) => o,
             None => test_target_node
                 .execution_platform_resolution()
                 .executor_config()
-                .buck_error_context_anyhow("Error accessing executor config")?,
+                .buck_error_context("Error accessing executor config")?,
         };
 
         if let TestStage::Listing { .. } = &stage {
@@ -1192,7 +1233,9 @@ impl BuckTestOrchestrator<'_> {
                 };
                 Ok(Cow::Owned(executor_config))
             }
-            Executor::Local(_) | Executor::RemoteEnabled(_) => Ok(Cow::Borrowed(executor_config)),
+            Executor::Local(_) | Executor::RemoteEnabled(_) | Executor::None => {
+                Ok(Cow::Borrowed(executor_config))
+            }
         }
     }
 
@@ -1201,13 +1244,14 @@ impl BuckTestOrchestrator<'_> {
         fs: &ArtifactFs,
         executor_config: &CommandExecutorConfig,
         stage: &TestStage,
-    ) -> anyhow::Result<CommandExecutor> {
+    ) -> buck2_error::Result<CommandExecutor> {
         let CommandExecutorResponse {
             executor,
             platform,
             action_cache_checker,
             remote_dep_file_cache_checker: _,
             cache_uploader,
+            output_trees_download_config: _,
         } = dice.get_command_executor_from_dice(executor_config).await?;
 
         // Caching is enabled only for listings
@@ -1234,7 +1278,7 @@ impl BuckTestOrchestrator<'_> {
     async fn get_local_executor(
         dice: &mut DiceComputations<'_>,
         fs: &ArtifactFs,
-    ) -> anyhow::Result<CommandExecutor> {
+    ) -> buck2_error::Result<CommandExecutor> {
         let executor_config = CommandExecutorConfig {
             executor: Executor::Local(LocalExecutorOptions::default()),
             options: CommandGenerationOptions {
@@ -1249,6 +1293,7 @@ impl BuckTestOrchestrator<'_> {
             action_cache_checker: _,
             remote_dep_file_cache_checker: _,
             cache_uploader: _,
+            output_trees_download_config: _,
         } = dice
             .get_command_executor_from_dice(&executor_config)
             .await?;
@@ -1267,7 +1312,7 @@ impl BuckTestOrchestrator<'_> {
     async fn get_test_info(
         dice: &mut DiceComputations<'_>,
         test_target: &ConfiguredProvidersLabel,
-    ) -> anyhow::Result<OwnedFrozenValueTyped<FrozenExternalRunnerTestInfo>> {
+    ) -> buck2_error::Result<OwnedFrozenValueTyped<FrozenExternalRunnerTestInfo>> {
         dice.get_providers(test_target)
             .await?
             .require_compatible()?
@@ -1276,7 +1321,9 @@ impl BuckTestOrchestrator<'_> {
                 c.as_ref()
                     .builtin_provider_value::<FrozenExternalRunnerTestInfo>()
             })
-            .context("Test executable only supports ExternalRunnerTestInfo providers")
+            .ok_or_else(|| {
+                internal_error!("Test executable only supports ExternalRunnerTestInfo providers")
+            })
     }
 
     async fn get_test_executor(
@@ -1286,7 +1333,7 @@ impl BuckTestOrchestrator<'_> {
         executor_override: Option<Arc<ExecutorConfigOverride>>,
         fs: &ArtifactFs,
         stage: &TestStage,
-    ) -> anyhow::Result<TestExecutor> {
+    ) -> buck2_error::Result<TestExecutor> {
         // NOTE: get_providers() implicitly calls this already but it's not the end of the world
         // since this will get cached in DICE.
         let node = dice
@@ -1298,8 +1345,10 @@ impl BuckTestOrchestrator<'_> {
             Some(executor_override) => Some(
                 &test_info
                     .executor_override(&executor_override.name)
-                    .context("The `executor_override` provided does not exist")
-                    .with_context(|| {
+                    .ok_or_else(|| {
+                        internal_error!("The `executor_override` provided does not exist")
+                    })
+                    .with_buck_error_context(|| {
                         format!(
                             "Error processing `executor_override`: `{}`",
                             executor_override.name
@@ -1307,7 +1356,13 @@ impl BuckTestOrchestrator<'_> {
                     })?
                     .0,
             ),
-            None => test_info.default_executor().map(|o| &o.0),
+            None => match stage {
+                TestStage::Listing { .. } if test_info.has_executor_overrides() => test_info
+                    .executor_override("listing")
+                    .or(test_info.default_executor())
+                    .map(|o| &o.0),
+                _ => test_info.default_executor().map(|o| &o.0),
+            },
         };
 
         let executor_config = Self::executor_config_with_remote_cache_override(
@@ -1318,7 +1373,7 @@ impl BuckTestOrchestrator<'_> {
 
         let executor = Self::get_command_executor(dice, fs, &executor_config, stage)
             .await
-            .context("Error constructing CommandExecutor")?;
+            .buck_error_context("Error constructing CommandExecutor")?;
 
         Ok(TestExecutor {
             test_executor: executor,
@@ -1330,13 +1385,13 @@ impl BuckTestOrchestrator<'_> {
         dice: &mut DiceComputations<'_>,
         test_target: &ConfiguredProvidersLabel,
         test_info: &FrozenExternalRunnerTestInfo,
-        cmd: Cow<'a, Vec<ArgValue>>,
+        cmd: Cow<'a, [ArgValue]>,
         env: Cow<'a, SortedVectorMap<String, ArgValue>>,
-        pre_create_dirs: Cow<'a, Vec<DeclaredOutput>>,
+        pre_create_dirs: Cow<'a, [DeclaredOutput]>,
         executor_fs: &ExecutorFs<'_>,
         prefix: TestExecutionPrefix,
         opts: TestSessionOptions,
-    ) -> anyhow::Result<ExpandedTestExecutable> {
+    ) -> buck2_error::Result<ExpandedTestExecutable> {
         let output_root = resolve_output_root(dice, test_target, prefix).await?;
 
         let mut declared_outputs = IndexMap::<BuckOutTestPath, OutputCreationBehavior>::new();
@@ -1344,9 +1399,7 @@ impl BuckTestOrchestrator<'_> {
         let mut supports_re = true;
 
         let cwd;
-        let expanded;
-
-        {
+        let (expanded_cmd, expanded_env, ensured_inputs, expanded_worker) = {
             cwd = if test_info.run_from_project_root() || opts.force_run_from_project_root {
                 CellRootPathBuf::new(ProjectRelativePathBuf::unchecked_new("".to_owned()))
             } else {
@@ -1364,19 +1417,31 @@ impl BuckTestOrchestrator<'_> {
                 fs: executor_fs,
                 cmd,
                 env,
+                digest_config: dice.global_data().get_digest_config(),
             };
 
-            expanded = if test_info.use_project_relative_paths()
+            let inputs = expander.get_inputs()?;
+            // We already built these before reaching out to tpx, so these should already be ready.
+            let ensured_inputs = KeepGoing::try_compute_join_all(dice, inputs, |dice, input| {
+                async move {
+                    let artifact_group_value = dice.ensure_artifact_group(&input).await?;
+                    buck2_error::Ok((input, artifact_group_value))
+                }
+                .boxed()
+            })
+            .await?;
+
+            let (expanded_cmd, expanded_env, expanded_worker) = if test_info
+                .use_project_relative_paths()
                 || opts.force_use_project_relative_paths
             {
-                expander.expand::<DefaultCommandLineContext>()
+                expander.expand::<DefaultCommandLineContext>(&ensured_inputs)
             } else {
                 supports_re = false;
-                expander.expand::<AbsCommandLineContext>()
+                expander.expand::<AbsCommandLineContext>(&ensured_inputs)
             }?;
+            (expanded_cmd, expanded_env, ensured_inputs, expanded_worker)
         };
-
-        let (expanded_cmd, expanded_env, inputs, expanded_worker) = expanded;
 
         for output in pre_create_dirs.into_owned() {
             let test_path = BuckOutTestPath::new(output_root.clone(), output.name.into());
@@ -1387,7 +1452,7 @@ impl BuckTestOrchestrator<'_> {
             cwd: cwd.as_project_relative_path().to_buf(),
             cmd: expanded_cmd,
             env: expanded_env,
-            inputs,
+            ensured_inputs,
             declared_outputs,
             supports_re,
             worker: expanded_worker,
@@ -1399,7 +1464,7 @@ impl BuckTestOrchestrator<'_> {
         cwd: ProjectRelativePathBuf,
         cmd: Vec<String>,
         env: SortedVectorMap<String, String>,
-        cmd_inputs: IndexSet<ArtifactGroup>,
+        ensured_inputs: Vec<(ArtifactGroup, ArtifactGroupValues)>,
         declared_outputs: IndexMap<BuckOutTestPath, OutputCreationBehavior>,
         fs: &ArtifactFs,
         timeout: Option<Duration>,
@@ -1409,16 +1474,11 @@ impl BuckTestOrchestrator<'_> {
         worker: Option<WorkerSpec>,
         re_dynamic_image: Option<RemoteExecutorCustomImage>,
         meta_internal_extra_params: MetaInternalExtraParams,
-    ) -> anyhow::Result<CommandExecutionRequest> {
-        let mut inputs = Vec::with_capacity(cmd_inputs.len());
-        for input in &cmd_inputs {
-            // we already built these before reaching out to tpx, so these should already be ready
-            // hence we don't actually need to spawn these in parallel
-            // TODO (T102328660): Does CommandExecutionRequest need this artifact?
-            inputs.push(CommandExecutionInput::Artifact(Box::new(
-                dice.ensure_artifact_group(input).await?,
-            )));
-        }
+    ) -> buck2_error::Result<CommandExecutionRequest> {
+        let inputs = ensured_inputs
+            .into_iter()
+            .map(|(_, v)| CommandExecutionInput::Artifact(Box::new(v)))
+            .collect_vec();
 
         // NOTE: This looks a bit awkward, that's because fbcode's rustfmt and ours slightly
         // disagree about format here...
@@ -1430,17 +1490,33 @@ impl BuckTestOrchestrator<'_> {
         let mut request = CommandExecutionRequest::new(
             vec![],
             cmd,
-            CommandExecutionPaths::new(inputs, outputs, fs, digest_config)?,
+            CommandExecutionPaths::new(
+                inputs,
+                outputs,
+                fs,
+                digest_config,
+                dice.per_transaction_data()
+                    .get_run_action_knobs()
+                    .action_paths_interner
+                    .as_ref(),
+            )?,
             env,
         );
+        let has_resource_control = dice
+            .per_transaction_data()
+            .data
+            .get::<HasResourceControl>()
+            .unwrap()
+            .0;
         request = request
             .with_working_directory(cwd)
             .with_local_environment_inheritance(EnvironmentInheritance::test_allowlist())
-            .with_disable_miniperf(true)
+            .with_disable_miniperf(!has_resource_control)
             .with_worker(worker)
             .with_remote_execution_custom_image(re_dynamic_image)
             .with_meta_internal_extra_params(meta_internal_extra_params)
-            .with_required_local_resources(required_local_resources)?;
+            .with_required_local_resources(required_local_resources)?
+            .with_is_test();
         if let Some(timeout) = timeout {
             request = request.with_timeout(timeout)
         }
@@ -1456,21 +1532,26 @@ impl BuckTestOrchestrator<'_> {
     async fn setup_local_resources(
         dice: &mut DiceComputations<'_>,
         cancellation: &CancellationContext,
-        setup_contexts: Vec<LocalResourceSetupContext>,
+        required_providers: Vec<(
+            &'_ ConfiguredTargetLabel,
+            OwnedFrozenValueTyped<FrozenLocalResourceInfo>,
+        )>,
         executor: CommandExecutor,
         default_timeout: Duration,
         liveliness_observer: Arc<dyn LivelinessObserver>,
     ) -> Result<Vec<LocalResourceState>, ExecuteError> {
-        if setup_contexts.is_empty() {
+        if required_providers.is_empty() {
             return Ok(vec![]);
         }
         let setup_commands = dice
-            .try_compute_join(setup_contexts, |dice, context| {
+            .try_compute_join(required_providers, |dice, provider| {
                 let fs = executor.fs();
+                let executor_fs = executor.executor_fs();
                 async move {
-                        Self::prepare_local_resource(dice, context, &fs, default_timeout).await
-                    }
-                    .boxed()
+                    Self::prepare_local_resource(dice, provider, &fs, &executor_fs, default_timeout)
+                        .await
+                }
+                .boxed()
             })
             .await?;
 
@@ -1507,8 +1588,7 @@ impl BuckTestOrchestrator<'_> {
                         missing_target.dupe(),
                         setup.await.with_buck_error_context(|| {
                             format!(
-                                "Error setting up local resource declared in `{}`",
-                                missing_target
+                                "Error setting up local resource declared in `{missing_target}`"
                             )
                         }),
                     )
@@ -1522,35 +1602,71 @@ impl BuckTestOrchestrator<'_> {
             .iter()
             .map(|t| lock.get(t).unwrap().clone())
             .collect();
-        Ok(result.map_err(anyhow::Error::from)?)
+        Ok(result?)
     }
 
     async fn prepare_local_resource(
         dice: &mut DiceComputations<'_>,
-        context: LocalResourceSetupContext,
+        provider: (
+            &ConfiguredTargetLabel,
+            OwnedFrozenValueTyped<FrozenLocalResourceInfo>,
+        ),
         fs: &ArtifactFs,
+        executor_fs: &ExecutorFs<'_>,
         default_timeout: Duration,
-    ) -> anyhow::Result<PreparedLocalResourceSetupContext> {
+    ) -> buck2_error::Result<PreparedLocalResourceSetupContext> {
         let digest_config = dice.global_data().get_digest_config();
 
+        let (target, provider) = provider;
+        let visited_inputs = {
+            let setup_command_line = provider.setup_command_line();
+            let mut artifact_visitor = SimpleCommandLineArtifactVisitor::new();
+            setup_command_line.visit_artifacts(&mut artifact_visitor)?;
+            artifact_visitor.inputs
+        };
+
         let inputs = dice
-            .try_compute_join(context.input_artifacts, |dice, group| {
+            .try_compute_join(visited_inputs, |dice, group| {
                 async move { dice.ensure_artifact_group(&group).await }.boxed()
             })
             .await?;
+
+        let artifact_path_mapping: FxHashMap<_, _> = inputs
+            .iter()
+            .flat_map(|v| v.iter())
+            .map(|(a, v)| (a, v.content_based_path_hash()))
+            .collect();
+        let mut cmd: Vec<String> = vec![];
+        let mut cmd_line_context = DefaultCommandLineContext::new(executor_fs);
+        let setup_command_line = provider.setup_command_line();
+        setup_command_line.add_to_command_line(
+            &mut cmd,
+            &mut cmd_line_context,
+            &artifact_path_mapping,
+        )?;
+
         let inputs = inputs
             .into_iter()
             .map(|group_values| CommandExecutionInput::Artifact(Box::new(group_values)))
             .collect();
-        let paths = CommandExecutionPaths::new(inputs, indexset![], fs, digest_config)?;
+        let paths = CommandExecutionPaths::new(
+            inputs,
+            indexset![],
+            fs,
+            digest_config,
+            dice.per_transaction_data()
+                .get_run_action_knobs()
+                .action_paths_interner
+                .as_ref(),
+        )?;
         let mut execution_request =
-            CommandExecutionRequest::new(vec![], context.cmd, paths, Default::default());
+            CommandExecutionRequest::new(vec![], cmd, paths, Default::default());
         execution_request =
-            execution_request.with_timeout(context.timeout.unwrap_or(default_timeout));
+            execution_request.with_timeout(provider.setup_timeout().unwrap_or(default_timeout));
         Ok(PreparedLocalResourceSetupContext {
-            target: context.target,
+            target: target.dupe(),
             execution_request,
-            env_var_mapping: context.env_var_mapping,
+            env_var_mapping: provider.env_var_mapping(),
         })
     }
 
@@ -1566,12 +1682,14 @@ impl BuckTestOrchestrator<'_> {
             Box::new(MutexClaimManager::new()),
             events.dupe(),
             liveliness_observer,
+            WaitingData::new(),
         );
 
         let local_resource_target = LocalResourceTarget {
             target: &context.target,
         };
-        let prepared_action = executor.prepare_action(&context.execution_request, digest_config)?;
+        let prepared_action =
+            executor.prepare_action(&context.execution_request, digest_config, false)?;
         let prepared_command = PreparedCommand {
             target: &local_resource_target as _,
             request: &context.execution_request,
@@ -1628,24 +1746,21 @@ impl BuckTestOrchestrator<'_> {
                 ));
             }
             CommandExecutionStatus::Error { error, .. } => {
-                return Err(error.into());
+                return Err(error);
             }
             CommandExecutionStatus::Cancelled { .. } => {
                 return Err(buck2_error::buck2_error!(
                     ErrorTag::LocalResourceSetup,
                     "Local resource setup command cancelled"
-                )
-                .into());
+                ));
             }
         };
 
         let string_content = String::from_utf8_lossy(&std_streams.stdout);
         let data: LocalResourcesSetupResult = serde_json::from_str(&string_content)
-            .context("Error parsing local resource setup command output")
+            // .buck_error_context("Error parsing local resource setup command output")
             .map_err(|e| from_any_with_tag(e, ErrorTag::LocalResourceSetup))?;
-        let state = data
-            .into_state(context.target.clone(), &context.env_var_mapping)
-            .map_err(|e| from_any_with_tag(e, ErrorTag::LocalResourceSetup))?;
+        let state = data.into_state(context.target.clone(), &context.env_var_mapping)?;
 
         Ok(state)
     }
@@ -1655,9 +1770,11 @@ impl Drop for BuckTestOrchestrator<'_> {
     fn drop(&mut self) {
         // If we didn't close the sender yet, then notify the receiver that our stream is
         // incomplete.
-        let _ignored = self.results_channel.unbounded_send(Err(anyhow::Error::msg(
-            "BuckTestOrchestrator exited before end-of-tests was received",
-        )));
+        let _ignored = self
+            .results_channel
+            .unbounded_send(Err(buck2_error::internal_error!(
+                "BuckTestOrchestrator exited before end-of-tests was received",
+            )));
     }
 }
 
@@ -1666,18 +1783,80 @@ struct Execute2RequestExpander<'a> {
     output_root: &'a ForwardRelativePath,
     declared_outputs: &'a mut IndexMap<BuckOutTestPath, OutputCreationBehavior>,
     fs: &'a ExecutorFs<'a>,
-    cmd: Cow<'a, Vec<ArgValue>>,
+    cmd: Cow<'a, [ArgValue]>,
     env: Cow<'a, SortedVectorMap<String, ArgValue>>,
+    digest_config: DigestConfig,
+}
+
+fn make_visit_arg_artifacts<'v>(
+    cli_args_for_interpolation: Vec<&'v dyn CommandLineArgLike<'v>>,
+    env_for_interpolation: HashMap<&'v str, &'v dyn CommandLineArgLike<'v>>,
+) -> impl for<'a> Fn(&'a mut dyn CommandLineArtifactVisitor<'v>, &'a ArgValue) -> buck2_error::Result<()>
+{
+    move |artifact_visitor: &mut dyn CommandLineArtifactVisitor<'_>, value: &ArgValue| {
+        match &value.content {
+            ArgValueContent::ExternalRunnerSpecValue(ExternalRunnerSpecValue::ArgHandle(h)) => {
+                let arg = cli_args_for_interpolation
+                    .get(h.0)
+                    .ok_or_else(|| internal_error!("Invalid ArgHandle: {h:?}"))?;
+                arg.visit_artifacts(artifact_visitor)?;
+            }
+            ArgValueContent::ExternalRunnerSpecValue(ExternalRunnerSpecValue::EnvHandle(h)) => {
+                let arg = env_for_interpolation
+                    .get(h.0.as_str())
+                    .ok_or_else(|| internal_error!("Invalid EnvHandle: {h:?}"))?;
+                arg.visit_artifacts(artifact_visitor)?;
+            }
+            ArgValueContent::DeclaredOutput(_) | ArgValueContent::ExternalRunnerSpecValue(_) => {}
+        };
+
+        buck2_error::Ok(())
+    }
 }
 
 impl<'a> Execute2RequestExpander<'a> {
-    /// Expand a command and env. Return CLI, env, and inputs.
+    fn get_inputs(&self) -> buck2_error::Result<IndexSet<ArtifactGroup>> {
+        let Execute2RequestExpander {
+            test_info,
+            cmd,
+            env,
+            ..
+        } = self;
+        let cli_args_for_interpolation = test_info
+            .command()
+            .filter_map(|c| match c {
+                TestCommandMember::Literal(..) => None,
+                TestCommandMember::Arglike(a) => Some(a),
+            })
+            .collect::<Vec<_>>();
+        let env_for_interpolation = test_info.env().collect::<HashMap<_, _>>();
+
+        let visit_arg_artifacts =
+            make_visit_arg_artifacts(cli_args_for_interpolation, env_for_interpolation);
+
+        let mut artifact_visitor = SimpleCommandLineArtifactVisitor::new();
+        for var in cmd.iter() {
+            visit_arg_artifacts(&mut artifact_visitor, var)?;
+        }
+
+        for (_, var) in env.iter() {
+            visit_arg_artifacts(&mut artifact_visitor, var)?;
+        }
+        let worker_exe = test_info.worker().map(|worker| worker.exe_command_line());
+        if let Some(worker_exe) = worker_exe {
+            worker_exe.visit_artifacts(&mut artifact_visitor)?;
+        }
+
+        Ok(artifact_visitor.inputs)
+    }
+
+    /// Expand a command and env.
     fn expand<B>(
         self,
-    ) -> anyhow::Result<(
+        ensured_inputs: &Vec<(ArtifactGroup, ArtifactGroupValues)>,
+    ) -> buck2_error::Result<(
         Vec<String>,
         SortedVectorMap<String, String>,
-        IndexSet<ArtifactGroup>,
         Option<WorkerSpec>,
     )>
     where
@@ -1690,6 +1869,7 @@ impl<'a> Execute2RequestExpander<'a> {
             fs,
             cmd,
             env,
+            digest_config,
         } = self;
         let cli_args_for_interpolation = test_info
             .command()
@@ -1698,12 +1878,12 @@ impl<'a> Execute2RequestExpander<'a> {
                 TestCommandMember::Arglike(a) => Some(a),
             })
             .collect::<Vec<_>>();
-
         let env_for_interpolation = test_info.env().collect::<HashMap<_, _>>();
+
+        let artifact_path_mapping = ArtifactPathMapperImpl::from(ensured_inputs);
 
         let expand_arg_value = |cli: &mut dyn CommandLineBuilder,
                                 ctx: &mut dyn CommandLineContext,
-                                artifact_visitor: &mut dyn CommandLineArtifactVisitor,
                                 declared_outputs: &mut IndexMap<
             BuckOutTestPath,
             OutputCreationBehavior,
@@ -1715,47 +1895,37 @@ impl<'a> Execute2RequestExpander<'a> {
 
             match content {
                 ArgValueContent::ExternalRunnerSpecValue(ExternalRunnerSpecValue::Verbatim(v)) => {
-                    v.as_str().add_to_command_line(&mut cli, ctx)?;
+                    v.as_str()
+                        .add_to_command_line(&mut cli, ctx, &artifact_path_mapping)?;
                 }
                 ArgValueContent::ExternalRunnerSpecValue(ExternalRunnerSpecValue::ArgHandle(h)) => {
                     let arg = cli_args_for_interpolation
                         .get(h.0)
-                        .with_context(|| format!("Invalid ArgHandle: {:?}", h))?;
-
-                    arg.visit_artifacts(artifact_visitor)?;
-                    arg.add_to_command_line(&mut cli, ctx)?;
+                        .ok_or_else(|| internal_error!("Invalid ArgHandle: {h:?}"))?;
+                    arg.add_to_command_line(&mut cli, ctx, &artifact_path_mapping)?;
                 }
                 ArgValueContent::ExternalRunnerSpecValue(ExternalRunnerSpecValue::EnvHandle(h)) => {
                     let arg = env_for_interpolation
                         .get(h.0.as_str())
-                        .with_context(|| format!("Invalid EnvHandle: {:?}", h))?;
-                    arg.visit_artifacts(artifact_visitor)?;
-                    arg.add_to_command_line(&mut cli, ctx)?;
+                        .ok_or_else(|| internal_error!("Invalid EnvHandle: {h:?}"))?;
+                    arg.add_to_command_line(&mut cli, ctx, &artifact_path_mapping)?;
                 }
                 ArgValueContent::DeclaredOutput(output) => {
                     let test_path =
-                        BuckOutTestPath::new(output_root.to_owned(), output.name.into());
+                        BuckOutTestPath::new(output_root.to_owned(), output.name.clone());
                     let path = fs.fs().buck_out_path_resolver().resolve_test(&test_path);
                     cli.push_location(ctx.resolve_project_path(path)?);
                     declared_outputs.insert(test_path, OutputCreationBehavior::Parent);
                 }
             };
 
-            anyhow::Ok(())
+            buck2_error::Ok(())
         };
-
-        let mut artifact_visitor = SimpleCommandLineArtifactVisitor::new();
 
         let mut expanded_cmd = Vec::<String>::new();
         let mut ctx = B::new(self.fs);
         for var in cmd.into_owned() {
-            expand_arg_value(
-                &mut expanded_cmd,
-                &mut ctx,
-                &mut artifact_visitor,
-                declared_outputs,
-                var,
-            )?;
+            expand_arg_value(&mut expanded_cmd, &mut ctx, declared_outputs, var)?;
         }
 
         let expanded_env = env
@@ -1767,11 +1937,10 @@ impl<'a> Execute2RequestExpander<'a> {
                 expand_arg_value(
                     &mut SpaceSeparatedCommandLineBuilder::wrap_string(&mut curr_env),
                     &mut ctx,
-                    &mut artifact_visitor,
                     declared_outputs,
                     v,
                 )?;
-                anyhow::Ok((k, curr_env))
+                buck2_error::Ok((k, curr_env))
             })
             .collect::<Result<SortedVectorMap<_, _>, _>>()?;
 
@@ -1779,22 +1948,47 @@ impl<'a> Execute2RequestExpander<'a> {
             Some(worker) => {
                 let mut worker_rendered = Vec::<String>::new();
                 let worker_exe = worker.exe_command_line();
-                worker_exe.add_to_command_line(&mut worker_rendered, &mut ctx)?;
-                worker_exe.visit_artifacts(&mut artifact_visitor)?;
+                worker_exe.add_to_command_line(
+                    &mut worker_rendered,
+                    &mut ctx,
+                    &artifact_path_mapping,
+                )?;
+                let worker_env: buck2_error::Result<SortedVectorMap<_, _>> = worker
+                    .env()
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let mut env = String::new();
+                        let mut ctx = DefaultCommandLineContext::new(fs);
+                        v.add_to_command_line(
+                            &mut SpaceSeparatedCommandLineBuilder::wrap_string(&mut env),
+                            &mut ctx,
+                            &artifact_path_mapping,
+                        )?;
+                        Ok((k.to_owned(), env))
+                    })
+                    .collect();
+
                 Some(WorkerSpec {
                     exe: worker_rendered,
                     id: WorkerId(worker.id),
+                    env: worker_env?,
                     concurrency: worker.concurrency(),
                     streaming: worker.streaming(),
                     remote_key: None,
+                    // TODO(ianc): Support input_paths on test workers
+                    input_paths: CommandExecutionPaths::new(
+                        vec![],
+                        indexset![],
+                        fs.fs(),
+                        digest_config,
+                        None,
+                    )?,
                 })
             }
             _ => None,
         };
 
-        let inputs = artifact_visitor.inputs;
-
-        Ok((expanded_cmd, expanded_env, inputs, expanded_worker))
+        Ok((expanded_cmd, expanded_env, expanded_worker))
     }
 }
 
@@ -1802,7 +1996,7 @@ async fn resolve_output_root(
     dice: &mut DiceComputations<'_>,
     test_target: &ConfiguredProvidersLabel,
     prefix: TestExecutionPrefix,
-) -> Result<ForwardRelativePathBuf, anyhow::Error> {
+) -> Result<ForwardRelativePathBuf, buck2_error::Error> {
     let output_root = match prefix {
         TestExecutionPrefix::Listing => {
             let resolver = dice.get_buck_out_path().await?;
@@ -1854,7 +2048,7 @@ struct ExpandedTestExecutable {
     cwd: ProjectRelativePathBuf,
     cmd: Vec<String>,
     env: SortedVectorMap<String, String>,
-    inputs: IndexSet<ArtifactGroup>,
+    ensured_inputs: Vec<(ArtifactGroup, ArtifactGroupValues)>,
     supports_re: bool,
     declared_outputs: IndexMap<BuckOutTestPath, OutputCreationBehavior>,
     worker: Option<WorkerSpec>,
@@ -1990,74 +2184,6 @@ impl CommandExecutionTarget for TestTarget<'_> {
     }
 }
 
-/// Checks if test listings cache is enabled. Needed only for safe deployment and will be removed
-async fn check_cache_listings_experiment(
-    dice: &mut DiceComputations<'_>,
-    test_target: &ConfiguredProvidersLabel,
-) -> anyhow::Result<bool> {
-    #[derive(
-        Clone,
-        Dupe,
-        derive_more::Display,
-        Debug,
-        Eq,
-        Hash,
-        PartialEq,
-        Allocative
-    )]
-    struct CheckCacheListingsConfigKey;
-
-    #[async_trait]
-    impl Key for CheckCacheListingsConfigKey {
-        type Value = buck2_error::Result<Arc<Vec<ParsedPattern<TargetPatternExtra>>>>;
-
-        async fn compute(
-            &self,
-            mut dice: &mut DiceComputations,
-            _cancellation: &CancellationContext,
-        ) -> Self::Value {
-            let cell_resolver = dice.get_cell_resolver().await?;
-            let root_cell = cell_resolver.root_cell();
-            let alias_resolver = dice.get_cell_alias_resolver(root_cell).await?;
-            let root_conf = dice.get_legacy_root_config_on_dice().await?;
-            let patterns: Vec<String> = root_conf
-                .view(&mut dice)
-                .parse_list(BuckconfigKeyRef {
-                    section: "buck2",
-                    property: "cache_test_listings",
-                })?
-                .unwrap_or_default();
-
-            let mut result = Vec::new();
-            for pattern in patterns {
-                result.push(ParsedPattern::parse_precise(
-                    pattern.trim(),
-                    root_cell,
-                    &cell_resolver,
-                    &alias_resolver,
-                )?);
-            }
-            Ok(result.into())
-        }
-
-        fn equality(x: &Self::Value, y: &Self::Value) -> bool {
-            match (x, y) {
-                (Ok(x), Ok(y)) => x == y,
-                _ => false,
-            }
-        }
-    }
-
-    let patterns = dice.compute(&CheckCacheListingsConfigKey).await??;
-    for pattern in patterns.iter() {
-        if pattern.matches(test_target.target().unconfigured_label()) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
 fn create_action_key_suffix(stage: &TestStage) -> String {
     let mut action_key_suffix = match &stage {
         TestStage::Listing { .. } => "listing".to_owned(),
@@ -2152,6 +2278,7 @@ mod tests {
     use buck2_core::cells::name::CellName;
     use buck2_core::configuration::data::ConfigurationData;
     use buck2_core::fs::project::ProjectRootTemp;
+    use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
     use buck2_test_api::data::TestStage;
     use buck2_test_api::data::TestStatus;
     use dice::UserComputationData;
@@ -2163,9 +2290,9 @@ mod tests {
 
     use super::*;
 
-    async fn make() -> anyhow::Result<(
+    async fn make() -> buck2_error::Result<(
         BuckTestOrchestrator<'static>,
-        UnboundedReceiver<anyhow::Result<ExecutorMessage>>,
+        UnboundedReceiver<buck2_error::Result<ExecutorMessage>>,
     )> {
         let fs = ProjectRootTemp::new().unwrap();
 
@@ -2176,13 +2303,18 @@ mod tests {
         let buckout_path = ProjectRelativePathBuf::unchecked_new("buck_out/v2".into());
         let mut dice = DiceBuilder::new()
             .set_data(|d| d.set_testing_io_provider(&fs))
-            .build(UserComputationData::new())?;
+            .build(UserComputationData::new())
+            .unwrap();
         dice.set_buck_out_path(Some(buckout_path))?;
         dice.set_cell_resolver(cell_resolver)?;
 
         let dice = dice.commit().await;
 
         let (sender, receiver) = mpsc::unbounded();
+
+        let re_client = Arc::new(remote_storage::ReClientWithCache::new(
+            UnconfiguredRemoteExecutionClient::testing_new_dummy(),
+        ));
 
         Ok((
             BuckTestOrchestrator::from_parts(
@@ -2192,13 +2324,14 @@ mod tests {
                 sender,
                 EventDispatcher::null(),
                 CancellationContext::testing(),
+                re_client,
             ),
             receiver,
         ))
     }
 
     #[tokio::test]
-    async fn orchestrator_results() -> anyhow::Result<()> {
+    async fn orchestrator_results() -> buck2_error::Result<()> {
         let (orchestrator, channel) = make().await?;
 
         let target =
@@ -2234,7 +2367,7 @@ mod tests {
 
             orchestrator.end_of_test_results(0).await?;
 
-            anyhow::Ok(())
+            buck2_error::Ok(())
         };
 
         let ((), results) = future::try_join(jobs, channel.try_collect::<Vec<_>>()).await?;
@@ -2270,7 +2403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orchestrator_attach_info_messages() -> anyhow::Result<()> {
+    async fn orchestrator_attach_info_messages() -> buck2_error::Result<()> {
         let (orchestrator, channel) = make().await?;
 
         let jobs = async {
@@ -2278,7 +2411,7 @@ mod tests {
 
             orchestrator.end_of_test_results(0).await?;
 
-            anyhow::Ok(())
+            buck2_error::Ok(())
         };
 
         let ((), results) = future::try_join(jobs, channel.try_collect::<Vec<_>>()).await?;
@@ -2295,7 +2428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_orchestrator_channel_drop() -> anyhow::Result<()> {
+    async fn test_orchestrator_channel_drop() -> buck2_error::Result<()> {
         let (orchestrator, channel) = make().await?;
         drop(orchestrator);
 
@@ -2306,7 +2439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_orchestrator_closes_channel() -> anyhow::Result<()> {
+    async fn test_orchestrator_closes_channel() -> buck2_error::Result<()> {
         let (orchestrator, channel) = make().await?;
         let sender = orchestrator.results_channel.clone();
         orchestrator.end_of_test_results(1).await?;

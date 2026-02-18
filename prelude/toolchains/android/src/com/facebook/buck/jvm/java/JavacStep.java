@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
@@ -33,31 +34,7 @@ public class JavacStep implements IsolatedStep {
   private final boolean ownsPipelineObject;
   private final CompilerOutputPathsValue compilerOutputPathsValue;
 
-  @VisibleForTesting
-  JavacStep(
-      ResolvedJavac resolvedJavac,
-      ResolvedJavacOptions javacOptions,
-      BuildTargetValue invokingRule,
-      RelPath configuredBuckOut,
-      CompilerOutputPathsValue compilerOutputPathsValue,
-      ClasspathChecker classpathChecker,
-      CompilerParameters compilerParameters,
-      @Nullable JarParameters abiJarParameters,
-      @Nullable JarParameters libraryJarParameters) {
-    this(
-        new JavacPipelineState(
-            resolvedJavac,
-            javacOptions,
-            invokingRule,
-            classpathChecker,
-            compilerParameters,
-            abiJarParameters,
-            libraryJarParameters),
-        invokingRule,
-        configuredBuckOut,
-        true,
-        compilerOutputPathsValue);
-  }
+  private final boolean mixedModule;
 
   public JavacStep(
       ResolvedJavac resolvedJavac,
@@ -67,7 +44,8 @@ public class JavacStep implements IsolatedStep {
       CompilerOutputPathsValue compilerOutputPathsValue,
       CompilerParameters compilerParameters,
       @Nullable JarParameters abiJarParameters,
-      @Nullable JarParameters libraryJarParameters) {
+      @Nullable JarParameters libraryJarParameters,
+      boolean mixedCompilation) {
     this(
         new JavacPipelineState(
             resolvedJavac,
@@ -79,7 +57,8 @@ public class JavacStep implements IsolatedStep {
         invokingRule,
         configuredBuckOut,
         true,
-        compilerOutputPathsValue);
+        compilerOutputPathsValue,
+        mixedCompilation);
   }
 
   public JavacStep(
@@ -87,7 +66,7 @@ public class JavacStep implements IsolatedStep {
       BuildTargetValue invokingRule,
       RelPath configuredBuckOut,
       CompilerOutputPathsValue compilerOutputPathsValue) {
-    this(state, invokingRule, configuredBuckOut, false, compilerOutputPathsValue);
+    this(state, invokingRule, configuredBuckOut, false, compilerOutputPathsValue, false);
   }
 
   private JavacStep(
@@ -95,12 +74,14 @@ public class JavacStep implements IsolatedStep {
       BuildTargetValue invokingRule,
       RelPath configuredBuckOut,
       boolean ownsPipelineObject,
-      CompilerOutputPathsValue compilerOutputPathsValue) {
+      CompilerOutputPathsValue compilerOutputPathsValue,
+      boolean mixedModule) {
     this.state = state;
     this.invokingRule = invokingRule;
     this.configuredBuckOut = configuredBuckOut;
     this.ownsPipelineObject = ownsPipelineObject;
     this.compilerOutputPathsValue = compilerOutputPathsValue;
+    this.mixedModule = mixedModule;
   }
 
   @Override
@@ -116,7 +97,7 @@ public class JavacStep implements IsolatedStep {
       if (invokingRule.isSourceAbi()) {
         exitCode = invocation.buildSourceAbiJar();
       } else if (invokingRule.isSourceOnlyAbi()) {
-        exitCode = invocation.buildSourceOnlyAbiJar();
+        exitCode = invocation.buildSourceOnlyAbiJar(mixedModule);
       } else {
         exitCode = invocation.buildClasses();
       }

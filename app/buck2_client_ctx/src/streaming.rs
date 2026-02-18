@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -13,7 +14,10 @@ use std::sync::atomic::AtomicU64;
 use async_trait::async_trait;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
+use buck2_common::init::DEFAULT_RETAINED_EVENT_LOGS;
 use buck2_common::invocation_paths::InvocationPaths;
+use buck2_error::ExitCode;
+use buck2_event_observer::span_tracker::EventTimestamp;
 use dupe::Dupe;
 
 use crate::client_ctx::BuckSubcommand;
@@ -30,7 +34,6 @@ use crate::daemon::client::connect::DaemonConstraintsRequest;
 use crate::daemon::client::connect::DesiredTraceIoState;
 use crate::daemon::client::connect::connect_buckd;
 use crate::events_ctx::EventsCtx;
-use crate::exit_result::ExitCode;
 use crate::exit_result::ExitResult;
 use crate::path_arg::PathArg;
 use crate::signal_handler::with_simple_sigint_handler;
@@ -39,17 +42,18 @@ use crate::subscribers::build_id_writer::BuildIdWriter;
 use crate::subscribers::event_log::EventLog;
 use crate::subscribers::health_check_subscriber::HealthCheckSubscriber;
 use crate::subscribers::re_log::ReLog;
-use crate::subscribers::recorder::get_invocation_recorder;
 use crate::subscribers::subscriber::EventSubscriber;
-use crate::subscribers::subscribers::EventSubscribers;
+use crate::subscribers::superconsole::timekeeper::RealtimeClock;
+use crate::subscribers::superconsole::timekeeper::Timekeeper;
 
 const HEALTH_CHECK_CHANNEL_SIZE: usize = 100;
 
-fn default_subscribers<T: StreamingCommand>(
+fn update_events_ctx<T: StreamingCommand>(
     cmd: &T,
     matches: BuckArgMatches<'_>,
     ctx: &ClientCommandContext,
-) -> EventSubscribers {
+    events_ctx: &mut EventsCtx,
+) {
     let console_opts = cmd.console_opts();
     let event_log_opts = cmd.event_log_opts();
     let mut subscribers = vec![];
@@ -78,7 +82,7 @@ fn default_subscribers<T: StreamingCommand>(
     ) = if enable_health_checks {
         let (tag_tx, tag_rx) = tokio::sync::mpsc::channel(HEALTH_CHECK_CHANNEL_SIZE);
         let (report_tx, report_rx) = tokio::sync::mpsc::channel(HEALTH_CHECK_CHANNEL_SIZE);
-        let subscriber = HealthCheckSubscriber::new(tag_tx, report_tx);
+        let subscriber = HealthCheckSubscriber::new(tag_tx, report_tx, paths);
         (Some(tag_rx), Some(report_rx), Some(subscriber))
     } else {
         (None, None, None)
@@ -89,7 +93,10 @@ fn default_subscribers<T: StreamingCommand>(
         console_opts.console_type,
         ctx.verbosity,
         expect_spans,
-        None,
+        Timekeeper::new(
+            Box::new(RealtimeClock),
+            EventTimestamp(ctx.start_time.into()),
+        ),
         T::COMMAND_NAME,
         console_opts.superconsole_config(),
         health_check_display_reports_receiver,
@@ -116,26 +123,26 @@ fn default_subscribers<T: StreamingCommand>(
     } else {
         Vec::new()
     };
-    let mut recorder = get_invocation_recorder(
-        ctx,
-        cmd.event_log_opts(),
-        Some(cmd.build_config_opts()),
-        cmd.logging_name(),
-        cmd.sanitize_argv(ctx.argv.clone()).argv,
-        representative_config_flags,
-        log_size_counter_bytes,
-        health_check_tags_receiver,
-        paths,
-    );
-    recorder.update_metadata_from_client_metadata(&ctx.client_metadata);
-    subscribers.push(recorder);
+
+    if let Some(recorder) = events_ctx.recorder.as_mut() {
+        recorder.update_for_command(
+            ctx,
+            cmd.event_log_opts(),
+            cmd.sanitize_argv(ctx.argv.clone()).argv,
+            Some(cmd.build_config_opts()),
+            representative_config_flags,
+            log_size_counter_bytes,
+            health_check_tags_receiver,
+            paths,
+        );
+    }
 
     if let Some(subscriber) = health_check_subscriber {
         subscribers.push(subscriber);
     }
 
     subscribers.extend(cmd.extra_subscribers());
-    EventSubscribers::new(subscribers)
+    events_ctx.subscribers = subscribers;
 }
 
 /// Trait to generalize the behavior of executable buck2 commands that rely on a server.
@@ -249,15 +256,16 @@ impl<T: StreamingCommand> BuckSubcommand for T {
         // FIXME: move this into client_ctx
         with_simple_sigint_handler(work)
             .await
-            .unwrap_or_else(|| ExitResult::status(ExitCode::SignalInterrupt))
+            .unwrap_or_else(ExitResult::signal_interrupt)
     }
 
-    fn subscribers(
+    fn update_events_ctx(
         &self,
         matches: BuckArgMatches<'_>,
         ctx: &ClientCommandContext,
-    ) -> EventSubscribers {
-        default_subscribers(self, matches, ctx)
+        events_ctx: &mut EventsCtx,
+    ) {
+        update_events_ctx(self, matches, ctx, events_ctx);
     }
 
     fn event_log_opts(&self) -> &CommonEventLogOptions {
@@ -266,10 +274,6 @@ impl<T: StreamingCommand> BuckSubcommand for T {
 
     fn logging_name(&self) -> &'static str {
         Self::COMMAND_NAME
-    }
-
-    fn is_streaming_command(&self) -> bool {
-        true
     }
 }
 
@@ -295,7 +299,12 @@ fn get_event_log_subscriber<T: StreamingCommand>(
         user_event_log.as_ref().map(|p| p.resolve(&ctx.working_dir)),
         sanitized_argv,
         T::COMMAND_NAME.to_owned(),
+        ctx.start_time,
         log_size_counter_bytes,
+        ctx.immediate_config
+            .daemon_startup_config()
+            .map(|daemon_startup_config| daemon_startup_config.retained_event_logs)
+            .unwrap_or(DEFAULT_RETAINED_EVENT_LOGS),
     );
     Box::new(log)
 }

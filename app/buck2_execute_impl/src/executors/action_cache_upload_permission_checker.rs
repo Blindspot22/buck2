@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::hash::Hash;
@@ -14,6 +15,7 @@ use buck2_core::async_once_cell::AsyncOnceCell;
 use buck2_core::execution_types::executor_config::RePlatformFields;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_error::BuckErrorContext;
+use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::re::client::ActionCacheWriteType;
 use buck2_execute::re::error::RemoteExecutionError;
 use buck2_execute::re::manager::ManagedRemoteExecutionClient;
@@ -52,8 +54,9 @@ impl ActionCacheUploadPermissionChecker {
         &self,
         re_client: &ManagedRemoteExecutionClient,
         platform: &RePlatformFields,
+        digest_config: DigestConfig,
     ) -> buck2_error::Result<Result<(), String>> {
-        let (action, action_result) = empty_action_result(platform)?;
+        let (action, action_result) = empty_action_result(platform, digest_config)?;
 
         // This is CAS upload, if it fails, something is very broken.
         re_client
@@ -100,11 +103,16 @@ impl ActionCacheUploadPermissionChecker {
         &self,
         re_client: &ManagedRemoteExecutionClient,
         platform: &RePlatformFields,
+        digest_config: DigestConfig,
     ) -> buck2_error::Result<Result<(), String>> {
         let cache_value = self.cache_value(re_client.use_case, platform);
         cache_value
             .has_permission_to_upload_to_cache
-            .get_or_try_init(self.do_has_permission_to_upload_to_cache(re_client, platform))
+            .get_or_try_init(self.do_has_permission_to_upload_to_cache(
+                re_client,
+                platform,
+                digest_config,
+            ))
             .await
             .cloned()
             .buck_error_context("Upload for permission check")

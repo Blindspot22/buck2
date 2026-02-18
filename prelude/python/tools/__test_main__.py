@@ -1,10 +1,11 @@
 #!/usr/bin/env fbpython -tt
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """
 This file contains the main module code for buck python test programs.
@@ -636,8 +637,7 @@ class MainProgram:
             parts = value.rsplit("=", 1)
             if len(parts) != 2:
                 self.option_parser.error(
-                    "--logger argument must be of the "
-                    "form <name>=<level>: %s" % value
+                    "--logger argument must be of the form <name>=<level>: %s" % value
                 )
             name = parts[0]
             level_name = parts[1].lower()

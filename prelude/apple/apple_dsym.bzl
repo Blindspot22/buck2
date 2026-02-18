@@ -1,13 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//utils:arglike.bzl", "ArgLike")  # @unused Used as a type
 load(":apple_toolchain_types.bzl", "AppleToolchainInfo")
-load(":debug.bzl", "AppleSelectiveDebuggableMetadata")  # @unused Used as a type
+load(":debug.bzl", "AppleDebuggableInfo", "AppleSelectiveDebuggableMetadata")  # @unused Used as a type
 
 DSYM_SUBTARGET = "dsym"
 DSYM_INFO_SUBTARGET = "dsym-info"
@@ -26,7 +27,6 @@ def get_apple_dsym_ext(ctx: AnalysisContext, executable: [ArgLike, Artifact], de
     cmd = cmd_args(
         [
             dsymutil,
-            "--verify-dwarf={}".format(ctx.attrs._dsymutil_verify_dwarf),
             # Reproducers are not useful, we can reproduce from the action digest.
             "--reproducer=Off",
         ],
@@ -35,16 +35,10 @@ def get_apple_dsym_ext(ctx: AnalysisContext, executable: [ArgLike, Artifact], de
         # So, those object files are needed for dsymutil to be to create the dSYM bundle.
         hidden = debug_info,
     )
-    if ctx.attrs.dsym_uses_parallel_linker:
-        cmd.add("--linker=parallel")
-
-    cmd.add(ctx.attrs._dsymutil_extra_flags)
     cmd.add(
-        [
-            "-o",
-            output.as_output(),
-            executable,
-        ],
+        "-o",
+        output.as_output(),
+        executable,
     )
     ctx.actions.run(cmd, category = "apple_dsym", identifier = action_identifier)
     return output
@@ -85,3 +79,13 @@ def get_apple_dsym_info_json(
         json_object = dsym_info,
         outputs = binary_dsyms + dep_dsyms + metadata_dsym_outputs,
     )
+
+def get_deps_debuggable_infos(ctx: AnalysisContext) -> list[AppleDebuggableInfo]:
+    binary_labels = filter(None, [getattr(binary_dep, "label", None) for binary_dep in (ctx.attrs.binary.values() if ctx.attrs.binary else {})])
+    deps_debuggable_infos = filter(
+        None,
+        # It's allowed for `ctx.attrs.binary` to appear in `ctx.attrs.deps` as well,
+        # in this case, do not duplicate the debugging info for the binary coming from two paths.
+        [dep.get(AppleDebuggableInfo) for dep in ctx.attrs.deps if dep.label not in binary_labels],
+    )
+    return deps_debuggable_infos

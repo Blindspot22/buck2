@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifact_tset.bzl",
@@ -11,9 +12,11 @@ load(
     "make_artifact_tset",
     "project_artifacts",
 )
+load("@prelude//:attrs_validators.bzl", "get_attrs_validation_specs")
 load("@prelude//:local_only.bzl", "get_resolved_cxx_binary_link_execution_preference")
 load(
     "@prelude//:resources.bzl",
+    "create_relocatable_resources_info",
     "create_resource_db",
     "gather_resources",
 )
@@ -22,6 +25,7 @@ load(
     "apple_build_link_args_with_deduped_flags",
     "apple_create_frameworks_linkable",
     "apple_get_link_info_by_deduping_link_infos",
+    "get_framework_search_path_flags",
 )
 load(
     "@prelude//cxx:cxx_bolt.bzl",
@@ -40,6 +44,7 @@ load(
     "@prelude//cxx:runtime_dependency_handling.bzl",
     "RuntimeDependencyHandling",
 )
+load("@prelude//cxx:transformation_spec.bzl", "TransformationKind", "build_transformation_spec_context")
 load(
     "@prelude//dist:dist_info.bzl",
     "DistInfo",
@@ -90,9 +95,15 @@ load(
     "merge_shared_libraries",
     "traverse_shared_library_info",
 )
+load("@prelude//linking:stamp_build_info.bzl", "PRE_STAMPED_SUFFIX", "cxx_stamp_build_info")
 load("@prelude//utils:arglike.bzl", "ArgLike")  # @unused Used as a type
 load(
+    "@prelude//utils:build_graph_pattern.bzl",
+    "new_build_graph_info",
+)
+load(
     "@prelude//utils:utils.bzl",
+    "flatten",
     "flatten_dict",
     "map_val",
 )
@@ -109,6 +120,9 @@ load(
 )
 load(
     ":compile.bzl",
+    "ClangTracesInfo",
+    "ClangTracesTSet",
+    "PicClangTracesInfo",
     "compile_cxx",
     "create_compile_cmds",
     "cxx_objects_sub_targets",
@@ -137,6 +151,7 @@ load(
     "CxxRuleConstructorParams",  # @unused Used as a type
 )
 load(":diagnostics.bzl", "check_sub_target")
+load(":gcno.bzl", "GcnoFilesInfo")
 load(":groups.bzl", "get_dedupped_roots_from_groups")
 load(
     ":link.bzl",
@@ -182,6 +197,8 @@ load(
 )
 load(
     ":preprocessor.bzl",
+    "CPreprocessor",
+    "CPreprocessorArgs",
     "cxx_inherited_preprocessor_infos",
     "cxx_private_preprocessor_info",
 )
@@ -190,6 +207,7 @@ CxxExecutableOutput = record(
     binary = Artifact,
     unstripped_binary = Artifact,
     bitcode_bundle = field(Artifact | None, None),
+    diagnostics = field(Artifact | None),
     dwp = field(Artifact | None),
     # Files that must be present for the executable to run successfully. These
     # are always materialized, whether the executable is the output of a build
@@ -215,11 +233,13 @@ CxxExecutableOutput = record(
     dist_info = DistInfo,
     sanitizer_runtime_files = field(list[Artifact], []),
     index_stores = field(list[Artifact], []),
+    validation_specs = field(list[ValidationSpec], []),
+    gcno_files = field(list[Artifact], []),
 )
 
 def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, is_cxx_test: bool = False) -> CxxExecutableOutput:
     # Gather preprocessor inputs.
-    preprocessor_deps = cxx_attr_deps(ctx) + filter(None, [ctx.attrs.precompiled_header])
+    preprocessor_deps = cxx_attr_deps(ctx) + filter(None, [impl_params.precompiled_header])
     (own_preprocessor_info, test_preprocessor_infos) = cxx_private_preprocessor_info(
         ctx,
         impl_params.headers_layout,
@@ -230,6 +250,16 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
     )
     inherited_preprocessor_infos = cxx_inherited_preprocessor_infos(preprocessor_deps) + impl_params.extra_preprocessors_info
 
+    # Add framework search paths if frameworks attribute is set.
+    # This is needed for the apple_test/apple_binary -> cxx_test/cxx_binary swap.
+    frameworks = getattr(ctx.attrs, "frameworks", [])
+    framework_search_path_pre = None
+    if frameworks:
+        framework_search_paths_flags = get_framework_search_path_flags(ctx)
+        framework_search_path_pre = CPreprocessor(
+            args = CPreprocessorArgs(args = [framework_search_paths_flags]),
+        )
+
     # The link style to use.
     link_strategy = to_link_strategy(cxx_attr_link_style(ctx))
     link_strategy = process_link_strategy_for_pic_behavior(link_strategy, get_cxx_toolchain_info(ctx).pic_behavior)
@@ -237,33 +267,92 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
     sub_targets = {}
 
     # Compile objects.
+    own_preprocessors = [own_preprocessor_info] + test_preprocessor_infos
+    if framework_search_path_pre:
+        own_preprocessors.insert(0, framework_search_path_pre)
     compile_cmd_output = create_compile_cmds(
-        ctx,
+        ctx.actions,
+        ctx.label,
+        get_cxx_toolchain_info(ctx),
         impl_params,
-        [own_preprocessor_info] + test_preprocessor_infos,
+        own_preprocessors,
         inherited_preprocessor_infos,
         is_coverage_enabled_by_any_dep(ctx, preprocessor_deps),
     )
-    compile_flavor = CxxCompileFlavor("pic") if link_strategy != LinkStrategy("static") else CxxCompileFlavor("default")
+    cxx_deps = cxx_attr_deps(ctx)
+    build_graph_info = new_build_graph_info(ctx, cxx_deps)
+    transformation_spec_context = build_transformation_spec_context(ctx, build_graph_info)
+    compile_flavors = set([CxxCompileFlavor("pic")]) if link_strategy != LinkStrategy("static") else set()
+
+    if transformation_spec_context:
+        transformation_kind = transformation_spec_context.provider.determine_transformation(ctx.label, transformation_spec_context.graph_info)
+        if transformation_kind == TransformationKind("debug"):
+            compile_flavors.add(CxxCompileFlavor("debug"))
+        elif transformation_kind == TransformationKind("optimized"):
+            compile_flavors.add(CxxCompileFlavor("optimized"))
+
     cxx_outs = compile_cxx(
-        ctx = ctx,
+        actions = ctx.actions,
+        target_label = ctx.label,
+        toolchain = get_cxx_toolchain_info(ctx),
         src_compile_cmds = compile_cmd_output.src_compile_cmds,
-        flavor = compile_flavor,
+        flavors = compile_flavors,
         provide_syntax_only = True,
+        separate_debug_info = impl_params.separate_debug_info,
         use_header_units = impl_params.use_header_units,
+        cuda_compile_style = impl_params.cuda_compile_style,
     )
+
+    gcno_files = [out.gcno_file for out in cxx_outs if out.gcno_file]
+    if get_cxx_toolchain_info(ctx).gcno_files:
+        gcno_files += flatten([
+            dep[GcnoFilesInfo].gcno_files
+            for dep in cxx_deps
+            if GcnoFilesInfo in dep
+        ])
 
     sub_targets[ARGSFILES_SUBTARGET] = [get_argsfiles_output(ctx, compile_cmd_output.argsfiles.relative, ARGSFILES_SUBTARGET)]
     sub_targets[XCODE_ARGSFILES_SUB_TARGET] = [get_argsfiles_output(ctx, compile_cmd_output.argsfiles.xcode, XCODE_ARGSFILES_SUB_TARGET)]
     sub_targets[OBJECTS_SUBTARGET] = [DefaultInfo(sub_targets = cxx_objects_sub_targets(cxx_outs))]
+
+    if impl_params.generate_sub_targets and impl_params.generate_sub_targets.clang_traces:
+        traces = [out.clang_trace for out in cxx_outs if out.clang_trace != None]
+        sub_targets["clang-trace"] = [DefaultInfo(
+            default_outputs = traces,
+        )]
+
+        clang_traces_tset = ctx.actions.tset(
+            ClangTracesTSet,
+            value = traces,
+            children = [info.clang_traces for info in filter(None, [
+                x.get(PicClangTracesInfo) if link_strategy != LinkStrategy("static") else x.get(ClangTracesInfo)
+                for x in cxx_deps
+            ])],
+        )
+
+        clang_traces_args = clang_traces_tset.project_as_args("clang_traces")
+        all_traces = ctx.actions.write(
+            ctx.actions.declare_output("recursive_clang_traces.txt"),
+            clang_traces_args,
+        )
+
+        sub_targets["clang-traces"] = [DefaultInfo(
+            default_output = all_traces,
+            other_outputs = [clang_traces_args],
+        )]
 
     diagnostics = {
         compile_cmd.src.short_path: out.diagnostics
         for compile_cmd, out in zip(compile_cmd_output.src_compile_cmds, cxx_outs)
         if out.diagnostics != None
     }
+    all_diagnostics = None
     if len(diagnostics) > 0:
-        sub_targets["check"] = check_sub_target(ctx, diagnostics)
+        sub_targets["check"], all_diagnostics = check_sub_target(
+            ctx,
+            diagnostics,
+            error_handler = impl_params.error_handler,
+        )
 
     # Compilation DB.
     comp_db = create_compilation_database(ctx, compile_cmd_output.src_compile_cmds, "compilation-database")
@@ -280,7 +369,7 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
     index_stores = [out.index_store for out in cxx_outs if out.index_store]
 
     # Link deps
-    link_deps = linkables(cxx_attr_deps(ctx)) + impl_params.extra_link_deps
+    link_deps = linkables(cxx_deps) + impl_params.extra_link_deps
 
     # Link Groups
     link_group = get_link_group(ctx)
@@ -333,6 +422,9 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
     # Target label to which link group it was included
     targets_consumed_by_link_groups = {}
     auto_link_groups = {}
+
+    # Linker map data for link group shared libraries, keyed by group name.
+    link_group_linker_map_data = {}
     labels_to_links = FinalLabelsToLinks(
         map = {},
     )
@@ -348,6 +440,7 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
             deps_merged_link_infos,
             frameworks_linkable,
             link_strategy,
+            transformation_spec_context,
             swiftmodule_linkable,
             prefer_stripped = impl_params.prefer_stripped_objects,
         )
@@ -389,6 +482,7 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
                 anonymous = ctx.attrs.anonymous_link_groups,
                 allow_cache_upload = impl_params.exe_allow_cache_upload,
                 public_nodes = public_link_group_nodes,
+                transformation_spec_context = transformation_spec_context,
                 error_handler = impl_params.error_handler,
             )
             link_group_libs_debug_info = linked_link_groups.libs_debug_info
@@ -396,6 +490,8 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
                 auto_link_groups[name] = linked_link_group.artifact
                 if linked_link_group.library != None:
                     link_group_libs[name] = linked_link_group.library
+                if linked_link_group.linker_map_data != None:
+                    link_group_linker_map_data[name] = linked_link_group.linker_map_data
             own_exe_link_flags += linked_link_groups.symbol_ldflags
             targets_consumed_by_link_groups = linked_link_groups.targets_consumed_by_link_groups
 
@@ -442,6 +538,7 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
             },
             prefer_stripped = impl_params.prefer_stripped_objects,
             prefer_optimized = False,
+            transformation_spec_context = transformation_spec_context,
         )
 
         # TODO(T110378098): Similar to shared libraries, we need to identify all the possible
@@ -575,7 +672,7 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
         gnu_use_link_groups,
         link_group_ctx,
         link_strategy,
-        traverse_shared_library_info(shlib_info),
+        traverse_shared_library_info(shlib_info, transformation_provider = transformation_spec_context),
         impl_params.extra_shared_libs,
     )
 
@@ -632,6 +729,7 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
             error_handler = impl_params.error_handler,
             extra_linker_outputs_factory = impl_params.extra_linker_outputs_factory,
             extra_linker_outputs_flags_factory = impl_params.extra_linker_outputs_flags_factory,
+            extra_distributed_thin_lto_opt_outputs_merger = impl_params.extra_distributed_thin_lto_opt_outputs_merger,
         ),
     )
     binary = link_result.exe
@@ -715,6 +813,9 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
                     {group: readable_mappings[group]},
                 ),
             )]
+        if group in link_group_linker_map_data:
+            lm_data = link_group_linker_map_data[group]
+            targets["linker-map"] = [DefaultInfo(default_output = lm_data.map, other_outputs = [lm_data.binary])]
         shared_libraries_sub_targets[soname] = [DefaultInfo(
             default_output = shlib.lib.output,
             sub_targets = targets,
@@ -747,6 +848,8 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
         resources = cxx_attr_resources(ctx),
         deps = cxx_attr_deps(ctx),
     ).values())
+    relocatable_resources_json = None
+    relocatable_resources_contents = None
     if resources:
         runtime_files.append(create_resource_db(
             ctx = ctx,
@@ -757,6 +860,11 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
         for resource in resources.values():
             runtime_files.append(resource.default_output)
             runtime_files.extend(resource.other_outputs)
+        relocatable_resources_json, relocatable_resources_contents = create_relocatable_resources_info(
+            ctx = ctx,
+            name = ctx.label.name,
+            resources = resources,
+        )
 
     if binary.dwp:
         # A `dwp` sub-target which generates the `.dwp` file for this binary and its shared lib dependencies.
@@ -794,7 +902,7 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
 
     link_cmd_debug_output = make_link_command_debug_output(binary)
     if link_cmd_debug_output != None:
-        link_cmd_debug_output_file = make_link_command_debug_output_json_info(ctx, [link_cmd_debug_output])
+        link_cmd_debug_output_file = make_link_command_debug_output_json_info(ctx.actions, [link_cmd_debug_output])
         sub_targets["linker.command"] = [DefaultInfo(
             default_outputs = filter(None, [link_cmd_debug_output_file]),
         )]
@@ -814,7 +922,7 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
             impl_params.additional.static_external_debug_info
         ),
     )
-    external_debug_info_artifacts = project_artifacts(ctx.actions, [external_debug_info])
+    external_debug_info_artifacts = project_artifacts(ctx.actions, external_debug_info)
     materialize_external_debug_info = ctx.actions.write(
         "debuginfo.artifacts",
         external_debug_info_artifacts,
@@ -855,9 +963,14 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams, 
         dist_info = DistInfo(
             shared_libs = shlib_info.set,
             nondebug_runtime_files = runtime_files,
+            relocatable_resources_json = relocatable_resources_json,
+            relocatable_resources_contents = relocatable_resources_contents,
         ),
         sanitizer_runtime_files = link_result.sanitizer_runtime_files,
         index_stores = index_stores,
+        diagnostics = all_diagnostics,
+        validation_specs = get_attrs_validation_specs(ctx),
+        gcno_files = dedupe(gcno_files),
     )
 
 _CxxLinkExecutableResult = record(
@@ -921,4 +1034,10 @@ def _link_into_executable(
     )
 
 def get_cxx_executable_product_name(ctx: AnalysisContext) -> str:
-    return ctx.label.name + ("-wrapper" if cxx_use_bolt(ctx) else "")
+    name = ctx.label.name
+    if cxx_stamp_build_info(ctx):
+        # build_info_stamping is executed after BOLT, make sure the prestamp flag is the innermost prefix
+        name += PRE_STAMPED_SUFFIX
+    if cxx_use_bolt(ctx):
+        name += "-wrapper"
+    return name

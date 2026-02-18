@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
 load(
@@ -72,6 +73,7 @@ def process_omnibus_linking(
         ),
         prefer_stripped_objects = ctx.attrs.prefer_stripped_native_objects,
         enable_distributed_thinlto = ctx.attrs.enable_distributed_thinlto,
+        anonymous = ctx.attrs.deduplicate_merged_link_roots,
     )
 
     # Extract re-linked extensions.

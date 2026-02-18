@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -13,7 +14,6 @@ import tempfile
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test, env
-
 from manifold.clients.python.manifold_client_deprecated import Client as ManifoldClient
 
 BUCKET_CONFIG = {"bucket": "buck2_logs", "apikey": "buck2_logs-key"}
@@ -97,8 +97,9 @@ async def test_explain_only_builds(buck: Buck) -> None:
 @env("BUCK2_TEST_MANIFOLD_TTL_S", str(84_000))  # 1 day
 async def test_explain_upload(buck: Buck) -> None:
     uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-    await buck.build("//:simple")
-    await buck.explain(env={"BUCK_WRAPPER_UUID": uuid})
+    env = {"BUCK_WRAPPER_UUID": uuid}
+    await buck.build("//:simple", env=env)
+    await buck.explain(env=env)
 
     assert await manifold_exists(path=f"flat/{uuid}-explain.html") is True
 

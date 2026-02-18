@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use crate::Component;
@@ -34,7 +35,7 @@ impl DrawHorizontal {
 
     /// Add another component.
     /// New component `draw` is called with remaining dimensions.
-    pub fn draw(&mut self, component: &dyn Component, mode: DrawMode) -> anyhow::Result<()> {
+    pub fn draw<C: Component>(&mut self, component: &C, mode: DrawMode) -> Result<(), C::Error> {
         // We call `draw` even if no space is left, but maybe we should not.
         let output = component.draw(
             Dimensions {
@@ -60,6 +61,8 @@ impl DrawHorizontal {
 #[cfg(test)]
 mod tests {
 
+    use std::convert::Infallible;
+
     use crate::Component;
     use crate::Dimensions;
     use crate::DrawMode;
@@ -75,12 +78,13 @@ mod tests {
         struct C1;
 
         impl Component for C0 {
+            type Error = Infallible;
+
             fn draw_unchecked(
                 &self,
-
                 dimensions: Dimensions,
                 _mode: DrawMode,
-            ) -> anyhow::Result<Lines> {
+            ) -> Result<Lines, Infallible> {
                 assert_eq!(
                     Dimensions {
                         width: 50,
@@ -97,12 +101,14 @@ mod tests {
         }
 
         impl Component for C1 {
+            type Error = Infallible;
+
             fn draw_unchecked(
                 &self,
 
                 dimensions: Dimensions,
                 _mode: DrawMode,
-            ) -> anyhow::Result<Lines> {
+            ) -> Result<Lines, Infallible> {
                 assert_eq!(
                     Dimensions {
                         width: 45,

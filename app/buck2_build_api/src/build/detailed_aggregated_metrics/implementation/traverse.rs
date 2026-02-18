@@ -1,15 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 
 use buck2_artifact::actions::key::ActionKey;
+use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
@@ -106,13 +108,13 @@ impl<'a> Graph<'a> {
                 Ok(artifact.action_key().map(|key| Key::Action(key.dupe())))
             }
             ArtifactGroup::TransitiveSetProjection(key) => {
-                let holder_key = key.key.holder_key();
+                let holder_key = key.key.key.holder_key();
                 match self.lookup_deferred(holder_key) {
                     Some(v) => {
-                        let tset = v.lookup_transitive_set(&key.key)?;
+                        let tset = v.lookup_transitive_set(&key.key.key)?;
                         Ok(Some(Key::ResolvedTransitiveSetProjection(
                             ResolvedTransitiveSetProjection {
-                                projection: key.projection,
+                                projection: key.key.projection,
                                 tset,
                             },
                         )))
@@ -120,7 +122,8 @@ impl<'a> Graph<'a> {
                     None => Ok(Some(Key::MissingAnalysis(holder_key.dupe()))),
                 }
             }
-            ArtifactGroup::Promise(promise_artifact) => Ok(promise_artifact
+            ArtifactGroup::Promise(p) => Ok(p
+                .promise_artifact
                 .unwrap()
                 .action_key()
                 .map(|key| Key::Action(key.dupe()))),
@@ -152,8 +155,8 @@ impl<'a> Graph<'a> {
                     ))
                 }
                 struct Visitor<'a, 'b, F: FnMut(Key)>(F, &'a Graph<'b>, buck2_error::Result<()>);
-                impl<F: FnMut(Key)> CommandLineArtifactVisitor for Visitor<'_, '_, F> {
-                    fn visit_input(&mut self, input: ArtifactGroup, _tag: Option<&ArtifactTag>) {
+                impl<'v, F: FnMut(Key)> CommandLineArtifactVisitor<'v> for Visitor<'_, '_, F> {
+                    fn visit_input(&mut self, input: ArtifactGroup, _tags: Vec<&ArtifactTag>) {
                         if self.2.is_err() {
                             return;
                         }
@@ -169,12 +172,18 @@ impl<'a> Graph<'a> {
                         }
                     }
 
-                    fn visit_output(
+                    fn visit_declared_output(
                         &mut self,
-                        _artifact: OutputArtifact,
-                        _tag: Option<&ArtifactTag>,
+                        _artifact: OutputArtifact<'v>,
+                        _tags: Vec<&ArtifactTag>,
                     ) {
-                        // nothing to do
+                    }
+
+                    fn visit_frozen_output(
+                        &mut self,
+                        _artifact: Artifact,
+                        _tags: Vec<&ArtifactTag>,
+                    ) {
                     }
                 }
                 let mut visitor = Visitor(&mut visit_dep, self, Ok(()));

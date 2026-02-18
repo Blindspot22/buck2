@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_binary_native_library_rules.bzl", "get_android_binary_native_library_info")
 load("@prelude//android:android_binary_resources_rules.bzl", "get_android_binary_resources_info")
@@ -21,7 +22,7 @@ load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
 load("@prelude//android:configuration.bzl", "get_deps_by_platform")
 load("@prelude//android:cpu_filters.bzl", "CPU_FILTER_FOR_DEFAULT_PLATFORM", "CPU_FILTER_FOR_PRIMARY_PLATFORM")
 load("@prelude//android:dex_rules.bzl", "get_multi_dex", "get_single_primary_dex", "get_split_dex_merge_config", "merge_to_single_dex", "merge_to_split_dex")
-load("@prelude//android:duplicate_class_check.bzl", "check_for_duplicate_classes")
+load("@prelude//android:duplicate_class_check.bzl", "check_for_duplicate_classes_for_non_pre_dexed_jars", "check_for_duplicate_classes_for_pre_dexed_libs")
 load("@prelude//android:exopackage.bzl", "get_exopackage_flags")
 load("@prelude//android:preprocess_java_classes.bzl", "get_preprocessed_java_classes")
 load("@prelude//android:util.bzl", "create_enhancement_context")
@@ -46,7 +47,7 @@ AndroidBinaryInfo = record(
     native_library_info = AndroidBinaryNativeLibsInfo,
     resources_info = AndroidBinaryResourcesInfo,
     materialized_artifacts = list[Artifact],
-    validation_info = list[ValidationInfo],
+    validation_outputs = list[Artifact],
 )
 
 def get_binary_info(ctx: AnalysisContext, use_proto_format: bool) -> AndroidBinaryInfo:
@@ -75,7 +76,22 @@ def get_binary_info(ctx: AnalysisContext, use_proto_format: bool) -> AndroidBina
     if target_to_module_mapping_file:
         enhancement_ctx.debug_output("module.mapping", target_to_module_mapping_file)
 
-    native_library_info = get_android_binary_native_library_info(enhancement_ctx, android_packageable_info, deps_by_platform, apk_module_graph_file = target_to_module_mapping_file)
+    shared_libraries_to_exclude_set = set([label.raw_target() for label in ctx.attrs.shared_libraries_to_exclude])
+    native_library_info = get_android_binary_native_library_info(
+        enhancement_ctx,
+        android_packageable_info,
+        deps_by_platform,
+        apk_module_graph_file = target_to_module_mapping_file,
+        shared_libraries_to_exclude = shared_libraries_to_exclude_set,
+        native_library_merge_glue = getattr(ctx.attrs, "native_library_merge_glue", None),
+        native_library_merge_sequence = getattr(ctx.attrs, "native_library_merge_sequence", None),
+        native_library_merge_map = getattr(ctx.attrs, "native_library_merge_map", None),
+        native_library_merge_non_asset_libs = getattr(ctx.attrs, "native_library_merge_non_asset_libs", False),
+        native_library_merge_linker_args = getattr(ctx.attrs, "native_library_merge_linker_args", None),
+        native_library_merge_linker_args_all = getattr(ctx.attrs, "native_library_merge_linker_args_all", None),
+        native_library_merge_code_generator = getattr(ctx.attrs, "native_library_merge_code_generator", None),
+        native_library_merge_sequence_blocklist = getattr(ctx.attrs, "native_library_merge_sequence_blocklist", None),
+    )
     java_packaging_deps.extend([create_java_packaging_dep(
         ctx,
         library_output,
@@ -119,13 +135,13 @@ def get_binary_info(ctx: AnalysisContext, use_proto_format: bool) -> AndroidBina
                 default_output = r_dot_java_info.source_zipped,
             ),
         ]
-    validation_info = []
+    validation_outputs = []
     dex_java_packaging_deps = [packaging_dep for packaging_dep in java_packaging_deps if packaging_dep.dex and packaging_dep.dex.dex.owner.raw_target() not in no_dx_target_labels]
     if should_pre_dex:
         pre_dexed_libs = [packaging_dep.dex for packaging_dep in dex_java_packaging_deps]
-        if ctx.attrs._android_toolchain[AndroidToolchainInfo].duplicate_class_checker:
-            validation_info.append(
-                check_for_duplicate_classes(
+        if ctx.attrs.duplicate_class_checker_enabled:
+            validation_outputs.append(
+                check_for_duplicate_classes_for_pre_dexed_libs(
                     ctx,
                     {str(lib.class_names.owner.raw_target()): lib.class_names for lib in pre_dexed_libs if lib.dex},
                 ),
@@ -143,13 +159,24 @@ def get_binary_info(ctx: AnalysisContext, use_proto_format: bool) -> AndroidBina
             dex_files_info = merge_to_single_dex(ctx, android_toolchain, pre_dexed_libs)
     else:
         jars_to_owners = {packaging_dep.jar: packaging_dep.jar.owner.raw_target() for packaging_dep in dex_java_packaging_deps}
+        if ctx.attrs.duplicate_class_checker_enabled:
+            validation_outputs.append(
+                check_for_duplicate_classes_for_non_pre_dexed_jars(
+                    ctx,
+                    jars_to_owners,
+                ),
+            )
+
         if ctx.attrs.preprocess_java_classes_bash:
             jars_to_owners, materialized_artifacts_dir = get_preprocessed_java_classes(enhancement_ctx, jars_to_owners)
             if materialized_artifacts_dir:
                 materialized_artifacts.append(materialized_artifacts_dir)
         if has_proguard_config:
             additional_proguard_configs = [resources_info.proguard_config_file] if not ctx.attrs.ignore_aapt_proguard_config and resources_info.proguard_config_file else []
-            additional_jars = android_toolchain.android_bootclasspath + android_toolchain.android_optional_jars + [no_dx[DefaultInfo].default_outputs[0] for no_dx in ctx.attrs.no_dx if len(no_dx[DefaultInfo].default_outputs) == 1]
+
+            no_dx_for_additional_jars = [no_dx for no_dx in ctx.attrs.no_dx if no_dx not in ctx.attrs.exclude_duplicate_targets_do_not_use]
+            additional_jars = android_toolchain.android_bootclasspath + android_toolchain.android_optional_jars + [no_dx[DefaultInfo].default_outputs[0] for no_dx in no_dx_for_additional_jars if len(no_dx[DefaultInfo].default_outputs) == 1]
+
             proguard_output = get_proguard_output(
                 ctx,
                 jars_to_owners,
@@ -189,6 +216,7 @@ def get_binary_info(ctx: AnalysisContext, use_proto_format: bool) -> AndroidBina
                 is_optimized = has_proguard_config,
                 apk_module_graph_file = target_to_module_mapping_file,
                 enable_bootstrap_dexes = ctx.attrs.enable_bootstrap_dexes,
+                multidex_min_api = ctx.attrs.multidex_min_api,
             )
         else:
             dex_files_info = get_single_primary_dex(
@@ -217,7 +245,7 @@ def get_binary_info(ctx: AnalysisContext, use_proto_format: bool) -> AndroidBina
         native_library_info = native_library_info,
         resources_info = resources_info,
         materialized_artifacts = materialized_artifacts,
-        validation_info = validation_info,
+        validation_outputs = validation_outputs,
     )
 
 def get_build_config_java_libraries(

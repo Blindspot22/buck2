@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 pub mod fs;
@@ -18,21 +19,31 @@ use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
 
-use crate::file_ops::RawDirEntry;
-use crate::file_ops::RawPathMetadata;
+use crate::file_ops::metadata::RawDirEntry;
+use crate::file_ops::metadata::RawPathMetadata;
 use crate::ignores::file_ignores::FileIgnoreReason;
 
 #[derive(Debug, Allocative, buck2_error::Error)]
 #[buck2(tag = Input)]
 pub enum ReadDirError {
-    #[error("Directory `{0}` does not exist")]
-    DirectoryDoesNotExist(CellPath),
+    #[error("Directory `{path}` does not exist")]
+    DirectoryDoesNotExist {
+        path: CellPath,
+        suggestion: DirectoryDoesNotExistSuggestion,
+    },
     #[error("Directory `{0}` is ignored ({})", .1.describe())]
     DirectoryIsIgnored(CellPath, FileIgnoreReason),
     #[error("Path `{0}` is `{1}`, not a directory")]
     NotADirectory(CellPath, String),
     #[error(transparent)]
     Error(buck2_error::Error),
+}
+
+#[derive(Debug, Allocative)]
+pub enum DirectoryDoesNotExistSuggestion {
+    Cell(Vec<String>),
+    Typo(String),
+    NoSuggestion,
 }
 
 impl From<buck2_error::Error> for ReadDirError {

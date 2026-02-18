@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Implementation of the OCaml build rules.
 
@@ -49,7 +50,7 @@
 
 load("@prelude//:local_only.bzl", "link_cxx_binary_locally")
 load("@prelude//:paths.bzl", "paths")
-load("@prelude//cxx:cxx_context.bzl", "get_cxx_platform_info", "get_cxx_toolchain_info")
+load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
 load(
     "@prelude//cxx:cxx_link_utility.bzl",
     "make_link_args",
@@ -94,8 +95,7 @@ load(
     "PythonLibraryInfo",
 )
 load("@prelude//utils:graph_utils.bzl", "depth_first_traversal", "post_order_traversal")
-load("@prelude//utils:platform_flavors_util.bzl", "by_platform")
-load("@prelude//utils:utils.bzl", "filter_and_map_idx", "flatten")
+load("@prelude//utils:utils.bzl", "filter_and_map_idx")
 load(":makefile.bzl", "parse_makefile")
 load(":ocaml_toolchain_types.bzl", "OCamlLibraryInfo", "OCamlLinkInfo", "OCamlToolchainInfo", "OtherOutputsInfo", "merge_ocaml_link_infos", "merge_other_outputs_info")
 
@@ -134,12 +134,8 @@ def _compile_result_to_tuple(r):
 
 # ---
 
-def _by_platform(ctx: AnalysisContext, xs: list[(str, list[typing.Any])]) -> list[typing.Any]:
-    platform = get_cxx_platform_info(ctx).name
-    return flatten(by_platform([platform], xs))
-
 def _attr_deps(ctx: AnalysisContext) -> list[Dependency]:
-    return ctx.attrs.deps + _by_platform(ctx, ctx.attrs.platform_deps)
+    return ctx.attrs.deps
 
 def _attr_deps_merged_link_infos(ctx: AnalysisContext) -> list[MergedLinkInfo]:
     return filter(None, [d.get(MergedLinkInfo) for d in _attr_deps(ctx)])
@@ -202,11 +198,19 @@ def _mk_cc(ctx: AnalysisContext, cc_args: list[typing.Any], cc_sh_filename: typi
     return _mk_script(ctx, cc_sh_filename, [compiler] + cc_args, {})
 
 # Pass '-cc ld.sh' to ocamlopt to use 'ld.sh' as the C linker.
+# Uses @argsfile to avoid ARG_MAX limits with large LTO link commands.
 def _mk_ld(ctx: AnalysisContext, link_args: list[typing.Any], ld_sh_filename: typing.Any) -> cmd_args:
     cxx_toolchain = get_cxx_toolchain_info(ctx)
     linker = cxx_toolchain.linker_info.linker
     linker_flags = cxx_toolchain.linker_info.linker_flags
-    return _mk_script(ctx, ld_sh_filename, [linker, linker_flags] + link_args, {})
+
+    argsfile_name = ld_sh_filename.removesuffix(".sh") + "_args.txt"
+    all_link_args = cmd_args(linker_flags)
+    all_link_args.add(link_args)
+    argsfile, _ = ctx.actions.write(argsfile_name, all_link_args, allow_args = True, with_inputs = True)
+
+    argsfile_ref = cmd_args(argsfile, format = "@{}", hidden = all_link_args)
+    return _mk_script(ctx, ld_sh_filename, [linker, argsfile_ref], {})
 
 # This should get called only once for any invocation of `ocaml_library_impl`,
 # `ocaml_binary_impl` (or `prebuilt_ocaml_library_impl`) and choice of
@@ -458,7 +462,7 @@ def _compile(ctx: AnalysisContext, compiler: cmd_args, build_mode: BuildMode) ->
     # 'cmxs_order' without regard for which.
     cmxs_order = ctx.actions.declare_output("cmxs_order_" + build_mode.value + ".lst")
 
-    pre = cxx_merge_cpreprocessors(ctx, [], filter(None, [d.get(CPreprocessorInfo) for d in _attr_deps(ctx)]))
+    pre = cxx_merge_cpreprocessors(ctx.actions, [], filter(None, [d.get(CPreprocessorInfo) for d in _attr_deps(ctx)]))
     pre_args = pre.set.project_as_args("args")
     cc_sh_filename = "cc_" + build_mode.value + ".sh"
     cc = _mk_cc(ctx, [pre_args], cc_sh_filename)
@@ -746,7 +750,13 @@ def ocaml_binary_impl(ctx: AnalysisContext) -> list[Provider]:
         ctx,
         ctx.actions,
         cxx_toolchain,
-        [get_link_args_for_strategy(ctx, dep_link_infos, LinkStrategy("static_pic"))],
+        [get_link_args_for_strategy(
+            ctx,
+            dep_link_infos,
+            LinkStrategy("static_pic"),
+            prefer_stripped = False,
+            transformation_spec_context = None,
+        )],
     )
     ld_nat = _mk_ld(ctx, [link_args_output.link_args], "ld_native.sh")
     ld_byt = _mk_ld(ctx, [link_args_output.link_args], "ld_bytecode.sh")
@@ -839,7 +849,13 @@ def ocaml_object_impl(ctx: AnalysisContext) -> list[Provider]:
         ctx,
         ctx.actions,
         cxx_toolchain,
-        [get_link_args_for_strategy(ctx, dep_link_infos, LinkStrategy("static_pic"))],
+        [get_link_args_for_strategy(
+            ctx,
+            dep_link_infos,
+            LinkStrategy("static_pic"),
+            prefer_stripped = False,
+            transformation_spec_context = None,
+        )],
     )
     ld = _mk_ld(ctx, [link_args_output.link_args], "ld.sh")
 
@@ -939,7 +955,13 @@ def ocaml_shared_impl(ctx: AnalysisContext) -> list[Provider]:
         ctx,
         ctx.actions,
         cxx_toolchain,
-        [get_link_args_for_strategy(ctx, dep_link_infos, LinkStrategy("static_pic"))],
+        [get_link_args_for_strategy(
+            ctx,
+            dep_link_infos,
+            LinkStrategy("static_pic"),
+            prefer_stripped = False,
+            transformation_spec_context = None,
+        )],
     )
 
     # 'ocamlopt.opt' with '-cc' fails to propagate '-shared' (and potentially

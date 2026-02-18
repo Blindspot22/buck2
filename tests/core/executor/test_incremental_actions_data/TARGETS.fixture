@@ -1,0 +1,38 @@
+load(":defs.bzl", "basic_incremental_action", "incremental_action_with_metadata_optout", "incremental_action_with_multiple_outputs")
+
+basic_incremental_action(
+    name = "basic_incremental_action",
+    script = "incremental_script.py",
+    invalidate = read_config("test", "seed", "42"),
+)
+
+incremental_action_with_metadata_optout(
+    name = "incremental_action_with_metadata_optout",
+)
+
+incremental_action_with_multiple_outputs(
+    name = "incremental_action_with_multiple_outputs",
+    script = "multi_incremental_script.py",
+    invalidate = read_config("test", "seed", "42"),
+)
+
+platform(
+    name = "p_default",
+    constraint_values = [],
+)
+
+platform(
+    name = "p_cat",
+    constraint_values = [
+        ":cat",
+    ],
+)
+
+constraint_setting(
+    name = "animal",
+)
+
+constraint_value(
+    name = "cat",
+    constraint_setting = ":animal",
+)

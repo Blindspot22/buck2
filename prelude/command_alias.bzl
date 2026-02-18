@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//os_lookup:defs.bzl", "Os", "OsLookup", "ScriptLanguage")
 load("@prelude//utils:arglike.bzl", "ArgLike")  # @unused: Used as a type
@@ -20,12 +21,13 @@ def command_alias_impl(ctx: AnalysisContext):
         base = _get_os_base(ctx, target_os.os)
 
     output = command_alias(
-        ctx,
-        "__command_alias_trampoline",
-        target_os,
-        base,
-        cmd_args(ctx.attrs.args),
-        ctx.attrs.env,
+        actions = ctx.actions,
+        path = ctx.attrs.executable_name,
+        target_os = target_os,
+        base = base,
+        args = cmd_args(ctx.attrs.args),
+        env = ctx.attrs.env,
+        labels = ctx.attrs.labels,
     )
 
     default_info = DefaultInfo(
@@ -40,6 +42,7 @@ def command_alias_impl(ctx: AnalysisContext):
     # probably be easier if we just always went the `output.cmd` route
     if output.maybe_directly_runnable == None or \
        ctx.attrs.run_using_single_arg or \
+       ctx.attrs.executable_name != None or \
        (len(ctx.attrs.platform_exe) > 0 and target_os.script == ScriptLanguage("sh")):
         run_info = RunInfo(args = output.cmd)
     else:
@@ -85,20 +88,37 @@ CommandAliasOutput = record(
 )
 
 def command_alias(
-        ctx: AnalysisContext,
+        *,
+        actions: AnalysisActions,
         # The path at which to write the output to, without an extension - that will be added
-        path: str,
+        path: str | None,
         # The target where this script should be able to run (this may actually be your exec platform)
         target_os: OsLookup,
         # Either the `RunInfo` to use, or in the case of a fat platform, the choice of `RunInfo`
         # depending on `uname`
         base: RunInfo | dict[str, RunInfo],
         args: cmd_args,
-        env: dict[str, ArgLike]) -> CommandAliasOutput:
+        env: dict[str, ArgLike],
+        labels: list[str]) -> CommandAliasOutput:
+    if path == "":
+        fail("Path cannot be empty string")
+
+    if path != None:
+        # Custom paths are usually provided for binaries that are searched for with a particular
+        # name. On Windows, the .bat extension is required, and well-behaved tools will respect the
+        # PATHEXT environment variable (which contains that extension). On Unix, no extension is
+        # expected for executables, and searches would likely fail if we added one.
+        unix_trampoline_path = path
+        windows_trampoline_path = path + ".bat"
+    else:
+        # Preserve the `.sh` extension in the default path, since many places have it hard-coded.
+        unix_trampoline_path = "__command_alias_trampoline.sh"
+        windows_trampoline_path = "__command_alias_trampoline.bat"
+
     if target_os.script == ScriptLanguage("sh"):
-        trampoline, hidden = _command_alias_write_trampoline_unix(ctx, path + ".sh", base, args, env)
+        trampoline, hidden = _command_alias_write_trampoline_unix(actions, unix_trampoline_path, base, args, env)
     elif target_os.script == ScriptLanguage("bat"):
-        trampoline, hidden = _command_alias_write_trampoline_windows(ctx, path + ".bat", base, args, env)
+        trampoline, hidden = _command_alias_write_trampoline_windows(actions, windows_trampoline_path, base, args, env, labels)
     else:
         fail("Unsupported script language: {}".format(target_os.script))
 
@@ -117,7 +137,7 @@ def command_alias(
     )
 
 def _command_alias_write_trampoline_unix(
-        ctx: AnalysisContext,
+        actions: AnalysisActions,
         path: str,
         base: RunInfo | dict[str, RunInfo],
         args: cmd_args,
@@ -143,9 +163,22 @@ def _command_alias_write_trampoline_unix(
     #
     # Instead, we use `BUCK_COMMAND_ALIAS_ABSOLUTE_PREFIX/`, verbatim, as an absolute prefix on the
     # cmd_args, and then replace that with the actual path of the script at runtime
+    #
+    # Resolve symlinks first to handle execution via symlinks (e.g., in link-trees)
     trampoline_args.add(
         """
-BASE=$(cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P)
+SCRIPT_PATH="$0"
+if [ -L "$SCRIPT_PATH" ]; then
+    TARGET="$(readlink "$SCRIPT_PATH")"
+    SCRIPT_PATH="$(dirname "$SCRIPT_PATH")/$TARGET"
+fi
+""",
+    )
+
+    # Calculate the base path and process arguments with the resolved path
+    trampoline_args.add(
+        """
+BASE=$(cd -- "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 ; pwd -P)
 R_ARGS=()
 for arg in "${ARGS[@]}"; do
     R_ARGS+=("${arg//BUCK_COMMAND_ALIAS_ABSOLUTE_PREFIX/$BASE}")
@@ -160,13 +193,13 @@ done
 
     trampoline_args.add('exec "${R_ARGS[@]}" "$@"')
 
-    trampoline = ctx.actions.declare_output(path)
+    trampoline = actions.declare_output(path)
     trampoline_args = cmd_args(
         trampoline_args,
         relative_to = (trampoline, 1),
         absolute_prefix = "BUCK_COMMAND_ALIAS_ABSOLUTE_PREFIX/",
     )
-    ctx.actions.write(
+    actions.write(
         trampoline.as_output(),
         trampoline_args,
         allow_args = True,
@@ -176,15 +209,16 @@ done
     return trampoline, trampoline_args
 
 def _command_alias_write_trampoline_windows(
-        ctx: AnalysisContext,
+        actions: AnalysisActions,
         path: str,
         base: RunInfo,
         args: cmd_args,
-        env: dict[str, ArgLike]) -> (Artifact, cmd_args):
+        env: dict[str, ArgLike],
+        labels: list[str]) -> (Artifact, cmd_args):
     trampoline_args = cmd_args()
     trampoline_args.add("@echo off")
 
-    if "close_stdin" in ctx.attrs.labels:
+    if "close_stdin" in labels:
         # Avoids waiting for input on the "Terminate batch job (Y/N)?" prompt.
         # The prompt itself is unavoidable, but we can avoid having to wait for input.
         # This will call the same trampoline batch file with stdin disabled
@@ -204,13 +238,13 @@ def _command_alias_write_trampoline_windows(
 
     trampoline_args.add(cmd)
 
-    trampoline = ctx.actions.declare_output(path)
+    trampoline = actions.declare_output(path)
     trampoline_args = cmd_args(
         trampoline_args,
         relative_to = (trampoline, 1),
         absolute_prefix = "%BUCK_COMMAND_ALIAS_ABSOLUTE%/",
     )
-    ctx.actions.write(
+    actions.write(
         trampoline.as_output(),
         trampoline_args,
         allow_args = True,

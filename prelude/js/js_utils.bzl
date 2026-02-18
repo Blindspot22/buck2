@@ -1,24 +1,20 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
-load("@prelude//:worker_tool.bzl", "WorkerToolInfo")
 load("@prelude//apple:apple_resource_types.bzl", "AppleResourceDestination", "AppleResourceSpec")
 load("@prelude//apple:resource_groups.bzl", "ResourceGraphInfo", "create_resource_graph")  # @unused `ResourceGraphInfo` used as a type
 load("@prelude//js:js_providers.bzl", "JsBundleInfo")
 load("@prelude//utils:argfile.bzl", "at_argfile")
 load("@prelude//utils:expect.bzl", "expect")
+load(":worker_tool.bzl", "WorkerToolInfo")
 
-RAM_BUNDLE_TYPES = {
-    "": "",
-    "rambundle-indexed": "indexed",
-}
-
-TRANSFORM_PROFILES = ["transform-profile-default", "hermes-stable", "hermes-canary"]
+TRANSFORM_PROFILES = ["hermes-legacy", "hermes-stable", "hermes-canary"]
 
 # Matches the default value for resolver.assetExts in metro-config
 ASSET_EXTENSIONS = [
@@ -55,13 +51,14 @@ ASSET_EXTENSIONS = [
     "ttf",
     # Archives (virtual files)
     "zip",
+    "lottie",
 ]
 
 # Matches the default value for resolver.platforms in metro-config
-ASSET_PLATFORMS = ["ios", "android", "windows", "macos", "macos_legacy", "web"]
+ASSET_PLATFORMS = ["ios", "android", "windows", "macos", "web"]
 
 def get_apple_resource_providers_for_js_bundle(ctx: AnalysisContext, js_bundle_info: JsBundleInfo, platform: str, skip_resources: bool) -> list[ResourceGraphInfo]:
-    if platform != "ios" and platform != "macos" and platform != "macos_legacy":
+    if platform != "ios" and platform != "macos":
         return []
 
     # `skip_resources` controls whether the JS resources should be skipped, not whether
@@ -126,7 +123,7 @@ def get_bundle_name(ctx: AnalysisContext, default_bundle_name: str) -> str:
     flavors = bundle_name_for_flavor_map.keys()
     for flavor in flavors:
         expect(
-            flavor == "android" or flavor == "ios" or flavor == "macos" or flavor == "macos_legacy" or flavor == "windows" or flavor == "vr",
+            flavor == "android" or flavor == "ios" or flavor == "macos" or flavor == "windows" or flavor == "vr",
             "Currently only support picking bundle name by platform!",
         )
 
@@ -142,7 +139,8 @@ def run_worker_commands(
         command_args_files: list[Artifact],
         identifier: str,
         category: str,
-        hidden_artifacts = [cmd_args]):
+        hidden_artifacts = [cmd_args],
+        has_content_based_path: bool = False):
     worker_args = cmd_args(
         "--command-args-file",
         command_args_files,
@@ -156,6 +154,7 @@ def run_worker_commands(
             actions = ctx.actions,
             name = paths.join(identifier, "{}.js_worker_argsfile".format(category)),
             args = worker_args,
+            has_content_based_path = has_content_based_path,
         ),
         hidden = [
             hidden_artifacts,
@@ -169,4 +168,5 @@ def run_worker_commands(
         identifier = identifier,
         # Handshake seems more prone to failure when running locally, so workaround by running remotely where possible.
         prefer_remote = True,
+        expect_eligible_for_dedupe = has_content_based_path,
     )

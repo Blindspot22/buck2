@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _artifacts(value: Artifact):
     return value
@@ -13,7 +14,7 @@ TransitiveOutputsTSet = transitive_set(args_projections = {"artifacts": _artifac
 JsLibraryInfo = provider(
     fields = {
         "output": provider_field(typing.Any, default = None),  # "artifact"
-        "transitive_outputs": provider_field(typing.Any, default = None),  # ["TransitiveOutputsTSet", None]
+        "transitive_outputs": provider_field(typing.Any, default = None),  # "TransitiveOutputsTSet"
     },
 )
 
@@ -43,6 +44,6 @@ def get_transitive_outputs(
     if value:
         kwargs["value"] = value
     if deps:
-        kwargs["children"] = filter(None, [js_library_info.transitive_outputs for js_library_info in deps])
+        kwargs["children"] = [js_library_info.transitive_outputs for js_library_info in deps]
 
     return actions.tset(TransitiveOutputsTSet, **kwargs)

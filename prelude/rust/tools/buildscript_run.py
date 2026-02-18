@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """
 Run a crate's Cargo buildscript.
@@ -15,21 +16,22 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, IO, NamedTuple, Optional
+from typing import Any, IO, NamedTuple, Optional
 
 
 IS_WINDOWS: bool = os.name == "nt"
+TOOL_CWD: str = os.path.join(os.getcwd(), "")
 
 
 def eprint(*args: Any, **kwargs: Any) -> None:
     print(*args, end="\n", file=sys.stderr, flush=True, **kwargs)
 
 
-def cfg_env(rustc_cfg: Path) -> Dict[str, str]:
+def cfg_env(rustc_cfg: Path) -> dict[str, str]:
     with rustc_cfg.open(encoding="utf-8") as f:
         lines = f.readlines()
 
-    cfgs: Dict[str, str] = {}
+    cfgs: dict[str, str] = {}
     for line in lines:
         if (
             line.startswith("unix")
@@ -100,7 +102,9 @@ def create_cwd(path: Path, manifest_dir: Path) -> Path:
         if dir_entry.name not in ["rust-toolchain", "rust-toolchain.toml"]:
             link = path.joinpath(dir_entry.name)
             link.unlink(missing_ok=True)
-            link.symlink_to(os.path.relpath(dir_entry, path))
+            link.symlink_to(
+                os.path.relpath(dir_entry, path), target_is_directory=dir_entry.is_dir()
+            )
 
     return path
 
@@ -111,7 +115,7 @@ def create_cwd(path: Path, manifest_dir: Path) -> Path:
 # when such a thing happens, but in practice they don't. To mitigate, we
 # manually invoke `rustc --version` and make sure that succeeds.
 def ensure_rustc_available(
-    env: Dict[str, str],
+    env: dict[str, str],
     cwd: Path,
     target: str,
 ) -> None:
@@ -158,7 +162,7 @@ def ensure_rustc_available(
 
 def run_buildscript(
     buildscript: str,
-    env: Dict[str, str],
+    env: dict[str, str],
     cwd: Path,
 ) -> str:
     try:
@@ -182,6 +186,8 @@ class Args(NamedTuple):
     manifest_dir: Path
     create_cwd: Path
     outfile: IO[str]
+    rustc_link_lib: bool
+    rustc_link_search: bool
 
 
 def arg_parse() -> Args:
@@ -192,6 +198,8 @@ def arg_parse() -> Args:
     parser.add_argument("--manifest-dir", type=Path, required=True)
     parser.add_argument("--create-cwd", type=Path, required=True)
     parser.add_argument("--outfile", type=argparse.FileType("w"), required=True)
+    parser.add_argument("--rustc-link-lib", action="store_true")
+    parser.add_argument("--rustc-link-search", action="store_true")
 
     return Args(**vars(parser.parse_args()))
 
@@ -226,14 +234,46 @@ def main() -> None:  # noqa: C901
 
     script_output = run_buildscript(args.buildscript, env=env, cwd=cwd)
 
-    cargo_rustc_cfg_pattern = re.compile("^cargo:rustc-cfg=(.*)")
+    cargo_rustc_cfg_pattern = re.compile("^cargo::?rustc-cfg=(.*)")
+    cargo_rustc_env_pattern = re.compile("^cargo::?rustc-env=(.+?)=(.*)")
+    cargo_rustc_link_lib_pattern = re.compile("^cargo::?rustc-link-lib=(.*)")
+    cargo_rustc_link_search_pattern = re.compile(
+        "^cargo::?rustc-link-search=([a-z]+=)?(.+)"
+    )
     flags = ""
     for line in script_output.split("\n"):
         cargo_rustc_cfg_match = cargo_rustc_cfg_pattern.match(line)
         if cargo_rustc_cfg_match:
-            flags += "--cfg={}\n".format(cargo_rustc_cfg_match.group(1))
-        else:
-            print(line, end="\n")
+            value = cargo_rustc_cfg_match.group(1)
+            flags += f"--cfg={value}\n"
+            continue
+        cargo_rustc_env_match = cargo_rustc_env_pattern.match(line)
+        if cargo_rustc_env_match:
+            key = cargo_rustc_env_match.group(1)
+            value = cargo_rustc_env_match.group(2)
+            if value.startswith(TOOL_CWD):
+                relative_path = value[len(TOOL_CWD) :]
+                flags += f"--env-set={key}=$(abspath {relative_path})\n"
+            else:
+                flags += f"--env-set={key}={value}\n"
+            continue
+        cargo_rustc_link_lib_match = cargo_rustc_link_lib_pattern.match(line)
+        if args.rustc_link_lib and cargo_rustc_link_lib_match:
+            value = cargo_rustc_link_lib_match.group(1)
+            flags += f"-l{value}\n"
+            continue
+        cargo_rustc_link_search_match = cargo_rustc_link_search_pattern.match(line)
+        if args.rustc_link_search and cargo_rustc_link_search_match:
+            kind = cargo_rustc_link_search_match.group(1) or ""
+            path = cargo_rustc_link_search_match.group(2)
+            if path.startswith(TOOL_CWD):
+                relative_path = path[len(TOOL_CWD) :]
+                flags += f"-L{kind}$(abspath {relative_path})\n"
+            else:
+                # Disregard link search not located within the build script's out dir.
+                pass
+            continue
+        print(line, end="\n")
     args.outfile.write(flags)
 
 

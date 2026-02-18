@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -11,14 +12,15 @@ import argparse
 import asyncio
 import json
 import sys
-from enum import Enum
 
+from .debug import debug_dump_replay
 from .ios import prepare_simulator
+from .simulator import SimulatorType
 
 
 def _args_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Utility to set up iOS simulators which are used by buck to run tests locally."
+        description="Utility to set up simulators which are used by buck to run tests locally."
     )
     parser.add_argument(
         "--simulator-manager",
@@ -29,13 +31,15 @@ def _args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--type",
         metavar="<TYPE>",
-        type=_ResourceType,
-        choices=[e.value for e in _ResourceType],
+        type=SimulatorType,
+        choices=[e.value for e in SimulatorType],
         required=True,
         help=f"""
             Type of required resources.
-            Pass `{_ResourceType.iosUnbootedSimulator}` to get an unbooted iOS simulator.
-            Pass `{_ResourceType.iosBootedSimulator}` to get a booted iOS simulator.
+            Pass `{SimulatorType.iphoneUnbooted}` to get an unbooted iPhone simulator.
+            Pass `{SimulatorType.iphoneBooted}` to get a booted iPhone simulator.
+            Pass `{SimulatorType.ipad}` to get an iPad simulator.
+            Pass `{SimulatorType.watch}` to get an Apple Watch simulator.
         """,
     )
     parser.add_argument(
@@ -53,20 +57,16 @@ def _args_parser() -> argparse.ArgumentParser:
     return parser
 
 
-class _ResourceType(str, Enum):
-    iosUnbootedSimulator = "ios_unbooted_simulator"
-    iosBootedSimulator = "ios_booted_simulator"
-
-
 def main() -> None:
+    debug_dump_replay()
     args = _args_parser().parse_args()
-    booted = args.type == _ResourceType.iosBootedSimulator
+    device = args.device if args.device else args.type.default_device()
     sim = asyncio.run(
         prepare_simulator(
             simulator_manager=args.simulator_manager,
-            booted=booted,
+            simulator_type=args.type,
             os_version=args.os_version,
-            device=args.device,
+            device=device,
         )
     )
     result = {

@@ -1,19 +1,21 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
 
 use buck2_artifact::artifact::artifact_type::Artifact;
-use buck2_core::fs::paths::RelativePathBuf;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::artifact::fs::ExecutorFs;
+use buck2_fs::paths::RelativePathBuf;
 use indexmap::IndexSet;
 
 use crate::interpreter::rule_defs::cmd_args::traits::CommandLineContext;
@@ -37,7 +39,10 @@ pub struct DefaultCommandLineContext<'v> {
     fs: &'v ExecutorFs<'v>,
     // First element is list of artifacts, each corresponding to a file with macro contents. Ordering is very important.
     // Second element is a current position in that list.
-    maybe_macros_state: Option<(&'v IndexSet<Artifact>, usize)>,
+    maybe_macros_state: Option<(
+        &'v IndexSet<(&'v Artifact, Option<&'v ContentBasedPathHash>)>,
+        usize,
+    )>,
 }
 
 impl<'v> DefaultCommandLineContext<'v> {
@@ -53,7 +58,7 @@ impl<'v> DefaultCommandLineContext<'v> {
 
     pub fn new_with_write_to_file_macros_support(
         fs: &'v ExecutorFs,
-        macro_files: &'v IndexSet<Artifact>,
+        macro_files: &'v IndexSet<(&'v Artifact, Option<&'v ContentBasedPathHash>)>,
     ) -> Self {
         Self {
             fs,
@@ -62,7 +67,7 @@ impl<'v> DefaultCommandLineContext<'v> {
     }
 
     /// The `ArtifactFilesystem` to resolve `Artifact`s
-    pub fn fs(&self) -> &ExecutorFs {
+    pub fn fs(&self) -> &ExecutorFs<'_> {
         self.fs
     }
 }
@@ -71,14 +76,14 @@ impl CommandLineContext for DefaultCommandLineContext<'_> {
     fn resolve_project_path(
         &self,
         path: ProjectRelativePathBuf,
-    ) -> buck2_error::Result<CommandLineLocation> {
+    ) -> buck2_error::Result<CommandLineLocation<'_>> {
         Ok(CommandLineLocation::from_relative_path(
             path.into(),
             self.fs.path_separator(),
         ))
     }
 
-    fn fs(&self) -> &ExecutorFs {
+    fn fs(&self) -> &ExecutorFs<'_> {
         self.fs
     }
 
@@ -89,7 +94,7 @@ impl CommandLineContext for DefaultCommandLineContext<'_> {
             }
             self.maybe_macros_state = Some((files, pos + 1));
             Ok(self
-                .resolve_project_path(files[pos].resolve_path(self.fs.fs())?)?
+                .resolve_project_path(files[pos].0.resolve_path(self.fs.fs(), files[pos].1)?)?
                 .into_relative())
         } else {
             Err(CommandLineBuilderErrors::WriteToFileMacroNotSupported.into())
@@ -113,15 +118,15 @@ impl CommandLineContext for AbsCommandLineContext<'_> {
     fn resolve_project_path(
         &self,
         path: ProjectRelativePathBuf,
-    ) -> buck2_error::Result<CommandLineLocation> {
+    ) -> buck2_error::Result<CommandLineLocation<'_>> {
         Ok(CommandLineLocation::from_root(
             self.0.fs().fs().fs(),
-            path.into(),
+            path,
             self.fs().path_separator(),
         ))
     }
 
-    fn fs(&self) -> &ExecutorFs {
+    fn fs(&self) -> &ExecutorFs<'_> {
         self.0.fs()
     }
 
@@ -145,9 +150,10 @@ mod tests {
     use buck2_core::execution_types::executor_config::PathSeparatorKind;
     use buck2_core::fs::artifact_path_resolver::ArtifactFs;
     use buck2_core::fs::buck_out_path::BuckOutPathResolver;
-    use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
     use buck2_core::fs::project::ProjectRoot;
     use buck2_core::fs::project_rel_path::ProjectRelativePath;
+    use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+    use fxhash::FxHashMap;
 
     use super::*;
     use crate::interpreter::rule_defs::cmd_args::traits::CommandLineArgLike;
@@ -170,7 +176,7 @@ mod tests {
         let mut cli = Vec::<String>::new();
         let mut ctx = DefaultCommandLineContext::new(&executor_fs);
 
-        "foo".add_to_command_line(&mut cli, &mut ctx)?;
+        "foo".add_to_command_line(&mut cli, &mut ctx, &FxHashMap::default())?;
 
         assert_eq!(&["foo".to_owned()], cli.as_slice());
         Ok(())

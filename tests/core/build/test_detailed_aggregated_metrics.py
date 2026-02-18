@@ -1,14 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+# pyre-unsafe
 
 import typing
 
 import pytest
-
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test
@@ -38,7 +40,7 @@ def parse_metrics(metrics: typing.Any) -> tuple[typing.Any, dict[str, typing.Any
 
     def stringify(t):
         t = t["label"]
-        return f"{t["package"]}:{t["name"]}"
+        return f"{t['package']}:{t['name']}"
 
     per_targets = {
         stringify(v["target"]): v for v in metrics["top_level_target_metrics"]

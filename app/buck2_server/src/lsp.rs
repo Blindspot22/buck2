@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -16,15 +17,13 @@ use std::thread;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_cli_proto::*;
 use buck2_common::dice::cells::HasCellResolver;
-use buck2_common::dice::file_ops::DiceFileComputations;
+use buck2_common::file_ops::dice::DiceFileComputations;
 use buck2_common::package_listing::dice::DicePackageListingResolver;
 use buck2_core::bxl::BxlFilePath;
 use buck2_core::bzl::ImportPath;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::build_file_cell::BuildFileCell;
 use buck2_core::cells::cell_path::CellPathRef;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::package::package_relative_path::PackageRelativePath;
@@ -33,11 +32,14 @@ use buck2_core::pattern::pattern::ParsedPattern;
 use buck2_core::pattern::pattern::TargetParsingRel;
 use buck2_core::pattern::pattern_type::ProvidersPatternExtra;
 use buck2_core::target::name::TargetName;
-use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_events::dispatch::span_async;
 use buck2_events::dispatch::with_dispatcher;
 use buck2_events::dispatch::with_dispatcher_async;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_interpreter::allow_relative_paths::HasAllowRelativePaths;
 use buck2_interpreter::load_module::InterpreterCalculation;
 use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
 use buck2_interpreter::paths::path::OwnedStarlarkPath;
@@ -106,7 +108,7 @@ impl DocsCacheManager {
     async fn get_cache(
         &self,
         mut current_dice_ctx: DiceTransaction,
-    ) -> buck2_error::Result<MutexGuard<DocsCache>> {
+    ) -> buck2_error::Result<MutexGuard<'_, DocsCache>> {
         let mut docs_cache = self.docs_cache.lock().await;
 
         let fs = &self.fs;
@@ -357,7 +359,7 @@ impl<'a> BuckLspContext<'a> {
         let cell_resolver = self
             .with_dice_ctx(|mut dice_ctx| async move { dice_ctx.get_cell_resolver().await })
             .await?;
-        let cell_path = cell_resolver.get_cell_path(&relative_path)?;
+        let cell_path = cell_resolver.get_cell_path(&relative_path);
 
         match path.extension() {
             Some(e) if e == "bxl" => Ok(OwnedStarlarkModulePath::BxlFile(BxlFilePath::new(
@@ -387,11 +389,13 @@ impl<'a> BuckLspContext<'a> {
             .with_dice_ctx(|mut dice_ctx| async move { dice_ctx.get_cell_resolver().await })
             .await?;
 
-        let path_str = path.to_str().buck_error_context("Path is not UTF-8")?;
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| internal_error!("Path is not UTF-8"))?;
 
         let cell_path = cell_resolver.get_cell_path(&ProjectRelativePath::new(
             path_str.strip_prefix('/').unwrap_or(path_str),
-        )?)?;
+        )?);
 
         match path.extension() {
             Some(e) if e == "bxl" => Ok(OwnedStarlarkModulePath::BxlFile(BxlFilePath::new(
@@ -492,12 +496,15 @@ impl<'a> BuckLspContext<'a> {
         current_package: CellPathRef<'_>,
         literal: &str,
     ) -> buck2_error::Result<Option<StringLiteralResult>> {
-        let (artifact_fs, cell_alias_resolver) = self
+        let (artifact_fs, cell_alias_resolver, dir_with_allowed_relative_dirs) = self
             .with_dice_ctx(|mut dice_ctx| async move {
                 Ok((
                     dice_ctx.get_artifact_fs().await?,
                     dice_ctx
                         .get_cell_alias_resolver(current_package.cell())
+                        .await?,
+                    dice_ctx
+                        .dirs_allowing_relative_paths(current_package.to_owned())
                         .await?,
                 ))
             })
@@ -505,7 +512,11 @@ impl<'a> BuckLspContext<'a> {
         let cell_resolver = artifact_fs.cell_resolver();
         match ParsedPattern::<ProvidersPatternExtra>::parse_not_relaxed(
             literal,
-            TargetParsingRel::AllowLimitedRelative(current_package),
+            if dir_with_allowed_relative_dirs.has_allowed_relative_dir() {
+                TargetParsingRel::AllowRelative(&dir_with_allowed_relative_dirs, None)
+            } else {
+                TargetParsingRel::AllowLimitedRelative(current_package)
+            },
             &cell_resolver,
             &cell_alias_resolver,
         ) {
@@ -568,7 +579,7 @@ impl LspContext for BuckLspContext<'_> {
         path: &str,
         current_file: &LspUrl,
         _workspace_root: Option<&Path>,
-    ) -> anyhow::Result<LspUrl> {
+    ) -> Result<LspUrl, String> {
         let dispatcher = self.server_ctx.events().dupe();
         self.runtime
             .block_on(with_dispatcher_async(dispatcher, async {
@@ -599,15 +610,16 @@ impl LspContext for BuckLspContext<'_> {
                             })
                             .await?;
 
-                        Ok(url)
+                        buck2_error::Ok(url)
                     }
-                    _ => Err(buck2_error::Error::from(ResolveLoadError::WrongScheme(
+                    _ => Err(ResolveLoadError::WrongScheme(
                         "file://".to_owned(),
                         current_file.clone(),
-                    ))
+                    )
                     .into()),
                 }
             }))
+            .map_err(|e| format!("{:#}", e))
     }
 
     fn resolve_string_literal(
@@ -615,7 +627,7 @@ impl LspContext for BuckLspContext<'_> {
         literal: &str,
         current_file: &LspUrl,
         _workspace_root: Option<&Path>,
-    ) -> anyhow::Result<Option<StringLiteralResult>> {
+    ) -> Result<Option<StringLiteralResult>, String> {
         let dispatcher = self.server_ctx.events().dupe();
         self.runtime
             .block_on(with_dispatcher_async(dispatcher, async {
@@ -648,15 +660,15 @@ impl LspContext for BuckLspContext<'_> {
                 {
                     Ok(Some(string_literal))
                 } else {
-                    Ok(None)
+                    buck2_error::Ok(None)
                 }
             }))
+            .map_err(|e| format!("{:#}", e))
     }
 
-    fn get_load_contents(&self, uri: &LspUrl) -> anyhow::Result<Option<String>> {
+    fn get_load_contents(&self, uri: &LspUrl) -> Result<Option<String>, String> {
         let dispatcher = self.server_ctx.events().dupe();
-        Ok(self
-            .runtime
+        self.runtime
             .block_on(with_dispatcher_async(dispatcher, async {
                 match uri {
                     LspUrl::File(path) => {
@@ -684,14 +696,15 @@ impl LspContext for BuckLspContext<'_> {
                         BuckLspContextError::WrongScheme("file://".to_owned(), uri.clone()).into(),
                     ),
                 }
-            }))?)
+            }))
+            .map_err(|e| format!("{:#}", e))
     }
 
     fn get_url_for_global_symbol(
         &self,
         _current_file: &LspUrl,
         symbol: &str,
-    ) -> anyhow::Result<Option<LspUrl>> {
+    ) -> Result<Option<LspUrl>, String> {
         let dispatcher = self.server_ctx.events().dupe();
         self.runtime
             .block_on(with_dispatcher_async(dispatcher, async {
@@ -700,8 +713,9 @@ impl LspContext for BuckLspContext<'_> {
                         self.docs_cache_manager.get_cache(dice_ctx).await
                     })
                     .await?;
-                Ok(docs_cache.url_for_symbol(symbol).cloned())
+                buck2_error::Ok(docs_cache.url_for_symbol(symbol).cloned())
             }))
+            .map_err(|e| format!("{:#}", e))
     }
 
     fn render_as_load(
@@ -709,12 +723,8 @@ impl LspContext for BuckLspContext<'_> {
         _target: &LspUrl,
         _current_file: &LspUrl,
         _workspace_root: Option<&Path>,
-    ) -> anyhow::Result<String> {
-        Err(buck2_error::buck2_error!(
-            buck2_error::ErrorTag::Unimplemented,
-            "Not yet implemented, render_as_load"
-        )
-        .into())
+    ) -> Result<String, String> {
+        Err("Not yet implemented, render_as_load".to_owned())
     }
 
     fn get_environment(&self, _uri: &LspUrl) -> DocModule {
@@ -727,16 +737,13 @@ pub(crate) async fn run_lsp_server_command(
     partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::LspMessage>,
     req: StreamingRequestHandler<buck2_cli_proto::LspRequest>,
 ) -> buck2_error::Result<buck2_cli_proto::LspResponse> {
-    let start_event = buck2_data::CommandStart {
-        metadata: ctx.request_metadata().await?,
-        data: Some(buck2_data::LspCommandStart {}.into()),
-    };
+    let start_event = ctx
+        .command_start_event(buck2_data::LspCommandStart {}.into())
+        .await?;
     span_async(start_event, async move {
-        let result = run_lsp_server(ctx, partial_result_dispatcher, req)
-            .await
-            .map_err(Into::into);
+        let result = run_lsp_server(ctx, partial_result_dispatcher, req).await;
         let end_event = command_end(&result, buck2_data::LspCommandEnd {});
-        (result.map_err(Into::into), end_event)
+        (result, end_event)
     })
     .await
 }

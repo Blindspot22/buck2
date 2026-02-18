@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Paths relative to 'Cell's
@@ -18,24 +19,38 @@ use std::ops::Deref;
 use std::path::PathBuf;
 
 use allocative::Allocative;
+use buck2_fs::paths::RelativePathBuf;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::fmt::quoted_display;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathIter;
 use derivative::Derivative;
 use derive_more::Display;
 use gazebo::transmute;
+use pagable::Pagable;
+use pagable::PagableBoxDeserialize;
+use pagable::PagableDeserialize;
+use pagable::PagableDeserializer;
+use pagable::PagableSerialize;
 use ref_cast::RefCast;
 use relative_path::RelativePath;
 use serde::Serialize;
 use strong_hash::StrongHash;
 
-use crate::fs::paths::RelativePathBuf;
-use crate::fs::paths::file_name::FileName;
-use crate::fs::paths::fmt::quoted_display;
-use crate::fs::paths::forward_rel_path::ForwardRelativePath;
-use crate::fs::paths::forward_rel_path::ForwardRelativePathBuf;
-use crate::fs::paths::forward_rel_path::ForwardRelativePathIter;
-
 /// A un-owned forward pointing, fully normalized path that is relative to the cell
 #[derive(
-    Display, Derivative, Hash, PartialEq, Eq, RefCast, PartialOrd, Ord, Allocative, StrongHash
+    Display,
+    Derivative,
+    Hash,
+    PartialEq,
+    Eq,
+    RefCast,
+    PartialOrd,
+    Ord,
+    Allocative,
+    StrongHash,
+    PagableSerialize
 )]
 #[derivative(Debug)]
 #[repr(transparent)]
@@ -46,7 +61,9 @@ pub struct CellRelativePath(
 /// The owned version of the 'CellRelativePath'
 #[derive(Clone, Display, Derivative)]
 // split in two lines because formatters disagree
-#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Allocative)]
+#[derive(
+    Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Allocative, StrongHash, Pagable
+)]
 #[derivative(Debug)]
 pub struct CellRelativePathBuf(
     #[derivative(Debug(format_with = "quoted_display"))] ForwardRelativePathBuf,
@@ -55,6 +72,15 @@ pub struct CellRelativePathBuf(
 impl Clone for Box<CellRelativePath> {
     fn clone(&self) -> Self {
         self.to_box()
+    }
+}
+
+impl<'de> PagableBoxDeserialize<'de> for CellRelativePath {
+    fn deserialize_box<D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Box<Self>> {
+        let owned = <CellRelativePathBuf as PagableDeserialize>::pagable_deserialize(deserializer)?;
+        Ok(owned.into_box())
     }
 }
 
@@ -151,7 +177,7 @@ impl CellRelativePath {
     ///
     /// use buck2_core::cells::paths::CellRelativePath;
     /// use buck2_core::cells::paths::CellRelativePathBuf;
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+    /// use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
     ///
     /// let path = CellRelativePath::from_path("foo/bar")?;
     /// let other = ForwardRelativePath::new("baz")?;
@@ -190,7 +216,7 @@ impl CellRelativePath {
     ///
     /// ```
     /// use buck2_core::cells::paths::CellRelativePath;
-    /// use buck2_core::fs::paths::file_name::FileName;
+    /// use buck2_fs::paths::file_name::FileName;
     ///
     /// assert_eq!(
     ///     Some(FileName::unchecked_new("bin")),
@@ -211,7 +237,7 @@ impl CellRelativePath {
     ///
     /// ```
     /// use buck2_core::cells::paths::CellRelativePath;
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+    /// use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
     ///
     /// let path = CellRelativePath::from_path("test/haha/foo.txt")?;
     ///
@@ -256,7 +282,7 @@ impl CellRelativePath {
     /// use std::path::Path;
     ///
     /// use buck2_core::cells::paths::CellRelativePath;
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+    /// use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
     ///
     /// let path = CellRelativePath::from_path("some/foo")?;
     ///
@@ -268,7 +294,7 @@ impl CellRelativePath {
         self.0.ends_with(child.as_ref())
     }
 
-    /// Extracts the stem (non-extension) portion of [`self.file_name`].
+    /// Extracts the stem (non-extension) portion of `self.file_name`.
     ///
     /// The stem is:
     ///
@@ -291,7 +317,7 @@ impl CellRelativePath {
         self.0.file_stem()
     }
 
-    /// Extracts the extension of [`self.file_name`], if possible.
+    /// Extracts the extension of `self.file_name`, if possible.
     ///
     /// ```
     /// use buck2_core::cells::paths::CellRelativePath;
@@ -343,7 +369,7 @@ impl CellRelativePath {
     ///
     /// ```
     /// use buck2_core::cells::paths::CellRelativePath;
-    /// use buck2_core::fs::paths::file_name::FileName;
+    /// use buck2_fs::paths::file_name::FileName;
     ///
     /// let p = CellRelativePath::from_path("foo/bar/baz")?;
     /// let mut it = p.iter();
@@ -355,7 +381,7 @@ impl CellRelativePath {
     ///
     /// # buck2_error::Ok(())
     /// ```
-    pub fn iter(&self) -> ForwardRelativePathIter {
+    pub fn iter(&self) -> ForwardRelativePathIter<'_> {
         self.0.iter()
     }
 
@@ -374,7 +400,7 @@ impl<'a> From<&'a ForwardRelativePath> for &'a CellRelativePath {
     /// use std::convert::From;
     ///
     /// use buck2_core::cells::paths::CellRelativePath;
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+    /// use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
     ///
     /// let f = ForwardRelativePath::new("foo")?;
     ///
@@ -461,7 +487,7 @@ impl<'a> TryFrom<&'a str> for &'a CellRelativePath {
     /// use std::convert::TryFrom;
     ///
     /// use buck2_core::cells::paths::CellRelativePath;
-    /// use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+    /// use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
     ///
     /// assert!(<&CellRelativePath>::try_from("foo/bar").is_ok());
     /// assert!(<&CellRelativePath>::try_from("").is_ok());
@@ -483,7 +509,7 @@ impl<'a> TryFrom<&'a RelativePath> for &'a CellRelativePath {
     /// use std::convert::TryFrom;
     ///
     /// use buck2_core::cells::paths::CellRelativePath;
-    /// use buck2_core::fs::paths::RelativePath;
+    /// use buck2_fs::paths::RelativePath;
     ///
     /// assert!(<&CellRelativePath>::try_from(RelativePath::new("foo/bar")).is_ok());
     /// assert!(<&CellRelativePath>::try_from(RelativePath::new("")).is_ok());
@@ -530,7 +556,7 @@ impl TryFrom<RelativePathBuf> for CellRelativePathBuf {
     /// use std::convert::TryFrom;
     ///
     /// use buck2_core::cells::paths::CellRelativePathBuf;
-    /// use buck2_core::fs::paths::RelativePathBuf;
+    /// use buck2_fs::paths::RelativePathBuf;
     ///
     /// assert!(CellRelativePathBuf::try_from(RelativePathBuf::from("foo/bar")).is_ok());
     /// assert!(CellRelativePathBuf::try_from(RelativePathBuf::from("")).is_ok());

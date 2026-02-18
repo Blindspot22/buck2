@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//java:java_toolchain.bzl",
@@ -75,17 +76,17 @@ def create_class_to_source_map_from_jar(
         jar: Artifact,
         srcs: list[Artifact],
         sources_jar_name: [str, None] = None) -> (Artifact, Artifact | None):
-    output = actions.declare_output(name)
+    output = actions.declare_output(name, has_content_based_path = True)
     cmd = cmd_args(java_toolchain.gen_class_to_source_map[RunInfo])
     if java_toolchain.gen_class_to_source_map_include_sourceless_compiled_packages != None:
         for item in java_toolchain.gen_class_to_source_map_include_sourceless_compiled_packages:
             cmd.add("-i", item)
     cmd.add("-o", output.as_output())
     cmd.add(jar)
-    cmd.add(at_argfile(actions = actions, name = "class_to_srcs_map_argsfile.txt", args = srcs))
+    cmd.add(at_argfile(actions = actions, name = "class_to_srcs_map_argsfile.txt", args = srcs, has_content_based_path = True))
     sources_jar = None
     if sources_jar_name:
-        sources_jar = actions.declare_output(sources_jar_name)
+        sources_jar = actions.declare_output(sources_jar_name, has_content_based_path = True)
         cmd.add("--sources_jar", sources_jar.as_output())
     actions.run(cmd, category = "class_to_srcs_map")
     return (output, sources_jar)
@@ -99,7 +100,7 @@ def maybe_create_class_to_source_map_debuginfo(
     if java_toolchain.gen_class_to_source_map_debuginfo == None:
         return None
 
-    output = actions.declare_output(name)
+    output = actions.declare_output(name, has_content_based_path = True)
     cmd = cmd_args(java_toolchain.gen_class_to_source_map_debuginfo[RunInfo])
     cmd.add("gen")
     cmd.add("-o", output.as_output())
@@ -113,7 +114,7 @@ def merge_class_to_source_map_from_jar(
         java_toolchain: JavaToolchainInfo,
         relative_to: [CellRoot, None],
         deps: list[JavaClassToSourceMapInfo]) -> Artifact:
-    output = actions.declare_output(name)
+    output = actions.declare_output(name, has_content_based_path = True)
 
     tset = actions.tset(
         JavaClassToSourceMapTset,
@@ -121,7 +122,7 @@ def merge_class_to_source_map_from_jar(
         children = [d.tset for d in deps],
     )
     class_to_source_files = tset.project_as_args("class_to_src_map")
-    mappings_file = actions.write("class_to_src_map.txt", class_to_source_files)
+    mappings_file = actions.write("class_to_src_map.txt", class_to_source_files, has_content_based_path = True)
 
     cmd = cmd_args(
         java_toolchain.merge_class_to_source_maps[RunInfo],
@@ -138,7 +139,7 @@ def _create_merged_debug_info(
         java_toolchain: JavaToolchainInfo,
         tset_debuginfo: TransitiveSet,
         name: str):
-    output = actions.declare_output(name)
+    output = actions.declare_output(name, has_content_based_path = True)
     cmd = cmd_args(java_toolchain.gen_class_to_source_map_debuginfo[RunInfo])
     cmd.add("merge")
     cmd.add(cmd_args(output.as_output(), format = "-o={}"))
@@ -148,7 +149,7 @@ def _create_merged_debug_info(
         children = [tset_debuginfo],
     )
     input_files = tset.project_as_args("class_to_src_map")
-    cmd.add(at_argfile(actions = actions, name = "debuginfo_list.txt", args = input_files))
+    cmd.add(at_argfile(actions = actions, name = "debuginfo_list.txt", args = input_files, has_content_based_path = True))
 
     actions.run(cmd, category = "merged_debuginfo")
     return output

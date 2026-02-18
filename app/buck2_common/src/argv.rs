@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -12,7 +13,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use buck2_core::cells::cell_path::CellPath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use gazebo::prelude::VecExt;
 
 /// Argv contains the bare process argv and the "expanded" argv. The expanded argv is
@@ -58,10 +59,10 @@ impl Display for ArgFileKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ArgFileKind::PythonExecutable(abs_path_buf, Some(flag)) => {
-                write!(f, "@{}#{}", abs_path_buf, flag)
+                write!(f, "@{abs_path_buf}#{flag}")
             }
-            ArgFileKind::PythonExecutable(abs_path_buf, None) => write!(f, "@{}", abs_path_buf),
-            ArgFileKind::Path(abs_path_buf) => write!(f, "@{}", abs_path_buf),
+            ArgFileKind::PythonExecutable(abs_path_buf, None) => write!(f, "@{abs_path_buf}"),
+            ArgFileKind::Path(abs_path_buf) => write!(f, "@{abs_path_buf}"),
             ArgFileKind::Stdin => f.write_str("@-"),
         }
     }

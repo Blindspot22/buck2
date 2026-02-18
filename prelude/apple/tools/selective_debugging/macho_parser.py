@@ -1,14 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
+import struct
 import sys
-from typing import BinaryIO, List, Optional, Tuple
+from typing import BinaryIO, Optional
 
 from .macho import (
     LC_CODE_SIGNATURE,
@@ -21,13 +23,24 @@ from .macho import (
     SymtabCommand,
 )
 
+"""
+// Each LC_SYMTAB entry consists of the following fields:
+// - String Index: 4 bytes, offset into the string table (I == unsigned int)
+// - Type: 1 byte (B == unsigned char)
+// - Section: 1 byte, (B == unsigned char)
+// - Description: 2 bytes (H == unsigned short)
+// - Value: 8 bytes on 64bit, 4 bytes on 32bit (Q == unsigned long long)
+// - Everything is little-endian representation (denoted by <)
+"""
+_LC_SYMTAB_STRUCT = struct.Struct("<IBBHQ")
+
 
 def _read_bytes(f: BinaryIO, n_bytes: int) -> int:
     b = f.read(n_bytes)
     return int.from_bytes(b, "little")
 
 
-def load_header(f: BinaryIO, offset: int) -> Tuple[MachOHeader, int]:
+def load_header(f: BinaryIO, offset: int) -> tuple[MachOHeader, int]:
     f.seek(offset)
     magic = _read_bytes(f, 4)
     cpu_type = _read_bytes(f, 4)
@@ -45,7 +58,7 @@ def load_header(f: BinaryIO, offset: int) -> Tuple[MachOHeader, int]:
 
 def load_commands(
     f: BinaryIO, offset: int, n_cmds: int
-) -> Tuple[Optional[LinkEditCommand], Optional[SymtabCommand]]:
+) -> tuple[Optional[LinkEditCommand], Optional[SymtabCommand]]:
     """
     The OSO entries are identified in segments named __LINKEDIT.
     If no segment is found with that name, there is nothing to scrub.
@@ -99,7 +112,7 @@ def load_commands(
     return lc_linkedit, lc_symtab
 
 
-def load_debug_symbols(f: BinaryIO, offset: int, n_symbol: int) -> List[Symbol]:
+def load_debug_symbols(f: BinaryIO, offset: int, n_symbol: int) -> list[Symbol]:
     """
     // Each LC_SYMTAB entry consists of the following fields:
     // - String Index: 4 bytes (offset into the string table)
@@ -109,14 +122,15 @@ def load_debug_symbols(f: BinaryIO, offset: int, n_symbol: int) -> List[Symbol]:
     // - Value: 8 bytes on 64bit, 4 bytes on 32bit
     """
     f.seek(offset)
-    symbols = []
-    for _ in range(n_symbol):
-        strtab_index = _read_bytes(f, 4)
-        sym_type = _read_bytes(f, 1)
-        section_idx = _read_bytes(f, 1)
-        desc = _read_bytes(f, 2)
-        value = _read_bytes(f, 8)
-        if sym_type == N_OSO:
-            symbol = Symbol(strtab_index, sym_type, section_idx, desc, value)
-            symbols.append(symbol)
-    return symbols
+    data = f.read(n_symbol * _LC_SYMTAB_STRUCT.size)
+    return [
+        Symbol(strtab_index, sym_type, section_idx, desc, value)
+        for (
+            strtab_index,
+            sym_type,
+            section_idx,
+            desc,
+            value,
+        ) in _LC_SYMTAB_STRUCT.iter_unpack(data)
+        if sym_type == N_OSO
+    ]

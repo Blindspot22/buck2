@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_event_observer::re_state::ReState;
@@ -21,15 +22,17 @@ pub(crate) struct ReHeader<'a> {
 }
 
 impl Component for ReHeader<'_> {
+    type Error = buck2_error::Error;
+
     fn draw_unchecked(
         &self,
         _dimensions: superconsole::Dimensions,
         mode: superconsole::DrawMode,
-    ) -> anyhow::Result<superconsole::Lines> {
-        Ok(self.re_state.render(
+    ) -> buck2_error::Result<superconsole::Lines> {
+        self.re_state.render(
             self.two_snapshots,
             self.super_console_config.enable_detailed_re,
             mode,
-        )?)
+        )
     }
 }

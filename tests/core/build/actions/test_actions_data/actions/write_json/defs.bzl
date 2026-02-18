@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _create_artifact(ctx: AnalysisContext):
     a = ctx.actions.write("path/test.txt", "")
@@ -171,7 +172,7 @@ def _write_json_with_inputs_rule(ctx: AnalysisContext) -> list[Provider]:
 
     # as_json will contain a quoted-path and we want to read the contents of that path
     script = ctx.actions.write("script.py", ["import sys;p_fp=open(sys.argv[1],'r');p=p_fp.read().replace('\"',\"\");i_fp=open(p,'r');i=i_fp.read();o_fp=open(sys.argv[2],'w');o_fp.write(i)"])
-    cmd = cmd_args("python3", script, as_json, output.as_output())
+    cmd = cmd_args("fbpython", script, as_json, output.as_output())
     ctx.actions.run(cmd, category = "cmd")
 
     marker = ctx.actions.declare_output("marker")

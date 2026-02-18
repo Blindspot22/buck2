@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -19,20 +20,18 @@ use allocative::Allocative;
 use buck2_common::cas_digest::CasDigestConfig;
 use buck2_common::cas_digest::DigestAlgorithm;
 use buck2_common::external_symlink::ExternalSymlink;
-use buck2_common::file_ops::FileDigest;
-use buck2_common::file_ops::FileMetadata;
-use buck2_common::file_ops::TrackedFileDigest;
-use buck2_core::fs::paths::RelativePath;
-use buck2_core::fs::paths::RelativePathBuf;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::Symlink;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
+use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::builder::DirectoryBuilder;
+use buck2_directory::directory::builder_lazy::DirectoryBuilderLike;
+use buck2_directory::directory::builder_lazy::LazyDirectoryBuilder;
 use buck2_directory::directory::dashmap_directory_interner::DashMapDirectoryInterner;
 use buck2_directory::directory::directory::Directory;
-use buck2_directory::directory::directory_hasher::DirectoryHasher;
+use buck2_directory::directory::directory_hasher::DirectoryDigester;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
 use buck2_directory::directory::directory_iterator::DirectoryIteratorPathStack;
 use buck2_directory::directory::directory_ref::DirectoryRef;
@@ -45,8 +44,12 @@ use buck2_directory::directory::fingerprinted_directory::FingerprintedDirectory;
 use buck2_directory::directory::immutable_directory::ImmutableDirectory;
 use buck2_directory::directory::shared_directory::SharedDirectory;
 use buck2_directory::directory::walk::unordered_entry_walk;
-use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
+use buck2_fs::paths::RelativePathBuf;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileNameBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use chrono::DateTime;
 use chrono::Utc;
 use derive_more::Display;
@@ -66,10 +69,6 @@ use crate::re::manager::ManagedRemoteExecutionClient;
 pub static INTERNER: Lazy<DashMapDirectoryInterner<ActionDirectoryMember, TrackedFileDigest>> =
     Lazy::new(DashMapDirectoryInterner::new);
 
-/// Represents a relative symlink, and stores the symlink's target path.
-#[derive(Debug, Display, Eq, PartialEq, Allocative)]
-pub struct Symlink(RelativePathBuf);
-
 #[derive(Clone, Debug, Dupe, PartialEq, Eq, Display, Allocative)]
 pub enum ActionDirectoryMember {
     File(FileMetadata),
@@ -84,6 +83,9 @@ pub type ActionImmutableDirectory = ImmutableDirectory<ActionDirectoryMember, Tr
 pub type ActionSharedDirectory = SharedDirectory<ActionDirectoryMember, TrackedFileDigest>;
 
 pub type ActionDirectoryBuilder = DirectoryBuilder<ActionDirectoryMember, TrackedFileDigest>;
+
+pub type LazyActionDirectoryBuilder =
+    LazyDirectoryBuilder<ActionDirectoryMember, TrackedFileDigest>;
 
 pub trait ActionDirectory = Directory<ActionDirectoryMember, TrackedFileDigest>;
 
@@ -102,7 +104,10 @@ pub struct ReDirectorySerializer {
 }
 
 impl ReDirectorySerializer {
-    fn create_re_directory<'a, D, I>(entries: I) -> RE::Directory
+    fn create_re_directory<'a, D, I>(
+        entries: I,
+        directory_renamer: Option<&dyn Fn(&str) -> Option<String>>,
+    ) -> RE::Directory
     where
         I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ActionDirectoryMember>)>,
         D: ActionFingerprintedDirectoryRef<'a>,
@@ -112,10 +117,12 @@ impl ReDirectorySerializer {
         let mut symlinks: Vec<RE::SymlinkNode> = Vec::new();
 
         for (name, entry) in entries {
-            let name = name.as_str().into();
-
             match entry {
                 DirectoryEntry::Dir(d) => {
+                    let name = match directory_renamer {
+                        Some(renamer) => renamer(name.as_str()).unwrap_or(name.as_str().into()),
+                        None => name.as_str().into(),
+                    };
                     directories.push(RE::DirectoryNode {
                         name,
                         digest: Some(d.as_fingerprinted_dyn().fingerprint().to_grpc()),
@@ -123,22 +130,34 @@ impl ReDirectorySerializer {
                 }
                 DirectoryEntry::Leaf(ActionDirectoryMember::File(f)) => {
                     files.push(RE::FileNode {
-                        name,
+                        name: name.as_str().into(),
                         digest: Some(f.digest.to_grpc()),
                         is_executable: f.is_executable,
                         ..Default::default()
                     });
                 }
                 DirectoryEntry::Leaf(ActionDirectoryMember::Symlink(s)) => {
+                    let target = if let Some(renamer) = directory_renamer {
+                        let mut target = None;
+                        for segment in s.target().iter() {
+                            if let Some(renamed_segment) = renamer(segment) {
+                                let current = target.as_deref().unwrap_or(s.target().as_str());
+                                target = Some(current.replace(segment, &renamed_segment));
+                            }
+                        }
+                        target.unwrap_or(s.to_string())
+                    } else {
+                        s.to_string()
+                    };
                     symlinks.push(RE::SymlinkNode {
-                        name,
-                        target: s.to_string(),
+                        name: name.as_str().into(),
+                        target,
                         ..Default::default()
                     });
                 }
                 DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(s)) => {
                     symlinks.push(RE::SymlinkNode {
-                        name,
+                        name: name.as_str().into(),
                         target: s.target_str().to_owned(),
                         ..Default::default()
                     });
@@ -147,7 +166,19 @@ impl ReDirectorySerializer {
         }
 
         files.sort_by(|a, b| a.name.cmp(&b.name));
-        directories.sort_by(|a, b| a.name.cmp(&b.name));
+        directories.sort_by(|a, b| {
+            a.name.cmp(&b.name).then(
+                // This never happens in the "normal" case without a directory_renamer, but the
+                // renamer breaks the standard CAS digesting scheme since we can now have two
+                // directories with the same name but different digests. Therefore we use the
+                // digest to get a deterministic ordering in those cases.
+                a.digest
+                    .as_ref()
+                    .expect("By construction")
+                    .hash
+                    .cmp(&b.digest.as_ref().expect("By construction").hash),
+            )
+        });
         symlinks.sort_by(|a, b| a.name.cmp(&b.name));
 
         RE::Directory {
@@ -163,7 +194,18 @@ impl ReDirectorySerializer {
         I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ActionDirectoryMember>)>,
         D: ActionFingerprintedDirectoryRef<'a>,
     {
-        proto_serialize(&Self::create_re_directory(entries))
+        proto_serialize(&Self::create_re_directory(entries, None))
+    }
+
+    pub fn rename_and_serialize_entries<'a, D, I>(
+        entries: I,
+        directory_renamer: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<u8>
+    where
+        I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ActionDirectoryMember>)>,
+        D: ActionFingerprintedDirectoryRef<'a>,
+    {
+        proto_serialize(&Self::create_re_directory(entries, Some(directory_renamer)))
     }
 }
 
@@ -173,7 +215,7 @@ fn proto_serialize<M: prost::Message>(m: &M) -> Vec<u8> {
     serialized_buf
 }
 
-impl DirectoryHasher<ActionDirectoryMember, TrackedFileDigest> for ReDirectorySerializer {
+impl DirectoryDigester<ActionDirectoryMember, TrackedFileDigest> for ReDirectorySerializer {
     fn hash_entries<'a, D, I>(&self, entries: I) -> TrackedFileDigest
     where
         I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ActionDirectoryMember>)>,
@@ -181,30 +223,13 @@ impl DirectoryHasher<ActionDirectoryMember, TrackedFileDigest> for ReDirectorySe
     {
         TrackedFileDigest::from_content(&Self::serialize_entries(entries), self.cas_digest_config)
     }
-}
 
-impl Symlink {
-    pub fn new(target: RelativePathBuf) -> Self {
-        Self(target)
-    }
-
-    /// Returns the path the symlink points to.
-    pub fn target(&self) -> &RelativePath {
-        self.0.as_relative_path()
-    }
-
-    /// Creates a new `Symlink` from `self`, such that its target is
-    /// `src_relative_to_dest/self.target()`.
-    ///
-    /// This solves a specific problem: symlink at path `src` points to an
-    /// artifact at path `src/target`. We move the symlink to `dest`, but we
-    /// want to keep linking to the same artifact. How can we adjust the target
-    /// in order to achieve that? We need to know how to get to `src` from
-    /// `dest`, which is what `src_relative_to_dest` tells us.
-    pub fn relativized<P: AsRef<RelativePath>>(&self, src_relative_to_dest: P) -> Self {
-        // FIXME(rafaelc): we don't need to normalize the target anymore!
-        let relativized_t = src_relative_to_dest.as_ref().join_normalized(&self.0);
-        Self(relativized_t)
+    fn leaf_size(&self, leaf: &ActionDirectoryMember) -> u64 {
+        match leaf {
+            ActionDirectoryMember::File(f) => f.digest.size(),
+            ActionDirectoryMember::Symlink(_) => 0,
+            ActionDirectoryMember::ExternalSymlink(_) => 0,
+        }
     }
 }
 
@@ -233,10 +258,10 @@ where
             DirectoryEntry::Dir(d) => Some(d),
             DirectoryEntry::Leaf(..) => None,
         })
-        .map(|d| ReDirectorySerializer::create_re_directory(d.entries()))
+        .map(|d| ReDirectorySerializer::create_re_directory(d.entries(), None))
         .collect();
 
-    let root = ReDirectorySerializer::create_re_directory(directory.as_ref().entries());
+    let root = ReDirectorySerializer::create_re_directory(directory.as_ref().entries(), None);
 
     RE::Tree {
         root: Some(root),
@@ -283,6 +308,7 @@ pub fn re_tree_to_directory(
     tree: &RE::Tree,
     leaf_expires: &DateTime<Utc>,
     digest_config: DigestConfig,
+    fingerprint: bool,
 ) -> buck2_error::Result<ActionDirectoryBuilder> {
     /// A map of digests to directories, populated lazily when we access it based on the hash we
     /// use. We need this because in a RE tree, the directories in the tree don't carry their hash,
@@ -327,17 +353,18 @@ pub fn re_tree_to_directory(
         dirmap: &'_ mut DirMap<'_>,
         leaf_expires: &DateTime<Utc>,
         digest_config: DigestConfig,
+        fingerprint: bool,
     ) -> buck2_error::Result<ActionDirectoryBuilder> {
         let mut builder = ActionDirectoryBuilder::empty();
         for node in &re_dir.files {
-            let name = FileNameBuf::try_from(node.name.clone()).with_buck_error_context(|| {
+            let name = FileNameBuf::try_from(node.name.clone()).map_err(|_| {
                 DirectoryReConversionError::IncorrectFileName {
                     name: node.name.clone(),
                     dir: re_dir_name.to_string(),
                 }
             })?;
 
-            let digest = node.digest.as_ref().with_buck_error_context(|| {
+            let digest = node.digest.as_ref().ok_or_else(|| {
                 DirectoryReConversionError::NodeWithDigestNone {
                     name: node.name.clone(),
                     dir: re_dir_name.to_string(),
@@ -397,6 +424,7 @@ pub fn re_tree_to_directory(
                 dirmap,
                 leaf_expires,
                 digest_config,
+                fingerprint,
             )?;
             builder.insert(
                 FileNameBuf::try_from(dir_node.name.clone()).map_err(|_| {
@@ -412,7 +440,18 @@ pub fn re_tree_to_directory(
         // NOTE: We re-digest the directories we just received here (instead of trusting RE with
         // the hashes). But, since output directories tend to be small, that doesn't actually
         // matter.
-        Ok(builder)
+        // NOTE 2: We eagerly fingerprint since the only outputs we expect to
+        // receive from RE are the ones we requested, so accordingly if we are
+        // deserializing something here we expect to later turn it into an
+        // output.
+        if fingerprint {
+            Ok(builder
+                .fingerprint(digest_config.as_directory_serializer())
+                .shared(&*INTERNER)
+                .into_builder())
+        } else {
+            Ok(builder)
+        }
     }
 
     let root_dir = match &tree.root {
@@ -426,6 +465,7 @@ pub fn re_tree_to_directory(
         &mut DirMap::new(&tree.children),
         leaf_expires,
         digest_config,
+        fingerprint,
     )
 }
 
@@ -453,7 +493,7 @@ impl<'a> TryFrom<&'a RE::SymlinkNode> for ActionDirectoryMember {
                 ForwardRelativePathBuf::default(),
             )?))
         } else {
-            ActionDirectoryMember::Symlink(Arc::new(Symlink(RelativePathBuf::from(
+            ActionDirectoryMember::Symlink(Arc::new(Symlink::new(RelativePathBuf::from(
                 node.target.clone(),
             ))))
         };
@@ -483,12 +523,12 @@ pub fn relativize_directory(
 
             let orig_dest = orig_path
                 .parent()
-                .buck_error_context("Symlink has no dir parent")?
+                .ok_or_else(|| internal_error!("Symlink has no dir parent"))?
                 .join_normalized(link.target())?;
 
             let new_dest = new_path
                 .parent()
-                .buck_error_context("Symlink has no dir parent")?
+                .ok_or_else(|| internal_error!("Symlink has no dir parent"))?
                 .as_forward_relative_path()
                 .as_relative_path()
                 .relative(orig_dest);
@@ -506,10 +546,40 @@ pub fn relativize_directory(
     Ok(())
 }
 
-pub fn insert_entry(
+pub fn override_executable_bit(
     builder: &mut ActionDirectoryBuilder,
-    path: &ProjectRelativePath,
-    entry: ActionDirectoryEntry<ActionDirectoryBuilder>,
+    executable_bit_override: bool,
+) -> buck2_error::Result<()> {
+    let mut replacements = ActionDirectoryBuilder::empty();
+
+    {
+        let mut walk = builder.unordered_walk_leaves();
+        while let Some((path, entry)) = walk.next() {
+            let file = match entry {
+                ActionDirectoryMember::File(file) => {
+                    file.dupe().with_executable(executable_bit_override)
+                }
+                _ => continue,
+            };
+
+            let path = path.get();
+
+            replacements.insert(
+                &path,
+                DirectoryEntry::Leaf(ActionDirectoryMember::File(file)),
+            )?;
+        }
+    }
+
+    builder.merge(replacements)?;
+
+    Ok(())
+}
+
+pub fn insert_entry<D>(
+    builder: &mut impl DirectoryBuilderLike<D, ActionDirectoryMember>,
+    path: ProjectRelativePathBuf,
+    entry: ActionDirectoryEntry<D>,
 ) -> buck2_error::Result<()> {
     if let DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(s)) = entry {
         // ExternalSymlink is a bit of an odd concept. The way it works is that when you try to
@@ -540,18 +610,16 @@ pub fn insert_entry(
         // can't "fix" it, and using the full symlink destination instead of
         // `s.without_remaining_path()`, but considering this doesn't seem to be something very
         // widespread and I might be missing something, I did not do it.
-        let fixed_source_path = s
-            .fix_source_path(path.as_ref())
-            .with_buck_error_context(|| {
-                format!("Error locating source path for symlink at {}: {}", path, s)
-            })?;
-        let path = ProjectRelativePath::unchecked_new(fixed_source_path.as_str());
+        let fixed_source_path = s.fix_source_path(path.as_ref()).ok_or_else(|| {
+            internal_error!("Error locating source path for symlink at {path}: {s}")
+        })?;
+        let path = ProjectRelativePath::unchecked_new(fixed_source_path.as_str()).to_buf();
         let entry = DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(
             s.without_remaining_path(),
         ));
-        builder.insert(path, entry)?;
+        builder.insert(path.into(), entry)?;
     } else {
-        builder.insert(path, entry)?;
+        builder.insert(path.into(), entry)?;
     }
 
     Ok(())
@@ -561,7 +629,7 @@ pub fn insert_entry(
 /// symlinks to calculate the `deps` of the `ArtifactValue`.
 pub fn insert_artifact(
     builder: &mut ActionDirectoryBuilder,
-    path: &ProjectRelativePath,
+    path: ProjectRelativePathBuf,
     value: &ArtifactValue,
 ) -> buck2_error::Result<()> {
     insert_entry(
@@ -576,9 +644,22 @@ pub fn insert_artifact(
     Ok(())
 }
 
-pub fn insert_file(
-    builder: &mut ActionDirectoryBuilder,
-    path: &ProjectRelativePath,
+pub fn insert_artifact_lazy(
+    builder: &mut LazyActionDirectoryBuilder,
+    path: ProjectRelativePathBuf,
+    value: &ArtifactValue,
+) -> buck2_error::Result<()> {
+    insert_entry(builder, path, value.entry().dupe())?;
+    // add input's deps
+    if let Some(deps) = value.deps() {
+        builder.merge(deps.dupe())?;
+    }
+    Ok(())
+}
+
+pub fn insert_file<D>(
+    builder: &mut impl DirectoryBuilderLike<D, ActionDirectoryMember>,
+    path: ProjectRelativePathBuf,
     meta: FileMetadata,
 ) -> buck2_error::Result<()> {
     insert_entry(
@@ -591,7 +672,7 @@ pub fn insert_file(
 #[cfg(test)]
 pub fn insert_symlink(
     builder: &mut ActionDirectoryBuilder,
-    path: &ProjectRelativePath,
+    path: ProjectRelativePathBuf,
     symlink: Arc<Symlink>,
 ) -> buck2_error::Result<()> {
     insert_entry(
@@ -618,7 +699,7 @@ pub fn expand_selector_for_dependencies(
 
         let mut handle_link_at_path = |link_path: &ForwardRelativePath, link: &Symlink| {
             let link_dst = match link_path.parent() {
-                Some(parent) => parent.join_system(&link.target().to_path("")),
+                Some(parent) => parent.join_system_normalized(&link.target().to_path("")),
                 None => ForwardRelativePath::new(link.target().as_str()).map(ToOwned::to_owned),
             };
 
@@ -770,12 +851,11 @@ pub fn extract_artifact_value(
 
 #[cfg(test)]
 mod tests {
-    use buck2_error::BuckErrorContext;
 
     use super::*;
 
-    fn path(s: &str) -> &ProjectRelativePath {
-        ProjectRelativePath::new(s).unwrap()
+    fn path(s: &str) -> ProjectRelativePathBuf {
+        ProjectRelativePath::new(s).unwrap().to_buf()
     }
 
     fn assert_dirs_eq(d1: &impl ActionDirectory, d2: &impl ActionDirectory) {
@@ -789,10 +869,10 @@ mod tests {
             let ((p1, e1), (p2, e2)) = match (n1, n2) {
                 (Some(n1), Some(n2)) => (n1, n2),
                 (Some((p1, _)), None) => {
-                    panic!("Walks differ, first difference at: {}", p1);
+                    panic!("Walks differ, first difference at: {p1}");
                 }
                 (None, Some((p2, _))) => {
-                    panic!("Walks differ, first difference at: {}", p2);
+                    panic!("Walks differ, first difference at: {p2}");
                 }
                 (None, None) => break,
             };
@@ -804,8 +884,7 @@ mod tests {
             assert_eq!(
                 e1.map_dir(|_| ()),
                 e2.map_dir(|_| ()),
-                "Walks differ at path {}",
-                p1
+                "Walks differ at path {p1}"
             );
         }
     }
@@ -855,7 +934,7 @@ mod tests {
         };
 
         // Move directory from a/d0 to b.
-        relativize_directory(&mut dir, path("a/d0"), path("b"))?;
+        relativize_directory(&mut dir, &path("a/d0"), &path("b"))?;
 
         assert_dirs_eq(&dir, &expected_dir);
 
@@ -914,8 +993,8 @@ mod tests {
     fn test_extract_no_deps() -> buck2_error::Result<()> {
         let digest_config = DigestConfig::testing_default();
         let root = build_test_dir()?;
-        let value = extract_artifact_value(&root, path("d6"), digest_config)?
-            .buck_error_context("Not value!")?;
+        let value = extract_artifact_value(&root, &path("d6"), digest_config)?
+            .ok_or_else(|| internal_error!("Not value!"))?;
         assert!(value.deps().is_none());
         Ok(())
     }
@@ -925,8 +1004,8 @@ mod tests {
         let digest_config = DigestConfig::testing_default();
 
         let root = build_test_dir()?;
-        let value = extract_artifact_value(&root, path("d1/d2/d3"), digest_config)?
-            .buck_error_context("Not value!")?;
+        let value = extract_artifact_value(&root, &path("d1/d2/d3"), digest_config)?
+            .ok_or_else(|| internal_error!("Not value!"))?;
 
         let expected = {
             let mut builder = ActionDirectoryBuilder::empty();
@@ -934,7 +1013,7 @@ mod tests {
             for p in &["d6/s4", "d6/f4", "d1/d2/d4", "f1"] {
                 let path = path(p);
                 let entry = find(root.as_ref(), path.as_forward_relative_path())?
-                    .with_buck_error_context(|| format!("Missing {}", path))?
+                    .ok_or_else(|| internal_error!("Missing {path}"))?
                     .map_dir(|d| d.to_builder())
                     .map_leaf(|l| l.dupe());
                 insert_entry(&mut builder, path, entry)?;
@@ -943,7 +1022,10 @@ mod tests {
             builder
         };
 
-        assert_dirs_eq(value.deps().buck_error_context("No deps!")?, &expected);
+        assert_dirs_eq(
+            value.deps().ok_or_else(|| internal_error!("No deps!"))?,
+            &expected,
+        );
 
         Ok(())
     }
@@ -953,8 +1035,8 @@ mod tests {
         let digest_config = DigestConfig::testing_default();
 
         let root = build_test_dir()?;
-        let value = extract_artifact_value(&root, path("d1/d2/d3/s3"), digest_config)?
-            .buck_error_context("Not value!")?;
+        let value = extract_artifact_value(&root, &path("d1/d2/d3/s3"), digest_config)?
+            .ok_or_else(|| internal_error!("Not value!"))?;
 
         let expected = {
             let mut builder = ActionDirectoryBuilder::empty();
@@ -966,7 +1048,10 @@ mod tests {
             builder
         };
 
-        assert_dirs_eq(value.deps().buck_error_context("No deps!")?, &expected);
+        assert_dirs_eq(
+            value.deps().ok_or_else(|| internal_error!("No deps!"))?,
+            &expected,
+        );
 
         Ok(())
     }
@@ -995,10 +1080,13 @@ mod tests {
             builder
         };
 
-        let value = extract_artifact_value(&builder, path("d1/f1"), digest_config)?
-            .buck_error_context("Not value!")?;
+        let value = extract_artifact_value(&builder, &path("d1/f1"), digest_config)?
+            .ok_or_else(|| internal_error!("Not value!"))?;
 
-        assert_dirs_eq(value.deps().buck_error_context("No deps!")?, &expected);
+        assert_dirs_eq(
+            value.deps().ok_or_else(|| internal_error!("No deps!"))?,
+            &expected,
+        );
 
         Ok(())
     }
@@ -1029,8 +1117,8 @@ mod tests {
             FileMetadata::empty(digest_config.cas_digest_config()),
         )?;
 
-        let value = extract_artifact_value(&builder, path("l1"), digest_config)?
-            .buck_error_context("Not value!")?;
+        let value = extract_artifact_value(&builder, &path("l1"), digest_config)?
+            .ok_or_else(|| internal_error!("Not value!"))?;
 
         let expected = {
             let mut builder = ActionDirectoryBuilder::empty();
@@ -1050,7 +1138,10 @@ mod tests {
             builder
         };
 
-        assert_dirs_eq(value.deps().buck_error_context("No deps!")?, &expected);
+        assert_dirs_eq(
+            value.deps().ok_or_else(|| internal_error!("No deps!"))?,
+            &expected,
+        );
 
         Ok(())
     }
@@ -1078,7 +1169,7 @@ mod tests {
         let dir = builder.fingerprint(digest_config.as_directory_serializer());
 
         let tree = directory_to_re_tree(&dir);
-        let dir2 = re_tree_to_directory(&tree, &Utc::now(), digest_config)?;
+        let dir2 = re_tree_to_directory(&tree, &Utc::now(), digest_config, true)?;
 
         assert_dirs_eq(&dir, &dir2);
 
@@ -1117,11 +1208,14 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     //Test that a symlink created with a windows path doesn't get interpreted as an invalid sylink
     //TODO(lmvasquezg) Update symlinks to store a normalized, OS-independent path
     fn test_unnormalized_symlinks() -> buck2_error::Result<()> {
+        if !cfg!(windows) {
+            return Ok(());
+        }
+
         let digest_config = DigestConfig::testing_default();
 
         let mut builder = ActionDirectoryBuilder::empty();
@@ -1136,8 +1230,90 @@ mod tests {
             FileMetadata::empty(digest_config.cas_digest_config()),
         )?;
 
-        extract_artifact_value(&builder, path("d1/f1"), digest_config)?
-            .buck_error_context("Not value!")?;
+        extract_artifact_value(&builder, &path("d1/f1"), digest_config)?
+            .ok_or_else(|| internal_error!("Not value!"))?;
+        Ok(())
+    }
+
+    struct TestSerializer {
+        pub cas_digest_config: CasDigestConfig,
+    }
+
+    impl DirectoryDigester<ActionDirectoryMember, TrackedFileDigest> for TestSerializer {
+        fn hash_entries<'a, D, I>(&self, entries: I) -> TrackedFileDigest
+        where
+            I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ActionDirectoryMember>)>,
+            D: ActionFingerprintedDirectoryRef<'a>,
+        {
+            fn rename(file_name: &str) -> Option<String> {
+                if file_name == "a" || file_name == "b" {
+                    Some("replaced".into())
+                } else {
+                    None
+                }
+            }
+            TrackedFileDigest::from_content(
+                &ReDirectorySerializer::rename_and_serialize_entries(entries, &rename),
+                self.cas_digest_config,
+            )
+        }
+
+        fn leaf_size(&self, leaf: &ActionDirectoryMember) -> u64 {
+            match leaf {
+                ActionDirectoryMember::File(f) => f.digest.size(),
+                ActionDirectoryMember::Symlink(_) => 0,
+                ActionDirectoryMember::ExternalSymlink(_) => 0,
+            }
+        }
+    }
+
+    #[test]
+    fn test_rename_and_serialize() -> buck2_error::Result<()> {
+        let digest_config = DigestConfig::testing_default();
+
+        let mut builder1 = ActionDirectoryBuilder::empty();
+
+        insert_file(
+            &mut builder1,
+            path("a/aa"),
+            FileMetadata::empty(digest_config.cas_digest_config()),
+        )?;
+        insert_file(
+            &mut builder1,
+            path("b/bb"),
+            FileMetadata::empty(digest_config.cas_digest_config()),
+        )?;
+
+        let mut builder2 = ActionDirectoryBuilder::empty();
+        insert_file(
+            &mut builder2,
+            path("b/aa"),
+            FileMetadata::empty(digest_config.cas_digest_config()),
+        )?;
+        insert_file(
+            &mut builder2,
+            path("a/bb"),
+            FileMetadata::empty(digest_config.cas_digest_config()),
+        )?;
+
+        let non_renamed_fingerprint1 = builder1
+            .clone()
+            .fingerprint(digest_config.as_directory_serializer());
+        let non_renamed_fingerprint2 = builder2
+            .clone()
+            .fingerprint(digest_config.as_directory_serializer());
+
+        assert!(non_renamed_fingerprint1 != non_renamed_fingerprint2);
+
+        let renamed_fingerprint1 = builder1.fingerprint(&TestSerializer {
+            cas_digest_config: digest_config.cas_digest_config(),
+        });
+        let renamed_fingerprint2 = builder2.fingerprint(&TestSerializer {
+            cas_digest_config: digest_config.cas_digest_config(),
+        });
+
+        assert!(renamed_fingerprint1 == renamed_fingerprint2);
+
         Ok(())
     }
 }

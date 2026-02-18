@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.step.isolatedsteps.java;
@@ -18,6 +19,7 @@ import com.facebook.buck.step.StepExecutionResults;
 import com.facebook.buck.step.isolatedsteps.IsolatedStep;
 import com.facebook.buck.util.zip.JarBuilder;
 import com.google.common.base.MoreObjects;
+import com.google.common.collect.ImmutableSet;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -26,6 +28,8 @@ import java.util.stream.Collectors;
 public class JarDirectoryStep implements IsolatedStep {
 
   private final JarParameters parameters;
+
+  private final ImmutableSet<AbsPath> extraEntriesToJar;
 
   /**
    * Creates a JAR from the specified entries (most often, classpath entries).
@@ -36,8 +40,13 @@ public class JarDirectoryStep implements IsolatedStep {
    * and copied to the generated JAR. @Param parameters the parameters that describe how to create
    * the jar.
    */
-  public JarDirectoryStep(JarParameters parameters) {
+  public JarDirectoryStep(JarParameters parameters, ImmutableSet<AbsPath> extraEntriesToJar) {
     this.parameters = parameters;
+    this.extraEntriesToJar = extraEntriesToJar;
+  }
+
+  public JarDirectoryStep(JarParameters parameters) {
+    this(parameters, ImmutableSet.of());
   }
 
   @Override
@@ -64,6 +73,7 @@ public class JarDirectoryStep implements IsolatedStep {
       throws IOException {
     AbsPath root = context.getRuleCellRoot();
     new JarBuilder()
+        .setEntriesToJar(extraEntriesToJar.stream())
         .setEntriesToJar(parameters.getEntriesToJar().stream().map(root::resolve))
         .setOverrideEntriesToJar(parameters.getOverrideEntriesToJar().stream().map(root::resolve))
         .setMainClass(parameters.getMainClass().orElse(null))

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -184,7 +185,11 @@ def write_bootstrapper(args: argparse.Namespace) -> None:
     if args.preload_libraries:
         ld_preload = [p.name for p in args.preload_libraries]
 
-    new_data = data.replace("<PYTHON>", "/usr/bin/env " + str(args.python))
+    python = str(args.python)
+    if not os.path.isabs(python) and os.path.sep in python:
+        python = os.path.abspath(python)
+
+    new_data = data.replace("<PYTHON>", f"/usr/bin/env {python}")
     new_data = new_data.replace("<PYTHON_INTERPRETER_FLAGS>", "")
 
     new_data = new_data.replace("<MODULES_DIR>", str(relative_modules_dir))

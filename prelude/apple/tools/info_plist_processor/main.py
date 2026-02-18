@@ -1,16 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 import argparse
+import io
+import plistlib
 from contextlib import ExitStack
 from enum import Enum
 from pathlib import Path
+
+from apple.tools.plistlib_utils import detect_format_and_load
 
 from .preprocess import preprocess
 from .process import process
@@ -55,6 +60,12 @@ def _create_preprocess_subparser(
         type=Path,
         help="JSON file containing substitutions mapping",
     )
+    parser.add_argument(
+        "--enforce-minimum-os-plist-key",
+        metavar="<Minimum OS Version Key>",
+        type=str,
+        help="Key for minimum OS version that should not be present in the plist file",
+    )
 
 
 def _create_process_subparser(
@@ -96,6 +107,17 @@ def _create_process_subparser(
         required=True,
         help="Path where processed .plist file should be placed",
     )
+    parser.add_argument(
+        "--output-xml",
+        action="store_true",
+        help="Output as XML",
+    )
+    parser.add_argument(
+        "--mutations",
+        metavar="<Mutations.json>",
+        type=Path,
+        help="Path to .json file containing mutation operations to apply to the plist",
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -112,14 +134,26 @@ def main() -> None:
     args = _parse_args()
     if args.subcommand_name == _SubcommandName.preprocess:
         with ExitStack() as stack:
-            input_file = stack.enter_context(args.input.open(mode="r"))
+            with args.input.open(mode="rb") as binary_file:
+                plist_data = detect_format_and_load(binary_file)
+                xml_content = plistlib.dumps(plist_data, fmt=plistlib.FMT_XML).decode(
+                    "utf-8"
+                )
+                input_file = io.StringIO(xml_content)
+
             output_file = stack.enter_context(args.output.open(mode="w"))
             substitutions_json = (
                 stack.enter_context(args.substitutions_json.open(mode="r"))
                 if args.substitutions_json is not None
                 else None
             )
-            preprocess(input_file, output_file, substitutions_json, args.product_name)
+            preprocess(
+                input_file,
+                output_file,
+                substitutions_json,
+                args.product_name,
+                args.enforce_minimum_os_plist_key,
+            )
     elif args.subcommand_name == _SubcommandName.process:
         with ExitStack() as stack:
             input_file = stack.enter_context(args.input.open(mode="rb"))
@@ -139,12 +173,20 @@ def main() -> None:
                 if args.override_keys is not None
                 else None
             )
+            output_format = plistlib.FMT_XML if args.output_xml else plistlib.FMT_BINARY
+            mutations_file = (
+                stack.enter_context(args.mutations.open(mode="r"))
+                if args.mutations is not None
+                else None
+            )
             process(
                 input_file=input_file,
                 output_file=output_file,
                 override_input_file=override_input,
                 additional_keys_file=additional_keys,
                 override_keys_file=override_keys,
+                output_format=output_format,
+                mutations_file=mutations_file,
             )
 
 

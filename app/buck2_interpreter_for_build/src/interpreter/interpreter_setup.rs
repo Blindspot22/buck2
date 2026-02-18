@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -26,7 +27,7 @@ pub fn setup_interpreter(
     updater: &mut DiceTransactionUpdater,
     cell_resolver: CellResolver,
     configuror: Arc<BuildInterpreterConfiguror>,
-    legacy_config_overrides: Arc<ExternalBuckconfigData>,
+    legacy_config_overrides: ExternalBuckconfigData,
     starlark_profiler_instrumentation_override: StarlarkProfilerConfiguration,
     disable_starlark_types: bool,
     unstable_typecheck: bool,
@@ -49,7 +50,7 @@ pub fn setup_interpreter_basic(
         dice,
         cell_resolver,
         configuror,
-        Arc::new(ExternalBuckconfigData::testing_default()),
+        ExternalBuckconfigData::testing_default(),
         StarlarkProfilerConfiguration::default(),
         false,
         false,

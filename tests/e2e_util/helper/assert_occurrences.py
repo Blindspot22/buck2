@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-unsafe
 
@@ -17,7 +18,7 @@ def truncate(x: str, limit: int) -> str:
         return x[: limit // 2] + " <<TRUNCATED>> " + x[-(limit // 2) :]
 
 
-def print_occurences_msg(
+def print_occurrences_msg(
     needle: str, haystack: str, occurrences: int, success: bool
 ) -> None:
     OUTPUT_LIMIT = 10000
@@ -29,13 +30,13 @@ def print_occurences_msg(
 
 
 def assert_occurrences(needle: str, haystack: str, occurrences: int) -> None:
-    print_occurences_msg(
+    print_occurrences_msg(
         needle, haystack, occurrences, haystack.count(needle) == occurrences
     )
 
 
 def assert_occurrences_regex(needle: str, haystack: str, occurrences: int) -> None:
-    print_occurences_msg(
+    print_occurrences_msg(
         needle,
         haystack,
         occurrences,

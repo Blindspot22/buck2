@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Borrow;
@@ -16,8 +17,10 @@ use std::str;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use serde::Deserialize;
 use serde::Serialize;
 use static_assertions::assert_eq_size;
+use strong_hash::StrongHash;
 
 use crate::arc_str::base::ArcStrBase;
 use crate::arc_str::base::ArcStrBaseInner;
@@ -49,16 +52,7 @@ unsafe impl ArcStrLenStrategy for ThinArcStrProperties {
 
 /// Wrapper for `Arc<str>`.
 #[derive(
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Allocative,
-    Clone,
-    Dupe,
-    Default,
-    strong_hash::StrongHash
+    PartialEq, Eq, Hash, StrongHash, PartialOrd, Ord, Allocative, Clone, Dupe, Default
 )]
 pub struct ThinArcStr {
     base: ArcStrBase<ThinArcStrProperties>,
@@ -132,6 +126,15 @@ impl From<String> for ThinArcStr {
 impl Serialize for ThinArcStr {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.as_str().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ThinArcStr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(String::deserialize(deserializer)?.into())
     }
 }
 

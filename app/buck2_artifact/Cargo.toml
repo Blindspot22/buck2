@@ -1,6 +1,6 @@
 [package]
 description = "Artifact types"
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_artifact"
 repository = { workspace = true }
@@ -17,6 +17,7 @@ take_mut = { workspace = true }
 allocative = { workspace = true }
 dupe = { workspace = true }
 gazebo = { workspace = true }
+starlark = { workspace = true }
 starlark_map = { workspace = true }
 strong_hash = { workspace = true }
 
@@ -25,6 +26,7 @@ buck2_core = { workspace = true }
 buck2_data = { workspace = true }
 buck2_error = { workspace = true }
 buck2_execute = { workspace = true }
+buck2_fs = { workspace = true }
 buck2_util = { workspace = true }
 
 [dev-dependencies]

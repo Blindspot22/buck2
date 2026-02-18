@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -24,9 +25,10 @@ use buck2_core::cells::cell_root_path::CellRootPathBuf;
 use buck2_core::cells::name::CellName;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::target::label::interner::ConcurrentTargetLabelInterner;
+use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_interpreter::extra::InterpreterHostArchitecture;
 use buck2_interpreter::extra::InterpreterHostPlatform;
-use buck2_interpreter::factory::StarlarkPassthroughProvider;
+use buck2_interpreter::factory::StarlarkEvaluatorProvider;
 use buck2_interpreter::file_loader::LoadedModule;
 use buck2_interpreter::file_loader::LoadedModules;
 use buck2_interpreter::import_paths::ImplicitImportPaths;
@@ -37,6 +39,7 @@ use buck2_interpreter::prelude_path::PreludePath;
 use buck2_node::nodes::eval_result::EvaluationResult;
 use buck2_node::nodes::targets_map::TargetsMap;
 use buck2_node::super_package::SuperPackage;
+use dice::CancellationContext;
 use dupe::Dupe;
 use indoc::indoc;
 use starlark::environment::GlobalsBuilder;
@@ -76,7 +79,7 @@ pub fn run_simple_starlark_test(content: &str) -> buck2_error::Result<()> {
     let mut tester = Tester::new()?;
     match tester.run_starlark_test(content) {
         Ok(_) => Ok(()),
-        Err(e) => Err(buck2_error::Error::from(e)),
+        Err(e) => Err(e),
     }
 }
 
@@ -121,18 +124,14 @@ pub fn cells(extra_root_config: Option<&str>) -> buck2_error::Result<CellsData> 
 pub fn expect_error<T>(result: buck2_error::Result<T>, content: &str, expected: &str) {
     match result {
         Ok(_) => {
-            eprintln!(
-                "Expected starlark failure, got success.\nCode contents:\n{}",
-                content
-            );
+            eprintln!("Expected starlark failure, got success.\nCode contents:\n{content}");
             panic!();
         }
         Err(e) => {
-            let returned = format!("{:?}", e);
+            let returned = format!("{e:?}");
             if !returned.contains(expected) {
                 eprintln!(
-                    "Could not find expected error string.\nExpected:\n{}\n\nError:\n{}\n\nCode contents:\n{}",
-                    expected, returned, content
+                    "Could not find expected error string.\nExpected:\n{expected}\n\nError:\n{returned}\n\nCode contents:\n{content}"
                 );
                 panic!();
             }
@@ -248,7 +247,8 @@ impl Tester {
         let interpreter = self.interpreter()?;
         let ParseData(ast, _) =
             interpreter.parse(StarlarkPath::LoadFile(path), content.to_owned())??;
-        let mut provider = StarlarkPassthroughProvider;
+        let provider =
+            StarlarkEvaluatorProvider::passthrough(StarlarkEvalKind::Unknown("testing".into()));
         let mut buckconfigs =
             LegacyConfigsViewForStarlark::new(self.root_config.dupe(), self.root_config.dupe());
 
@@ -257,7 +257,8 @@ impl Tester {
             &mut buckconfigs,
             ast,
             loaded_modules.clone(),
-            &mut provider,
+            provider,
+            &CancellationContext::testing(),
         )?;
         Ok(LoadedModule::new(
             OwnedStarlarkModulePath::LoadFile(path.clone()),
@@ -294,10 +295,11 @@ impl Tester {
         let interpreter = self.interpreter()?;
         let ParseData(ast, _) =
             interpreter.parse(StarlarkPath::BuildFile(path), content.to_owned())??;
-        let mut provider = StarlarkPassthroughProvider;
+        let provider =
+            StarlarkEvaluatorProvider::passthrough(StarlarkEvalKind::Unknown("testing".into()));
         let mut buckconfigs =
             LegacyConfigsViewForStarlark::new(self.root_config.dupe(), self.root_config.dupe());
-        let eval_result_with_stats = interpreter.eval_build_file(
+        let (_finished_eval, eval_result_with_stats) = interpreter.eval_build_file(
             path,
             &mut buckconfigs,
             package_listing,
@@ -305,8 +307,9 @@ impl Tester {
             false,
             ast,
             loaded_modules,
-            &mut provider,
+            provider,
             true,
+            &CancellationContext::testing(),
         )?;
         Ok(eval_result_with_stats.result)
     }
@@ -400,7 +403,7 @@ impl Tester {
             "#
         );
 
-        self.add_import(&import_path, &format!("{}\n\n{}", template, content))?;
+        self.add_import(&import_path, &format!("{template}\n\n{content}"))?;
 
         let test_path = ImportPath::testing_new("root//some/package:test.bzl");
         let test_content = indoc!(
@@ -409,9 +412,7 @@ impl Tester {
             test()
             "#
         );
-        self.add_import(&test_path, test_content)
-            .map(|_| ())
-            .map_err(|e| e.into())
+        self.add_import(&test_path, test_content).map(|_| ())
     }
 
     pub fn run_starlark_bzl_test_expecting_error(&mut self, content: &str, expected: &str) {

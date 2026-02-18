@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 
 import argparse
@@ -127,13 +128,13 @@ def main():
     weight_estimate_paths = args.weight_estimates
     output = args.output
 
-    assert len(dex_target_identifiers) == len(
-        class_names_paths
-    ), "Must provide same number of class names files as dex target identifiers!"
+    assert len(dex_target_identifiers) == len(class_names_paths), (
+        "Must provide same number of class names files as dex target identifiers!"
+    )
 
-    assert len(dex_target_identifiers) == len(
-        weight_estimate_paths
-    ), "Must provide same number of weight estimate files as dex target identifiers!"
+    assert len(dex_target_identifiers) == len(weight_estimate_paths), (
+        "Must provide same number of weight estimate files as dex target identifiers!"
+    )
 
     json_output = {}
     for i in range(len(dex_target_identifiers)):

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use core::fmt;
@@ -24,6 +25,8 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_error::internal_error;
 use buck2_util::arc_str::ArcStr;
 use dupe::Dupe;
+use pagable::Pagable;
+use strong_hash::StrongHash;
 
 use crate::attrs::attr_type::configuration_dep::ConfigurationDepKind;
 use crate::attrs::attr_type::string::StringLiteral;
@@ -80,7 +83,9 @@ impl Deref for TargetNode {
 }
 
 /// The kind of the rule, denoting where it can be used and how.
-#[derive(Debug, Copy, Clone, Dupe, Eq, PartialEq, Hash, Allocative)]
+#[derive(
+    Debug, Copy, Clone, Dupe, Eq, PartialEq, Hash, StrongHash, Pagable, Allocative
+)]
 pub enum RuleKind {
     /// A normal rule with no special properties.
     Normal,
@@ -129,6 +134,8 @@ pub struct TargetNodeData {
 
     /// Config modifiers set in the package this target belongs to
     package_cfg_modifiers: Option<PackageCfgModifiersValue>,
+
+    test_config_unification_rollout: bool,
 }
 
 impl TargetNodeData {
@@ -155,6 +162,10 @@ impl TargetNodeData {
     pub fn package_cfg_modifiers(&self) -> Option<&PackageCfgModifiersValue> {
         self.package_cfg_modifiers.as_ref()
     }
+
+    pub fn test_config_unification_rollout(&self) -> bool {
+        self.test_config_unification_rollout
+    }
 }
 
 impl TargetNode {
@@ -166,6 +177,7 @@ impl TargetNode {
         deps_cache: CoercedDeps,
         call_stack: Option<StarlarkCallStack>,
         package_cfg_modifiers: Option<PackageCfgModifiersValue>,
+        test_config_unification_rollout: bool,
     ) -> TargetNode {
         TargetNode(triomphe::Arc::new(TargetNodeData {
             rule,
@@ -175,6 +187,7 @@ impl TargetNode {
             deps_cache,
             call_stack,
             package_cfg_modifiers,
+            test_config_unification_rollout,
         }))
     }
 
@@ -273,7 +286,7 @@ impl TargetNode {
     ///
     /// "attribute" here is a user defined attribute, not including "special" attributes.
     #[inline]
-    pub fn attrs(&self, opts: AttrInspectOptions) -> impl Iterator<Item = CoercedAttrFull> {
+    pub fn attrs(&self, opts: AttrInspectOptions) -> impl Iterator<Item = CoercedAttrFull<'_>> {
         self.as_ref().attrs(opts)
     }
 
@@ -378,6 +391,7 @@ impl TargetNode {
             x.name.hash(state);
             x.value.hash(state);
         });
+        self.test_config_unification_rollout().hash(state);
     }
 
     #[inline]
@@ -524,7 +538,6 @@ impl<'a> TargetNodeRef<'a> {
         .map(move |x|
                 // use unwrap here, if fail here it means we iter over a key not in the match list from `special_attr_or_none`
                 (x, self.special_attr_or_none(x).unwrap()))
-        .into_iter()
     }
 
     pub fn metadata(self) -> buck2_error::Result<Option<&'a MetadataMap>> {
@@ -627,8 +640,8 @@ impl<'a> TargetNodeRef<'a> {
 }
 
 pub mod testing {
-    use buck2_core::fs::paths::file_name::FileNameBuf;
     use buck2_core::package::PackageLabel;
+    use buck2_fs::paths::file_name::FileNameBuf;
     use serde_json::map::Map;
     use serde_json::value::Value;
 
@@ -701,6 +714,7 @@ pub mod testing {
                 CoercedDeps::from(deps_cache),
                 call_stack,
                 None,
+                false,
             )
         }
     }

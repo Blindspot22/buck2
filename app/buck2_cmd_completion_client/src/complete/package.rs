@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use buck2_client_ctx::command_outcome::CommandOutcome;
 use buck2_common::invocation_roots::InvocationRoots;
 use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
-use buck2_core::fs::working_dir::AbsWorkingDir;
+use buck2_fs::working_dir::AbsWorkingDir;
 
 use super::path_completer::PathCompleter;
 use super::path_sanitizer::PathSanitizer;
@@ -34,7 +35,7 @@ impl<'a> PackageCompleter<'a> {
         let cell_configs =
             Arc::new(BuckConfigBasedCells::parse_with_config_args(&roots.project_root, &[]).await?);
 
-        let path_sanitizer = PathSanitizer::new(&cell_configs, cwd).await?;
+        let path_sanitizer = PathSanitizer::new(&cell_configs, cwd, roots).await?;
         let results = CompletionResults::new(roots, cell_configs.clone());
         CommandOutcome::Success(Self {
             cwd: cwd.to_owned(),
@@ -56,7 +57,7 @@ impl<'a> PackageCompleter<'a> {
         let cwd_cell_name = self
             .cell_configs
             .cell_resolver
-            .get_cell_path(&self.roots.cwd)?
+            .get_cell_path(&self.roots.cwd)
             .cell();
         let cwd_cell_root = self.cell_configs.cell_resolver.get(cwd_cell_name)?.path();
         let cwd_cell_root = self.roots.project_root.resolve(cwd_cell_root);
@@ -93,7 +94,7 @@ impl<'a> PackageCompleter<'a> {
             .get_cell_alias_resolver_for_cwd_fast(&self.roots.project_root, &self.roots.cwd)
             .await?;
         for (cell_alias, cell_name) in alias_resolver.mappings() {
-            let canonical_cell_root = format!("{}//", cell_alias);
+            let canonical_cell_root = format!("{cell_alias}//");
             if canonical_cell_root.starts_with(given_path) {
                 let cell = cell_resolver.get(cell_name)?;
                 let cell_abs_path = self
@@ -131,7 +132,7 @@ impl<'a> PackageCompleter<'a> {
 mod tests {
     use buck2_client_ctx::exit_result::ExitResult;
     use buck2_common::invocation_roots::find_invocation_roots;
-    use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
+    use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 
     use super::*;
 

@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
+import argparse
 import json
 import os
+import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+
+from writable import make_path_user_writable
 
 _RE_TMPDIR_ENV_VAR = "TMPDIR"
 _FILE_WRITE_FAILURE_MARKER = "could not write"
@@ -82,7 +88,31 @@ def _remove_swiftinterface_module_prefixes(command):
         f.truncate()
 
 
-def _rewrite_dependency_file(command):
+def _make_path_user_writable(path: str) -> None:
+    # Ensure the path is writable by the user. This is required for Swift
+    # Incremental Remote Actions, where this path may or may not be
+    # pre-populated from a previous action. We need to check because we won't
+    # know if we have these paths populated until runtime.
+    if "INSIDE_RE_WORKER" not in os.environ:
+        return
+
+    if not os.path.exists(path):
+        return
+
+    backup_path = f"{path}.bak"
+    shutil.move(path, backup_path)
+    shutil.copy2(backup_path, path)
+
+    backup_file = pathlib.Path(backup_path)
+    backup_file.unlink()
+
+    make_path_user_writable(path)
+
+
+def _rewrite_dependency_file(command, out_path):
+    if not out_path:
+        raise RuntimeError("-emit-dependencies requires -dependencies-file-output")
+
     # The compiler will output d files in Makefile format with abolute paths,
     # Buck expects line separated relative paths with no input prefix.
     output_file_map_path = command[command.index("-output-file-map") + 1]
@@ -104,23 +134,123 @@ def _rewrite_dependency_file(command):
                 break
 
     # Sanity check that we only track relative paths
-    cwd = os.getcwd()
     relative_paths = []
     for path in dependencies:
-        if path.startswith(cwd):
-            # The driver passes the host plugins path as an absolute path.
-            # Until that is fixed upstream we need to remove the prefix
-            # from any macro library dependencies.
-            relative_paths.append(path[len(cwd) + 1 :])
+        if "/usr/lib/swift/host/" in path:
+            # We don't track toolchain internal paths.
+            continue
         elif path.startswith("/"):
+            # This can occur for Xcode toolchain plugins like libSwiftUIMacros.dylib
             print(f"Dependency file contains absolute path: {path}", file=sys.stderr)
-            sys.exit(1)
         else:
-            relative_paths.append(path)
+            relative_paths.append(os.path.normpath(path))
 
-    with open(deps_file_path, "w") as f:
+    _make_path_user_writable(out_path)
+    with open(out_path, "w") as f:
         f.write("\n".join(sorted(relative_paths)))
         f.write("\n")
+
+
+def _get_output_file_map(args):
+    try:
+        i = args.index("-output-file-map")
+        filename = args[i + 1]
+    except (ValueError, IndexError):
+        raise RuntimeError("Failed to find -output-file-map in args")
+
+    with open(filename) as f:
+        return json.load(f)
+
+
+def _get_serialized_diagnostics_frontend_flag(args):
+    for a in args:
+        if a.startswith("-serialize-diagnostics-path="):
+            return a
+    return None
+
+
+def _get_serialized_diagnostics_path(args):
+    # The diagnostics can be specified via frontend args or in the output file
+    # map.
+    frontend_arg = _get_serialized_diagnostics_frontend_flag(args)
+    if frontend_arg:
+        return frontend_arg.split("=")[1]
+
+    output_file_map = _get_output_file_map(args)
+    module_entries = output_file_map.get("", {})
+    if "diagnostics" in module_entries:
+        return module_entries["diagnostics"]
+    else:
+        raise RuntimeError("Failed to find diagnostics in output file map")
+
+
+def _parse_wrapper_args(
+    allargs: list[str],
+) -> tuple[list[str], argparse.ArgumentParser]:
+    driver_args = []
+    wrapper_args = []
+    i = 0
+    while i < len(allargs):
+        arg = allargs[i]
+        if arg == "-Xwrapper":
+            if i == len(allargs) - 1:
+                raise RuntimeError("Missing argument to -Xwrapper")
+
+            wrapper_args.append(allargs[i + 1])
+            i += 2
+        else:
+            driver_args.append(arg)
+            i += 1
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-dependencies-file-output",
+        help="Path to write Buck format dependencies file to",
+    )
+    parser.add_argument(
+        "-ignore-errors",
+        action="store_true",
+        help="Used to ignore errors during index store generation",
+    )
+    parser.add_argument(
+        "-json-error-output-path",
+        help="Path to write error output in JSON format",
+    )
+    parser.add_argument(
+        "-remove-module-prefixes",
+        action="store_true",
+        help="Hack to remove module prefixes from swiftinterface output",
+    )
+    parser.add_argument(
+        "-serialized-diagnostics-to-json",
+        help="Path to serialized diagnostics to JSON transformer",
+    )
+    parser.add_argument(
+        "-skip-incremental-outputs",
+        action="store_true",
+        help="Hack to skip writing incremental outputs to avoid cache invalidation",
+    )
+    parser.add_argument(
+        "--writable-incremental-paths",
+        nargs="*",
+        help="Paths that should be made writable for incremental compilation",
+    )
+    parser.add_argument(
+        "--no-file-prefix-map",
+        action="store_true",
+        help="Don't use -file-prefix-map or -coverage-prefix-map options",
+    )
+    parsed_args = parser.parse_args(wrapper_args)
+
+    if (
+        parsed_args.json_error_output_path
+        and not parsed_args.serialized_diagnostics_to_json
+    ):
+        raise RuntimeError(
+            "-json-error-output-path requires -serialized-diagnostics-to-json to transform the serialized diagnostics."
+        )
+
+    return driver_args, parsed_args
 
 
 def main():
@@ -142,40 +272,68 @@ def main():
         # compilation actions.
         env["CLANG_MODULE_CACHE_PATH"] = "/tmp/buck-module-cache"
 
-    command = sys.argv[1:]
-
-    # Check if we need to strip module prefixes from types in swiftinterface output.
-    should_remove_module_prefixes = "-remove-module-prefixes" in command
-    if should_remove_module_prefixes:
-        command.remove("-remove-module-prefixes")
-
-    should_ignore_errors = "-ignore-errors" in command
-    if should_ignore_errors:
-        command.remove("-ignore-errors")
+    # Separate the driver args from the wrapper args
+    command, wrapper_args = _parse_wrapper_args(sys.argv[1:])
 
     # Use relative paths for debug information and index information,
     # so we generate relocatable files.
     #
     # We need to use the path where the action is run (both locally and on RE),
     # which is not known when we define the action.
-    command += [
-        "-file-prefix-map",
-        f"{os.getcwd()}/=",
-        "-file-prefix-map",
-        f"{os.getcwd()}=.",
-    ]
+    if not wrapper_args.no_file_prefix_map:
+        command += [
+            # Macro expansions get materialized in the temporary directory, which
+            # varies between local and remote actions. For local actions this will
+            # be a subdir of the CWD, so this needs to be the first map entry.
+            # We also need this prefix for the clang module cache path if we are
+            # not using explicit modules with remote actions.
+            "-file-prefix-map",
+            f"{env.get(_RE_TMPDIR_ENV_VAR, '/tmp').rstrip('/')}=/tmp",
+            "-file-prefix-map",
+            f"{os.getcwd()}/=",
+            "-file-prefix-map",
+            f"{os.getcwd()}=.",
+        ]
 
-    # Apply a coverage prefix map for the current directory
-    # to make file path metadata relocatable stripping
-    # the current directory from it.
-    #
-    # This overrides -file-prefix-map.
-    command += [
-        "-coverage-prefix-map",
-        f"{os.getcwd()}=.",
-    ]
+        # Apply a coverage prefix map for the current directory
+        # to make file path metadata relocatable stripping
+        # the current directory from it.
+        #
+        # This overrides -file-prefix-map.
+        command += [
+            "-coverage-prefix-map",
+            f"{os.getcwd()}=.",
+        ]
 
-    command = _process_skip_incremental_outputs(command)
+    if wrapper_args.skip_incremental_outputs:
+        command = _process_skip_incremental_outputs(command)
+
+    writable_args = ["-emit-objc-header-path", "-emit-module-path"]
+
+    for arg in writable_args:
+        if arg in command:
+            idx = command.index(arg)
+            file_path = command[idx + 1]
+            _make_path_user_writable(file_path)
+
+    if wrapper_args.writable_incremental_paths:
+        for file_path in wrapper_args.writable_incremental_paths:
+            _make_path_user_writable(file_path)
+        output_file_map_path = command[command.index("-output-file-map") + 1]
+        with open(output_file_map_path) as f:
+            output_file_map = json.load(f)
+            for value in output_file_map.values():
+                for subkey in [
+                    "swift-dependencies",
+                    "dependencies",
+                    "emit-module-dependencies",
+                    "emit-module-diagnostics",
+                    "diagnostics",
+                    "object",
+                ]:
+                    maybe_path = value.get(subkey, None)
+                    if maybe_path:
+                        _make_path_user_writable(maybe_path)
 
     result = subprocess.run(
         command,
@@ -188,9 +346,28 @@ def main():
     print(result.stdout, file=sys.stdout, end="")
     print(result.stderr, file=sys.stderr, end="")
 
+    if wrapper_args.json_error_output_path:
+        _make_path_user_writable(wrapper_args.json_error_output_path)
+        with open(wrapper_args.json_error_output_path, "w") as json_out:
+            # Don't bother running the diagnostics deserializer if compilation
+            # succeeded as the output will never be used.
+            if result.returncode == 0 or wrapper_args.ignore_errors:
+                json_out.write("[]")
+            else:
+                # Get the serialized diagnostics output from the output file map.
+                serialized_diags = _get_serialized_diagnostics_path(command)
+
+                # Convert the diagnostics to JSON for the Buck error handler.
+                subprocess.run(
+                    [wrapper_args.serialized_diagnostics_to_json, serialized_diags],
+                    stdout=json_out,
+                    check=True,
+                )
+
     if result.returncode == 0:
-        # The Swift compiler will return an exit code of 0 and warn when it cannot write auxiliary files.
-        # Detect and error so that the action is not cached.
+        # The Swift compiler will return an exit code of 0 and warn when it
+        # cannot write auxiliary files. Detect and error so that the action
+        # is not cached.
         failed_write = (
             _FILE_WRITE_FAILURE_MARKER in result.stdout
             or _FILE_WRITE_FAILURE_MARKER in result.stderr
@@ -203,28 +380,22 @@ def main():
 
         # Rewrite .d files for the format that Buck requires.
         if "-emit-dependencies" in command:
-            _rewrite_dependency_file(command)
+            _rewrite_dependency_file(command, wrapper_args.dependencies_file_output)
 
-    # https://github.com/swiftlang/swift/issues/56573
-    if should_remove_module_prefixes:
-        _remove_swiftinterface_module_prefixes(command)
+        # https://github.com/swiftlang/swift/issues/56573
+        if wrapper_args.remove_module_prefixes:
+            _remove_swiftinterface_module_prefixes(command)
 
-    if should_ignore_errors:
+    if wrapper_args.ignore_errors:
         sys.exit(0)
     else:
         sys.exit(result.returncode)
 
 
-_SKIP_INCREMENTAL_OUTPUTS_ARG = "-skip-incremental-outputs"
-_SWIFT_FILES_ARGSFILE = ".swift_files"
+_SWIFT_FILES_ARGSFILE = "_swift_srcs"
 
 
 def _process_skip_incremental_outputs(command):
-    if _SKIP_INCREMENTAL_OUTPUTS_ARG not in command:
-        return command
-
-    command.remove(_SKIP_INCREMENTAL_OUTPUTS_ARG)
-
     output_file_map = command[command.index("-output-file-map") + 1]
     output_dir = os.path.dirname(os.path.dirname(output_file_map))
 

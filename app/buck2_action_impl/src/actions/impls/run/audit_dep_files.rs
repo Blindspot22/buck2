@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -17,13 +18,13 @@ use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_directory::directory::directory::Directory;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
-use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
+use buck2_error::internal_error;
 use buck2_execute::digest_config::HasDigestConfig;
 use buck2_execute::materialize::materializer::HasMaterializer;
 use dice::DiceTransaction;
 
-use crate::actions::impls::run::dep_files::DepFilesKey;
+use crate::actions::impls::run::RunActionKey;
 use crate::actions::impls::run::dep_files::StoredFingerprints;
 use crate::actions::impls::run::dep_files::get_dep_files;
 use crate::actions::impls::run::dep_files::read_dep_files;
@@ -41,26 +42,38 @@ async fn audit_dep_files(
     identifier: Option<String>,
     stdout: &mut (dyn Write + Send),
 ) -> buck2_error::Result<()> {
-    let key = DepFilesKey::new(BaseDeferredKey::TargetLabel(label), category, identifier);
+    let key = RunActionKey::new(BaseDeferredKey::TargetLabel(label), category, identifier);
 
     let state = get_dep_files(&key)
-        .with_buck_error_context(|| format!("Failed to find dep files for key `{}`", key))?;
+        .ok_or_else(|| internal_error!("Failed to find dep files for key `{key}`"))?;
 
+    let declared_dep_files = match state.declared_dep_files() {
+        Some(declared_dep_files) => declared_dep_files,
+        None => {
+            return Err(buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "Trying to audit dep files for an action that doesn't declare any dep files!"
+            ));
+        }
+    };
+
+    let artifact_fs = ctx.clone().get_artifact_fs().await?;
     let dep_files = read_dep_files(
         state.has_signatures(),
-        state.declared_dep_files(),
-        &ctx.clone().get_artifact_fs().await?,
+        declared_dep_files,
+        state.result(),
+        &artifact_fs,
         ctx.per_transaction_data().get_materializer().as_ref(),
     )
-    .await
-    .buck_error_context("Failed to read dep files")?
-    .buck_error_context("Dep fils have expired")?;
+    .await?
+    .ok_or_else(|| internal_error!("Dep files have expired"))?;
 
     let fingerprints = state.locked_compute_fingerprints(
         Cow::Owned(dep_files),
         true,
         ctx.global_data().get_digest_config(),
-    );
+        &artifact_fs,
+    )?;
 
     let dirs = match &*fingerprints {
         StoredFingerprints::Digests(..) => {
@@ -74,12 +87,12 @@ async fn audit_dep_files(
     };
 
     for path in dirs.untagged.ordered_walk_leaves().paths() {
-        writeln!(stdout, "untagged\t{}", path)?;
+        writeln!(stdout, "untagged\t{path}")?;
     }
 
     for (tag, dir) in dirs.tagged.iter() {
         for path in dir.ordered_walk_leaves().paths() {
-            writeln!(stdout, "{}\t{}", tag, path)?;
+            writeln!(stdout, "{tag}\t{path}")?;
         }
     }
 

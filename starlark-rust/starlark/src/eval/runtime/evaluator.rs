@@ -104,10 +104,31 @@ enum EvaluatorError {
     CallstackSizeAlreadySet,
     #[error("Max callstack size cannot be zero")]
     ZeroCallstackSize,
+    #[error("Evaluation cancelled")]
+    Cancelled,
+    #[error("Max heap size is already set")]
+    HeapSizeAlreadySet,
+    #[error("Max heap size cannot be zero")]
+    ZeroHeapSize,
+    #[error(
+        "Heap memory limit of {0} bytes exceeded.
+This error is usually emitted some time after the limit is actually exceeded, so the span may not \
+be informative."
+    )]
+    HeapLimitExceeded(usize),
+    #[error("Max tick count is already set")]
+    TickLimitAlreadySet,
+    #[error("Max tick count cannot be zero")]
+    ZeroTickLimit,
+    #[error("Execution duration limit of {0} ticks has been exceeded")]
+    TickLimitExceeded(u64),
 }
 
 /// Number of bytes to allocate between GC's.
 pub(crate) const GC_THRESHOLD: usize = 100000;
+
+/// Number of ticks to execute before running "infrequent" checks
+const INFREQUENT_INSTRUCTION_CHECK_PERIOD: u32 = 1000;
 
 /// Default value for max starlark stack size
 pub(crate) const DEFAULT_STACK_SIZE: usize = 50;
@@ -115,7 +136,7 @@ pub(crate) const DEFAULT_STACK_SIZE: usize = 50;
 /// Holds everything about an ongoing evaluation (local variables, globals, module resolution etc).
 pub struct Evaluator<'v, 'a, 'e> {
     // The module that is being used for this evaluation
-    pub(crate) module_env: &'v Module,
+    pub(crate) module_env: &'a Module<'v>,
     /// Current function (`def` or `lambda`) frame: locals and bytecode stack.
     pub(crate) current_frame: BcFramePtr<'v>,
     // How we deal with a `load` function.
@@ -152,6 +173,8 @@ pub struct Evaluator<'v, 'a, 'e> {
     /// Field that can be used for any purpose you want (can store types you define).
     /// Typically accessed via native functions you also define.
     pub extra: Option<&'a dyn AnyLifetime<'e>>,
+    /// Like `extra`, but mutable
+    pub extra_mut: Option<&'a mut dyn AnyLifetime<'e>>,
     /// Called to perform console IO each time `breakpoint` function is called.
     pub(crate) breakpoint_handler:
         Option<Box<dyn Fn() -> anyhow::Result<Box<dyn BreakpointConsole>>>>,
@@ -161,9 +184,41 @@ pub struct Evaluator<'v, 'a, 'e> {
     pub(crate) soft_error_handler: &'a (dyn SoftErrorHandler + 'a),
     /// Max size of starlark stack
     pub(crate) max_callstack_size: Option<usize>,
+    /// Max size of heap memory in bytes
+    pub(crate) max_heap_size: Option<usize>,
+    /// Max number of ticks to execute
+    pub(crate) max_tick_count: Option<u64>,
     // The Starlark-level call-stack of functions.
     // Must go last because it's quite a big structure
     pub(crate) call_stack: CheapCallStack<'v>,
+    /// Function to check if evaluation should be cancelled early
+    pub(crate) is_cancelled: Box<dyn Fn() -> bool + 'a>,
+    /// A counter to track when to perform "infrequent" checks like cancellation, timeouts, etc
+    pub(crate) infrequent_instr_check_counter: u32,
+    /// Total number of ticks executed so far
+    pub(crate) total_tick_count_at_last_infrequent_check: u64,
+}
+
+// We use this to validate that the Evaluator lifetimes have the expected variance.
+#[allow(clippy::ref_option_ref, clippy::borrowed_box)]
+fn _check_variance() {
+    // 'v: invariant
+    // 'e: invariant
+
+    fn check_covariant_a<'v, 'a, 'e: 'a, 'a2>(a: Evaluator<'v, 'a, 'e>)
+    where
+        'a: 'a2,
+    {
+        // For debugging this, we check each field individually so that the error message points to the specific problematic field.
+        let _: &Option<&'a2 dyn FileLoader> = &a.loader;
+        let _: &EvaluationInstrumentation<'a2, '_> = &a.eval_instrumentation;
+        let _: &Option<&'a2 dyn AnyLifetime<'_>> = &a.extra;
+        let _: &Option<&'a2 mut dyn AnyLifetime<'_>> = &a.extra_mut;
+        let _: &&'a2 (dyn PrintHandler + 'a2) = &a.print_handler;
+        let _: &&'a2 (dyn SoftErrorHandler + 'a2) = &a.soft_error_handler;
+        let _: &Box<dyn Fn() -> bool + 'a2> = &a.is_cancelled;
+        let _: &Evaluator<'v, 'a2, 'e> = &a;
+    }
 }
 
 /// Just holds things that require using EvaluationCallbacksEnabled so that we can cache whether that needs to be enabled or not.
@@ -210,13 +265,14 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
     ///
     /// If your program contains `load()` statements, you also need to call
     /// [`set_loader`](Evaluator::set_loader).
-    pub fn new(module: &'v Module) -> Self {
+    pub fn new(module: &'a Module<'v>) -> Self {
         Evaluator {
             call_stack: CheapCallStack::default(),
             module_env: module,
             current_frame: BcFramePtr::null(),
             loader: None,
             extra: None,
+            extra_mut: None,
             next_gc_level: GC_THRESHOLD,
             disable_gc: false,
             alloca: Alloca::new(),
@@ -234,6 +290,11 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
             verbose_gc: false,
             static_typechecking: false,
             max_callstack_size: None,
+            max_heap_size: None,
+            max_tick_count: None,
+            is_cancelled: Box::new(|| false),
+            infrequent_instr_check_counter: 0,
+            total_tick_count_at_last_infrequent_check: 0,
         }
     }
 
@@ -420,11 +481,17 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
         self.call_stack.top_location()
     }
 
+    /// Obtain the nth location on the call-stack. May be [`None`] if the
+    /// stack is not that deep. n=0 is the top of the stack.
+    pub fn call_stack_nth_location(&self, n: usize) -> Option<FileSpan> {
+        self.call_stack.nth_location(n)
+    }
+
     pub(crate) fn before_stmt_fn(
         &mut self,
-        f: &'a dyn for<'v1> Fn(FileSpanRef, bool, &mut Evaluator<'v1, 'a, 'e>),
+        f: &'a dyn for<'v1, 'a2> Fn(FileSpanRef, bool, &mut Evaluator<'v1, 'a2, 'e>),
     ) {
-        self.before_stmt(f.into())
+        self.before_stmt(BeforeStmtFunc::from_fn(f))
     }
 
     pub(crate) fn before_stmt(&mut self, f: BeforeStmtFunc<'a, 'e>) {
@@ -447,6 +514,11 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
     /// Set deprecation handler. If not set, deprecations are treated as hard errors.
     pub fn set_soft_error_handler(&mut self, handler: &'a (dyn SoftErrorHandler + 'a)) {
         self.soft_error_handler = handler;
+    }
+
+    /// Set canceled-checking function. This function is called periodically to check if the evaluator should return early (with an error condition).
+    pub fn set_check_cancelled(&mut self, is_canceled: Box<dyn Fn() -> bool + 'a>) {
+        self.is_cancelled = is_canceled
     }
 
     /// Called to add an entry to the call stack, by the function being invoked.
@@ -474,12 +546,12 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
     }
 
     /// The active heap where [`Value`]s are allocated.
-    pub fn heap(&self) -> &'v Heap {
+    pub fn heap(&self) -> Heap<'v> {
         self.module_env.heap()
     }
 
     /// Module which was passed to the evaluator.
-    pub fn module(&self) -> &'v Module {
+    pub fn module(&self) -> &'a Module<'v> {
         self.module_env
     }
 
@@ -488,7 +560,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
     /// as the results of this execution are required.
     /// Suitable for use with [`add_reference`](FrozenHeap::add_reference)
     /// and [`OwnedFrozenValue::owned_frozen_value`](crate::values::OwnedFrozenValue::owned_frozen_value).
-    pub fn frozen_heap(&self) -> &'v FrozenHeap {
+    pub fn frozen_heap(&self) -> &'a FrozenHeap {
         self.module_env.frozen_heap()
     }
 
@@ -655,7 +727,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
         }
     }
 
-    fn func_to_def_info(&self, func: Value<'_>) -> crate::Result<FrozenRef<DefInfo>> {
+    fn func_to_def_info(&self, func: Value<'_>) -> crate::Result<FrozenRef<'_, DefInfo>> {
         if let Some(func) = func.downcast_ref::<Def>() {
             Ok(func.def_info)
         } else if let Some(func) = func.downcast_ref::<FrozenDef>() {
@@ -668,7 +740,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
         }
     }
 
-    pub(crate) fn top_frame_def_info(&self) -> crate::Result<FrozenRef<DefInfo>> {
+    pub(crate) fn top_frame_def_info(&self) -> crate::Result<FrozenRef<'_, DefInfo>> {
         let func = self.call_stack.top_nth_function(0)?;
         self.func_to_def_info(func)
     }
@@ -699,7 +771,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
 
     /// Gets the "top frame" for debugging. If the real top frame is `breakpoint` or `debug_evaluate`
     /// it will be skipped. This should only be used for the starlark debugger.
-    pub(crate) fn top_frame_def_info_for_debugger(&self) -> crate::Result<FrozenRef<DefInfo>> {
+    pub(crate) fn top_frame_def_info_for_debugger(&self) -> crate::Result<FrozenRef<'_, DefInfo>> {
         let func = self.top_frame_maybe_for_debugger(true)?;
         self.func_to_def_info(func)
     }
@@ -711,10 +783,16 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
     }
 
     fn trace(&mut self, tracer: &Tracer<'v>) {
+        self.time_flame_profile
+            .record_call_enter(const_frozen_string!("trace/walk").to_value());
         self.module_env.trace(tracer);
         self.current_frame.trace(tracer);
         self.call_stack.trace(tracer);
+        self.time_flame_profile.record_call_exit();
+        self.time_flame_profile
+            .record_call_enter(const_frozen_string!("trace/walk (profiling)").to_value());
         self.time_flame_profile.trace(tracer);
+        self.time_flame_profile.record_call_exit();
     }
 
     /// Perform a garbage collection.
@@ -736,8 +814,31 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
             self.time_flame_profile
                 .record_call_enter(const_frozen_string!("GC").to_value());
 
-            self.heap().garbage_collect(|tracer| self.trace(tracer));
+            // Garbage collection does two time-consuming tasks:
+            // 1. It calls the closure we provide here to trace the existing
+            //    heap, moving objects to the new heap.
+            // 2. It returns, implicitly dropping the old arena and any objects
+            //    it may still contain.
+            //
+            // The best way to measure the former and the latter are to record
+            // enter/exits around our call to self.trace, and then an enter at
+            // the end of the closure. Once we regain control we record the
+            // matching exit, which covers the time it took to drop the old
+            // heap.
+            self.heap().garbage_collect(|tracer| {
+                self.trace(tracer);
 
+                // See above, this enter begins right as our closure ends, and
+                // will catch the implicit drop of the old arena as the
+                // self.heap() lets it auto-drop on return from the
+                // .garbage_collect()
+                self.time_flame_profile
+                    .record_call_enter(const_frozen_string!("cleanup").to_value());
+            });
+            // This exists the "cleanup" in the closure above
+            self.time_flame_profile.record_call_exit();
+
+            // For the "GC" above
             self.time_flame_profile.record_call_exit();
 
             if self.verbose_gc {
@@ -854,6 +955,172 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
         self.max_callstack_size = Some(stack_size);
         Ok(())
     }
+
+    /// Sets maximum size of the starlark heap in bytes.
+    ///
+    /// Evaluation will fail with an error after the limit is exceeded.
+    ///
+    /// Putting aside that starlark-rust should in general not be considered secure against truly
+    /// malicious code, this check in particular is best-effort and should absolutely not be treated
+    /// as a way to guarantee bounded memory use of an evaluation. Use OS-level APIs in a subprocess
+    /// if you want that.
+    ///
+    /// Particular limitations:
+    ///  1. This limit is not enforced on allocation, but instead checked once every so often during
+    ///     evaluation. No promises on the exact frequency. It's probably possible for a user to
+    ///     allocate a large amount of memory in between two such checks, significantly exceeding
+    ///     this limit.
+    ///  2. As a result of the above, the error generated when this check fails usually will not
+    ///     point to where the memory allocation actually happened, but rather a bit later.
+    ///  3. This check only limits the memory use of the starlark heap itself. `StarlarkValue`s that
+    ///     allocate data in the Rust heap will not have that data accounted for.
+    ///  4. `starlark-rust` itself has some types that do this, in particular structs and dicts.
+    ///     Even a large dict costs only constant memory in the starlark heap, though the starlark
+    ///     values that make up the keys and values themselves will obviously have their memory use
+    ///     accounted for in their own allocations.
+    ///  5. The exact amount of memory used by a particular evaluation is of course not a stable API
+    ///     guarantee; however, the previous point means that changes to the behavior of `dict`,
+    ///     `struct`, or other types that allocate in the native heap could cause swings that would
+    ///     otherwise be unexpectedly large. For this and other reasons, users using this are
+    ///     encouraged to call `check_heap_size_limit` at the end of their evaluation and log a
+    ///     warning in case they're approaching the limit so that proactive action can be taken.
+    ///
+    /// Despite those limitations, the intent is obviously that this is useful protection against
+    /// the kinds of memory overruns that are likely from normal code patterns.
+    pub fn set_max_heap_size(&mut self, heap_size: usize) -> anyhow::Result<()> {
+        if heap_size == 0 {
+            return Err(EvaluatorError::ZeroHeapSize.into());
+        }
+        if self.max_heap_size.is_some() {
+            return Err(EvaluatorError::HeapSizeAlreadySet.into());
+        }
+        self.max_heap_size = Some(heap_size);
+        Ok(())
+    }
+
+    /// Check if the heap size limit has been exceeded
+    ///
+    /// Returns `None` if no limit is set
+    #[inline]
+    pub fn check_heap_size_limit(&mut self) -> Option<ResourceCheckResult> {
+        let limit = self.max_heap_size?;
+
+        let current = self.heap().peak_allocated_bytes() + self.frozen_heap().allocated_bytes();
+
+        if current > limit {
+            Some(ResourceCheckResult::Exceeded(crate::Error::new_other(
+                EvaluatorError::HeapLimitExceeded(limit),
+            )))
+        } else if current > (limit / 2) {
+            Some(ResourceCheckResult::Warn {
+                usage: current as u64,
+                limit: limit as u64,
+            })
+        } else {
+            Some(ResourceCheckResult::Ok)
+        }
+    }
+
+    /// Set a limit on the tick count of this starlark evaluation.
+    ///
+    /// Evaluation will fail with an error after the limit is exceeded.
+    ///
+    /// Appropriate values for this parameter can be found by running representative evaluations and
+    /// inspecting `get_total_tick_count` at the end.
+    ///
+    /// Putting aside that starlark-rust should in general not be considered secure against truly
+    /// malicious code, this check in particular is best-effort and should absolutely not be treated
+    /// as a way to guarantee bounded runtime. Use OS-level APIs in a subprocess if you want that.
+    ///
+    /// For the purpose of this check one "tick" is either one function call or one loop
+    /// backedge. The primary upside of this choice is that it is deterministic, cheap to implement,
+    /// and most importantly is *stable*, ie is unlikely to change unexpectedly from inocuous
+    /// looking changes to either starlark code or the internals of starlark-rust.
+    ///
+    /// The tradeoff is that it is not very "fair" in any meaningful sense; some loop bodies are
+    /// more expensive than others. The intent is that this is useful protection against the kinds
+    /// of blowups in runtime that users are liable to write accidentally.
+    ///
+    /// Like for `set_max_heap_size`, you may wish to call `check_tick_count_limit` at the
+    /// end of evaluations and log a warning if indicated to prevent surprises.
+    pub fn set_max_tick_count(&mut self, tick_count: u64) -> anyhow::Result<()> {
+        if tick_count == 0 {
+            return Err(EvaluatorError::ZeroTickLimit.into());
+        }
+        if self.max_tick_count.is_some() {
+            return Err(EvaluatorError::TickLimitAlreadySet.into());
+        }
+        self.max_tick_count = Some(tick_count);
+        Ok(())
+    }
+
+    /// Check if the tick count limit has been exceeded.
+    ///
+    /// Returns `None` if no limit is set.
+    #[inline]
+    pub fn check_tick_count_limit(&self) -> Option<ResourceCheckResult> {
+        let limit = self.max_tick_count?;
+        let current = self.get_total_tick_count();
+
+        if current > limit {
+            Some(ResourceCheckResult::Exceeded(crate::Error::new_other(
+                EvaluatorError::TickLimitExceeded(limit),
+            )))
+        } else if current > (limit / 2) {
+            Some(ResourceCheckResult::Warn {
+                usage: current,
+                limit,
+            })
+        } else {
+            Some(ResourceCheckResult::Ok)
+        }
+    }
+
+    /// Get the total number of ticks executed in this evaluator.
+    ///
+    /// See `set_max_tick_count` for a bit more about this.
+    #[inline]
+    pub fn get_total_tick_count(&self) -> u64 {
+        self.total_tick_count_at_last_infrequent_check + self.infrequent_instr_check_counter as u64
+    }
+
+    #[inline(always)]
+    pub(crate) fn report_forward_progress(&mut self) -> crate::Result<()> {
+        self.infrequent_instr_check_counter += 1;
+        if self.infrequent_instr_check_counter >= INFREQUENT_INSTRUCTION_CHECK_PERIOD {
+            #[cfg(rust_nightly)]
+            std::hint::cold_path();
+            self.run_infrequent_instr_checks()?;
+            self.total_tick_count_at_last_infrequent_check +=
+                self.infrequent_instr_check_counter as u64;
+            self.infrequent_instr_check_counter = 0;
+        };
+
+        Ok(())
+    }
+
+    pub(crate) fn run_infrequent_instr_checks(&mut self) -> crate::Result<()> {
+        if (self.is_cancelled)() {
+            return Err(crate::Error::new_other(EvaluatorError::Cancelled));
+        }
+        if let Some(ResourceCheckResult::Exceeded(e)) = self.check_heap_size_limit() {
+            return Err(e);
+        }
+        if let Some(ResourceCheckResult::Exceeded(e)) = self.check_tick_count_limit() {
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+pub enum ResourceCheckResult {
+    Ok,
+    /// Returned if the actual usage is more than half the limit.
+    Warn {
+        usage: u64,
+        limit: u64,
+    },
+    Exceeded(crate::Error),
 }
 
 pub(crate) trait EvaluationCallbacks {
@@ -948,4 +1215,90 @@ pub(crate) fn before_stmt(
         "`before_stmt` cannot be modified during evaluation"
     );
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::environment::Globals;
+    use crate::environment::Module;
+    use crate::eval::Evaluator;
+    use crate::syntax::AstModule;
+    use crate::syntax::Dialect;
+
+    #[test]
+    fn test_heap_memory_limit() -> crate::Result<()> {
+        // Test that the heap memory limit is enforced during evaluation
+        let globals = Globals::standard();
+        Module::with_temp_heap(|module| {
+            let mut eval = Evaluator::new(&module);
+            // Set a low heap limit (1000 bytes)
+            eval.set_max_heap_size(10000).unwrap();
+
+            let ast = AstModule::parse(
+                "test.bzl",
+                // Small program that shouldn't exceed the limit
+                "x = 1 + 1".to_owned(),
+                &Dialect::Standard,
+            )
+            .unwrap();
+            // This should succeed
+            eval.eval_module(ast, &globals).unwrap();
+
+            let ast = AstModule::parse(
+                "test.bzl",
+                // Allocate many strings to exceed heap limit
+                "def allocate():\n    x = [str(i) * 100 for i in range(10000)]\nallocate()"
+                    .to_owned(),
+                &Dialect::Standard,
+            )
+            .unwrap();
+            let err = eval.eval_module(ast, &globals);
+
+            let expected = "Heap memory limit";
+            let err_msg = format!("{err:#?}");
+            if !err_msg.contains(expected) {
+                panic!("Error:\n{err:#?}\nExpected:\n{expected:?}")
+            }
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_tick_count_limit() -> crate::Result<()> {
+        // Test that the tick count limit is enforced during evaluation
+        let globals = Globals::standard();
+        Module::with_temp_heap(|module| {
+            let mut eval = Evaluator::new(&module);
+            // Set a low tick limit (10000 ticks)
+            eval.set_max_tick_count(10000).unwrap();
+
+            let ast = AstModule::parse(
+                "test.bzl",
+                // Small program that shouldn't exceed the limit
+                "x = 1 + 1".to_owned(),
+                &Dialect::Standard,
+            )
+            .unwrap();
+            // This should succeed
+            eval.eval_module(ast, &globals).unwrap();
+
+            let ast = AstModule::parse(
+                "test.bzl",
+                // Loop many times to exceed tick limit
+                "def loop():\n    for i in range(1000000):\n        pass\nloop()".to_owned(),
+                &Dialect::Standard,
+            )
+            .unwrap();
+            let err = eval.eval_module(ast, &globals);
+
+            let expected = "ticks has been exceeded";
+            let err_msg = format!("{err:#?}");
+            if !err_msg.contains(expected) {
+                panic!("Error:\n{err:#?}\nExpected:\n{expected:?}")
+            }
+
+            Ok(())
+        })
+    }
 }

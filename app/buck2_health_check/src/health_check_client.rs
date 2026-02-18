@@ -1,15 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![allow(dead_code)] // TODO(rajneeshl): Remove this when the health checks are moved to the server.
 
-use buck2_core::soft_error;
+use buck2_common::invocation_paths::InvocationPaths;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::error::TrySendError;
@@ -18,6 +20,7 @@ use tokio::task::JoinHandle;
 use crate::interface::HealthCheckContextEvent;
 use crate::interface::HealthCheckEvent;
 use crate::interface::HealthCheckService;
+use crate::interface::HealthCheckSnapshotData;
 use crate::report::DisplayReport;
 use crate::report::Report;
 
@@ -34,12 +37,21 @@ impl StreamingHealthCheckClient {
         tags_sender: Option<Sender<Vec<String>>>,
         display_reports_sender: Option<Sender<Vec<DisplayReport>>>,
         event_receiver: Receiver<HealthCheckEvent>,
-    ) -> Self {
+        paths: Option<&InvocationPaths>,
+    ) -> buck2_error::Result<Self> {
+        let Some(path) = paths else {
+            return Err(buck2_error::buck2_error!(
+                buck2_error::ErrorTag::HealthCheck,
+                "Error setting up health check state dir. Health checks will not be run."
+            ));
+        };
+        let health_check_dir = path.health_check_state_dir();
         let inner = tokio::spawn(async move {
-            let mut client = HealthCheckClientInner::new(tags_sender, display_reports_sender);
+            let mut client =
+                HealthCheckClientInner::new(tags_sender, display_reports_sender, health_check_dir);
             client.run_event_loop(event_receiver).await;
         });
-        Self { inner }
+        Ok(Self { inner })
     }
 }
 
@@ -63,8 +75,9 @@ impl HealthCheckClientInner {
     fn new(
         tags_sender: Option<Sender<Vec<String>>>,
         display_reports_sender: Option<Sender<Vec<DisplayReport>>>,
+        health_check_dir: AbsNormPathBuf,
     ) -> Self {
-        let health_check_service = Self::create_service();
+        let health_check_service = Self::create_service(health_check_dir);
         Self::new_with_service(tags_sender, display_reports_sender, health_check_service)
     }
 
@@ -79,16 +92,22 @@ impl HealthCheckClientInner {
             health_check_service,
         }
     }
-    fn create_service() -> Box<dyn HealthCheckService> {
+    fn create_service(health_check_dir: AbsNormPathBuf) -> Box<dyn HealthCheckService> {
         #[cfg(fbcode_build)]
         {
-            Box::new(crate::service::health_check_rpc_client::HealthCheckRpcClient::new())
+            Box::new(
+                crate::service::health_check_rpc_client::HealthCheckRpcClient::new(
+                    health_check_dir,
+                ),
+            )
         }
         #[cfg(not(fbcode_build))]
         {
             // There is no easy binary distribution mechanism for OSS, hence default to in-process execution.
             Box::new(
-                crate::service::health_check_in_process_service::HealthCheckInProcessService::new(),
+                crate::service::health_check_in_process_service::HealthCheckInProcessService::new(
+                    health_check_dir,
+                ),
             )
         }
     }
@@ -99,8 +118,8 @@ impl HealthCheckClientInner {
                 HealthCheckEvent::HealthCheckContextEvent(event) => {
                     self.update_context(event).await;
                 }
-                HealthCheckEvent::Snapshot() => {
-                    self.run_checks().await;
+                HealthCheckEvent::Snapshot(snapshot) => {
+                    self.run_checks(snapshot).await;
                 }
             }
         }
@@ -108,19 +127,19 @@ impl HealthCheckClientInner {
 
     async fn update_context(&mut self, event: HealthCheckContextEvent) {
         if let Err(e) = self.health_check_service.update_context(event).await {
-            let _ignored = soft_error!("health_check_context_update_failed", e);
+            tracing::debug!("Health check context update failed: {:#}", e);
         }
     }
 
-    async fn run_checks(&mut self) {
-        match self.health_check_service.run_checks().await {
+    async fn run_checks(&mut self, snapshot: HealthCheckSnapshotData) {
+        match self.health_check_service.run_checks(snapshot).await {
             Ok(reports) => {
                 if let Err(e) = self.send_reports(reports) {
-                    let _ignored = soft_error!("health_check_reports_error", e);
+                    tracing::debug!("Health check reporting failed: {:#}", e);
                 }
             }
             Err(e) => {
-                let _ignored = soft_error!("health_check_run_error", e);
+                tracing::debug!("Health check run failed: {:#}", e);
             }
         }
     }
@@ -189,7 +208,7 @@ impl HealthCheckClientInner {
                     // If the channel is full, skip sending these reports rather than OOMing due to huge buffers.
                     return Err(buck2_error::buck2_error!(
                         buck2_error::ErrorTag::HealthCheck,
-                        "Health check diplay reports channel full. Dropping reports."
+                        "Health check display reports channel full. Dropping reports."
                     ));
                 }
                 _ => {}
@@ -203,6 +222,7 @@ impl HealthCheckClientInner {
 mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::time::SystemTime;
 
     use async_trait::async_trait;
     use tokio::sync::mpsc;
@@ -210,6 +230,7 @@ mod tests {
     use super::*;
     use crate::interface::HealthCheckType;
     use crate::report::HealthIssue;
+    use crate::report::Message;
     use crate::report::Severity;
 
     struct TestHealthCheckService {
@@ -225,7 +246,10 @@ mod tests {
             Ok(())
         }
 
-        async fn run_checks(&mut self) -> buck2_error::Result<Vec<Report>> {
+        async fn run_checks(
+            &mut self,
+            _snapshot: HealthCheckSnapshotData,
+        ) -> buck2_error::Result<Vec<Report>> {
             let reports = self.reports.lock().unwrap().clone();
             Ok(reports)
         }
@@ -241,7 +265,7 @@ mod tests {
                     health_check_type: HealthCheckType::StableRevision,
                     health_issue: Some(HealthIssue {
                         severity: Severity::Warning,
-                        message: "Test report 1".to_owned(),
+                        message: Message::Simple("Test report 1".to_owned()),
                         remediation: None,
                     }),
                 }),
@@ -252,7 +276,7 @@ mod tests {
                     health_check_type: HealthCheckType::LowDiskSpace,
                     health_issue: Some(HealthIssue {
                         severity: Severity::Info,
-                        message: "Test report 2".to_owned(),
+                        message: Message::Simple("Test report 2".to_owned()),
                         remediation: None,
                     }),
                 }),
@@ -284,7 +308,9 @@ mod tests {
 
         // Send snapshot event
         event_sender
-            .send(HealthCheckEvent::Snapshot())
+            .send(HealthCheckEvent::Snapshot(HealthCheckSnapshotData {
+                timestamp: SystemTime::now(),
+            }))
             .await
             .unwrap();
 

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
@@ -18,12 +19,12 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future;
@@ -140,7 +141,7 @@ impl Key for EvalVar {
         let equation = lookup_unit(ctx, &self.0).await.map_err(Arc::new)?;
         Ok(match &*equation {
             Equation::Add(adds) => resolve_units(ctx, &adds[..]).await?.iter().sum(),
-            Equation::Unit(unit) => resolve_units(ctx, &[unit.clone()]).await?[0],
+            Equation::Unit(unit) => resolve_units(ctx, std::slice::from_ref(&unit)).await?[0],
         })
     }
 

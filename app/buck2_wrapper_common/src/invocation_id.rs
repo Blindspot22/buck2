@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::hash_map::DefaultHasher;
@@ -92,10 +93,7 @@ impl TraceId {
     pub fn from_env_or_new() -> buck2_error::Result<TraceId> {
         match env::var(BUCK_WRAPPER_UUID_ENV_VAR) {
             Ok(s) => Ok(TraceId::from_str(&s).with_buck_error_context(|| {
-                format!(
-                    "Parsing buck2 invocation id from env variable {}",
-                    BUCK_WRAPPER_UUID_ENV_VAR
-                )
+                format!("Parsing buck2 invocation id from env variable {BUCK_WRAPPER_UUID_ENV_VAR}")
             })?),
             Err(env::VarError::NotPresent) => Ok(TraceId::new()),
             Err(env::VarError::NotUnicode(_)) => Err(TraceIdError::EnvVarNotUtf8.into()),

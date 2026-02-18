@@ -1,14 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 import argparse
 import subprocess
 import sys
 import time
+from enum import Enum
 from pathlib import Path
 from typing import List, NamedTuple
 
@@ -38,9 +40,15 @@ def run(cmd: List[str], check: bool, retries: int = MAX_RETRIES) -> str:
     return proc.stdout
 
 
+class ObjectFormat(str, Enum):
+    Sha1 = "sha1"
+    Sha256 = "sha256"
+
+
 class Args(NamedTuple):
     git_dir: Path
     work_tree: Path
+    object_format: ObjectFormat
     repo: str
     rev: str
 
@@ -49,6 +57,7 @@ def arg_parse() -> Args:
     parser = argparse.ArgumentParser()
     parser.add_argument("--git-dir", type=Path, required=True)
     parser.add_argument("--work-tree", type=Path, required=True)
+    parser.add_argument("--object-format", type=ObjectFormat, required=False)
     parser.add_argument("--repo", type=str, required=True)
     parser.add_argument("--rev", type=str, required=True)
     return Args(**vars(parser.parse_args()))
@@ -68,8 +77,12 @@ def main() -> None:
     args.work_tree.mkdir(exist_ok=True)
 
     git = ["git", f"--git-dir={args.git_dir}", f"--work-tree={args.work_tree}"]
+    if args.object_format is None:
+        object_format_args = []
+    else:
+        object_format_args = ["--object-format", args.object_format]
 
-    run([*git, "init"], check=True)
+    run([*git, "init"] + object_format_args, check=True)
     git_configure(git)
     run([*git, "remote", "remove", "origin"], check=False)
     run([*git, "remote", "add", "origin", args.repo], check=True)

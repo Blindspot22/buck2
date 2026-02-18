@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::num::NonZeroU64;
@@ -12,7 +13,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use allocative::Allocative;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use dupe::Dupe;
 use serde::Serialize;
 
@@ -34,7 +35,7 @@ pub struct SpanId(pub NonZeroU64);
 
 impl SpanId {
     pub fn from_u64(span_id: u64) -> buck2_error::Result<SpanId> {
-        SpanId::from_u64_opt(span_id).buck_error_context("zero span id")
+        SpanId::from_u64_opt(span_id).ok_or_else(|| internal_error!("zero span id"))
     }
 
     pub fn from_u64_opt(span_id: u64) -> Option<SpanId> {

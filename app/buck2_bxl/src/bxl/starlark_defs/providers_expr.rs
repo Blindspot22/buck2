@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_core::cells::cell_path::CellPathRef;
@@ -31,7 +32,7 @@ use starlark::values::UnpackValue;
 use starlark::values::list::UnpackList;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
-use crate::bxl::starlark_defs::context::BxlContextNoDice;
+use crate::bxl::starlark_defs::context::BxlContext;
 use crate::bxl::starlark_defs::nodes::configured::StarlarkConfiguredTargetNode;
 use crate::bxl::starlark_defs::nodes::unconfigured::StarlarkTargetNode;
 use crate::bxl::starlark_defs::targetset::StarlarkTargetSet;
@@ -75,6 +76,22 @@ pub(crate) enum ConfiguredProvidersLabelArg<'v> {
     ProvidersLabel(&'v StarlarkConfiguredProvidersLabel),
 }
 
+/// ConfiguredProvidersLabelListArg is a type that can be used as an argument in starlark api for
+/// a list of configured provider labels
+#[derive(StarlarkTypeRepr, UnpackValue)]
+pub(crate) enum ConfiguredProvidersLabelListArg<'v> {
+    List(UnpackList<ConfiguredProvidersLabelArg<'v>>),
+    TargetSet(&'v StarlarkTargetSet<ConfiguredTargetNode>),
+}
+
+/// ConfiguredProvidersExprArg is a type that can be used as an argument in starlark api for
+/// a configured provider label expression (single or list)
+#[derive(StarlarkTypeRepr, UnpackValue)]
+pub(crate) enum ConfiguredProvidersExprArg<'v> {
+    One(ConfiguredProvidersLabelArg<'v>),
+    List(ConfiguredProvidersLabelListArg<'v>),
+}
+
 /// AnyProvidersLabelArg is a type that can be used as an argument in stalark api for
 /// a configured provider label or an unconfigured provider label
 #[derive(StarlarkTypeRepr, UnpackValue)]
@@ -112,29 +129,29 @@ impl<'v> ConfiguredProvidersLabelArg<'v> {
     }
 }
 
-impl<'v> AnyProvidersExprArg<'v> {
-    pub(crate) fn contains_unconfigured(&self) -> bool {
+impl<'v> ConfiguredProvidersExprArg<'v> {
+    pub(crate) fn unpack(&self) -> ProvidersExpr<ConfiguredProvidersLabel> {
         match self {
-            AnyProvidersExprArg::One(arg) => arg.is_unconfigured(),
-            AnyProvidersExprArg::List(arg) => arg.contains_unconfigured(),
-        }
-    }
-}
-
-impl<'v> AnyProvidersLabelArg<'v> {
-    fn is_unconfigured(&self) -> bool {
-        matches!(self, AnyProvidersLabelArg::Unconfigured(_))
-    }
-}
-
-impl<'v> AnyProvidersLabelListArg<'v> {
-    fn contains_unconfigured(&self) -> bool {
-        match self {
-            AnyProvidersLabelListArg::List(args) => {
-                args.items.iter().any(|arg| arg.is_unconfigured())
+            ConfiguredProvidersExprArg::One(arg) => {
+                ProvidersExpr::Literal(arg.configured_providers_label())
             }
-            AnyProvidersLabelListArg::StarlarkTargetSet(_) => true,
-            _ => false,
+            ConfiguredProvidersExprArg::List(ConfiguredProvidersLabelListArg::List(list)) => {
+                ProvidersExpr::Iterable(
+                    list.items
+                        .iter()
+                        .map(|arg| arg.configured_providers_label())
+                        .collect(),
+                )
+            }
+            ConfiguredProvidersExprArg::List(ConfiguredProvidersLabelListArg::TargetSet(
+                target_set,
+            )) => ProvidersExpr::Iterable(
+                target_set
+                    .0
+                    .iter()
+                    .map(|node| ConfiguredProvidersLabel::default_for(node.label().dupe()))
+                    .collect(),
+            ),
         }
     }
 }
@@ -143,7 +160,7 @@ impl ProvidersExpr<ConfiguredProvidersLabel> {
     pub(crate) async fn unpack<'v, 'c>(
         arg: AnyProvidersExprArg<'v>,
         global_cfg_options_override: &GlobalCfgOptions,
-        ctx: &BxlContextNoDice<'_>,
+        ctx: &BxlContext<'_>,
         dice: &'c mut DiceComputations<'_>,
     ) -> buck2_error::Result<Self> {
         match arg {
@@ -159,7 +176,7 @@ impl ProvidersExpr<ConfiguredProvidersLabel> {
     async fn unpack_literal<'v, 'c>(
         arg: AnyProvidersLabelArg<'v>,
         global_cfg_options_override: &'c GlobalCfgOptions,
-        ctx: &BxlContextNoDice<'_>,
+        ctx: &BxlContext<'_>,
         dice: &'c mut DiceComputations<'_>,
     ) -> buck2_error::Result<ConfiguredProvidersLabel> {
         match arg {
@@ -176,7 +193,7 @@ impl ProvidersExpr<ConfiguredProvidersLabel> {
     async fn unpack_iterable<'c, 'v: 'c>(
         arg: AnyProvidersLabelListArg<'v>,
         global_cfg_options_override: &'c GlobalCfgOptions,
-        ctx: &'c BxlContextNoDice<'_>,
+        ctx: &'c BxlContext<'_>,
         dice: &'c mut DiceComputations<'_>,
     ) -> buck2_error::Result<ProvidersExpr<ConfiguredProvidersLabel>> {
         match arg {
@@ -218,7 +235,7 @@ impl ProvidersExpr<ConfiguredProvidersLabel> {
 impl ProvidersExpr<ProvidersLabel> {
     pub(crate) fn unpack<'v>(
         arg: ProvidersExprArg<'v>,
-        ctx: &BxlContextNoDice<'_>,
+        ctx: &BxlContext<'_>,
     ) -> buck2_error::Result<Self> {
         match arg {
             ProvidersExprArg::One(arg) => Self::unpack_literal(arg, ctx),
@@ -228,14 +245,14 @@ impl ProvidersExpr<ProvidersLabel> {
 
     fn unpack_literal<'v>(
         value: ProvidersLabelArg<'v>,
-        ctx: &BxlContextNoDice<'_>,
+        ctx: &BxlContext<'_>,
     ) -> buck2_error::Result<Self> {
         Ok(Self::Literal(Self::unpack_providers_label(value, ctx)?))
     }
 
     fn unpack_iterable<'c, 'v: 'c>(
         arg: ProvidersLabelListArg<'v>,
-        ctx: &'c BxlContextNoDice<'_>,
+        ctx: &'c BxlContext<'_>,
     ) -> buck2_error::Result<ProvidersExpr<ProvidersLabel>> {
         match arg {
             ProvidersLabelListArg::TargetSet(s) => Ok(ProvidersExpr::Iterable(
@@ -264,7 +281,7 @@ impl<P: ProvidersLabelMaybeConfigured> ProvidersExpr<P> {
 
     fn unpack_providers_label<'v>(
         arg: ProvidersLabelArg<'v>,
-        ctx: &BxlContextNoDice<'_>,
+        ctx: &BxlContext<'_>,
     ) -> buck2_error::Result<ProvidersLabel> {
         match arg {
             ProvidersLabelArg::Str(s) => {

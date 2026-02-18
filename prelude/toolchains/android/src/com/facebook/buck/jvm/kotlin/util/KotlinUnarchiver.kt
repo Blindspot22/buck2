@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin.util
@@ -12,8 +13,7 @@ package com.facebook.buck.jvm.kotlin.util
 import com.facebook.buck.core.filesystems.AbsPath
 import com.facebook.buck.core.filesystems.RelPath
 import com.facebook.buck.jvm.java.JavaPaths
-import com.facebook.buck.util.unarchive.ArchiveFormat
-import com.facebook.buck.util.unarchive.ExistingFileMode
+import com.facebook.buck.util.unarchive.Unzip
 import com.google.common.collect.ImmutableList
 import com.google.common.collect.ImmutableSet
 import java.io.IOException
@@ -24,7 +24,7 @@ import java.util.Optional
 fun getExpandedSourcePaths(
     ruleCellRoot: AbsPath,
     kotlinSourceFilePaths: ImmutableSet<RelPath>,
-    workingDirectory: Optional<Path>
+    workingDirectory: Optional<Path>,
 ): ImmutableList<Path> {
   // Add sources file or sources list to command
 
@@ -36,11 +36,11 @@ fun getExpandedSourcePaths(
     } else if (pathString.endsWith(JavaPaths.SRC_ZIP) || pathString.endsWith(JavaPaths.SRC_JAR)) {
       // For a Zip of .java files, create a JavaFileObject for each .java entry.
       val zipPaths: ImmutableList<Path> =
-          ArchiveFormat.ZIP.unarchiver.extractArchive(
+          Unzip.extractArchive(
               ruleCellRoot,
               ruleCellRoot.resolve(path).path,
               ruleCellRoot.resolve(workingDirectory.orElse(path.path)).path,
-              ExistingFileMode.OVERWRITE)
+          )
       sources.addAll(
           zipPaths
               .stream()
@@ -49,7 +49,8 @@ fun getExpandedSourcePaths(
                     input.toString().endsWith(".kts") ||
                     input.toString().endsWith(".java"))
               }
-              .iterator())
+              .iterator()
+      )
     }
   }
   return sources.build()

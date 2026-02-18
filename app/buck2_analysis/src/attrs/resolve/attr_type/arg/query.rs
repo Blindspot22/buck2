@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -20,11 +21,17 @@ use crate::attrs::resolve::ctx::AnalysisQueryResult;
 use crate::attrs::resolve::ctx::AttrResolutionContext;
 
 pub(crate) trait ConfiguredQueryMacroBaseExt {
-    fn resolve(&self, ctx: &dyn AttrResolutionContext) -> buck2_error::Result<ResolvedQueryMacro>;
+    fn resolve(
+        &self,
+        ctx: &mut dyn AttrResolutionContext,
+    ) -> buck2_error::Result<ResolvedQueryMacro>;
 }
 
 impl ConfiguredQueryMacroBaseExt for QueryMacroBase<ConfiguredProvidersLabel> {
-    fn resolve(&self, ctx: &dyn AttrResolutionContext) -> buck2_error::Result<ResolvedQueryMacro> {
+    fn resolve(
+        &self,
+        ctx: &mut dyn AttrResolutionContext,
+    ) -> buck2_error::Result<ResolvedQueryMacro> {
         let query_result: Arc<AnalysisQueryResult> = ctx.resolve_query(&self.query.query)?;
 
         match &self.expansion_type {

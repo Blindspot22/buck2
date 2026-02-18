@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -18,6 +19,7 @@ use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
 use buck2_build_api::validation::transitive_validations::TransitiveValidations;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use derivative::Derivative;
 use derive_more::Display;
 use dice::CancellationContext;
@@ -67,7 +69,6 @@ impl TransitiveValidationKey {
             .validations()
             .filter(|spec| !spec.optional() || enabled_optional_validations.contains(spec.name()))
             .map(|spec| spec.validation_result().get_bound_artifact())
-            .map(|r| r.map_err(buck2_error::Error::from))
             .collect::<buck2_error::Result<Vec<Artifact>>>()?;
         ctx.try_compute_join(artifacts, |ctx, output| {
             async move { compute_single_validation(ctx, output).await }.boxed()
@@ -187,7 +188,7 @@ async fn compute_single_validation(
 ) -> Result<(), TreatValidationFailureAsError> {
     let action_key = validation_result
         .action_key()
-        .internal_error("Expected validation to be a build artifact")?;
+        .ok_or_else(|| internal_error!("Expected validation to be a build artifact"))?;
     let key = SingleValidationKey(action_key.dupe());
     let result = ctx.compute(&key).await?;
     tighten_cached_validation_result(result)

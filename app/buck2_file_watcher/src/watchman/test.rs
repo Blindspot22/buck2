@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fs;
@@ -17,6 +18,7 @@ use assert_matches::assert_matches;
 use async_trait::async_trait;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
+use buck2_error::internal_error;
 use buck2_util::process::async_background_command;
 use gazebo::prelude::*;
 use tokio::io::AsyncWriteExt;
@@ -97,7 +99,7 @@ impl WatchmanInstance {
         let child = self
             .child
             .as_mut()
-            .buck_error_context("Watchman was already shutdown")?;
+            .ok_or_else(|| internal_error!("Watchman was already shutdown"))?;
 
         child
             .kill()
@@ -125,15 +127,15 @@ impl Drop for WatchmanInstance {
             format!("Failed to read log file at {}", self.log.display())
         });
         match log {
-            Ok(log) => eprintln!("Watchman logs follow\n{}", log),
-            Err(e) => eprintln!("Failed to read logs: {:#}", e),
+            Ok(log) => eprintln!("Watchman logs follow\n{log}"),
+            Err(e) => eprintln!("Failed to read logs: {e:#}"),
         };
 
         // Try to see if Watchman had exited or not.
         match child.try_wait() {
-            Ok(Some(status)) => eprintln!("Watchman had exited with status {:?}", status),
+            Ok(Some(status)) => eprintln!("Watchman had exited with status {status:?}"),
             Ok(None) => eprintln!("Watchan is still running"),
-            Err(e) => eprintln!("Failed to access Watchman status: {:#}", e),
+            Err(e) => eprintln!("Failed to access Watchman status: {e:#}"),
         }
     }
 }

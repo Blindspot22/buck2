@@ -1,9 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+load(
+    "@prelude//:artifact_tset.bzl",
+    "ArtifactTSet",  # @unused Used as a type
+)
+load(":swift_toolchain_types.bzl", "SwiftCompiledModuleTset")
 
 SWIFT_EXTENSION = ".swift"
 
@@ -14,6 +21,18 @@ SwiftCompilationModes = ["wmo", "incremental", "auto"]
 SwiftMacroPlugin = plugins.kind()
 
 SwiftVersion = ["5", "6"]
+
+SwiftDependencyInfo = provider(fields = {
+    "debug_info_tset": provider_field(ArtifactTSet),
+    # Includes modules through exported_deps, used for compilation
+    "exported_swiftmodules": provider_field(SwiftCompiledModuleTset),
+    # If this target has exported_headers, used to validate non-modular dep exports
+    "has_exported_headers": provider_field(bool),
+    # Macro deps cannot be mixed with apple_library deps
+    "is_macro": provider_field(bool),
+    # If this target provides a clang module, used to validate non-modular dep exports
+    "is_modular": provider_field(bool),
+})
 
 def _swift_framework_implicit_search_paths_args(args: cmd_args):
     return args

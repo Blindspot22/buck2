@@ -1,18 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 
 use allocative::Allocative;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::package::package_relative_path::PackageRelativePath;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_util::arc_str::ArcS;
 use dupe::Dupe;
 use starlark_map::sorted_set::SortedSet;
@@ -81,7 +82,7 @@ impl PackageListing {
     pub fn files_within<'a>(
         &'a self,
         dir: &PackageRelativePath,
-    ) -> impl Iterator<Item = &'a ArcS<PackageRelativePath>> {
+    ) -> impl Iterator<Item = &'a ArcS<PackageRelativePath>> + use<'a> {
         self.listing.files.files_within(dir)
     }
 
@@ -102,8 +103,8 @@ impl PackageListing {
 }
 
 pub mod testing {
-    use buck2_core::fs::paths::file_name::FileNameBuf;
     use buck2_core::package::package_relative_path::PackageRelativePathBuf;
+    use buck2_fs::paths::file_name::FileNameBuf;
     use starlark_map::sorted_set::SortedSet;
     use starlark_map::sorted_vec::SortedVec;
 

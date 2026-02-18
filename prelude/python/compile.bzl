@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(":manifest.bzl", "ManifestInfo")
 load(":toolchain.bzl", "PythonToolchainInfo")
@@ -28,8 +29,12 @@ def compile_manifests_for_mode(
         manifests: list[ManifestInfo],
         invalidation_mode: PycInvalidationMode = PycInvalidationMode("unchecked_hash")) -> ManifestInfo:
     mode = invalidation_mode.value.upper()
-    output = ctx.actions.declare_output("bytecode_{}".format(mode), dir = True)
-    bytecode_manifest = ctx.actions.declare_output("bytecode_{}.manifest".format(mode))
+    has_content_based_path = (
+        getattr(ctx.attrs, "supports_pyc_content_based_paths", False) == True and
+        ctx.attrs._python_toolchain[PythonToolchainInfo].supports_content_based_paths == True
+    )
+    output = ctx.actions.declare_output("bytecode_{}".format(mode), dir = True, has_content_based_path = has_content_based_path)
+    bytecode_manifest = ctx.actions.declare_output("bytecode_{}.manifest".format(mode), has_content_based_path = has_content_based_path)
     cmd = [
         ctx.attrs._python_toolchain[PythonToolchainInfo].host_interpreter,
         ctx.attrs._python_toolchain[PythonToolchainInfo].compile,
@@ -74,4 +79,4 @@ def compile_manifests_for_mode(
         identifier = mode,
         error_handler = ctx.attrs._python_toolchain[PythonToolchainInfo].python_error_handler,
     )
-    return ManifestInfo(manifest = bytecode_manifest, artifacts = [(output, "bytecode")])
+    return ManifestInfo(manifest = bytecode_manifest.without_associated_artifacts(), artifacts = [(output, "bytecode")])

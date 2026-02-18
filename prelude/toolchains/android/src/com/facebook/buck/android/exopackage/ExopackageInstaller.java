@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.exopackage;
@@ -12,8 +13,6 @@ package com.facebook.buck.android.exopackage;
 import com.facebook.buck.android.AdbHelper;
 import com.facebook.buck.android.AndroidInstallPrinter;
 import com.facebook.buck.android.IsolatedApkInfo;
-import com.facebook.buck.android.agent.util.AgentUtil;
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.core.util.log.Logger;
 import com.facebook.buck.io.filesystem.impl.ProjectFilesystemUtils;
@@ -158,7 +157,7 @@ public class ExopackageInstaller {
                 try {
                   return device.getDeviceAbis();
                 } catch (Exception e) {
-                  throw new HumanReadableException("Unable to communicate with device", e);
+                  throw new RuntimeException("Unable to communicate with device", e);
                 }
               },
               rootPath,
@@ -197,7 +196,7 @@ public class ExopackageInstaller {
                 try {
                   return device.getDeviceAbis();
                 } catch (Exception e) {
-                  throw new HumanReadableException("Unable to communicate with device", e);
+                  throw new RuntimeException("Unable to communicate with device", e);
                 }
               },
               rootPath,
@@ -237,7 +236,7 @@ public class ExopackageInstaller {
 
     LOG.debug("App path: %s", appPackageInfo.get().apkPath);
     String installedAppSignature = getInstalledAppSignature(appPackageInfo.get().apkPath);
-    String localAppSignature = AgentUtil.getJarSignature(apkInfo.getApkPath().toString());
+    String localAppSignature = ExopackageUtil.getJarSignature(apkInfo.getApkPath().toString());
     LOG.info("Local app signature: %s", localAppSignature);
     LOG.info("Remote app signature: %s", installedAppSignature);
 

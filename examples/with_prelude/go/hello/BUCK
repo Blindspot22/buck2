@@ -1,3 +1,5 @@
+oncall("build_infra")
+
 _SUPPORTED = not host_info().os.is_windows
 
 # buildifier: disable=no-effect

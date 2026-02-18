@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_binary_resources_rules.bzl", "get_android_binary_resources_info")
 load("@prelude//android:android_library.bzl", "build_android_library", "optional_jars")
@@ -47,6 +48,7 @@ def robolectric_test_impl(ctx: AnalysisContext) -> list[Provider]:
         referenced_resources_lists = [],
         generate_strings_and_ids_separately = False,
         aapt2_preferred_density = ctx.attrs.preferred_density_for_binary_resources,
+        manifest_entries = ctx.attrs.manifest_entries,
     )
 
     test_config_properties_file = ctx.actions.write(

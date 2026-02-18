@@ -1,17 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
 
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::directory::Directory;
@@ -22,6 +20,10 @@ use buck2_execute::directory::ActionDirectoryMember;
 use buck2_execute::directory::ActionDirectoryRef;
 use buck2_execute::directory::ActionSharedDirectory;
 use buck2_execute::execute::blocking::IoRequest;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 
 pub struct MaterializeTreeStructure {
     pub path: ProjectRelativePathBuf,
@@ -48,6 +50,7 @@ fn materialize<F, D>(
     dest: &AbsNormPath,
     materialize_dirs_and_syms: bool,
     mut file_src: F,
+    executable_bit_override: Option<bool>,
 ) -> buck2_error::Result<()>
 where
     F: FnMut(&AbsNormPath) -> Option<AbsNormPathBuf>,
@@ -65,6 +68,7 @@ where
         &mut dest,
         materialize_dirs_and_syms,
         &mut file_src,
+        executable_bit_override,
     )
 }
 
@@ -78,7 +82,7 @@ where
     P: AsRef<AbsNormPath>,
     D: ActionDirectory,
 {
-    materialize(entry, dest.as_ref(), true, |_: &AbsNormPath| None)
+    materialize(entry, dest.as_ref(), true, |_: &AbsNormPath| None, None)
 }
 
 /// Materializes the files of an the entry rooted at `dest`.
@@ -89,6 +93,7 @@ pub(crate) fn materialize_files<P, D>(
     entry: DirectoryEntry<&D, &ActionDirectoryMember>,
     src: P,
     dest: P,
+    executable_bit_override: Option<bool>,
 ) -> buck2_error::Result<()>
 where
     P: AsRef<AbsNormPath>,
@@ -107,7 +112,7 @@ where
             Some(src.join(subpath))
         }
     };
-    materialize(entry, dest, false, file_src)
+    materialize(entry, dest, false, file_src, executable_bit_override)
 }
 
 /// Materializes the files of an entry rooted at `dest`.
@@ -125,7 +130,7 @@ where
     D: ActionDirectory,
 {
     let file_src = |d: &AbsNormPath| srcs.remove(d);
-    materialize(entry, dest.as_ref(), false, file_src)
+    materialize(entry, dest.as_ref(), false, file_src, None)
 }
 
 fn materialize_recursively<'a, F, D>(
@@ -133,6 +138,7 @@ fn materialize_recursively<'a, F, D>(
     dest: &mut AbsNormPathBuf,
     materialize_dirs_and_syms: bool,
     file_src: &mut F,
+    executable_bit_override: Option<bool>,
 ) -> buck2_error::Result<()>
 where
     F: FnMut(&AbsNormPath) -> Option<AbsNormPathBuf>,
@@ -145,26 +151,44 @@ where
             }
             for (name, entry) in d.entries() {
                 dest.push(name);
-                materialize_recursively(entry, dest, materialize_dirs_and_syms, file_src)?;
+                materialize_recursively(
+                    entry,
+                    dest,
+                    materialize_dirs_and_syms,
+                    file_src,
+                    executable_bit_override,
+                )?;
                 dest.pop();
             }
             Ok(())
         }
         DirectoryEntry::Leaf(ActionDirectoryMember::File(_)) => {
             if let Some(src) = file_src(dest) {
-                fs_util::copy(src, dest)?;
+                fs_util::copy(src, &dest).categorize_internal()?;
+                if let Some(executable_bit_override) = executable_bit_override {
+                    fs_util::set_executable(&dest, executable_bit_override)
+                        .categorize_internal()?;
+                }
             }
             Ok(())
         }
         DirectoryEntry::Leaf(ActionDirectoryMember::Symlink(s)) => {
-            if materialize_dirs_and_syms && fs_util::symlink_metadata(&dest).is_err() {
-                fs_util::symlink(s.target().as_str(), dest)?;
+            if materialize_dirs_and_syms
+                && fs_util::symlink_metadata(&dest)
+                    .categorize_internal()
+                    .is_err()
+            {
+                fs_util::symlink(s.target().as_str(), dest).categorize_internal()?;
             }
             Ok(())
         }
         DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(s)) => {
-            if materialize_dirs_and_syms && fs_util::symlink_metadata(&dest).is_err() {
-                fs_util::symlink(s.target(), dest)?;
+            if materialize_dirs_and_syms
+                && fs_util::symlink_metadata(&dest)
+                    .categorize_internal()
+                    .is_err()
+            {
+                fs_util::symlink(s.target(), dest).categorize_internal()?;
             }
             Ok(())
         }

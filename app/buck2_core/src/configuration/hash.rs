@@ -1,13 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
+use pagable::Pagable;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(input)]
@@ -26,6 +28,7 @@ enum ConfigurationHashError {
     Eq,
     PartialEq,
     Hash,
+    Pagable,
     Allocative,
     derive_more::Display,
     Ord,
@@ -35,7 +38,7 @@ pub struct ConfigurationHash(pub(crate) String);
 
 impl ConfigurationHash {
     pub fn new(value: u64) -> ConfigurationHash {
-        ConfigurationHash(format!("{:0>16x}", value))
+        ConfigurationHash(format!("{value:0>16x}"))
     }
 
     pub(crate) fn from_str(value: &str) -> buck2_error::Result<ConfigurationHash> {

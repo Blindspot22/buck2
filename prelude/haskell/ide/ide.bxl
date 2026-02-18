@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//haskell:library_info.bzl", "HaskellLibraryProvider")
@@ -35,7 +36,7 @@ _HASKELL_LIB = "prelude//rules.bzl:haskell_library"
 
 linkStyle = LinkStyle("static")
 
-configuration_modifiers = ["ovr_config//third-party/ghc/constraints:8.8.3"]
+configuration_modifiers = ["ovr_config//third-party/ghc/constraints:9.2.4"]
 
 def _impl_target(ctx):
     target = ctx.cli_args.target
@@ -176,6 +177,13 @@ def _solution_for_haskell_lib(ctx, target, exclude):
     haskell_toolchain = ctx.analysis(resolved_attrs._haskell_toolchain.label)
     toolchain = haskell_toolchain.providers().get(HaskellToolchainInfo)
 
+    if "platform010/build/ghc/8.8.3/" in str(toolchain.packager):
+        msg = """ 
+        Haskell IDE cannot process this file. We only supports GHC 9.2.4,
+            but this file seems to have 8.8.3 dependecies. Please migrate your project to GHC 9.2.4.
+        """
+        fail(msg)
+
     binutils_path = paths.join(root, toolchain.ghci_binutils_path)
     cc_path = paths.join(root, toolchain.ghci_cc_path)
     cxx_path = paths.join(root, toolchain.ghci_cxx_path)
@@ -226,7 +234,8 @@ def externalSourcesForTarget(ctx, target):
     return paths
 
 def merge(results):
-    flags = {}
+    seen_flags = set()
+    flags = []
     sources = {}
     haskellDeps = {}
     import_dirs = {}
@@ -235,9 +244,10 @@ def merge(results):
     exclude_packages = {}
 
     for result in results:
-        # TODO flags are order sensitive, so avoid the dedup dictionary trick
         for flag in result["flags"]:
-            flags[flag] = ()
+            if not (flag in seen_flags):
+                flags.append(flag)
+                seen_flags.add(flag)
         for source in result["sources"]:
             sources[source] = ()
         for p, v in result["haskell_deps"].items():
@@ -253,7 +263,7 @@ def merge(results):
 
     return {
         "exclude_packages": exclude_packages,
-        "flags": flags.keys(),
+        "flags": flags,
         "generated_dependencies": generated_dependencies.keys(),
         "haskell_deps": haskellDeps,
         "import_dirs": import_dirs.keys(),
@@ -274,8 +284,10 @@ def _assembleSolution(ctx, linkStyle, result):
                 if result["exclude_packages"].get(item.name) == None:
                     hlis[item.name] = item
     for hli in hlis.values():
-        flags.append("-package")
-        flags.append(hli.name)
+        if not (hli.name.startswith("z-")):
+            flags.append("-package")
+            flags.append(hli.name)
+
         ctx.output.ensure_multiple(hli.stub_dirs)
         ctx.output.ensure_multiple(hli.libs)
         ctx.output.ensure_multiple(hli.import_dirs.values())

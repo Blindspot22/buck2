@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//js:js_providers.bzl", "JsLibraryInfo", "get_transitive_outputs")
@@ -22,9 +23,8 @@ GroupedSource = record(
 def _get_grouped_srcs(ctx: AnalysisContext) -> list[GroupedSource]:
     grouped_srcs = {}
     for src in ctx.attrs.srcs:
-        # TODO(ianc) also support sources with an "inner path".
         expect(
-            type(src) == "artifact",
+            isinstance(src, Artifact),
             "src {} is not an artifact, its type is: {}".format(src, type(src)),
         )
         canonical_src_name = get_canonical_src_name(src.short_path)
@@ -60,7 +60,10 @@ def _build_js_files(
     for grouped_src in grouped_srcs:
         identifier = "{}/{}".format(transform_profile, grouped_src.canonical_name)
 
-        output_path = ctx.actions.declare_output("transform-out/{}.jsfile".format(identifier))
+        output_path = ctx.actions.declare_output(
+            "transform-out/{}.jsfile".format(identifier),
+            has_content_based_path = True,
+        )
         job_args = {
             "additionalSources": [{
                 "sourcePath": additional_source,
@@ -68,11 +71,11 @@ def _build_js_files(
             } for additional_source in grouped_src.additional_sources],
             "command": "transform",
             "flavors": flavors,
-            "outputFilePath": output_path,
+            "outputFilePath": output_path.as_output(),
             "release": ctx.attrs._is_release,
             "sourceJsFileName": _get_virtual_path(ctx, grouped_src.main_source, ctx.attrs.base_path),
             "sourceJsFilePath": grouped_src.main_source,
-            "transformProfile": "default" if transform_profile == "transform-profile-default" else transform_profile,
+            "transformProfile": "default" if transform_profile == "hermes-legacy" else transform_profile,
         }
         if ctx.attrs.extra_json:
             job_args["extraData"] = cmd_args(ctx.attrs.extra_json, delimiter = "")
@@ -80,6 +83,7 @@ def _build_js_files(
         command_args_file = ctx.actions.write_json(
             "{}_command_args".format(identifier),
             job_args,
+            has_content_based_path = True,
         )
 
         all_output_paths.append(output_path)
@@ -97,6 +101,7 @@ def _build_js_files(
             identifier = "{}_{}_batch{}".format(ctx.label.name, transform_profile, batch_number),
             category = "transform",
             hidden_artifacts = all_hidden_artifacts[start_index:end_index],
+            has_content_based_path = True,
         )
 
     return all_output_paths
@@ -106,12 +111,15 @@ def _build_library_files(
         transform_profile: str,
         flavors: list[str],
         js_files: list[Artifact]) -> Artifact:
-    output_path = ctx.actions.declare_output("library-files-out/{}/library_files".format(transform_profile))
+    output_path = ctx.actions.declare_output(
+        "library-files-out/{}/library_files".format(transform_profile),
+        has_content_based_path = True,
+    )
 
     job_args = {
         "command": "library-files",
         "flavors": flavors,
-        "outputFilePath": output_path,
+        "outputFilePath": output_path.as_output(),
         "platform": ctx.attrs._platform,
         "release": ctx.attrs._is_release,
         "sourceFilePaths": js_files,
@@ -126,6 +134,7 @@ def _build_library_files(
     command_args_file = ctx.actions.write_json(
         "library_files_{}_command_args".format(transform_profile),
         job_args,
+        has_content_based_path = True,
     )
 
     run_worker_commands(
@@ -135,6 +144,7 @@ def _build_library_files(
         identifier = transform_profile,
         category = "library_files",
         hidden_artifacts = [cmd_args([output_path.as_output()] + js_files)],
+        has_content_based_path = True,
     )
     return output_path
 
@@ -144,13 +154,16 @@ def _build_js_library(
         library_files: Artifact,
         flavors: list[str],
         js_library_deps: list[Artifact]) -> Artifact:
-    output_path = ctx.actions.declare_output("library-dependencies-out/{}.jslib".format(transform_profile))
+    output_path = ctx.actions.declare_output(
+        "library-dependencies-out/{}.jslib".format(transform_profile),
+        has_content_based_path = True,
+    )
     job_args = {
         "aggregatedSourceFilesFilePath": library_files,
         "command": "library-dependencies",
         "dependencyLibraryFilePaths": js_library_deps,
         "flavors": flavors,
-        "outputPath": output_path,
+        "outputPath": output_path.as_output(),
         "platform": ctx.attrs._platform,
         "release": ctx.attrs._is_release,
     }
@@ -161,6 +174,7 @@ def _build_js_library(
     command_args_file = ctx.actions.write_json(
         "library_deps_{}_args".format(transform_profile),
         job_args,
+        has_content_based_path = True,
     )
 
     run_worker_commands(
@@ -173,28 +187,12 @@ def _build_js_library(
             output_path.as_output(),
             library_files,
         ] + js_library_deps)],
+        has_content_based_path = True,
     )
 
     return output_path
 
 def js_library_impl(ctx: AnalysisContext) -> list[Provider]:
-    if ctx.attrs._build_only_native_code:
-        sub_targets = {}
-        unused_output = ctx.actions.write("unused.js", [])
-
-        for transform_profile in TRANSFORM_PROFILES:
-            sub_targets[transform_profile] = [
-                DefaultInfo(default_output = unused_output),
-                JsLibraryInfo(
-                    output = unused_output,
-                    transitive_outputs = None,
-                ),
-            ]
-
-        return [
-            DefaultInfo(default_output = None, sub_targets = sub_targets),
-        ]
-
     grouped_srcs = _get_grouped_srcs(ctx)
     flavors = get_flavors(ctx)
     sub_targets = {}

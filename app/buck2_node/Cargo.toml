@@ -1,6 +1,6 @@
 [package]
 description = "Target graph node"
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_node"
 repository = { workspace = true }
@@ -19,6 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
 static_assertions = { workspace = true }
+static_interner = { workspace = true }
 strsim = { workspace = true }
 triomphe = { workspace = true }
 
@@ -28,6 +29,7 @@ dice = { workspace = true }
 display_container = { workspace = true }
 dupe = { workspace = true }
 gazebo = { workspace = true }
+pagable = { workspace = true }
 starlark_map = { workspace = true }
 strong_hash = { workspace = true }
 
@@ -36,10 +38,11 @@ buck2_core = { workspace = true }
 buck2_data = { workspace = true }
 buck2_error = { workspace = true }
 buck2_events = { workspace = true }
-buck2_futures = { workspace = true }
+buck2_fs = { workspace = true }
 buck2_query = { workspace = true }
 buck2_query_parser = { workspace = true }
 buck2_util = { workspace = true }
+dice_futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

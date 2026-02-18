@@ -1,8 +1,14 @@
+load("@prelude//python:internal_tools.bzl", "python_internal_tools")
 load("@prelude//utils:source_listing.bzl", "source_listing")
 
-oncall("build_infra")
+oncall("plf_experience")
 
 source_listing()
+
+python_internal_tools(
+    name = "python_internal_tools",
+    visibility = ["PUBLIC"],
+)
 
 prelude = native
 
@@ -140,5 +146,11 @@ prelude.command_alias(
 prelude.python_bootstrap_binary(
     name = "create_link_tree",
     main = "create_link_tree.py",
+    visibility = ["PUBLIC"],
+)
+
+prelude.python_bootstrap_binary(
+    name = "gather_libpython_symbols",
+    main = "gather_libpython_symbols.py",
     visibility = ["PUBLIC"],
 )

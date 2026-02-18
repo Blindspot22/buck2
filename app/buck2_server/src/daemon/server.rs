@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::future;
@@ -37,34 +38,37 @@ use buck2_common::io::IoProvider;
 use buck2_common::io::trace::TracingIoProvider;
 use buck2_common::legacy_configs::configs::LegacyBuckConfig;
 use buck2_common::memory;
+use buck2_common::sqlite::sqlite_db::SqliteIdentity;
 use buck2_core::buck2_env;
 use buck2_core::error::reload_hard_error_config;
 use buck2_core::error::reset_soft_error_counters;
-use buck2_core::fs::cwd::WorkingDirectory;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::fs_util::DiskSpaceStats;
-use buck2_core::fs::fs_util::disk_space_stats;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::logging::LogConfigurationReloadHandle;
 use buck2_core::pattern::unparsed::UnparsedPatternPredicate;
 use buck2_error::BuckErrorContext;
 use buck2_events::Event;
+use buck2_events::daemon_id::DaemonId;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_events::source::ChannelEventSource;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::materialize::materializer::MaterializationMethod;
-use buck2_execute_impl::materializers::sqlite::MaterializerStateIdentity;
-use buck2_futures::cancellation::CancellationContext;
-use buck2_futures::drop::DropTogether;
-use buck2_futures::spawn::spawn_dropcancel;
+use buck2_execute_impl::executors::local::ForkserverAccess;
+use buck2_fs::cwd::WorkingDirectory;
+use buck2_fs::fs_util;
+use buck2_fs::fs_util::DiskSpaceStats;
+use buck2_fs::fs_util::disk_space_stats;
+use buck2_fs::paths::abs_path::AbsPathBuf;
 use buck2_interpreter::starlark_profiler::config::StarlarkProfilerConfiguration;
 use buck2_profile::proto_to_profile_mode;
 use buck2_profile::starlark_profiler_configuration_from_request;
+use buck2_resource_control::buck_cgroup_tree::BuckCgroupTree;
+use buck2_resource_control::buck_cgroup_tree::PreppedBuckCgroups;
 use buck2_server_ctx::bxl::BXL_SERVER_COMMANDS;
 use buck2_server_ctx::late_bindings::AUDIT_SERVER_COMMAND;
 use buck2_server_ctx::late_bindings::OTHER_SERVER_COMMANDS;
+use buck2_server_ctx::late_bindings::QUERY_SERVER_COMMANDS;
 use buck2_server_ctx::late_bindings::STARLARK_SERVER_COMMAND;
+use buck2_server_ctx::late_bindings::TARGETS_SERVER_COMMANDS;
 use buck2_server_ctx::partial_result_dispatcher::NoPartialResult;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
 use buck2_server_ctx::streaming_request_handler::StreamingRequestHandler;
@@ -75,7 +79,9 @@ use buck2_util::system_stats::system_memory_stats;
 use buck2_util::threads::thread_spawn;
 use dice::DetectCycles;
 use dice::Dice;
-use dice::WhichDice;
+use dice_futures::cancellation::CancellationContext;
+use dice_futures::drop::DropTogether;
+use dice_futures::spawn::spawn_dropcancel;
 use dupe::Dupe;
 use futures::Future;
 use futures::FutureExt;
@@ -112,6 +118,7 @@ use crate::file_status::file_status_command;
 use crate::lsp::run_lsp_server_command;
 use crate::new_generic::new_generic_command;
 use crate::profile::profile_command;
+use crate::profiling_manager::StarlarkProfilingManager;
 use crate::snapshot;
 use crate::snapshot::SnapshotCollector;
 use crate::subscription::run_subscription_server_command;
@@ -162,9 +169,8 @@ impl DaemonShutdown {
 #[derive(Allocative)]
 pub struct BuckdServerInitPreferences {
     pub detect_cycles: Option<DetectCycles>,
-    pub which_dice: Option<WhichDice>,
     pub enable_trace_io: bool,
-    pub reject_materializer_state: Option<MaterializerStateIdentity>,
+    pub reject_materializer_state: Option<SqliteIdentity>,
     pub daemon_startup_config: DaemonStartupConfig,
 }
 
@@ -175,14 +181,7 @@ impl BuckdServerInitPreferences {
         digest_config: DigestConfig,
         root_config: &LegacyBuckConfig,
     ) -> buck2_error::Result<Arc<Dice>> {
-        configure_dice_for_buck(
-            io,
-            digest_config,
-            Some(root_config),
-            self.detect_cycles,
-            self.which_dice,
-        )
-        .await
+        configure_dice_for_buck(io, digest_config, Some(root_config), self.detect_cycles).await
     }
 }
 
@@ -245,9 +244,11 @@ impl BuckdServer {
         delegate: Box<dyn BuckdServerDelegate>,
         init_ctx: BuckdServerInitPreferences,
         process_info: DaemonProcessInfo,
+        prepped_cgroups: Option<PreppedBuckCgroups>,
         base_daemon_constraints: buck2_cli_proto::DaemonConstraints,
         listener: Pin<Box<dyn Stream<Item = Result<tokio::net::TcpStream, io::Error>> + Send>>,
         rt: Handle,
+        daemon_id: DaemonId,
     ) -> buck2_error::Result<()> {
         let now = SystemTime::now();
         let now = now.duration_since(SystemTime::UNIX_EPOCH)?;
@@ -270,11 +271,33 @@ impl BuckdServer {
             Some(dir)
         };
 
+        let cgroup_tree = if let Some(prepped_cgroups) = prepped_cgroups {
+            Some(
+                BuckCgroupTree::set_up(
+                    prepped_cgroups,
+                    &init_ctx.daemon_startup_config.resource_control,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
         let cert_state = CertState::new().await;
         certs_validation_background_job(cert_state.dupe()).await;
 
         let daemon_state = Arc::new(
-            DaemonState::new(fb, paths, init_ctx, rt.clone(), materializations, cwd).await?,
+            DaemonState::new(
+                fb,
+                paths,
+                init_ctx,
+                &rt,
+                materializations,
+                cwd,
+                cgroup_tree,
+                daemon_id,
+            )
+            .await?,
         );
 
         #[cfg(fbcode_build)]
@@ -381,7 +404,7 @@ impl BuckdServer {
         .await
     }
 
-    async fn run_streaming_anyhow<Req, Res, PartialRes, F>(
+    async fn run_streaming_fallible<Req, Res, PartialRes, F>(
         &self,
         req: Request<Req>,
         opts: impl StreamingCommandOptions<Req>,
@@ -399,6 +422,8 @@ impl BuckdServer {
         Res: Into<command_result::Result> + Send + 'static,
         PartialRes: Into<partial_result::PartialResult> + Send + 'static,
     {
+        let command_start = Instant::now();
+
         if buck2_env!("BUCK2_TEST_FAIL_STREAMING", bool, applicability = testing).unwrap() {
             Err(buck2_error::buck2_error!(
                 buck2_error::ErrorTag::Input,
@@ -453,7 +478,7 @@ impl BuckdServer {
         // as a baseline.
         let snapshot_collector =
             SnapshotCollector::new(data.dupe(), daemon_state.paths.buck_out_path());
-        dispatch.instant_event(Box::new(snapshot_collector.create_snapshot()));
+        dispatch.instant_event(Box::new(snapshot_collector.create_snapshot().await));
         let cert_state = self.0.cert_state.dupe();
 
         let repo_root = daemon_state.paths.project_root().root().to_buf();
@@ -461,6 +486,11 @@ impl BuckdServer {
         // We start collecting immediately, and emit the event as soon as it is ready
         let version_control_revision_collector =
             version_control_revision::spawn_version_control_collector(dispatch.dupe(), repo_root);
+
+        #[cfg(unix)]
+        let memory_reporter = daemon_state.data.memory_tracker.as_ref().map(|t| {
+            buck2_resource_control::memory_tracker::spawn_memory_reporter(dispatch.dupe(), t.dupe())
+        });
 
         let resp = streaming(
             req,
@@ -474,26 +504,43 @@ impl BuckdServer {
                         let base_context =
                             daemon_state.prepare_command(dispatch.dupe(), guard).await?;
 
+                        let client_ctx = req.client_context()?;
+
+                        let profiling_manager = StarlarkProfilingManager::new(
+                            client_ctx.profile_pattern_opts.as_ref(),
+                            opts.starlark_profiler_instrumentation_override(&req)?,
+                            &base_context.events,
+                        )?;
+
                         let context = ServerCommandContext::new(
                             base_context,
-                            req.client_context()?,
-                            opts.starlark_profiler_instrumentation_override(&req)?,
+                            client_ctx,
+                            profiling_manager,
                             req.build_options(),
                             &daemon_state.paths,
                             cert_state.dupe(),
                             snapshot_collector,
                             cancellations,
+                            command_start,
                         )?;
 
-                        func(&context, PartialResultDispatcher::new(dispatch.dupe()), req).await?
+                        let res =
+                            func(&context, PartialResultDispatcher::new(dispatch.dupe()), req)
+                                .await;
+
+                        context.finalize().await?;
+                        res?
                     };
+
                     // Do not kill the process prematurely.
                     drop(version_control_revision_collector);
+                    #[cfg(unix)]
+                    drop(memory_reporter);
                     match result {
                         Ok(_) => dispatch.command_result(result_to_command_result(result)),
                         Err(e) => match check_cert_state(cert_state).await {
                             Some(err) => dispatch.command_result(error_to_command_result(
-                                err.context(format!("{e:?}")).into(),
+                                err.context(format!("{e:?}")),
                             )),
                             _ => dispatch.command_result(error_to_command_result(e)),
                         },
@@ -530,12 +577,10 @@ impl BuckdServer {
         // send signal to register new command time
         _ = self.0.command_channel.unbounded_send(());
 
-        match self.run_streaming_anyhow(req, opts, func).await {
+        match self.run_streaming_fallible(req, opts, func).await {
             Ok(resp) => Ok(resp),
             Err(e) => match check_cert_state(self.0.cert_state.dupe()).await {
-                Some(err) => Ok(error_to_response_stream(
-                    err.context(format!("{e:?}")).into(),
-                )),
+                Some(err) => Ok(error_to_response_stream(err.context(format!("{e:?}")))),
                 _ => Ok(error_to_response_stream(e)),
             },
         }
@@ -560,6 +605,7 @@ impl BuckdServer {
     }
 
     /// Checks if the server is accepting requests.
+    #[allow(clippy::result_large_err)]
     fn check_if_accepting_requests(&self) -> Result<(), Status> {
         if self.0.stop_accepting_requests.load(Ordering::Relaxed) {
             Err(Status::failed_precondition(
@@ -571,11 +617,12 @@ impl BuckdServer {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn convert_positive_duration(proto_duration: &prost_types::Duration) -> Result<Duration, Status> {
     if proto_duration.seconds < 0 || proto_duration.nanos < 0 {
         return Err(Status::new(
             Code::Unknown,
-            format!("received invalid timeout: `{:?}`", proto_duration),
+            format!("received invalid timeout: `{proto_duration:?}`"),
         ));
     }
     Ok(Duration::from_secs(proto_duration.seconds as u64)
@@ -875,7 +922,8 @@ impl DaemonApi for BuckdServer {
                         daemon_state.data(),
                         daemon_state.paths.buck_out_path(),
                     )
-                    .create_snapshot(),
+                    .create_snapshot()
+                    .await,
                 )
             } else {
                 None
@@ -898,16 +946,21 @@ impl DaemonApi for BuckdServer {
 
             let io_provider = daemon_state.data().io.name().to_owned();
 
-            let uptime = self.0.start_instant.elapsed();
-            let base = StatusResponse {
+            let uptime = Instant::now() - self.0.start_instant;
+
+            let mut base = StatusResponse {
                 process_info: Some(self.0.process_info.clone()),
-                start_time: Some(self.0.start_time.clone()),
+                start_time: Some(self.0.start_time),
                 uptime: Some(uptime.try_into()?),
                 snapshot,
                 daemon_constraints: Some(daemon_constraints),
                 project_root: daemon_state.paths.project_root().to_string(),
                 isolation_dir: daemon_state.paths.isolation.to_string(),
-                forkserver_pid: daemon_state.data.forkserver.as_ref().map(|f| f.pid()),
+                forkserver_pid: match &daemon_state.data.forkserver {
+                    #[cfg(unix)]
+                    ForkserverAccess::Client(f) => Some(f.pid()),
+                    ForkserverAccess::None => None,
+                },
                 supports_vpnless: Some(daemon_state.data().http_client.supports_vpnless()),
                 http2: Some(daemon_state.data().http_client.http2()),
                 valid_working_directory: Some(valid_working_directory),
@@ -915,6 +968,16 @@ impl DaemonApi for BuckdServer {
                 io_provider: Some(io_provider),
                 ..Default::default()
             };
+
+            if req.include_tokio_runtime_metrics {
+                let tokio_metrics = self.0.rt.metrics();
+                let metrics_response = TokioRuntimeMetrics {
+                    num_workers: tokio_metrics.num_workers() as u64,
+                    num_alive_tasks: tokio_metrics.num_alive_tasks() as u64,
+                    global_queue_depth: tokio_metrics.global_queue_depth() as u64,
+                };
+                base.tokio_runtime_metrics = Some(metrics_response);
+            }
             Ok(base)
         })
         .await
@@ -1009,7 +1072,7 @@ impl DaemonApi for BuckdServer {
             DefaultCommandOptions,
             |ctx, partial_result_dispatcher, req| {
                 Box::pin(async {
-                    OTHER_SERVER_COMMANDS
+                    QUERY_SERVER_COMMANDS
                         .get()?
                         .aquery(ctx, partial_result_dispatcher, req)
                         .await
@@ -1029,7 +1092,7 @@ impl DaemonApi for BuckdServer {
             DefaultCommandOptions,
             |ctx, partial_result_dispatcher, req| {
                 Box::pin(async {
-                    OTHER_SERVER_COMMANDS
+                    QUERY_SERVER_COMMANDS
                         .get()?
                         .uquery(ctx, partial_result_dispatcher, req)
                         .await
@@ -1050,7 +1113,7 @@ impl DaemonApi for BuckdServer {
             QueryCommandOptions { profile_mode },
             |ctx, partial_result_dispatcher, req| {
                 Box::pin(async {
-                    OTHER_SERVER_COMMANDS
+                    QUERY_SERVER_COMMANDS
                         .get()?
                         .cquery(ctx, partial_result_dispatcher, req)
                         .await
@@ -1070,7 +1133,7 @@ impl DaemonApi for BuckdServer {
             DefaultCommandOptions,
             |ctx, partial_result_dispatcher, req| {
                 Box::pin(async {
-                    OTHER_SERVER_COMMANDS
+                    TARGETS_SERVER_COMMANDS
                         .get()?
                         .targets(ctx, partial_result_dispatcher, req)
                         .await
@@ -1090,7 +1153,7 @@ impl DaemonApi for BuckdServer {
             DefaultCommandOptions,
             |ctx, partial_result_dispatcher, req| {
                 Box::pin(async {
-                    OTHER_SERVER_COMMANDS
+                    TARGETS_SERVER_COMMANDS
                         .get()?
                         .ctargets(ctx, partial_result_dispatcher, req)
                         .await
@@ -1110,7 +1173,7 @@ impl DaemonApi for BuckdServer {
             DefaultCommandOptions,
             |ctx, partial_result_dispatcher, req| {
                 Box::pin(async {
-                    OTHER_SERVER_COMMANDS
+                    TARGETS_SERVER_COMMANDS
                         .get()?
                         .targets_show_outputs(ctx, partial_result_dispatcher, req)
                         .await
@@ -1200,7 +1263,7 @@ impl DaemonApi for BuckdServer {
         let req = req.into_inner();
 
         memory::write_heap_to_file(&req.destination_path)
-            .map_err(|e| Status::invalid_argument(format!("failed to perform heap dump: {}", e)))?;
+            .map_err(|e| Status::invalid_argument(format!("failed to perform heap dump: {e}")))?;
         if let Some(test_executor_destination_path) = req.test_executor_destination_path {
             let test_executors = get_all_test_executors();
             tracing::debug!(
@@ -1214,7 +1277,7 @@ impl DaemonApi for BuckdServer {
                     .unstable_heap_dump(&test_executor_destination_path)
                     .await
                     .map_err(|e| {
-                        Status::invalid_argument(format!("failed to perform heap dump: {}", e))
+                        Status::invalid_argument(format!("failed to perform heap dump: {e}"))
                     })?;
             }
         }
@@ -1232,7 +1295,7 @@ impl DaemonApi for BuckdServer {
 
         match response {
             Ok(response) => Ok(Response::new(UnstableAllocatorStatsResponse { response })),
-            Err(e) => Err(Status::invalid_argument(format!("{:#}", e))),
+            Err(e) => Err(Status::invalid_argument(format!("{e:#}"))),
         }
     }
 
@@ -1263,7 +1326,7 @@ impl DaemonApi for BuckdServer {
         };
 
         res.map(Response::new)
-            .map_err(|e| Status::internal(format!("{:#}", e)))
+            .map_err(|e| Status::internal(format!("{e:#}")))
     }
 
     type AllocativeStream = ResponseStream;
@@ -1275,7 +1338,10 @@ impl DaemonApi for BuckdServer {
 
         let res: buck2_error::Result<_> = try {
             let client_ctx = req.get_ref().client_context()?;
-            let trace_id = client_ctx.trace_id.parse()?;
+            let trace_id = client_ctx
+                .trace_id
+                .parse()
+                .map_err(buck2_error::Error::from)?;
             let (event_source, dispatcher) = self.0.daemon_state.prepare_events(trace_id).await?;
             let active_command = ActiveCommand::new(&dispatcher, client_ctx.sanitized_argv.clone());
             (event_source, dispatcher, active_command)
@@ -1459,17 +1525,18 @@ impl DaemonApi for BuckdServer {
                 .log_reload_handle
                 .update_log_filter(&req.log_filter)
                 .buck_error_context("Error updating daemon log filter")
-                .map_err(|e| Status::invalid_argument(format!("{:#}", e)))?;
+                .map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
         }
 
+        #[cfg(unix)]
         if req.forkserver {
             let data = self.0.daemon_state.data();
-            if let Some(forkserver) = data.forkserver.as_ref() {
+            if let ForkserverAccess::Client(forkserver) = &data.forkserver {
                 forkserver
                     .set_log_filter(req.log_filter)
                     .await
                     .buck_error_context("Error forwarding daemon log filter to forkserver")
-                    .map_err(|e| Status::invalid_argument(format!("{:#}", e)))?;
+                    .map_err(|e| Status::invalid_argument(format!("{e:#}")))?;
             }
         }
 
@@ -1494,6 +1561,7 @@ impl DaemonApi for BuckdServer {
 
 /// Options to configure the execution of a oneshot command (i.e. what happens in `oneshot()`).
 trait OneshotCommandOptions: Send + Sync + 'static {
+    #[allow(clippy::result_large_err)]
     fn pre_run(&self, server: &BuckdServer) -> Result<(), Status> {
         server.check_if_accepting_requests()
     }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -14,9 +15,9 @@ use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_build_api::actions::query::ActionQueryNode;
 use buck2_build_api::actions::query::FIND_MATCHING_ACTION;
 use buck2_build_api::analysis::AnalysisResult;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use dice::DiceComputations;
 use dupe::Dupe;
 use dupe::IterDupedExt;
@@ -60,7 +61,7 @@ async fn find_matching_action(
     working_dir: &ProjectRelativePath,
     global_cfg_options: &GlobalCfgOptions,
     analysis: &AnalysisResult,
-    path_after_target_name: ForwardRelativePathBuf,
+    short_path: ForwardRelativePathBuf,
 ) -> buck2_error::Result<Option<ActionQueryNode>> {
     ctx.with_linear_recompute(|ctx| async move {
         let dice_aquery_delegate =
@@ -91,7 +92,7 @@ async fn find_matching_action(
                 },
             ))
         {
-            match check_output_path(&build_artifact, &path_after_target_name)? {
+            match check_output_path(&build_artifact, &short_path)? {
                 Some(action_key_match) => match action_key_match {
                     ActionKeyMatch::Exact(key) => {
                         return Ok(Some(dice_aquery_delegate.get_action_node(key).await?));
@@ -123,13 +124,13 @@ async fn find_matching_action(
 
 pub(crate) fn init_find_matching_action() {
     FIND_MATCHING_ACTION.init(
-        |ctx, working_dir, global_cfg_options, analysis, path_after_target_name| {
+        |ctx, working_dir, global_cfg_options, analysis, short_path| {
             Box::pin(find_matching_action(
                 ctx,
                 working_dir,
                 global_cfg_options,
                 analysis,
-                path_after_target_name,
+                short_path,
             ))
         },
     );

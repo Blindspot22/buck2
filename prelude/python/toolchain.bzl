@@ -1,12 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
-load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxPlatformInfo")
-load("@prelude//utils:platform_flavors_util.bzl", "by_platform")
+load("@prelude//utils:arglike.bzl", "ArgLike")
+load(":manifest.bzl", "ManifestInfo")
 
 # The ways that Python executables handle native linkable dependencies.
 NativeLinkStrategy = enum(
@@ -31,6 +32,8 @@ PackageStyle = enum(
     "inplace",
     "standalone",
     "inplace_lite",
+    # Similar to inplace, but generate copies instead of symlinks
+    "outplace",
 )
 
 StripLibparStrategy = enum(
@@ -45,48 +48,39 @@ StripLibparStrategy = enum(
 PythonToolchainInfo = provider(
     # @unsorted-dict-items
     fields = {
-        "build_standalone_binaries_locally": provider_field(typing.Any, default = None),
-        "compile": provider_field(typing.Any, default = None),
-        "default_sitecustomize": provider_field(typing.Any, default = None),
+        "build_standalone_binaries_locally": provider_field(bool | None, default = None),
+        "compile": provider_field(ArgLike | None, default = None),
         # The interpreter to use to compile bytecode.
-        "host_interpreter": provider_field(typing.Any, default = None),
-        "bundled_interpreter": provider_field(typing.Any, default = None),
-        "interpreter": provider_field(typing.Any, default = None),
-        "version": provider_field(typing.Any, default = None),
-        "native_link_strategy": provider_field(typing.Any, default = None),
-        "linker_flags": provider_field(list[typing.Any], default = []),
-        "binary_linker_flags": provider_field(list[typing.Any], default = []),
-        "extension_linker_flags": provider_field(list[typing.Any], default = []),
-        "wheel_linker_flags": provider_field(list[typing.Any], default = []),
+        "host_interpreter": provider_field(ArgLike | None, default = None),
+        "interpreter": provider_field(ArgLike | None, default = None),
+        "version": provider_field(str | None, default = None),
+        "native_link_strategy": provider_field(str | None, default = None),  # Should be `NativeLinkStrategy`.
+        "linker_flags": provider_field(ArgLike, default = []),
+        "binary_linker_flags": provider_field(ArgLike, default = []),
+        "supports_content_based_paths": provider_field(bool | None, default = None),
+        "extension_linker_flags": provider_field(ArgLike, default = []),
+        "wheel_extension_linker_flags": provider_field(ArgLike, default = []),
+        "wheel_linker_flags": provider_field(ArgLike, default = []),
         # site-packages-relative rpaths to emebed into libs/bins in the wheel
-        "wheel_rpaths": provider_field(list[str], default = []),
-        "gen_lpar_bootstrap": provider_field(typing.Any, default = None),
-        "generate_static_extension_info": provider_field(typing.Any, default = None),
-        "package_style": provider_field(typing.Any, default = None),
-        "strip_libpar": provider_field(typing.Any, default = None),
-        "make_source_db": provider_field(typing.Any, default = None),
-        "native_library_runtime_paths": provider_field(list[str], default = []),
-        "make_source_db_no_deps": provider_field(typing.Any, default = None),
-        "make_py_package_inplace": provider_field(typing.Any, default = None),
-        "make_py_package_live": provider_field(typing.Any, default = None),
-        "make_py_package_standalone": provider_field(typing.Any, default = None),
-        "make_py_package_manifest_module": provider_field(typing.Any, default = None),
-        "make_py_package_modules": provider_field(typing.Any, default = None),
-        "pex_executor": provider_field(typing.Any, default = None),
-        "pex_extension": provider_field(typing.Any, default = None),
-        "type_checker": provider_field(typing.Any, default = None),
-        "typeshed_stubs": provider_field(typing.Any, default = []),
-        "emit_omnibus_metadata": provider_field(typing.Any, default = None),
-        "fail_with_message": provider_field(typing.Any, default = None),
-        # A filegroup that gets added to all python executables
-        "runtime_library": provider_field(Dependency | None, default = None),
+        "wheel_rpaths": provider_field(ArgLike, default = []),
+        "gen_lpar_bootstrap": provider_field(Dependency | None, default = None),
+        "package_style": provider_field(str | None, default = None),  # Should be `PackageStyle`.
+        "strip_libpar": provider_field(str | None, default = None),  # Should be `StripLibparStrategy`.
+        "native_library_runtime_paths": provider_field(ArgLike, default = []),
+        "native_library_env_var": provider_field(ArgLike | None, default = None),
+        "make_py_package_live": provider_field(Dependency | None, default = None),
+        "make_py_package_standalone": provider_field(ArgLike | None, default = None),
+        "pex_extension": provider_field(str, default = ".par"),
+        "type_checker": provider_field(RunInfo | None, default = None),
+        "typeshed_stubs": provider_field(ManifestInfo | None, default = None),
+        "emit_omnibus_metadata": provider_field(bool | None, default = None),
         # The fully qualified name of a function that handles invoking the
         # executable's entry point
         "main_runner": provider_field(str, default = "__par__.bootstrap.run_as_main"),
-        "run_lpar_main": provider_field(typing.Any, default = None),
         # Prefix to use when running a Python test/executable.
-        "run_prefix": provider_field(list[typing.Any], default = []),
-        "python_error_handler": provider_field(typing.Any, default = None),
+        "run_prefix": provider_field(ArgLike, default = []),
+        "python_error_handler": provider_field(typing.Callable | None, default = None),
+        "manifest_module_entries": provider_field(dict[str, list[str] | dict[str, typing.Any]] | None, default = None),
     },
 )
 
@@ -99,23 +93,6 @@ def get_package_style(ctx: AnalysisContext) -> PackageStyle:
     if ctx.attrs.package_style != None:
         return PackageStyle(ctx.attrs.package_style.lower())
     return PackageStyle(ctx.attrs._python_toolchain[PythonToolchainInfo].package_style)
-
-def get_platform_attr(
-        python_platform_info: PythonPlatformInfo,
-        cxx_toolchain: Dependency,
-        xs: list[(str, typing.Any)]) -> list[typing.Any]:
-    """
-    Take a platform_* value, and the non-platform version, and concat into a list
-    of values based on the cxx/python platform
-    """
-    if len(xs) == 0:
-        return []
-    cxx_info = cxx_toolchain.get(CxxPlatformInfo)
-    if cxx_info == None:
-        fail("Cannot use platform attrs in a fat platform configuration")
-    python_platform = python_platform_info.name
-    cxx_platform = cxx_info.name
-    return by_platform([python_platform, cxx_platform], xs)
 
 python = struct(
     PythonToolchainInfo = PythonToolchainInfo,

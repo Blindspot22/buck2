@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::any::Any;
@@ -14,9 +15,9 @@ use std::sync::atomic::Ordering;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
-use buck2_futures::spawner::Spawner;
 use derive_more::Display;
+use dice_futures::cancellation::CancellationContext;
+use dice_futures::spawner::Spawner;
 use dupe::Dupe;
 use futures::future::BoxFuture;
 use tokio::task::JoinHandle;
@@ -25,7 +26,7 @@ use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::key::Key;
 use crate::api::user_data::UserComputationData;
-use crate::impls::dice::DiceModern;
+use crate::impls::dice::Dice;
 
 struct MySpawner(AtomicUsize);
 
@@ -62,7 +63,7 @@ impl Key for K {
 
 #[tokio::test]
 async fn uses_custom_spawner() {
-    let dice = DiceModern::builder().build(DetectCycles::Disabled);
+    let dice = Dice::builder().build(DetectCycles::Disabled);
     let spawner = Arc::new(MySpawner(AtomicUsize::new(0)));
 
     let mut data = UserComputationData::new();

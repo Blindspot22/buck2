@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::path::PathBuf;
@@ -12,7 +13,8 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// This is the same as rustfix::Diagnostic, but with a more complete schema.
+/// Diagnostics from rustc, see
+/// <https://doc.rust-lang.org/beta/rustc/json.html#diagnostics>.
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct Message {
     pub(crate) message: String,

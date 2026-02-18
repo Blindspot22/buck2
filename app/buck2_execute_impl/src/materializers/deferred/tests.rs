@@ -1,22 +1,24 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
 
-use buck2_common::file_ops::FileMetadata;
-use buck2_core::fs::fs_util::IoError;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_common::file_ops::metadata::FileMetadata;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
+use buck2_error::internal_error;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::directory::ActionDirectoryBuilder;
 use buck2_execute::directory::insert_file;
 use buck2_execute::materialize::materializer::DeferredMaterializerSubscription;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use parking_lot::Mutex;
 
 use super::*;
 
@@ -35,16 +37,16 @@ fn test_find_artifacts() -> buck2_error::Result<()> {
     let mut builder = ActionDirectoryBuilder::empty();
     insert_file(
         &mut builder,
-        &artifact1.join(ForwardRelativePath::new("f1").unwrap()),
+        artifact1.join(ForwardRelativePath::new("f1").unwrap()),
         file.dupe(),
     )?;
     insert_file(
         &mut builder,
-        &artifact2.join(ForwardRelativePath::new("d/f1").unwrap()),
+        artifact2.join(ForwardRelativePath::new("d/f1").unwrap()),
         file.dupe(),
     )?;
-    insert_file(&mut builder, &artifact3, file.dupe())?;
-    insert_file(&mut builder, &non_artifact2, file.dupe())?;
+    insert_file(&mut builder, artifact3.clone(), file.dupe())?;
+    insert_file(&mut builder, non_artifact2, file.dupe())?;
     builder.mkdir(&non_artifact1)?;
 
     // Build tree with artifacts 1-4
@@ -95,20 +97,21 @@ mod state_machine {
     use std::thread;
 
     use assert_matches::assert_matches;
-    use buck2_core::fs::fs_util;
-    use buck2_core::fs::fs_util::ReadDir;
-    use buck2_core::fs::paths::RelativePathBuf;
-    use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-    use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+    use buck2_common::file_ops::metadata::Symlink;
     use buck2_core::fs::project::ProjectRootTemp;
     use buck2_error::BuckErrorContext;
     use buck2_error::buck2_error;
+    use buck2_events::daemon_id::DaemonId;
     use buck2_events::source::ChannelEventSource;
     use buck2_execute::directory::ActionDirectoryEntry;
     use buck2_execute::directory::ActionSharedDirectory;
     use buck2_execute::directory::INTERNER;
-    use buck2_execute::directory::Symlink;
     use buck2_execute::execute::blocking::IoRequest;
+    use buck2_fs::fs_util::ReadDir;
+    use buck2_fs::fs_util::uncategorized as fs_util;
+    use buck2_fs::paths::RelativePathBuf;
+    use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
     use buck2_util::threads::ignore_stack_overflow_checks_for_future;
     use buck2_wrapper_common::invocation_id::TraceId;
     use futures::StreamExt;
@@ -122,7 +125,7 @@ mod state_machine {
     use crate::materializers::deferred::command_processor::TestingDeferredMaterializerCommandProcessor;
     use crate::materializers::deferred::subscriptions::MaterializerSubscriptionOperation;
     use crate::materializers::deferred::subscriptions::SubscriptionHandle;
-    use crate::materializers::sqlite::testing_materializer_state_sqlite_db;
+    use crate::sqlite::materializer_db::testing_materializer_state_sqlite_db;
 
     #[derive(Debug, Eq, PartialEq, Allocative)]
     enum Op {
@@ -327,7 +330,7 @@ mod state_machine {
             unimplemented!()
         }
 
-        fn read_dir(&self, path: &AbsNormPathBuf) -> Result<ReadDir, IoError> {
+        fn read_dir(&self, path: &AbsNormPathBuf) -> buck2_error::Result<ReadDir> {
             if let Some(barriers) = self.read_dir_barriers.as_ref() {
                 // Allow tests to advance here, execute something and then continue
                 barriers.as_ref().0.wait();
@@ -443,7 +446,8 @@ mod state_machine {
 
         let (daemon_dispatcher_events, daemon_dispatcher_sink) =
             buck2_events::create_source_sink_pair();
-        let daemon_dispatcher = EventDispatcher::new(TraceId::null(), daemon_dispatcher_sink);
+        let daemon_dispatcher =
+            EventDispatcher::new(TraceId::null(), DaemonId::new(), daemon_dispatcher_sink);
 
         let (command_sender, command_receiver) = channel();
         (
@@ -452,7 +456,6 @@ mod state_machine {
                 Some(db),
                 Handle::current(),
                 true,
-                LogBuffer::new(1),
                 command_sender.dupe(),
                 tree,
                 CancellationContext::testing(),
@@ -511,7 +514,6 @@ mod state_machine {
                         min_ttl: chrono::Duration::zero(),
                         enabled: false,
                     },
-                    0,
                     AccessTimesUpdates::Disabled,
                     clean_stale_config,
                 ));
@@ -531,7 +533,6 @@ mod state_machine {
                     num_entries_from_sqlite: 0,
                 },
                 stats: Arc::new(DeferredMaterializerStats::default()),
-                verbose_materializer_log: true,
             },
             handle,
             daemon_dispatcher_events,
@@ -550,9 +551,13 @@ mod state_machine {
             dm.testing_declare(&path, value.dupe());
             assert_eq!(dm.io.take_log(), &[(Op::Clean, path.clone())]);
 
+            // When redeclaring the same artifact nothing happens.
+            dm.testing_declare(&path, value.dupe());
+            assert_eq!(dm.io.take_log(), &[]);
+
             let res = dm
                 .materialize_artifact(&path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await;
             assert_eq!(dm.io.take_log(), &[(Op::Materialize, path.clone())]);
 
@@ -570,7 +575,7 @@ mod state_machine {
 
             let _ignore = dm
                 .materialize_artifact(&path2, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await;
             assert_eq!(dm.io.take_log(), &[(Op::Materialize, path2.clone())]);
 
@@ -634,7 +639,7 @@ mod state_machine {
             assert_eq!(dm.io.take_log(), &[(Op::Clean, symlink_path.clone())]);
 
             dm.materialize_artifact(&symlink_path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await
                 .map_err(|_| {
                     buck2_error!(
@@ -695,7 +700,7 @@ mod state_machine {
             // Materialize the symlink, at this point the target is not in the tree so it's ignored
             let res = dm
                 .materialize_artifact(&symlink_path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await;
 
             let logs = dm.io.take_log();
@@ -716,7 +721,7 @@ mod state_machine {
             // This time, we don't re-materialize the symlink as that's already been done.
             // But we still materialize the target as that has not been materialized yet.
             dm.materialize_artifact(&symlink_path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await
                 .map_err(|_| {
                     buck2_error!(
@@ -915,12 +920,12 @@ mod state_machine {
             // Now we check that materialization fails. This needs to wait on the previous clean.
             let res = dm
                 .materialize_artifact(&path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await;
 
             assert_matches!(
             res,
-            Err(SharedMaterializingError::Error(e)) if format!("{:#}", e).contains("Injected error")
+            Err(SharedMaterializingError::Error(e)) if format!("{e:#}").contains("Injected error")
         );
 
             // We do not actually get to materializing or cleaning.
@@ -957,7 +962,7 @@ mod state_machine {
                 symlink_value.clone(),
             );
             dm.materialize_artifact(&symlink_path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await
                 .map_err(|err| buck2_error!(buck2_error::ErrorTag::MaterializationError, "error materializing {:?}", err))?;
             assert_eq!(
@@ -992,11 +997,11 @@ mod state_machine {
             dm.io.set_fail_on(vec![target_path.clone()]);
             let res = dm
                 .materialize_artifact(&symlink_path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await;
             assert_matches!(
             res,
-            Err(SharedMaterializingError::Error(e)) if format!("{:#}", e).contains("Injected error")
+            Err(SharedMaterializingError::Error(e)) if format!("{e:#}").contains("Injected error")
         );
             assert_eq!(
                 dm.io.take_log(),
@@ -1011,7 +1016,7 @@ mod state_machine {
             // Request symlink again, target is materialized and symlink materialization succeeds
             dm.io.set_fail_on(vec![]);
             dm.materialize_artifact(&symlink_path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await
                 .map_err(|err| buck2_error!(buck2_error::ErrorTag::MaterializationError, "error materializing 2 {:?}", err))?;
             assert_eq!(dm.io.take_log(), &[(Op::Materialize, target_path.clone()), ]);
@@ -1037,12 +1042,12 @@ mod state_machine {
             // Materializing it fails.
             let res = dm
                 .materialize_artifact(&path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await;
 
             assert_matches!(
                 res,
-                Err(SharedMaterializingError::Error(e)) if format!("{:#}", e).contains("Injected error")
+                Err(SharedMaterializingError::Error(e)) if format!("{e:#}").contains("Injected error")
             );
 
             // Unset fail, but we haven't processed materialization_finished yet so this does nothing.
@@ -1051,19 +1056,19 @@ mod state_machine {
             // Rejoining the existing future fails.
             let res = dm
                 .materialize_artifact(&path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await;
 
             assert_matches!(
                 res,
-                Err(SharedMaterializingError::Error(e)) if format!("{:#}", e).contains("Injected error")
+                Err(SharedMaterializingError::Error(e)) if format!("{e:#}").contains("Injected error")
             );
 
             // Now process cleanup_finished_vacant and materialization_finished.
             let mut processed = 0;
 
             while let Ok(cmd) = channel.low_priority.try_recv() {
-                eprintln!("got cmd = {:?}", cmd);
+                eprintln!("got cmd = {cmd:?}");
                 dm.testing_process_one_low_priority_command(cmd);
                 processed += 1;
             }
@@ -1073,7 +1078,7 @@ mod state_machine {
             // Materializing works now:
             let res = dm
                 .materialize_artifact(&path, EventDispatcher::null())
-                .buck_error_context("Expected a future")?
+                .ok_or_else(|| internal_error!("Expected a future"))?
                 .await;
 
             assert_matches!(res, Ok(()));
@@ -1082,10 +1087,12 @@ mod state_machine {
         }).await
     }
 
+    const SAMPLE_BUCK_OUT_PATH: &str = "buck-out/v2/gen/foo/bar";
+
     #[tokio::test]
     async fn test_clean_stale() -> buck2_error::Result<()> {
         ignore_stack_overflow_checks_for_future(async {
-            let path = make_path("buck-out/v2/gen/foo/bar");
+            let path = make_path(SAMPLE_BUCK_OUT_PATH);
             let project_root = temp_root();
             let io = Arc::new(StubIoHandler::new(project_root.clone()));
             let (dm, mut handle, _) = make_materializer(io.dupe(), None).await;
@@ -1126,7 +1133,7 @@ mod state_machine {
     #[tokio::test]
     async fn test_clean_stale_interrupt() -> buck2_error::Result<()> {
         ignore_stack_overflow_checks_for_future(async {
-            let path = make_path("buck-out/v2/gen/foo/bar");
+            let path = make_path(SAMPLE_BUCK_OUT_PATH);
             let project_root = temp_root();
             let io = Arc::new(StubIoHandler::new(project_root.clone()));
             let (dm, mut handle, _) = make_materializer(io.dupe(), None).await;
@@ -1217,13 +1224,15 @@ mod state_machine {
     #[tokio::test]
     async fn test_clean_stale_schedule() -> buck2_error::Result<()> {
         ignore_stack_overflow_checks_for_future(async {
-            let path = make_path("buck-out/v2/gen/foo/bar");
+            let path = make_path(SAMPLE_BUCK_OUT_PATH);
             let project_root = temp_root();
             // dry run because it's easier and since this is only testing that cleans are triggered by the materializer
             let clean_stale_config = CleanStaleConfig {
                 clean_period: std::time::Duration::from_secs(1),
                 artifact_ttl: std::time::Duration::from_secs(0),
                 start_offset: std::time::Duration::from_secs(0),
+                decreased_ttl_hours_disk_threshold: None,
+                decreased_ttl_hours: None,
                 dry_run: true,
             };
             let io = Arc::new(StubIoHandler::new(project_root.dupe()));
@@ -1246,7 +1255,7 @@ mod state_machine {
             };
             // The first clean stale request is scheduled at roughly the same time as materialize_write so we may receive an initial clean event
             // before anything is materialized, if so ignore events until an artifact is found (retained != 0).
-            // It should only be neccesary to wait for a single clean (1 second) but wait for up to 5 just in case.
+            // It should only be necessary to wait for a single clean (1 second) but wait for up to 5 just in case.
             let mut i = 0;
             while i < 5 {
                 let res = receive_clean_result(&mut daemon_dispatcher_events);

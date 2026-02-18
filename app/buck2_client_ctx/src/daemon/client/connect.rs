@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::env;
@@ -26,17 +27,17 @@ use buck2_common::client_utils::retrying;
 use buck2_common::daemon_dir::DaemonDir;
 use buck2_common::init::DaemonStartupConfig;
 use buck2_common::invocation_paths::InvocationPaths;
-use buck2_common::systemd::ParentSlice;
-use buck2_common::systemd::SystemdRunner;
-use buck2_common::systemd::SystemdRunnerConfig;
-use buck2_common::systemd::replace_unit_delimiter;
 use buck2_core::buck2_env;
 use buck2_data::DaemonWasStartedReason;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
 use buck2_error::buck2_error;
 use buck2_error::conversion::from_any_with_tag;
-use buck2_util::process::async_background_command;
+use buck2_error::internal_error;
+use buck2_events::daemon_id::DaemonId;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_resource_control::spawn_daemon::create_daemon_spawn_command;
 use buck2_util::truncate::truncate;
 use buck2_wrapper_common::kill::process_exists;
 use buck2_wrapper_common::pid::Pid;
@@ -62,12 +63,12 @@ use crate::daemon::client::kill::hard_kill_until;
 use crate::daemon::daemon_windows::spawn_background_process_on_windows;
 use crate::daemon_constraints;
 use crate::daemon_constraints::get_possibly_nested_invocation_daemon_uuid;
+use crate::events_ctx::DaemonEventsCtx;
 use crate::events_ctx::EventsCtx;
 use crate::immediate_config::ImmediateConfigContext;
 use crate::startup_deadline::StartupDeadline;
 use crate::subscribers::classify_server_stderr::classify_server_stderr;
 use crate::subscribers::stdout_stderr_forwarder::StdoutStderrForwarder;
-use crate::subscribers::subscribers::EventSubscribers;
 
 /// The client side matcher for DaemonConstraints.
 #[derive(Clone, Debug)]
@@ -95,8 +96,8 @@ pub(crate) enum ConstraintUnsatisfiedReason {
     RejectDaemonId,
     #[display("Trace IO mismatch")]
     TraceIo,
-    #[display("Materializer state identity mismatch")]
-    MaterializerStateIdentity,
+    #[display("Sqlite identity mismatch")]
+    SqliteIdentity,
 }
 
 impl ConstraintUnsatisfiedReason {
@@ -117,8 +118,8 @@ impl ConstraintUnsatisfiedReason {
             ConstraintUnsatisfiedReason::TraceIo => {
                 buck2_data::DaemonWasStartedReason::ConstraintMismatchTraceIo
             }
-            ConstraintUnsatisfiedReason::MaterializerStateIdentity => {
-                buck2_data::DaemonWasStartedReason::ConstraintMismatchMaterializerStateIdentity
+            ConstraintUnsatisfiedReason::SqliteIdentity => {
+                buck2_data::DaemonWasStartedReason::ConstraintMismatchSqliteIdentity
             }
         }
     }
@@ -196,7 +197,7 @@ impl DaemonConstraintsRequest {
 
         if let Some(r) = &self.reject_materializer_state {
             if extra.materializer_state_identity.as_ref() == Some(r) {
-                return Err(ConstraintUnsatisfiedReason::MaterializerStateIdentity);
+                return Err(ConstraintUnsatisfiedReason::SqliteIdentity);
             }
         }
 
@@ -295,11 +296,20 @@ impl<'a> BuckdLifecycle<'a> {
     }
 
     fn clean_daemon_dir(&self) -> buck2_error::Result<()> {
-        self.lock.clean_daemon_dir(true)
+        self.lock
+            .clean_daemon_dir(true)
+            .buck_error_context("Cleaning daemon dir")
+            .tag(ErrorTag::DaemonDirCleanupFailed)
     }
 
     async fn start_server(&self) -> buck2_error::Result<()> {
         let mut args = vec!["--isolation-dir", self.paths.isolation.as_str(), "daemon"];
+
+        let daemon_id = DaemonId::new();
+        let daemon_id_s = daemon_id.to_string();
+
+        args.push("--daemon-id");
+        args.push(&daemon_id_s);
 
         if self.constraints.is_trace_io_requested() {
             args.push("--enable-trace-io");
@@ -342,6 +352,7 @@ impl<'a> BuckdLifecycle<'a> {
                 args,
                 &daemon_env_vars,
                 &self.constraints.daemon_startup_config,
+                &daemon_id,
             )
             .await
         } else {
@@ -375,31 +386,35 @@ impl<'a> BuckdLifecycle<'a> {
         args: Vec<&str>,
         daemon_env_vars: &[(&OsStr, &OsStr)],
         daemon_startup_config: &DaemonStartupConfig,
+        daemon_id: &DaemonId,
     ) -> buck2_error::Result<()> {
         let project_dir = self.paths.project_root();
         let timeout_secs = buckd_startup_timeout()?;
 
         let daemon_exe = get_daemon_exe()?;
-        let slice_name = format!(
-            "buck2-daemon.{}.{}",
-            replace_unit_delimiter(project_dir.name().unwrap_or("unknown_project")),
-            replace_unit_delimiter(self.paths.isolation.as_str())
+
+        // Create a unique name that we know won't overlap with other buck2 daemons and has enough
+        // information to understand at least a little bit about which daemon it is
+        let repo_name = project_dir
+            .root()
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or(String::new());
+        let unit_name = format!(
+            "buck2-daemon.{}.{}.{}",
+            &repo_name,
+            self.paths.isolation.as_str(),
+            &daemon_id,
         );
-        let systemd_runner =
-            SystemdRunner::create_if_enabled(&SystemdRunnerConfig::daemon_runner_config(
-                &daemon_startup_config.resource_control,
-                ParentSlice::Root(slice_name.clone()),
-            ))?;
-        let mut cmd = if let Some(systemd_runner) = &systemd_runner {
-            systemd_runner
-                .ensure_scope_stopped(&format!("{}.scope", &slice_name))
-                .await?;
-            systemd_runner
-                .background_command_linux(daemon_exe, &slice_name, &project_dir.root())
-                .into()
-        } else {
-            async_background_command(daemon_exe)
-        };
+
+        let (cmd, resource_control_args) = create_daemon_spawn_command(
+            &daemon_startup_config.resource_control,
+            daemon_exe,
+            unit_name,
+            project_dir.root(),
+        )
+        .await?;
+        let mut cmd: tokio::process::Command = cmd.into();
 
         cmd.current_dir(project_dir.root())
             .stdout(std::process::Stdio::piped())
@@ -407,6 +422,8 @@ impl<'a> BuckdLifecycle<'a> {
             .args(args);
 
         cmd.arg(daemon_startup_config.serialize()?);
+
+        cmd.args(&resource_control_args);
 
         if buck2_env!("BUCK_DAEMON_LOG_TO_FILE", type=u8)? == Some(1) {
             cmd.env("BUCK_LOG_TO_FILE_PATH", self.paths.log_dir().as_os_str());
@@ -435,12 +452,12 @@ impl<'a> BuckdLifecycle<'a> {
         let mut stdout_taken = child
             .stdout
             .take()
-            .buck_error_context("Child should have its stdout piped")
+            .ok_or_else(|| internal_error!("Child should have its stdout piped"))
             .unwrap();
         let mut stderr_taken = child
             .stderr
             .take()
-            .buck_error_context("Child should have its stderr piped")
+            .ok_or_else(|| internal_error!("Child should have its stderr piped"))
             .unwrap();
 
         let status_fut = async {
@@ -455,7 +472,7 @@ impl<'a> BuckdLifecycle<'a> {
                     // Signal termination is not considered a success, so wait() results in an appropriate ExitStatus
                     buck2_error::Ok(child.wait().await?)
                 }
-                Ok(result) => result.map_err(|e| buck2_error::Error::from(e).into()),
+                Ok(result) => result.map_err(buck2_error::Error::from),
             }
         };
         let stdout_fut = async {
@@ -481,28 +498,20 @@ impl<'a> BuckdLifecycle<'a> {
         // so we wait for termination of the child process.
         let joined = try_join3(status_fut, stdout_fut, stderr_fut).await;
         match joined {
-            Err(e) => Err(BuckdConnectError::BuckDaemonStartupFailed {
-                code: 1,
-                stdout: "".to_owned(),
-                stderr: format!("Failed to launch Buck2 daemon: {:#}", e),
-            }
-            .into()),
+            Err(error) => Err(BuckdConnectError::BuckDaemonLaunchFailed { error }.into()),
             Ok((status, stdout, stderr)) => {
                 if !status.success() {
+                    let code = status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or("unknown".to_owned());
                     Err(BuckdConnectError::BuckDaemonStartupFailed {
-                        code: status.code().unwrap_or(1),
+                        code,
                         stdout: String::from_utf8_lossy(&stdout).to_string(),
                         stderr: String::from_utf8_lossy(&stderr).to_string(),
                     }
                     .into())
                 } else {
-                    if let Some(systemd_runner) = systemd_runner {
-                        // set memory limits to buck2 daemon slice to control
-                        // the buck memory including daemon, fork-server and all actions
-                        systemd_runner
-                            .set_slice_memory_limit(&format!("{}.slice", slice_name))
-                            .await?;
-                    }
                     Ok(())
                 }
             }
@@ -555,19 +564,19 @@ impl BootstrapBuckdClient {
     pub async fn connect(
         paths: &InvocationPaths,
         constraints: BuckdConnectConstraints,
-        event_subscribers: &mut EventSubscribers,
+        events_ctx: &mut EventsCtx,
     ) -> buck2_error::Result<Self> {
         let daemon_dir = paths.daemon_dir()?;
 
-        buck2_core::fs::fs_util::create_dir_all(&daemon_dir.path)
-            .with_buck_error_context(|| format!("Error creating daemon dir: {}", daemon_dir))?;
+        fs_util::create_dir_all(&daemon_dir.path)
+            .with_buck_error_context(|| format!("Error creating daemon dir: {daemon_dir}"))?;
 
         let res = match constraints {
             BuckdConnectConstraints::ExistingOnly => {
                 establish_connection_existing(&daemon_dir).await
             }
             BuckdConnectConstraints::Constraints(constraints) => {
-                establish_connection(paths, constraints, event_subscribers).await
+                establish_connection(paths, constraints, events_ctx).await
             }
         };
 
@@ -586,7 +595,6 @@ impl BootstrapBuckdClient {
                 daemon_dir: self.daemon_dir,
                 client: self.client,
                 constraints: self.constraints,
-                tailers: None,
             },
         }
     }
@@ -616,14 +624,11 @@ pub async fn connect_buckd(
     events_ctx: &mut EventsCtx,
     paths: &InvocationPaths,
 ) -> buck2_error::Result<BuckdClientConnector> {
-    match BootstrapBuckdClient::connect(paths, constraints, &mut events_ctx.subscribers)
-        .await
-        .map_err(buck2_error::Error::from)
-    {
+    match BootstrapBuckdClient::connect(paths, constraints, events_ctx).await {
         Ok(client) => Ok(client.to_connector()),
         Err(e) => {
-            events_ctx.subscribers.handle_daemon_connection_failure();
-            Err(e.into())
+            events_ctx.handle_daemon_connection_failure();
+            Err(e)
         }
     }
 }
@@ -644,13 +649,12 @@ pub async fn establish_connection_existing(
             },
         )
         .await
-        .map_err(buck2_error::Error::from)
 }
 
 async fn establish_connection(
     paths: &InvocationPaths,
     constraints: DaemonConstraintsRequest,
-    event_subscribers: &mut EventSubscribers,
+    events_ctx: &mut EventsCtx,
 ) -> buck2_error::Result<BootstrapBuckdClient> {
     // There are many places where `establish_connection_inner` may hang.
     // If it does, better print something to the user instead of hanging quietly forever.
@@ -659,10 +663,9 @@ async fn establish_connection(
     deadline
         .down(
             "establishing connection to Buck daemon or start a daemon",
-            |timeout| establish_connection_inner(paths, constraints, timeout, event_subscribers),
+            |timeout| establish_connection_inner(paths, constraints, timeout, events_ctx),
         )
         .await
-        .map_err(buck2_error::Error::from)
 }
 
 fn explain_failed_to_connect_reason(reason: buck2_data::DaemonWasStartedReason) -> &'static str {
@@ -673,9 +676,7 @@ fn explain_failed_to_connect_reason(reason: buck2_data::DaemonWasStartedReason) 
         DaemonWasStartedReason::ConstraintMismatchStartupConfig => "Startup config mismatch",
         DaemonWasStartedReason::ConstraintRejectDaemonId => "Reject daemon id",
         DaemonWasStartedReason::ConstraintMismatchTraceIo => "Trace IO mismatch",
-        DaemonWasStartedReason::ConstraintMismatchMaterializerStateIdentity => {
-            "Materializer state identity mismatch"
-        }
+        DaemonWasStartedReason::ConstraintMismatchSqliteIdentity => "Sqlite identity mismatch",
         DaemonWasStartedReason::CouldNotConnectToDaemon => {
             // TODO(nga): get rid of this variant.
             "Could not connect to daemon"
@@ -693,7 +694,7 @@ async fn establish_connection_inner(
     paths: &InvocationPaths,
     constraints: DaemonConstraintsRequest,
     deadline: StartupDeadline,
-    event_subscribers: &mut EventSubscribers,
+    events_ctx: &mut EventsCtx,
 ) -> buck2_error::Result<BootstrapBuckdClient> {
     let daemon_dir = paths.daemon_dir()?;
 
@@ -747,7 +748,7 @@ async fn establish_connection_inner(
                             }
                         }
 
-                        event_subscribers
+                        events_ctx
                             .eprintln(&format!(
                                 "buck2 daemon constraint mismatch: {reason}; killing daemon..."
                             ))
@@ -760,40 +761,35 @@ async fn establish_connection_inner(
                             )
                             .await?;
 
-                        event_subscribers
-                            .eprintln("Starting new buck2 daemon...")
-                            .await?;
+                        events_ctx.eprintln("Starting new buck2 daemon...").await?;
 
                         reason.to_daemon_was_started_reason()
                     }
                     Err(reason) => {
-                        // TODO(nga): should print some proper message here.
-                        hard_kill_until(&buckd_info.info, deadline.down_deadline()?.deadline())
-                            .await?;
-
-                        event_subscribers
+                        events_ctx
                             .eprintln(&format!(
-                                "Could not connect to buck2 daemon ({}), starting a new one...",
+                                "Could not connect to buck2 daemon ({}), killing daemon..",
                                 explain_failed_to_connect_reason(reason)
                             ))
                             .await?;
+
+                        hard_kill_until(&buckd_info.info, &deadline)
+                            .await
+                            .map_err(|error| BuckdConnectError::DaemonKillFailed { error })?;
 
                         reason
                     }
                 }
             }
             Ok(None) => {
-                event_subscribers
-                    .eprintln("Starting new buck2 daemon...")
-                    .await?;
+                events_ctx.eprintln("Starting new buck2 daemon...").await?;
 
                 buck2_data::DaemonWasStartedReason::NoBuckdInfo
             }
             Err(e) => {
-                event_subscribers
+                events_ctx
                     .eprintln(&format!(
-                        "Could not load buckd.info: {}, starting new buck2 daemon...",
-                        e
+                        "Could not load buckd.info: {e}, starting new buck2 daemon..."
                     ))
                     .await?;
 
@@ -814,7 +810,7 @@ async fn establish_connection_inner(
                     &lifecycle_lock,
                     paths,
                     &constraints,
-                    event_subscribers,
+                    events_ctx,
                     daemon_was_started_reason,
                 )
             },
@@ -827,16 +823,17 @@ async fn start_new_buckd_and_connect(
     lifecycle_lock: &BuckdLifecycle<'_>,
     paths: &InvocationPaths,
     constraints: &DaemonConstraintsRequest,
-    event_subscribers: &mut EventSubscribers,
+    events_ctx: &mut EventsCtx,
     daemon_was_started_reason: buck2_data::DaemonWasStartedReason,
 ) -> buck2_error::Result<BootstrapBuckdClient> {
     // Daemon dir may be corrupted. Safer to delete it.
-    lifecycle_lock
-        .clean_daemon_dir()
-        .buck_error_context("Cleaning daemon dir")?;
+    lifecycle_lock.clean_daemon_dir()?;
 
     // Now there's definitely no server that can be connected to
-    lifecycle_lock.start_server().await?;
+    lifecycle_lock
+        .start_server()
+        .await
+        .buck_error_context("Error starting buck2 daemon")?;
     // It might take a little bit for the daemon server to start up. We could wait for the buckd.info
     // file to appear, but it's just as easy to just retry the connection itself.
 
@@ -860,15 +857,16 @@ async fn start_new_buckd_and_connect(
         .into());
     }
 
-    event_subscribers.handle_daemon_started(daemon_was_started_reason);
+    events_ctx.handle_daemon_started(daemon_was_started_reason);
 
-    event_subscribers
+    events_ctx
         .eprintln("Connected to new buck2 daemon.")
         .await?;
 
     Ok(client)
 }
 
+#[allow(clippy::large_enum_variant)]
 enum ConnectBeforeRestart {
     Accepted(BootstrapBuckdClient),
     Rejected,
@@ -951,12 +949,14 @@ impl<'a> BuckdProcessInfo<'a> {
     }
 
     pub fn load(daemon_dir: &'a DaemonDir) -> buck2_error::Result<Self> {
-        Self::load_if_exists(daemon_dir)?.with_buck_error_context(|| {
-            format!(
-                "buckd info {} does not exist",
-                daemon_dir.buckd_info().display()
-            )
-        })
+        match Self::load_if_exists(daemon_dir) {
+            Ok(Some(info)) => Ok(info),
+            Ok(None) => Err(BuckdConnectError::BuckdInfoMissing {
+                path: daemon_dir.buckd_info(),
+            }
+            .into()),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn load_if_exists(daemon_dir: &'a DaemonDir) -> buck2_error::Result<Option<Self>> {
@@ -971,13 +971,8 @@ impl<'a> BuckdProcessInfo<'a> {
             }
         };
         let reader = BufReader::new(file);
-        let info = serde_json::from_reader(reader).with_buck_error_context(|| {
-            format!(
-                "Error parsing daemon info in `{}`. \
-                Try deleting that file and running `buck2 killall` before running your command again",
-                location.display(),
-            )
-        })?;
+        let info = serde_json::from_reader(reader)
+            .map_err(|error| BuckdConnectError::BuckdInfoParseError { location, error })?;
 
         Ok(Some(BuckdProcessInfo { info, daemon_dir }))
     }
@@ -1011,10 +1006,12 @@ async fn get_constraints(
 ) -> buck2_error::Result<buck2_cli_proto::DaemonConstraints> {
     // NOTE: No tailers in bootstrap client, we capture logs if we fail to connect, but
     // otherwise we leave them alone.
-    let status = EventsCtx::new(EventSubscribers::new(vec![Box::new(StdoutStderrForwarder)]))
-        .unpack_oneshot(None, {
+    let mut events_ctx = EventsCtx::new(None, vec![Box::new(StdoutStderrForwarder)]);
+    let status = DaemonEventsCtx::without_tailers(&mut events_ctx)
+        .unpack_oneshot({
             client.status(tonic::Request::new(buck2_cli_proto::StatusRequest {
                 snapshot: false,
+                include_tokio_runtime_metrics: false,
             }))
         })
         .await?;
@@ -1036,8 +1033,8 @@ pub fn get_daemon_exe() -> buck2_error::Result<PathBuf> {
         let ext = if cfg!(windows) { ".exe" } else { "" };
         Ok(exe
             .parent()
-            .buck_error_context("Expected current exe to be in a directory")?
-            .join(format!("buck2-daemon{}", ext)))
+            .ok_or_else(|| internal_error!("Expected current exe to be in a directory"))?
+            .join(format!("buck2-daemon{ext}")))
     } else {
         Ok(exe)
     }
@@ -1050,21 +1047,48 @@ enum BuckdConnectError {
     #[error(
         "buck daemon startup failed with exit code {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     )]
+    #[buck2(tag = DaemonStartupFailed)]
     BuckDaemonStartupFailed {
-        code: i32,
+        code: String,
         stdout: String,
         stderr: String,
+    },
+    #[error("Failed to launch Buck2 daemon: {error:#}")]
+    #[buck2(tag = DaemonLaunchFailed)]
+    BuckDaemonLaunchFailed {
+        #[source]
+        error: buck2_error::Error,
     },
     #[error(
         "during buck daemon startup, the started process did not match constraints ({reason}).\nexpected: {expected:?}\nactual: {actual:?}"
     )]
+    #[buck2(tag = DaemonConstraintsWrongAfterStart)]
     BuckDaemonConstraintWrongAfterStart {
         reason: ConstraintUnsatisfiedReason,
         expected: DaemonConstraintsRequest,
         actual: buck2_cli_proto::DaemonConstraints,
     },
     #[error("buck2 daemon constraint mismatch during nested invocation: {reason}")]
+    #[buck2(tag = DaemonNestedConstraintsMismatch)]
     NestedConstraintMismatch { reason: ConstraintUnsatisfiedReason },
+    #[error("buckd info {path} does not exist")]
+    #[buck2(tag = BuckdInfoMissing)]
+    BuckdInfoMissing { path: AbsNormPathBuf },
+    #[error("Error parsing daemon info in `{}`. \
+                Try deleting that file and running `buck2 killall` before running your command again",
+                location.display())]
+    #[buck2(tag = BuckdInfoParseError)]
+    BuckdInfoParseError {
+        location: AbsNormPathBuf,
+        #[source]
+        error: serde_json::Error,
+    },
+    #[error("Failed to kill buckd: {error:#}")]
+    #[buck2(tag = DaemonKillFailed)]
+    DaemonKillFailed {
+        #[source]
+        error: buck2_error::Error,
+    },
 }
 
 async fn daemon_connect_error(
@@ -1109,8 +1133,7 @@ async fn daemon_connect_error(
         let stderr = truncate(&stderr, 64000);
         let error = error
             .context(format!(
-                "Error connecting to the daemon, daemon stderr follows:\n{}",
-                stderr
+                "Error connecting to the daemon, daemon stderr follows:\n{stderr}"
             ))
             .tag([ErrorTag::DaemonConnect]);
 
@@ -1125,8 +1148,7 @@ async fn daemon_connect_error(
     let error_message = format!(
         "Failed to connect to buck daemon.
     Try running `buck2 kill` and your command afterwards.
-    Alternatively, try running `{}` and your command afterwards",
-        delete_commad
+    Alternatively, try running `{delete_commad}` and your command afterwards"
     );
     error.context(error_message)
 }

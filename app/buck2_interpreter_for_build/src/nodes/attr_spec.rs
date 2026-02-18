@@ -1,13 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use buck2_core::target::label::label::TargetLabelRef;
 use buck2_core::target::name::TargetNameRef;
@@ -63,8 +65,11 @@ pub trait AttributeSpecExt {
         internals: &ModuleInternals,
     ) -> buck2_error::Result<(&'v TargetNameRef, AttrValues)>;
 
-    /// Returns a starlark Parameters for the rule callable.
+    /// Returns a starlark Parameters for the rule callable, but not default values.
     fn signature(&self, rule_name: String) -> ParametersSpec<Value<'_>>;
+
+    /// Returns a starlark Parameters for the rule callable, with default values.
+    fn signature_with_default_value(&self, rule_name: String) -> ParametersSpec<Arc<CoercedAttr>>;
 
     fn ty_function(&self) -> TyFunction;
 
@@ -132,10 +137,7 @@ impl AttributeSpecExt for AttributeSpec {
                         v,
                     )
                     .with_buck_error_context(|| {
-                        format!(
-                            "Error coercing attribute `{}` of `{}`",
-                            attr_name, target_label,
-                        )
+                        format!("Error coercing attribute `{attr_name}` of `{target_label}`",)
                     })?;
 
                 if attr_is_visibility {
@@ -198,7 +200,7 @@ impl AttributeSpecExt for AttributeSpec {
         Ok((name, attr_values))
     }
 
-    /// Returns a starlark Parameters for the rule callable.
+    /// Returns a starlark Parameters for the rule callable, but not default values.
     fn signature(&self, rule_name: String) -> ParametersSpec<Value<'_>> {
         ParametersSpec::new_named_only(
             &rule_name,
@@ -208,6 +210,23 @@ impl AttributeSpecExt for AttributeSpec {
                     name,
                     match default {
                         Some(_) => ParametersSpecParam::Optional,
+                        None => ParametersSpecParam::Required,
+                    },
+                )
+            }),
+        )
+    }
+
+    /// Returns a starlark Parameters for the rule callable, with default values.
+    fn signature_with_default_value(&self, rule_name: String) -> ParametersSpec<Arc<CoercedAttr>> {
+        ParametersSpec::new_named_only(
+            &rule_name,
+            self.attr_specs().map(|(name, _idx, attribute)| {
+                let default = attribute.default();
+                (
+                    name,
+                    match default {
+                        Some(default) => ParametersSpecParam::Defaulted(default.dupe()),
                         None => ParametersSpecParam::Required,
                     },
                 )

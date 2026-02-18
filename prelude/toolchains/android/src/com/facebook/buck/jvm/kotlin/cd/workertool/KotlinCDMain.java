@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin.cd.workertool;
@@ -12,10 +13,10 @@ package com.facebook.buck.jvm.kotlin.cd.workertool;
 import com.facebook.buck.core.util.log.Logger;
 import com.facebook.buck.jvm.cd.CompilerDaemonLoggerUtil;
 import com.facebook.buck.jvm.cd.CompilerDaemonRunner;
+import com.facebook.buck.jvm.cd.ErrorInterceptor;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
 import java.util.logging.Level;
-import org.kohsuke.args4j.CmdLineException;
 
 /**
  * KotlinCD main class.
@@ -33,11 +34,22 @@ public class KotlinCDMain {
       KotlinCDCommand command = new KotlinCDCommand(args, ImmutableMap.copyOf(System.getenv()));
       Logger logger = Logger.get(KotlinCDMain.class.getName());
       logger.info(String.format("Starting KotlinCDWorkerTool %s", command));
+      System.setErr(new ErrorInterceptor());
+      Runtime.getRuntime()
+          .addShutdownHook(
+              new Thread(
+                  () -> {
+                    System.out.flush();
+                    System.err.flush();
+                    // Your shutdown logic here...
+                  }));
       CompilerDaemonRunner.run(command);
       command.postExecute();
-    } catch (CmdLineException e) {
-      System.exit(1);
+      System.err.println("KotlinCDWorkerTool succeeded!");
+      System.exit(0);
+    } catch (Exception e) {
+      System.err.println("KotlinCDWorkerTool failed: " + e.getMessage());
     }
-    System.exit(0);
+    System.exit(2);
   }
 }

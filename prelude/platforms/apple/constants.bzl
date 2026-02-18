@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # These are identifiers used in defining Apple platforms for configuring apple_* rules.
 
@@ -25,8 +26,6 @@ VISIONOS = "visionos"
 APPLETVOS_ARM64 = "appletvos-arm64"
 
 APPLETVSIMULATOR_ARM64 = "appletvsimulator-arm64"
-
-APPLETVSIMULATOR_X86_64 = "appletvsimulator-x86_64"
 
 # iOS Platforms/Flavors
 
@@ -73,10 +72,11 @@ apple_sdks = struct(
     VISIONOS = VISIONOS,
 )
 
+ALL_APPLE_SDKS = tuple([getattr(apple_sdks, field) for field in dir(apple_sdks)])  # convert the `apple_sdks` struct into a tuple (taking the values, not the keys)
+
 appletv_platforms = struct(
     APPLETVOS_ARM64 = APPLETVOS_ARM64,
     APPLETVSIMULATOR_ARM64 = APPLETVSIMULATOR_ARM64,
-    APPLETVSIMULATOR_X86_64 = APPLETVSIMULATOR_X86_64,
 )
 
 ios_platforms = struct(

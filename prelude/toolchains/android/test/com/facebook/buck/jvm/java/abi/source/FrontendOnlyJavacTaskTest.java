@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java.abi.source;
@@ -13,14 +14,11 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 
 import com.facebook.buck.jvm.java.plugin.adapter.BuckJavacPlugin;
 import com.facebook.buck.jvm.java.plugin.adapter.BuckJavacTask;
 import com.facebook.buck.jvm.java.plugin.adapter.TestTaskListener;
 import com.facebook.buck.jvm.java.plugin.adapter.TestTaskListenerAdapter;
-import com.facebook.buck.jvm.java.testutil.compiler.CompilerTreeApiParameterized;
-import com.facebook.buck.jvm.java.version.utils.JavaVersionUtils;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -47,8 +45,9 @@ import javax.tools.JavaFileObject;
 import org.hamcrest.Matchers;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
-@RunWith(CompilerTreeApiParameterized.class)
+@RunWith(Parameterized.class)
 public class FrontendOnlyJavacTaskTest extends CompilerTreeApiParameterizedTest {
   @Test
   public void testParseReturnsAllCompilationUnits() throws IOException {
@@ -98,27 +97,20 @@ public class FrontendOnlyJavacTaskTest extends CompilerTreeApiParameterizedTest 
 
     Iterable<? extends Element> actualElements = testCompiler.enter();
 
-    if (JavaVersionUtils.getMajorVersion() <= 8) {
-      assertThat(
-          actualElements,
-          Matchers.containsInAnyOrder(
-              elements.getTypeElement("com.facebook.foo.Foo"),
-              elements.getTypeElement("com.facebook.foo.Extra"),
-              elements.getTypeElement("com.facebook.bar.Bar")));
-    } else {
-      assertThat(
-          actualElements,
-          Matchers.containsInAnyOrder(
-              elements.getTypeElement("com.facebook.foo.Foo"),
-              elements.getTypeElement("com.facebook.foo.Extra"),
-              elements.getTypeElement("com.facebook.bar.Bar"),
-              elements.getPackageElement("com.facebook.foo")));
-    }
+    assertThat(
+        actualElements,
+        Matchers.containsInAnyOrder(
+            elements.getTypeElement("com.facebook.foo.Foo"),
+            elements.getTypeElement("com.facebook.foo.Extra"),
+            elements.getTypeElement("com.facebook.bar.Bar"),
+            elements.getPackageElement("com.facebook.foo")));
   }
 
   @Test
   public void testTaskListenersGetEvents() throws Exception {
-    assumeTrue(testingTrees());
+    if (!testingTrees()) {
+      return;
+    }
     List<String> events = new ArrayList<>();
 
     initCompiler(ImmutableMap.of("Foo.java", "public class Foo { }"));
@@ -159,7 +151,9 @@ public class FrontendOnlyJavacTaskTest extends CompilerTreeApiParameterizedTest 
 
   @Test
   public void testTaskListenersCanWorkWithElements() throws Exception {
-    assumeTrue(testingTrees());
+    if (!testingTrees()) {
+      return;
+    }
     AtomicBoolean listenerRan = new AtomicBoolean(false);
 
     initCompiler(ImmutableMap.of("Foo.java", "public class Foo { }"));
@@ -220,18 +214,7 @@ public class FrontendOnlyJavacTaskTest extends CompilerTreeApiParameterizedTest 
 
     testCompiler.compile();
 
-    String[] javacEventsJava8 = {
-      "PARSE started",
-      "PARSE finished",
-      "ENTER started",
-      "ENTER finished",
-      "ANALYZE started",
-      "ANALYZE finished",
-      "GENERATE started",
-      "GENERATE finished",
-    };
-
-    String[] javacEventsJava9 = {
+    String[] javacEvents = {
       "COMPILATION started",
       "PARSE started",
       "PARSE finished",
@@ -243,13 +226,8 @@ public class FrontendOnlyJavacTaskTest extends CompilerTreeApiParameterizedTest 
       "GENERATE finished",
       "COMPILATION finished",
     };
-    String[] javacEvents =
-        (JavaVersionUtils.getMajorVersion() >= 9) ? javacEventsJava9 : javacEventsJava8;
 
-    String[] treesEventsJava8 = {
-      "PARSE started", "PARSE finished", "ENTER started", "ENTER finished",
-    };
-    String[] treesEventsJava9 = {
+    String[] treesEvents = {
       "COMPILATION started",
       "PARSE started",
       "PARSE finished",
@@ -257,8 +235,6 @@ public class FrontendOnlyJavacTaskTest extends CompilerTreeApiParameterizedTest 
       "ENTER finished",
       "COMPILATION finished",
     };
-    String[] treesEvents =
-        (JavaVersionUtils.getMajorVersion() >= 9) ? treesEventsJava9 : treesEventsJava8;
 
     assertThat(events, Matchers.contains(testingJavac() ? javacEvents : treesEvents));
   }

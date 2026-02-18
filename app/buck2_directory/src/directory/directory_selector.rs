@@ -1,18 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::iter;
 
 use buck2_core::directory_digest::DirectoryDigest;
-use buck2_core::fs::paths::IntoFileNameBufIterator;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_fs::paths::IntoFileNameBufIterator;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileNameBuf;
 use either::Either;
 use starlark_map::small_map::SmallMap;
 
@@ -162,11 +163,11 @@ pub struct Search<'a, 'b, T: WalkType<'b>> {
 impl<'a, 'b, T: WalkType<'b>> Search<'a, 'b, T> {
     pub fn new(selector: &'a DirectorySelector, root: T::Directory) -> Self {
         match selector {
-            DirectorySelector::Traverse(ref search) => Search {
+            DirectorySelector::Traverse(search) => Search {
                 inner: SearchInner::Stack(vec![SearchFrame {
                     search,
                     name: None,
-                    entries: T::directory_entries(root).into(),
+                    entries: T::directory_entries(root),
                 }]),
             },
             DirectorySelector::Take => Search {
@@ -214,7 +215,7 @@ impl<'b, T: WalkType<'b>> DirectoryIterator for Search<'_, 'b, T> {
                                     stack.push(SearchFrame {
                                         name: Some(name),
                                         search: t,
-                                        entries: T::directory_entries(d).into(),
+                                        entries: T::directory_entries(d),
                                     });
                                     continue;
                                 }
@@ -278,5 +279,158 @@ impl DirectorySelector {
         dir: &'b D,
     ) -> OrderedDirectorySearch<'a, 'b, D::DirectoryRef<'b>> {
         OrderedDirectorySearch::new(self, dir.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert_matches::assert_matches;
+
+    use crate::directory::directory::Directory;
+    use crate::directory::directory_iterator::DirectoryIterator;
+    use crate::directory::directory_selector::DirectorySearchError;
+    use crate::directory::directory_selector::DirectorySelector;
+    use crate::directory::entry::DirectoryEntry;
+    use crate::directory::test::NopEntry;
+    use crate::directory::test::TestDirectoryBuilder;
+    use crate::directory::test::TestHasher;
+    use crate::directory::test::path;
+
+    #[test]
+    fn test_search() -> buck2_error::Result<()> {
+        let mut b = TestDirectoryBuilder::empty();
+        b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("b/c"), DirectoryEntry::Leaf(NopEntry))?;
+        let d = b.fingerprint(&TestHasher);
+
+        {
+            let mut selector = DirectorySelector::empty();
+            selector.select(path("a/b"));
+
+            let mut it = selector.ordered_search(&d).with_paths();
+
+            assert_matches!(
+                it.next(),
+                Some((p, Ok(DirectoryEntry::Leaf(..)))) => assert_eq!(p, path("a/b"))
+            );
+            assert_matches!(it.next(), None)
+        }
+
+        {
+            let mut selector = DirectorySelector::empty();
+            selector.select(path("a/b/c"));
+            selector.select(path("b/c"));
+
+            let mut it = selector.ordered_search(&d).with_paths();
+
+            assert_matches!(
+                it.next(),
+                Some((p, Err(DirectorySearchError::CannotTraverseLeaf { .. }))) => assert_eq!(p, path("a/b"))
+            );
+            assert_matches!(
+                it.next(),
+                Some((p, Ok(DirectoryEntry::Leaf(..)))) => assert_eq!(p, path("b/c"))
+            );
+            assert_matches!(it.next(), None)
+        }
+
+        {
+            let mut selector = DirectorySelector::empty();
+            selector.select(path("a"));
+
+            let mut it = selector.ordered_search(&d).with_paths();
+            assert_matches!(
+                it.next(),
+                Some((p, Ok(DirectoryEntry::Dir(..)))) => assert_eq!(p, path("a"))
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter() -> buck2_error::Result<()> {
+        let mut b = TestDirectoryBuilder::empty();
+        b.insert(path("a/aa"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("a/a"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("b/b"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("b/bb"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("c/c"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("c/cc"), DirectoryEntry::Leaf(NopEntry))?;
+
+        let mut selector = DirectorySelector::empty();
+        selector.select(path("a"));
+        selector.select(path("b/b"));
+
+        selector.filter(&mut b)?;
+
+        let mut it = b.ordered_walk().with_paths();
+
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("a"))
+        );
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("a/a"))
+        );
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("a/aa"))
+        );
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("b"))
+        );
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("b/b"))
+        );
+
+        assert_matches!(it.next(), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_continues_on_error() -> buck2_error::Result<()> {
+        let mut b = TestDirectoryBuilder::empty();
+        b.insert(path("a/aa/aaa"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("a/aa/bbb"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("a/bb"), DirectoryEntry::Leaf(NopEntry))?;
+        b.insert(path("c"), DirectoryEntry::Leaf(NopEntry))?;
+
+        let mut selector = DirectorySelector::empty();
+        selector.select(path("a/aa"));
+        selector.select(path("c/d"));
+
+        assert_matches!(selector.filter(&mut b), Err(..));
+
+        let mut it = b.ordered_walk().with_paths();
+
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("a"))
+        );
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("a/aa"))
+        );
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("a/aa/aaa"))
+        );
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("a/aa/bbb"))
+        );
+        assert_matches!(
+            it.next(),
+            Some((p, _)) => assert_eq!(p, path("c"))
+        );
+
+        assert_matches!(it.next(), None);
+
+        Ok(())
     }
 }

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:resources.bzl",
@@ -112,18 +113,42 @@ def _args_for_compiling(entry: JavaClasspathEntry):
 def _javacd_json(v):
     return v.abi
 
+def _abi_snapshot_json(entry: JavaClasspathEntry):
+    if entry.abi and entry.abi_jar_snapshot:
+        return cmd_args([entry.abi_jar_snapshot], delimiter = " ")
+
+    return None
+
+def _abi_dirs(entry: JavaClasspathEntry):
+    return entry.abi_as_dir or []
+
 def _abi_to_abi_dir(entry: JavaClasspathEntry):
     if entry.abi_as_dir:
         return cmd_args([entry.abi, entry.abi_as_dir], delimiter = " ")
     return []
 
+def _full_library_args(entry: JavaClasspathEntry):
+    return entry.full_library
+
+# This doesn't have any projections on it at all. It exists only for the
+# purpose of propagating JavaCompilingDepsTSet nodes up the graph in
+# JavaGlobalCodeInfo.
+#
+# We then traverse this wrapper to get the underlying JavaCompilingDepsTSets.
+# It is much, much cheaper in memory usage to do this than it is to ensure
+# a TSet projection at every node for every different global code info spec.
+JavaCompilingDepsTSetWrapper = transitive_set()
+
 JavaCompilingDepsTSet = transitive_set(
     args_projections = {
+        "abi_dirs": _abi_dirs,
         "abi_to_abi_dir": _abi_to_abi_dir,
         "args_for_ast_dumper": _args_for_ast_dumper,
         "args_for_compiling": _args_for_compiling,
+        "full_library_args": _full_library_args,
     },
     json_projections = {
+        "abi_snapshot_json": _abi_snapshot_json,
         "javacd_json": _javacd_json,
     },
 )
@@ -147,6 +172,11 @@ def _full_jar_args(dep: JavaPackagingDep):
         return cmd_args(dep.jar)
     return cmd_args()
 
+def _full_jar_owner_args(dep: JavaPackagingDep):
+    if dep.jar:
+        return cmd_args(dep.label.raw_target())
+    return cmd_args()
+
 def _args_for_classpath_macro(dep: JavaPackagingDep):
     return dep.output_for_classpath_macro
 
@@ -157,6 +187,7 @@ JavaPackagingDepTSet = transitive_set(
     args_projections = {
         "args_for_classpath_macro": _args_for_classpath_macro,
         "full_jar_args": _full_jar_args,
+        "full_jar_owner_args": _full_jar_owner_args,
     },
     json_projections = {
         "javacd_json": _packaging_dep_javacd_json,
@@ -181,6 +212,9 @@ JavaLibraryInfo = provider(
         # Consisting of this library's own output, and the "compiling_deps" of any exported_deps and exported_provided_deps.
         #
         "compiling_deps": provider_field(typing.Any, default = None),  # ["JavaCompilingDepsTSet", None]
+
+        # A TSet that contains the "compiling_deps" as a node. This is used to propagate "global code info" up the graph.
+        "compiling_deps_wrapper": provider_field(typing.Any, default = None),  # ["JavaCompilingDepsTSetWrapper", None]
 
         # An output of the library. If present then already included into `compiling_deps` field.
         "library_output": provider_field(typing.Any, default = None),  # ["JavaClasspathEntry", None]
@@ -224,8 +258,8 @@ JavaPackagingInfo = provider(
 KeystoreInfo = provider(
     # @unsorted-dict-items
     fields = {
-        "store": provider_field(typing.Any, default = None),  # artifact
-        "properties": provider_field(typing.Any, default = None),  # artifact
+        "store": provider_field(Artifact),
+        "properties": provider_field(Artifact),
     },
 )
 
@@ -239,6 +273,7 @@ JavaCompileOutputs = record(
     preprocessed_library = Artifact,
     incremental_state_dir = Artifact | None,
     used_jars_json = Artifact | None,
+    kotlin_classes = Artifact | None,
 )
 
 JavaProviders = record(
@@ -289,7 +324,8 @@ def make_compile_outputs(
         annotation_processor_output: Artifact | None = None,
         incremental_state_dir: Artifact | None = None,
         abi_jar_snapshot: Artifact | None = None,
-        used_jars_json: Artifact | None = None) -> JavaCompileOutputs:
+        used_jars_json: Artifact | None = None,
+        kotlin_classes: Artifact | None = None) -> JavaCompileOutputs:
     expect(classpath_abi != None or classpath_abi_dir == None, "A classpath_abi_dir should only be provided if a classpath_abi is provided!")
     return JavaCompileOutputs(
         full_library = full_library,
@@ -307,6 +343,7 @@ def make_compile_outputs(
         preprocessed_library = preprocessed_library,
         incremental_state_dir = incremental_state_dir,
         used_jars_json = used_jars_json,
+        kotlin_classes = kotlin_classes,
     )
 
 def create_abi(actions: AnalysisActions, class_abi_generator: Dependency, library: Artifact, keepSynthetic: bool = False) -> Artifact:
@@ -314,7 +351,7 @@ def create_abi(actions: AnalysisActions, class_abi_generator: Dependency, librar
     # itself some actions output artifact, so we replace directory
     # separators to get a path that we can uniquely own.
     # TODO(cjhopman): This probably should take in the output path.
-    class_abi = actions.declare_output("{}-class-abi.jar".format(library.short_path.replace("/", "_")))
+    class_abi = actions.declare_output("{}-class-abi.jar".format(library.short_path.replace("/", "_")), has_content_based_path = True)
     cmd = [
         class_abi_generator[RunInfo],
         library,
@@ -331,16 +368,24 @@ def create_abi(actions: AnalysisActions, class_abi_generator: Dependency, librar
 
 ClasspathSnapshotGranularity = enum("CLASS_LEVEL", "CLASS_MEMBER_LEVEL")
 
-def generate_java_classpath_snapshot(actions: AnalysisActions, snapshot_generator: Dependency | None, granularity: ClasspathSnapshotGranularity, library: Artifact, action_identifier: str | None) -> Artifact | None:
+def generate_java_classpath_snapshot(
+        actions: AnalysisActions,
+        snapshot_generator: Dependency | None,
+        granularity: ClasspathSnapshotGranularity,
+        library: Artifact,
+        action_identifier: str | None) -> Artifact | None:
     if not snapshot_generator:
         return None
     identifier = (
         "{}_".format(action_identifier) if action_identifier else ""
     ) + library.short_path.replace("/", "_").split(".")[0]
-    output = actions.declare_output("{}_jar_snapshot_{}.bin".format(
-        identifier,
-        "cl" if ClasspathSnapshotGranularity("CLASS_LEVEL") == granularity else "cml",
-    ))
+    output = actions.declare_output(
+        "{}_jar_snapshot_{}.bin".format(
+            identifier,
+            "cl" if ClasspathSnapshotGranularity("CLASS_LEVEL") == granularity else "cml",
+        ),
+        has_content_based_path = True,
+    )
     actions.run(
         [
             snapshot_generator[RunInfo],
@@ -381,12 +426,37 @@ def derive_compiling_deps(
 
     return actions.tset(JavaCompilingDepsTSet, children = (children or []) + ([library_output] if library_output else []))
 
+def single_library_compiling_deps_wrapper(
+        actions: AnalysisActions,
+        compiling_deps_tset: [JavaCompilingDepsTSet, None]) -> [JavaCompilingDepsTSetWrapper, None]:
+    if compiling_deps_tset:
+        return actions.tset(JavaCompilingDepsTSetWrapper, value = compiling_deps_tset)
+    else:
+        return None
+
+# Accumulate the wrappers required for propagating JavaCompilingDepsTSets up the graph.
+def derive_compiling_deps_wrapper(
+        actions: AnalysisActions,
+        library_output: [JavaCompilingDepsTSetWrapper, None],
+        children: list[Dependency]) -> [JavaCompilingDepsTSetWrapper, None]:
+    if children:
+        filtered_children = filter(
+            None,
+            [exported_dep.compiling_deps_wrapper for exported_dep in filter(None, [x.get(JavaLibraryInfo) for x in children])],
+        )
+        children = filtered_children
+
+    if not library_output and not children:
+        return None
+
+    return actions.tset(JavaCompilingDepsTSetWrapper, children = (children or []) + ([library_output] if library_output else []))
+
 def create_java_packaging_dep(
         ctx: AnalysisContext,
         library_jar: Artifact | None = None,
         output_for_classpath_macro: Artifact | None = None,
         needs_desugar: bool = False,
-        desugar_deps: list[Artifact] = [],
+        desugar_deps: [TransitiveSetArgsProjection, None] = None,
         is_prebuilt_jar: bool = False,
         has_srcs: bool = True,
         sources_jar: Artifact | None = None,
@@ -456,9 +526,9 @@ def get_java_packaging_info(
 
 def _create_java_compiling_deps_tset_for_global_code(
         actions: AnalysisActions,
-        global_code_libraries: list[JavaCompilingDepsTSet],
+        global_code_libraries: list[JavaCompilingDepsTSetWrapper],
         name: str,
-        global_code_infos: list[JavaGlobalCodeInfo]) -> [JavaCompilingDepsTSet, None]:
+        global_code_infos: list[JavaGlobalCodeInfo]) -> [JavaCompilingDepsTSetWrapper, None]:
     global_code_jars_children = filter(None, [info.global_code_map.get(name, None) for info in global_code_infos])
     if global_code_libraries:
         global_code_jars_children.extend(global_code_libraries)
@@ -468,7 +538,7 @@ def _create_java_compiling_deps_tset_for_global_code(
     elif len(global_code_jars_children) == 1:
         return global_code_jars_children[0]
     else:
-        return actions.tset(JavaCompilingDepsTSet, children = global_code_jars_children)
+        return actions.tset(JavaCompilingDepsTSetWrapper, children = global_code_jars_children)
 
 # This function identifies and collects necessary dependencies that meet criteria defined in `GLOBAL_CODE_CONFIG` for global code generation across frameworks.
 # It maps framework names to their corresponding Java compiling dependency sets.
@@ -489,9 +559,9 @@ def get_global_code_info(
         ctx: AnalysisContext,
         declared_deps: list[Dependency],
         packaging_deps: list[Dependency],
-        single_library_dep: [JavaCompilingDepsTSet, None],
-        library_compiling_deps: [JavaCompilingDepsTSet, None],
-        first_order_compiling_deps_without_library_itself: [JavaCompilingDepsTSet, None],
+        single_library_dep: [JavaCompilingDepsTSetWrapper, None],
+        library_compiling_deps: [JavaCompilingDepsTSetWrapper, None],
+        first_order_compiling_deps_without_library_itself: list[JavaCompilingDepsTSetWrapper],
         global_code_config: dict) -> JavaGlobalCodeInfo:
     global_code_infos = filter(None, [x.get(JavaGlobalCodeInfo) for x in packaging_deps])
 
@@ -513,7 +583,7 @@ def get_global_code_info(
             if single_library_dep:
                 global_code_library_compiling_deps.append(single_library_dep)
             if first_order_compiling_deps_without_library_itself:
-                global_code_library_compiling_deps.append(first_order_compiling_deps_without_library_itself)
+                global_code_library_compiling_deps.extend(first_order_compiling_deps_without_library_itself)
         elif target_is_global_code_dep:
             global_code_library_compiling_deps = [library_compiling_deps]
         elif contains_trigger:
@@ -570,17 +640,17 @@ def _create_non_template_providers(
         library_output: [JavaClasspathEntry, None],
         global_code_config,
         declared_deps: list[Dependency] = [],
+        provided_deps: list[Dependency] = [],
         exported_deps: list[Dependency] = [],
         exported_provided_deps: list[Dependency] = [],
         runtime_deps: list[Dependency] = [],
         needs_desugar: bool = False,
-        desugar_classpath: list[Artifact] = [],
+        desugar_classpath: [TransitiveSetArgsProjection, None] = None,
         is_prebuilt_jar: bool = False,
         has_srcs: bool = True,
         sources_jar: Artifact | None = None,
         proguard_config: Artifact | None = None,
         gwt_module: Artifact | None = None,
-        first_order_compiling_deps_without_library_itself: JavaCompilingDepsTSet | None = None,
         dex_weight_factor: int = 1) -> (JavaLibraryInfo, JavaPackagingInfo, JavaGlobalCodeInfo, SharedLibraryInfo, ResourceInfo, LinkableGraph):
     """Creates java library providers of type `JavaLibraryInfo` and `JavaPackagingInfo`.
 
@@ -622,21 +692,30 @@ def _create_non_template_providers(
     )
 
     single_library = single_library_compiling_deps(ctx.actions, library_output)
-    compiling_deps = derive_compiling_deps(ctx.actions, single_library, exported_deps + exported_provided_deps)
+
+    single_library_wrapper = single_library_compiling_deps_wrapper(ctx.actions, single_library)
+    compiling_deps_wrapper = derive_compiling_deps_wrapper(ctx.actions, single_library_wrapper, exported_deps + exported_provided_deps)
+    first_order_compiling_deps_wrappers_without_library_itself = filter(
+        None,
+        [exported_dep.compiling_deps_wrapper for exported_dep in filter(None, [x.get(JavaLibraryInfo) for x in declared_deps + exported_deps + provided_deps + exported_provided_deps])],
+    )
 
     global_code_info = get_global_code_info(
         ctx,
         declared_deps,
         packaging_deps,
-        single_library,
-        compiling_deps,
-        first_order_compiling_deps_without_library_itself,
+        single_library_wrapper,
+        compiling_deps_wrapper,
+        first_order_compiling_deps_wrappers_without_library_itself,
         global_code_config,
     )
+
+    compiling_deps = derive_compiling_deps(ctx.actions, single_library, exported_deps + exported_provided_deps)
 
     return (
         JavaLibraryInfo(
             compiling_deps = compiling_deps,
+            compiling_deps_wrapper = compiling_deps_wrapper,
             library_output = library_output,
             output_for_classpath_macro = output_for_classpath_macro,
             may_not_be_exported = "may_not_be_exported" in (ctx.attrs.labels or []),
@@ -681,14 +760,14 @@ def create_java_library_providers(
     first_order_classpath_libs = [dep.output_for_classpath_macro for dep in first_order_classpath_deps]
 
     compiling_deps = derive_compiling_deps(ctx.actions, None, declared_deps + exported_deps + provided_deps + exported_provided_deps)
-    compiling_classpath = [dep.full_library for dep in (list(compiling_deps.traverse()) if compiling_deps else [])]
-    desugar_classpath = compiling_classpath if needs_desugar else []
+    desugar_classpath = compiling_deps.project_as_args("full_library_args") if needs_desugar and compiling_deps != None else None
 
     library_info, packaging_info, global_code_info, shared_library_info, cxx_resource_info, linkable_graph = _create_non_template_providers(
         ctx,
         library_output = library_output,
         global_code_config = global_code_config,
         declared_deps = declared_deps,
+        provided_deps = provided_deps,
         exported_deps = exported_deps,
         exported_provided_deps = exported_provided_deps,
         runtime_deps = runtime_deps,
@@ -699,7 +778,6 @@ def create_java_library_providers(
         sources_jar = sources_jar,
         proguard_config = proguard_config,
         gwt_module = gwt_module,
-        first_order_compiling_deps_without_library_itself = compiling_deps,
         dex_weight_factor = dex_weight_factor,
     )
 
@@ -707,7 +785,7 @@ def create_java_library_providers(
     template_info = create_template_info(ctx, packaging_info, first_order_libs)
 
     intellij_info = JavaLibraryIntellijInfo(
-        compiling_classpath = compiling_classpath,
+        compiling_classpath = [dep.full_library for dep in (list(compiling_deps.traverse()) if compiling_deps else [])],
         generated_sources = generated_sources,
         annotation_jars_dir = annotation_jars_dir,
         lint_jar = lint_jar,

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.util.zip;
@@ -26,6 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
@@ -37,11 +39,14 @@ public class JarBuilderMain {
   @Option(name = "--output", required = true)
   private String output;
 
-  @Option(name = "--entries-to-jar", required = true)
+  @Option(name = "--entries-to-jar")
   private String entriesToJarFilePath;
 
   @Option(name = "--override-entries-to-jar")
   private String overrideEntriesToJarFilePath;
+
+  @Option(name = "--class-files", usage = "Format: <name>:<path>")
+  private List<String> classFiles;
 
   @Option(name = "--blocklist-patterns")
   private String blocklistPatternsFilePath;
@@ -94,6 +99,28 @@ public class JarBuilderMain {
     final List<AbsPath> entriesToJar = readEntriesToJar(root, entriesToJarFilePath);
     final List<AbsPath> overrideEntriesToJar = readEntriesToJar(root, overrideEntriesToJarFilePath);
     final JarBuilder jarBuilder = concatJars ? new ConcatJarBuilder() : new JarBuilder();
+    final List<JarEntrySupplier> classFileEntries;
+    if (classFiles != null) {
+      classFileEntries =
+          classFiles.stream()
+              .map(
+                  (classFile) -> {
+                    // Parse and add additional class files. For example:
+                    // --class-files module-info.class:/tmp/foo.class
+                    // will add /tmp/foo.class to the jar with name "module-info.class"
+                    String[] parts = classFile.split(":", 2);
+                    if (parts.length != 2) {
+                      throw new IllegalArgumentException(
+                          "Expected --class-files format: <name>:<path>");
+                    }
+                    return new JarEntrySupplier(
+                        new CustomZipEntry(parts[0]),
+                        () -> Files.newInputStream(Path.of(parts[1])));
+                  })
+              .collect(Collectors.toList());
+    } else {
+      classFileEntries = new ArrayList<>();
+    }
 
     jarBuilder
         .setMainClass(mainClass)
@@ -104,6 +131,7 @@ public class JarBuilderMain {
         .setRemoveEntryPredicate(getRemoveEntryPredicate())
         .setEntriesToJar(getEntriesToJar(entriesToJar, concatJars))
         .setOverrideEntriesToJar(overrideEntriesToJar)
+        .addEntries(classFileEntries)
         .createJarFile(outputFile);
   }
 

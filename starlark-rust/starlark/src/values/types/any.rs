@@ -76,6 +76,8 @@ use starlark_derive::starlark_value;
 use crate as starlark;
 use crate::any::ProvidesStaticType;
 use crate::values::AllocValue;
+use crate::values::FrozenHeap;
+use crate::values::FrozenRef;
 use crate::values::Heap;
 use crate::values::StarlarkValue;
 use crate::values::Value;
@@ -102,7 +104,7 @@ impl<'v, T: Debug + Send + Sync + 'static> StarlarkValue<'v> for StarlarkAny<T> 
 }
 
 impl<'v, T: Debug + Send + Sync + 'static> AllocValue<'v> for StarlarkAny<T> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_simple(self)
     }
 }
@@ -125,5 +127,14 @@ impl<T: Debug + Send + Sync + 'static> StarlarkAny<T> {
     pub fn get<'v>(x: Value<'v>) -> Option<&'v T> {
         let x: &StarlarkAny<T> = x.downcast_ref()?;
         Some(&x.0)
+    }
+}
+
+impl FrozenHeap {
+    /// Allocate any value in the frozen heap.
+    pub fn alloc_any<T: Debug + Send + Sync>(&self, value: T) -> FrozenRef<'static, T> {
+        self.alloc_simple_typed_static(StarlarkAny::new(value))
+            .as_frozen_ref()
+            .map(|r| &r.0)
     }
 }

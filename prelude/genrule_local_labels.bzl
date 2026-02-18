@@ -1,9 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+load("@prelude//utils:selects.bzl", "selects")
 
 """
 Handle labels used to opt-out genrules from running remotely.
@@ -153,6 +156,9 @@ _GENRULE_LOCAL_LABELS = set([
     # Perform makes compilation in situ.
     "uses_make",
 
+    # Like uses_make but for windows
+    "uses_msbuild",
+
     # Like it says in the label
     "uses_mkscratch",
 
@@ -225,10 +231,23 @@ _GENRULE_LOCAL_LABELS = set([
     # Need to build sgw containers on devserver and not on RE
     # We pull base image from internet
     "sgw_build_containers",
+
+    # Needs to pull docker image from a docker
+    # registry hosted on our internal network
+    "uses_docker_registry",
 ])
 
 def genrule_labels_require_local(labels):
-    for label in labels:
-        if label in _GENRULE_LOCAL_LABELS:
-            return True
-    return False
+    def check_labels(labels_list):
+        if labels_list == None:
+            return False
+
+        for label in labels_list:
+            if selects.is_select(label):
+                return selects.apply(label, lambda val: val in _GENRULE_LOCAL_LABELS if val else False)
+
+            elif label in _GENRULE_LOCAL_LABELS:
+                return True
+        return False
+
+    return selects.apply(labels, check_labels)

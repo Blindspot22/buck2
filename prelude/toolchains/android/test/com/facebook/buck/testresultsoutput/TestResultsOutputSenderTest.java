@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testresultsoutput;
@@ -77,9 +78,10 @@ public class TestResultsOutputSenderTest {
         TestResultsOutputSender.fromEnvName(customEnvVarName);
     assertTrue(sender.isPresent());
 
-    sender.get().sendTestStart("test_test_name");
+    long startedTime = 1700000000000L;
+    sender.get().sendTestStart("test_test_name", startedTime);
 
-    String expected = "{\"start\":{\"name\":\"test_test_name\"}}\n";
+    String expected = "{\"start\":{\"name\":\"test_test_name\",\"started_time\":1700000000000}}\n";
 
     assertOutputMatchesExpected(expected, tempFile);
   }

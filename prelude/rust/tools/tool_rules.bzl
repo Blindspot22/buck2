@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//decls:toolchains_common.bzl", "toolchains_common")
 load("@prelude//rust:rust_toolchain.bzl", "RustToolchainInfo")
@@ -23,6 +24,9 @@ def _get_rustc_cfg_impl(ctx: AnalysisContext) -> list[Provider]:
         cmd.append(cmd_args("--target=", toolchain_info.rustc_target_triple, delimiter = ""))
 
     env = {}
+    if ctx.attrs.enable_nightly_cfgs:
+        env["RUSTC_BOOTSTRAP"] = "1"
+
     if toolchain_info.rust_target_path != None:
         env["RUST_TARGET_PATH"] = toolchain_info.rust_target_path[DefaultInfo].default_outputs[0]
 
@@ -33,6 +37,7 @@ def _get_rustc_cfg_impl(ctx: AnalysisContext) -> list[Provider]:
 get_rustc_cfg = rule(
     impl = _get_rustc_cfg_impl,
     attrs = {
+        "enable_nightly_cfgs": attrs.bool(default = False),
         "_rust_toolchain": toolchains_common.rust(),
     },
 )

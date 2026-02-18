@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -63,6 +64,10 @@ impl<'v> StarlarkValue<'v> for StarlarkLazyCqueryCtx {
     }
 }
 
+/// The context for performing lazy `cquery` operations in bxl. The functions offered on this ctx are
+/// the same behaviour as the query functions available within cquery command.
+///
+/// An instance may be obtained with [`bxl.LazyContext.cquery()`](../LazyContext#lazycontextcquery).
 #[starlark_module]
 fn lazy_cquery_methods(builder: &mut MethodsBuilder) {
     /// Evaluates some general query string. `query_args` can be a target_set of unconfigured nodes, or

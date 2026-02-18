@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Provides the starlark values representing resolved attrs.arg() attributes.
@@ -32,7 +33,8 @@ use static_assertions::assert_eq_size;
 
 use crate::artifact_groups::ArtifactGroup;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
@@ -67,11 +69,15 @@ assert_eq_size!(ResolvedMacro, [usize; 2]);
 impl<'v> Display for ResolvedMacro<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ResolvedMacro::Location(_) => {
-                // Unfortunately we don't keep the location here, which makes it harder to show
-                write!(f, "$(location ...)")
+            ResolvedMacro::Location(r) => {
+                let default_outputs = r.default_outputs();
+                if default_outputs.is_empty() {
+                    write!(f, "$(location ...)")
+                } else {
+                    write!(f, "$(location {})", &default_outputs[0])
+                }
             }
-            ResolvedMacro::Source(a) => write!(f, "$(source {})", a),
+            ResolvedMacro::Source(a) => write!(f, "$(source {a})"),
             ResolvedMacro::ArgLike(x) => Display::fmt(x, f),
             ResolvedMacro::Query(x) => Display::fmt(x, f),
         }
@@ -82,9 +88,10 @@ pub fn add_output_to_arg(
     builder: &mut dyn ArgBuilder,
     ctx: &mut dyn CommandLineContext,
     artifact: &StarlarkArtifact,
+    artifact_path_mapping: &dyn ArtifactPathMapper,
 ) -> buck2_error::Result<()> {
     let path = ctx
-        .resolve_artifact(&artifact.get_bound_artifact()?)?
+        .resolve_artifact(&artifact.get_bound_artifact()?, artifact_path_mapping)?
         .into_string();
     builder.push_str(&path);
     Ok(())
@@ -94,12 +101,13 @@ fn add_outputs_to_arg(
     builder: &mut dyn ArgBuilder,
     ctx: &mut dyn CommandLineContext,
     outputs_list: &[StarlarkArtifact],
+    artifact_path_mapping: &dyn ArtifactPathMapper,
 ) -> buck2_error::Result<()> {
     for (i, value) in outputs_list.iter().enumerate() {
         if i != 0 {
             builder.push_str(" ");
         }
-        add_output_to_arg(builder, ctx, value)?;
+        add_output_to_arg(builder, ctx, value, artifact_path_mapping)?;
     }
     Ok(())
 }
@@ -109,24 +117,27 @@ impl<'v> ResolvedMacro<'v> {
         &self,
         builder: &mut dyn ArgBuilder,
         ctx: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         match self {
             Self::Source(artifact) => {
-                let s = ctx.resolve_artifact(artifact)?.into_string();
+                let s = ctx
+                    .resolve_artifact(artifact, artifact_path_mapping)?
+                    .into_string();
                 builder.push_str(&s);
             }
             Self::Location(info) => {
                 let outputs = &info.default_outputs();
 
-                add_outputs_to_arg(builder, ctx, outputs)?;
+                add_outputs_to_arg(builder, ctx, outputs, artifact_path_mapping)?;
             }
             Self::ArgLike(command_line_like) => {
                 let mut cli_builder = SpaceSeparatedCommandLineBuilder::wrap(builder);
                 command_line_like
                     .as_command_line_arg()
-                    .add_to_command_line(&mut cli_builder, ctx)?;
+                    .add_to_command_line(&mut cli_builder, ctx, artifact_path_mapping)?;
             }
-            Self::Query(value) => value.add_to_arg(builder, ctx)?,
+            Self::Query(value) => value.add_to_arg(builder, ctx, artifact_path_mapping)?,
         };
 
         Ok(())
@@ -134,11 +145,11 @@ impl<'v> ResolvedMacro<'v> {
 
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
         match self {
             Self::Location(info) => {
-                info.for_each_output(&mut |i| visitor.visit_input(i, None))?;
+                info.for_each_output(&mut |i| visitor.visit_input(i, vec![]))?;
             }
             Self::ArgLike(command_line_like) => {
                 command_line_like
@@ -147,7 +158,7 @@ impl<'v> ResolvedMacro<'v> {
             }
             Self::Query(value) => value.visit_artifacts(visitor)?,
             Self::Source(artifact) => {
-                visitor.visit_input(ArtifactGroup::Artifact(artifact.dupe()), None)
+                visitor.visit_input(ArtifactGroup::Artifact(artifact.dupe()), vec![])
             }
         }
         Ok(())
@@ -218,7 +229,7 @@ impl ResolvedStringWithMacros {
     }
 }
 
-impl CommandLineArgLike for ResolvedStringWithMacros {
+impl<'v> CommandLineArgLike<'v> for ResolvedStringWithMacros {
     fn register_me(&self) {
         command_line_arg_like_impl!(ResolvedStringWithMacros::starlark_type_repr());
     }
@@ -227,6 +238,7 @@ impl CommandLineArgLike for ResolvedStringWithMacros {
         &self,
         cmdline_builder: &mut dyn CommandLineBuilder,
         ctx: &mut dyn CommandLineContext,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         struct Builder {
             arg: String,
@@ -259,7 +271,7 @@ impl CommandLineArgLike for ResolvedStringWithMacros {
                         builder.push_str("@");
                         builder.push_path(ctx)?;
                     } else {
-                        val.add_to_arg(&mut builder, ctx)?;
+                        val.add_to_arg(&mut builder, ctx, artifact_path_mapping)?;
                     }
                 }
             }
@@ -272,7 +284,7 @@ impl CommandLineArgLike for ResolvedStringWithMacros {
 
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
         for part in &*self.parts {
             if let ResolvedStringWithMacrosPart::Macro(_, val) = part {
@@ -290,6 +302,7 @@ impl CommandLineArgLike for ResolvedStringWithMacros {
     fn visit_write_to_file_macros(
         &self,
         visitor: &mut dyn WriteToFileMacroVisitor,
+        artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         for part in &*self.parts {
             match part {
@@ -298,7 +311,7 @@ impl CommandLineArgLike for ResolvedStringWithMacros {
                 }
                 ResolvedStringWithMacrosPart::Macro(write_to_file, val) => {
                     if *write_to_file {
-                        visitor.visit_write_to_file_macro(val)?;
+                        visitor.visit_write_to_file_macro(val, artifact_path_mapping)?;
                     } else {
                         // nop
                     }

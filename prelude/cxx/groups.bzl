@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:groups_types.bzl", "Traversal")
 load("@prelude//linking:types.bzl", "Linkage")
@@ -38,7 +39,9 @@ _VALID_ATTRS = [
     "enable_if_node_count_exceeds",
     "discard_group",
     "linker_flags",
+    "linker_script",
     "exported_linker_flags",
+    "link_execution_preference",
     "no_as_needed",
     "requires_root_node_exists",
     "prohibit_file_duplicates",
@@ -108,7 +111,9 @@ def parse_groups_definitions(
             enable_if_node_count_exceeds = attrs.get("enable_if_node_count_exceeds", None),
             discard_group = attrs.get("discard_group", False),
             linker_flags = attrs.get("linker_flags", []),
+            linker_script = attrs.get("linker_script", None),
             exported_linker_flags = attrs.get("exported_linker_flags", []),
+            link_execution_preference = attrs.get("link_execution_preference", None),
             no_as_needed = attrs.get("no_as_needed", False),
             requires_root_node_exists = attrs.get("requires_root_node_exists", True),
             prohibit_file_duplicates = attrs.get("prohibit_file_duplicates", False),
@@ -163,7 +168,7 @@ def _parse_filter(entry: str) -> GroupFilterInfo:
             # text.
             regex_expr = regex("^{}$".format(label_regex), fancy = False)
 
-            def matches_regex(_t, labels):
+            def matches_regex(_r, _t, labels):
                 for label in labels:
                     if regex_expr.match(label):
                         return True
@@ -178,7 +183,7 @@ def _parse_filter(entry: str) -> GroupFilterInfo:
         if target_regex != None:
             regex_expr = regex("^{}$".format(target_regex), fancy = True)
 
-            def matches_regex(t, _labels):
+            def matches_regex(_r, t, _labels):
                 return regex_expr.match(str(t.raw_target()))
 
             return GroupFilterInfo(
@@ -190,7 +195,7 @@ def _parse_filter(entry: str) -> GroupFilterInfo:
     if pattern != None:
         build_target_pattern = parse_build_target_pattern(pattern)
 
-        def matches_target_pattern(t, _labels):
+        def matches_target_pattern(_r, t, _labels):
             return build_target_pattern.matches(t)
 
         return GroupFilterInfo(
@@ -219,14 +224,41 @@ def compute_mappings(groups_map: dict[str, Group], graph_map: dict[Label, typing
     target_to_group_map = {}
     node_traversed_targets = {}
 
-    for group in groups_map.values():
+    group_mappings_with_roots = []
+    group_mappings_without_roots = []
+    group_to_targets = {}
+
+    groups = groups_map.values()
+    for group in groups:
         for mapping in group.mappings:
-            targets_in_mapping = _find_targets_in_mapping(graph_map, mapping)
-            for target in targets_in_mapping:
-                # If the target doesn't exist in our graph, skip the mapping.
-                if target not in graph_map:
-                    continue
-                _update_target_to_group_mapping(graph_map, target_to_group_map, node_traversed_targets, group, groups_map, mapping, target)
+            if mapping and not mapping.roots:
+                group_mappings_without_roots.append((group, mapping))
+            else:
+                group_mappings_with_roots.append((group, mapping))
+
+    # We assume there's more targets in the build graph then there are groups
+    for target in graph_map:
+        graph_node_labels = graph_map[target].labels
+        for group, mapping in group_mappings_without_roots:
+            all_match = True
+            for filter in mapping.filters:
+                if not filter.matches(None, target, graph_node_labels):
+                    all_match = False
+                    break
+            if all_match:
+                group_to_targets.setdefault(group.name, []).append((target, mapping))
+
+    for group, mapping in group_mappings_with_roots:
+        targets_in_mapping = _find_targets_in_mapping(graph_map, mapping)
+        for target in targets_in_mapping:
+            # If the target doesn't exist in our graph, skip the mapping.
+            if target not in graph_map:
+                continue
+            group_to_targets.setdefault(group.name, []).append((target, mapping))
+
+    for group in groups_map.values():
+        for target, mapping in group_to_targets.get(group.name, []):
+            _update_target_to_group_mapping(graph_map, target_to_group_map, node_traversed_targets, group, groups_map, mapping, target)
 
     return target_to_group_map
 
@@ -271,7 +303,7 @@ def _find_targets_in_mapping(
     # Else find all dependencies that match the filter.
     matching_targets = {}
 
-    def populate_matching_targets(node):  # Label -> bool:
+    def populate_matching_targets(node, root = None):  # Label -> bool:
         graph_node = graph_map[node]
 
         # This callsite was migrated away from `lazy.is_any()`
@@ -279,7 +311,11 @@ def _find_targets_in_mapping(
         # associated with the lambda required by the function.
         if mapping.filters:
             for filter in mapping.filters:
-                if not filter.matches(node, graph_node.labels):
+                if not filter.matches(root, node, graph_node.labels):
+                    # Filters can specify if they should stop once the first
+                    # non-match occurs.
+                    if filter.stop_at_first_non_match:
+                        return False
                     return True
 
         matching_targets[node] = None
@@ -296,6 +332,12 @@ def _find_targets_in_mapping(
             return graph_node.deps + graph_node.exported_deps
         return []
 
+    def populate_matching_targets_with_root(root, node):  # (Label, Label) -> list
+        if populate_matching_targets(node, root = root):
+            graph_node = graph_map[node]
+            return graph_node.deps + graph_node.exported_deps
+        return []
+
     if not mapping.roots:
         for node in graph_map:
             populate_matching_targets(node)
@@ -306,7 +348,7 @@ def _find_targets_in_mapping(
             # We reset it for each root we visit so that we don't have results
             # from other roots.
             matching_targets = {}
-            depth_first_traversal_by(graph_map, [root], populate_matching_targets_bfs_wrapper)
+            depth_first_traversal_by(graph_map, [root], partial(populate_matching_targets_with_root, root))
             for t in matching_targets:
                 targets_to_counter[t] = targets_to_counter.get(t, 0) + 1
 
@@ -316,7 +358,14 @@ def _find_targets_in_mapping(
             if count > 1
         ]
     else:
-        depth_first_traversal_by(graph_map, mapping.roots, populate_matching_targets_bfs_wrapper)
+        if len(mapping.roots) == 1:
+            matching_fn = partial(populate_matching_targets_with_root, mapping.roots[0])
+        else:
+            # When we have multiple roots there is no way to determine which
+            # root is being traversed, so just set it to None.
+            matching_fn = populate_matching_targets_bfs_wrapper
+
+        depth_first_traversal_by(graph_map, mapping.roots, matching_fn)
 
     return matching_targets.keys()
 

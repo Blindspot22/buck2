@@ -1,3 +1,5 @@
+oncall("build_infra")
+
 cxx_library(
     name = "lib",
     srcs = ["lib.cc"],

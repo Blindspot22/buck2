@@ -1,4 +1,4 @@
-load("@prelude//toolchains/android/tools:build_rules.bzl", "buck_java_binary", "buck_java_library", "buck_prebuilt_artifact", "buck_prebuilt_jar")
+load("@prelude//toolchains/android/tools:build_rules.bzl", "buck_java_binary", "buck_java_library", "buck_kotlin_library", "buck_prebuilt_artifact", "buck_prebuilt_jar")
 load("@prelude//toolchains/android/tools/build_rules:fb_native.bzl", "fb_native")
 load("@prelude//utils:source_listing.bzl", "source_listing")
 
@@ -15,10 +15,13 @@ ZIP_SCRUBBER_SRCS = [
     "ZipConstants.java",
 ]
 
-buck_java_library(
+buck_kotlin_library(
     name = "zip",
     srcs = glob(
-        ["*.java"],
+        [
+            "*.java",
+            "*.kt",
+        ],
         exclude = JAR_BUILDER_MAIN_SRCS + ZIP_SCRUBBER_SRCS,
     ),
     tests = [
@@ -26,7 +29,6 @@ buck_java_library(
     ],
     visibility = ["PUBLIC"],
     deps = [
-        "prelude//toolchains/android/src/com/facebook/buck/core/exceptions:exceptions",
         "prelude//toolchains/android/src/com/facebook/buck/core/util/log:log",
         "prelude//toolchains/android/src/com/facebook/buck/io/file:file",
         "prelude//toolchains/android/src/com/facebook/buck/io/filesystem:filesystem",
@@ -96,6 +98,7 @@ buck_java_library(
         "prelude//toolchains/android/src/com/facebook/buck/core/filesystems:filesystems",
         "prelude//toolchains/android/src/com/facebook/buck/jvm/java:remove_classes_patterns_matcher",
         "prelude//toolchains/android/src/com/facebook/buck/util:util",
+        "prelude//toolchains/android/src/com/facebook/buck/util/function:function",
         "prelude//toolchains/android/third-party:args4j",
         "prelude//toolchains/android/third-party:guava",
         ":zip",
@@ -121,8 +124,8 @@ buck_prebuilt_jar(
 # buck build prelude//toolchains/android/src/com/facebook/buck/util/zip:jar_builder_main --show-simple-output | xargs frecli --use-case android_build_infra_tools cas upload-blob
 buck_prebuilt_artifact(
     name = "jar_builder_main.jar",
-    # @oss-disable[end= ]: cas_digest = "8736eacdd6ac915a5e9a11cedd57d737286175c7c91dc974c14a9292b9c0eaa6:22163374",
-    oss_sha1 = "773465b2d6bd444c15c04dc4c9bc4e8ff81ed821",
+    # @oss-disable[end= ]: cas_digest = "73149775903042a6a323255a7b40862323c8afc35afd582c4b8861ff77d8fbe9:23604183",
+    oss_sha1 = "18f839ebb58babae4ae35900ef33cdf065d0cbc5",
     oss_url = "https://github.com/facebook/buck2/releases/download/androidToolchain%2F2025-04-03/jar_builder_main.jar",
 )
 

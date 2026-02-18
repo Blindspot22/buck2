@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fs::File;
@@ -18,12 +19,13 @@ use buck2_common::argv::ArgFileKind;
 use buck2_common::argv::ArgFilePath;
 use buck2_common::argv::ExpandedArgv;
 use buck2_common::argv::ExpandedArgvBuilder;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_core::is_open_source;
 use buck2_error::BuckErrorContext;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::working_dir::AbsWorkingDir;
 use buck2_util::process::background_command;
 use termwiz::istty::IsTty;
 
@@ -69,13 +71,9 @@ pub fn log_relative_path_from_cell_root(requested_path: &str) -> buck2_error::Re
         ("WARNING: ", "")
     };
     crate::eprintln!(
-        "{}`@{}` was specified, but not found. Using file at `//{}`.",
+        "{}`@{}` was specified, but not found. Using file at `//{}`.{}",
         prefix,
         requested_path,
-        requested_path
-    )?;
-    crate::eprintln!(
-        "This behavior is being deprecated. Please use `\"@//{}\"` instead{}",
         requested_path,
         reset
     )?;
@@ -146,6 +144,7 @@ fn expand_argfiles_with_context(
                 // TODO: We want to detect cyclic inclusion
                 resolve_and_expand_argfile(expanded_args, flagfile, context, cwd)?;
             }
+            comment if comment.starts_with("--#") => {}
             _ => expanded_args.push(next_arg),
         }
     }
@@ -162,7 +161,7 @@ fn resolve_and_expand_argfile(
     cwd: &AbsWorkingDir,
 ) -> buck2_error::Result<()> {
     let flagfile = resolve_flagfile(path, context, cwd)
-        .with_buck_error_context(|| format!("Error resolving flagfile `{}`", path))?;
+        .with_buck_error_context(|| format!("Error resolving flagfile `{path}`"))?;
     let flagfile_lines = expand_argfile_contents(context, &flagfile)?;
     expanded.argfile_scope(flagfile, |expanded| {
         expand_argfiles_with_context(expanded, flagfile_lines, context, cwd)
@@ -309,8 +308,8 @@ fn resolve_flagfile(
     };
 
     // FIXME(JakobDegen): Don't canonicalize
-
-    let canonicalized_path = fs_util::canonicalize(resolved_path)?;
+    // input path from --flagfile/@argfile (errors on path missing)
+    let canonicalized_path = fs_util::canonicalize(resolved_path).categorize_input()?;
     context.push_trace(&canonicalized_path);
     context.resolve_argfile_kind(canonicalized_path, flag)
 }
@@ -319,9 +318,11 @@ fn resolve_flagfile(
 mod tests {
     use buck2_common::argv::ExpandedArgSource;
     use buck2_common::argv::FlagfileArgSource;
-    use buck2_core::fs::paths::abs_path::AbsPath;
-    use buck2_core::fs::paths::abs_path::AbsPathBuf;
-    use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
+    use buck2_fs::fs_util::uncategorized as fs_util;
+    use buck2_fs::paths::abs_path::AbsPath;
+    use buck2_fs::paths::abs_path::AbsPathBuf;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+    use indoc::indoc;
 
     use super::*;
 
@@ -353,8 +354,7 @@ mod tests {
             context.resolve_argfile_kind(fs_util::canonicalize(external_mode_file)?, None)?;
         assert!(
             matches!(kind, ArgFileKind::Path(ArgFilePath::External(_))),
-            "{:?}",
-            kind
+            "{kind:?}"
         );
 
         let kind = context.resolve_argfile_kind(
@@ -363,8 +363,7 @@ mod tests {
         )?;
         assert!(
             matches!(kind, ArgFileKind::Path(ArgFilePath::Project(_))),
-            "{:?}",
-            kind
+            "{kind:?}"
         );
 
         let kind = context.resolve_argfile_kind(
@@ -375,8 +374,7 @@ mod tests {
         )?;
         assert!(
             matches!(kind, ArgFileKind::Path(ArgFilePath::Project(_))),
-            "{:?}",
-            kind
+            "{kind:?}"
         );
 
         Ok(())
@@ -397,6 +395,42 @@ mod tests {
             context.resolve_argfile_kind(AbsNormPathBuf::new(mode_file.into_path_buf())?, None)?;
         let lines = expand_argfile_contents(&context, &kind)?;
         assert_eq!(vec!["a".to_owned(), "b".to_owned()], lines);
+        Ok(())
+    }
+
+    #[test]
+    fn test_comment() -> buck2_error::Result<()> {
+        let content = indoc! {"
+            --# Usage: buck2 build @mode/mrustc ...
+            --#
+            --# Generated by tools/build/buck/gen_modes.py
+            --# \x40generated SignedSource<<e5d1ca23a1a7a4a0af60a49cc2ac8260>>
+            --config=rust.compiler=mrustc
+        "};
+        let expected = ["--config=rust.compiler=mrustc".to_owned()];
+
+        // Set up project directory
+        let tempdir = tempfile::tempdir()?;
+        let root = AbsPath::new(tempdir.path())?;
+        let cwd = AbsWorkingDir::unchecked_new(AbsNormPathBuf::new(root.to_path_buf())?);
+        let mut context = ImmediateConfigContext::new(&cwd);
+
+        // Write modefile
+        let mode_dir = root.join("mode");
+        fs_util::create_dir(&mode_dir)?;
+        let mode_file = mode_dir.join("mrustc");
+        fs_util::write(&mode_file, content)?;
+
+        // Expand and check
+        let mut expanded = ExpandedArgvBuilder::new();
+        expand_argfiles_with_context(
+            &mut expanded,
+            vec!["@mode/mrustc".to_owned()],
+            &mut context,
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(*expanded.build().args().collect::<Vec<_>>(), expected);
         Ok(())
     }
 
@@ -470,7 +504,7 @@ mod tests {
                     "{}{}",
                     v.kind,
                     if let Some(v) = &v.parent {
-                        display_flagfile(&v)
+                        display_flagfile(v)
                     } else {
                         "".to_owned()
                     }

@@ -1,13 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 // If this code needs fixing, make sure you fix the README.md too!
+
+use std::convert::Infallible;
 
 use superconsole::Component;
 use superconsole::Dimensions;
@@ -21,7 +24,13 @@ use superconsole::components::bordering::BorderedSpec;
 struct HelloWorld;
 
 impl Component for HelloWorld {
-    fn draw_unchecked(&self, _dimensions: Dimensions, _mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = Infallible;
+
+    fn draw_unchecked(
+        &self,
+        _dimensions: Dimensions,
+        _mode: DrawMode,
+    ) -> Result<Lines, Infallible> {
         Ok(Lines(vec![
             vec!["Hello world!".to_owned()].try_into().unwrap(),
         ]))

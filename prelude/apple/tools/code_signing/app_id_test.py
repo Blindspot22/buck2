@@ -1,14 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
+import importlib.resources
 import plistlib
 import unittest
-
-import pkg_resources
 
 from .app_id import AppId
 
@@ -30,13 +30,19 @@ class TestAppId(unittest.TestCase):
             _ = AppId.from_string("invalid.")
 
     def test_entitlements_parsing(self):
-        with pkg_resources.resource_stream(
-            __name__, "test_resources/Entitlements.plist"
-        ) as file:
-            entitlements = plistlib.load(file)
-            result = AppId.infer_from_entitlements(entitlements)
-            expected = AppId("ABCDE12345", "com.example.TestApp")
-            self.assertEqual(expected, result)
+        expected = AppId("ABCDE12345", "com.example.TestApp")
+        test_plist_files = [
+            "test_resources/test1.plist",
+            "test_resources/test2.plist",
+            "test_resources/test3.plist",
+        ]
+
+        package = importlib.resources.files(__package__)
+        for file in test_plist_files:
+            with (package / file).open("rb") as f:
+                entitlements = plistlib.load(f)
+                result = AppId.infer_from_entitlements(entitlements)
+                self.assertEqual(expected, result)
 
         invalid_file = b"""<?xml version="1.0" encoding="UTF-8"?>
                             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

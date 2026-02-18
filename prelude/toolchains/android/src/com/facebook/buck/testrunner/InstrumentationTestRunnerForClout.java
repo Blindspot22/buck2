@@ -1,21 +1,22 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testrunner;
 
-import com.android.ddmlib.IDevice;
 import com.facebook.buck.testrunner.reportlayer.TombstonesReportLayer;
 import com.facebook.buck.testrunner.reportlayer.VideoRecordingReportLayer;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import javax.annotation.Nullable;
 
 public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner {
 
@@ -45,7 +46,8 @@ public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner
       boolean clearPackageData,
       boolean disableAnimations,
       String preTestSetupScript,
-      List<String> extraApksToInstall) {
+      List<String> extraApksToInstall,
+      @Nullable Integer userId) {
     super(
         deviceArgs,
         packageName,
@@ -69,7 +71,8 @@ public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner
         clearPackageData,
         disableAnimations,
         preTestSetupScript,
-        extraApksToInstall);
+        extraApksToInstall,
+        userId);
   }
 
   @SuppressWarnings("PMD.BlacklistedSystemGetenv")
@@ -101,13 +104,12 @@ public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner
             argsParser.clearPackageData,
             argsParser.disableAnimations,
             argsParser.preTestSetupScript,
-            argsParser.extraApksToInstall);
+            argsParser.extraApksToInstall,
+            argsParser.userId);
     if (argsParser.recordVideo) {
       runner.addReportLayer(new VideoRecordingReportLayer(runner));
     }
-    if (argsParser.collectTombstones) {
-      runner.addReportLayer(new TombstonesReportLayer(runner));
-    }
+    runner.addReportLayer(new TombstonesReportLayer(runner, argsParser.collectTombstones));
     return runner;
   }
 
@@ -133,7 +135,7 @@ public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner
   }
 
   @Override
-  protected void installPackage(IDevice device, String path) throws Throwable {
+  protected void installPackage(String path) throws Throwable {
     RunShellCommand.run(getAdbPath(), "install " + path);
   }
 }

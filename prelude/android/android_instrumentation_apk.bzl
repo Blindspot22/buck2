@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//android:android_apk.bzl", "build_apk")
 load("@prelude//android:android_binary_native_library_rules.bzl", "get_android_binary_native_library_info")
@@ -119,6 +120,7 @@ This will lead to overbuilding and is not supported. Configuration {} not found 
                 jars_to_owners,
                 ctx.attrs.primary_dex_patterns,
                 enable_bootstrap_dexes = ctx.attrs.enable_bootstrap_dexes,
+                multidex_min_api = ctx.attrs.multidex_min_api,
             )
         else:
             dex_files_info = get_single_primary_dex(
@@ -126,17 +128,24 @@ This will lead to overbuilding and is not supported. Configuration {} not found 
                 ctx.attrs._android_toolchain[AndroidToolchainInfo],
                 jars_to_owners.keys(),
             )
-
     native_library_info = get_android_binary_native_library_info(
         enhance_ctx,
         android_packageable_info,
         filtered_deps_by_platform,
         prebuilt_native_library_dirs_to_exclude = apk_under_test_info.prebuilt_native_library_dirs if not is_self_instrumenting else set(),
         shared_libraries_to_exclude = apk_under_test_info.shared_libraries if not is_self_instrumenting else set(),
+        native_library_merge_glue = apk_under_test_info.native_library_merge_glue,
+        native_library_merge_code_generator = apk_under_test_info.native_library_merge_code_generator,
+        native_library_merge_linker_args_all = apk_under_test_info.native_library_merge_linker_args_all,
+        native_library_merge_linker_args = apk_under_test_info.native_library_merge_linker_args,
+        native_library_merge_map = apk_under_test_info.native_library_merge_map,
+        native_library_merge_non_asset_libs = apk_under_test_info.native_library_merge_non_asset_libs,
+        native_library_merge_sequence = apk_under_test_info.native_library_merge_sequence,
+        native_library_merge_sequence_blocklist = apk_under_test_info.native_library_merge_sequence_blocklist,
     )
 
     output_apk = build_apk(
-        label = ctx.label,
+        output_filename = ctx.label.name,
         actions = ctx.actions,
         android_toolchain = ctx.attrs._android_toolchain[AndroidToolchainInfo],
         keystore = apk_under_test_info.keystore,

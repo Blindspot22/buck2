@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -102,6 +103,9 @@ impl StreamingCommand for RunCommand {
         ctx: &mut ClientCommandContext<'_>,
         events_ctx: &mut EventsCtx,
     ) -> ExitResult {
+        let run_args_missing_separator =
+            !self.extra_run_args.is_empty() && !std::env::args().any(|arg| arg == "--");
+
         let context = ctx.client_context(matches, &self)?;
         let has_target_universe = !self.target_cfg.target_universe.is_empty();
         // TODO(rafaelc): fail fast on the daemon if the target doesn't have RunInfo
@@ -124,6 +128,7 @@ impl StreamingCommand for RunCommand {
                     final_artifact_uploads: Uploads::Never as i32,
                     target_universe: self.target_cfg.target_universe,
                     timeout: None, // TODO: maybe it shouild be supported here?
+                    run_args_missing_separator,
                 },
                 events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
@@ -175,13 +180,16 @@ impl StreamingCommand for RunCommand {
 
         // Special case for recursive invocations of buck; `BUCK2_WRAPPER` is set by wrapper scripts that execute
         // Buck2. We're not a wrapper script, so we unset it to prevent `run` from inheriting it.
-        std::env::remove_var(BUCK2_WRAPPER_ENV_VAR);
-        std::env::remove_var(BUCK_WRAPPER_UUID_ENV_VAR);
-        std::env::remove_var(BUCK_WRAPPER_START_TIME_ENV_VAR);
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(BUCK2_WRAPPER_ENV_VAR) };
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(BUCK_WRAPPER_UUID_ENV_VAR) };
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(BUCK_WRAPPER_START_TIME_ENV_VAR) };
 
         if let Some(file_path) = self.command_args_file {
             let mut output = File::create(&file_path).with_buck_error_context(|| {
-                format!("Failed to create/open `{}` to print command", file_path)
+                format!("Failed to create/open `{file_path}` to print command")
             })?;
 
             let command = CommandArgsFile {
@@ -267,4 +275,9 @@ pub enum RunCommandError {
     MultipleTargets,
     #[error("Target `{0}` is not found in the specified target universe")]
     TargetNotFoundInTargetUniverse(String),
+    #[error(
+        "`buck2 run` will require a `--` separator before target arguments in the future. \
+         Please use `buck2 run <target> -- <args>` instead of `buck2 run <target> <args>`"
+    )]
+    MissingSeparator,
 }

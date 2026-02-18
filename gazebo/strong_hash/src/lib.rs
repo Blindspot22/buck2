@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeMap;
@@ -21,21 +22,15 @@ use crate as strong_hash;
 
 mod impls;
 
-/// `StrongHash`` is a trait that is notionally similar to `std::hash::Hash`,
-/// but carries the implicit expectation that the hash that will be produced
-/// should be as perturbed as possible.
+/// `StrongHash`` is a trait that is notionally similar to `std::hash::Hash`, but carries the
+/// implicit expectation that the hash that will be produced should be as perturbed as possible.
 ///
-/// When implementing `StrongHash` for an object, you should always hash the entire object
-/// and not a subset or a lossy representation of the object unless you are hashing another
-/// cryptographic hash of the object. If you do the latter, a good rule of thumb
-/// is that you should feel comfortable also using that same hash for equality
-/// checks.
+/// `StrongHash` must be implemented such that - when combined with a crypto hasher - the hash value
+/// is suitable to use for equality checks. That means fields must not be omitted and pre-computed
+/// hash values cannot be used if the hasher used for them is weak.
 ///
-/// By default, `StrongHash` is implemented for most rust types that implement
-/// `std::hash::Hash`. including all primitive types, strings, and vectors.
-///
-/// `StrongHash` can be derived on enums and structs if all of their members implement
-/// `StrongHash`. For example:
+/// `StrongHash` can be derived on enums and structs if all of their members implement `StrongHash`.
+/// For example:
 ///
 /// ```ignore
 /// #[derive(StrongHash)]
@@ -46,8 +41,7 @@ mod impls;
 /// }
 /// ```
 ///
-/// `StrongHash` can also be implemented manually similar to std::hash::Hash. For
-/// example:
+/// `StrongHash` can also be implemented manually similar to std::hash::Hash. For example:
 ///
 /// ```ignore
 /// struct MyStruct {
@@ -81,7 +75,13 @@ macro_rules! impl_strong_hash_for_impl_hash {
     };
 }
 
-impl_strong_hash_for_impl_hash!(bool u8 i8 u16 i16 u32 i32 u64 i64 usize str &str String);
+impl_strong_hash_for_impl_hash!(bool u8 i8 u16 i16 u32 i32 u64 i64 usize str String);
+
+impl<T: StrongHash + ?Sized> StrongHash for &T {
+    fn strong_hash<H: Hasher>(&self, state: &mut H) {
+        (**self).strong_hash(state);
+    }
+}
 
 impl<T: StrongHash> StrongHash for [T] {
     fn strong_hash<H: Hasher>(&self, state: &mut H) {
@@ -89,12 +89,6 @@ impl<T: StrongHash> StrongHash for [T] {
         for item in self.iter() {
             item.strong_hash(state);
         }
-    }
-}
-
-impl<T: StrongHash> StrongHash for &[T] {
-    fn strong_hash<H: Hasher>(&self, state: &mut H) {
-        <[T] as StrongHash>::strong_hash(*self, state);
     }
 }
 

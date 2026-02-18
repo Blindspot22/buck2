@@ -1,18 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
 use buck2_core::directory_digest::DirectoryDigest;
-use buck2_core::directory_digest::InternableDirectoryDigest;
-use buck2_core::fs::paths::file_name::FileNameBuf;
+use buck2_fs::paths::file_name::FileNameBuf;
 use derivative::Derivative;
 use derive_more::Display;
+use either::Either;
 
 use crate::directory::builder::DirectoryBuilder;
 use crate::directory::dashmap_directory_interner::DashMapDirectoryInterner;
@@ -36,7 +37,7 @@ where
 
 impl<L, H> ImmutableDirectory<L, H>
 where
-    H: InternableDirectoryDigest,
+    H: DirectoryDigest,
 {
     pub fn shared(self, interner: &DashMapDirectoryInterner<L, H>) -> SharedDirectory<L, H> {
         match self {
@@ -44,17 +45,23 @@ where
             Self::Shared(dir) => dir,
         }
     }
-}
 
-impl<L, H> ImmutableDirectory<L, H>
-where
-    H: DirectoryDigest,
-{
     pub fn into_builder(self) -> DirectoryBuilder<L, H> {
         match self {
             Self::Exclusive(d) => d.into_builder(),
             Self::Shared(s) => s.into_builder(),
         }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Exclusive(dir) => dir.data.entries.len(),
+            Self::Shared(dir) => dir.inner.data.entries.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -63,13 +70,22 @@ where
     L: Clone,
     H: DirectoryDigest,
 {
-    pub fn into_entries<C>(self) -> C
+    pub fn collect_entries<C>(self) -> C
     where
         C: FromIterator<(FileNameBuf, DirectoryEntry<DirectoryBuilder<L, H>, L>)>,
     {
         match self {
-            Self::Exclusive(dir) => dir.into_entries(),
-            Self::Shared(dir) => dir.into_entries(),
+            Self::Exclusive(dir) => dir.collect_entries(),
+            Self::Shared(dir) => dir.collect_entries(),
+        }
+    }
+
+    pub fn into_entries(
+        self,
+    ) -> impl Iterator<Item = (FileNameBuf, DirectoryEntry<DirectoryBuilder<L, H>, L>)> {
+        match self {
+            Self::Exclusive(dir) => Either::Left(dir.into_entries()),
+            Self::Shared(dir) => Either::Right(dir.into_entries()),
         }
     }
 }
@@ -120,6 +136,13 @@ where
         match self {
             Self::Exclusive(dir) => FingerprintedDirectory::fingerprint(dir),
             Self::Shared(dir) => FingerprintedDirectory::fingerprint(dir),
+        }
+    }
+
+    fn size(&self) -> u64 {
+        match self {
+            Self::Exclusive(dir) => FingerprintedDirectory::size(dir),
+            Self::Shared(dir) => FingerprintedDirectory::size(dir),
         }
     }
 }

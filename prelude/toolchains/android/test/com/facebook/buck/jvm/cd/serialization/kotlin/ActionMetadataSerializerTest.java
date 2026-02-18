@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.cd.serialization.kotlin;
@@ -12,6 +13,7 @@ package com.facebook.buck.jvm.cd.serialization.kotlin;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 
+import com.facebook.buck.cd.model.kotlin.Digests;
 import com.facebook.buck.cd.model.kotlin.Metadata;
 import com.facebook.buck.jvm.java.ActionMetadata;
 import java.nio.file.Path;
@@ -22,19 +24,6 @@ import java.util.stream.Collectors;
 import org.junit.Test;
 
 public class ActionMetadataSerializerTest {
-
-  @Test
-  public void testSerialization() {
-    ActionMetadata actionMetadata =
-        new ActionMetadata(Path.of(""), createPreviousDigest(), createCurrentDigest());
-    com.facebook.buck.cd.model.kotlin.ActionMetadata expectedActionMetadata =
-        createActionMetaData(actionMetadata.getPreviousDigest(), actionMetadata.getCurrentDigest());
-
-    com.facebook.buck.cd.model.kotlin.ActionMetadata resultActionMetadata =
-        ActionMetadataSerializer.serialize(actionMetadata);
-
-    assertThat(resultActionMetadata, equalTo(expectedActionMetadata));
-  }
 
   @Test
   public void testDeserialization() {
@@ -56,19 +45,30 @@ public class ActionMetadataSerializerTest {
     Metadata.Builder expectedPreviousMetadataBuilder = Metadata.newBuilder();
     expectedPreviousMetadataBuilder.addAllDigests(
         previousDigest.entrySet().stream()
-            .map(DigestSerializer::serialize)
+            .map(ActionMetadataSerializerTest::serializeDigests)
             .collect(Collectors.toList()));
 
     Metadata.Builder expectedCurrentMetadataBuilder = Metadata.newBuilder();
     expectedCurrentMetadataBuilder.addAllDigests(
         currentDigest.entrySet().stream()
-            .map(DigestSerializer::serialize)
+            .map(ActionMetadataSerializerTest::serializeDigests)
             .collect(Collectors.toList()));
 
     return com.facebook.buck.cd.model.kotlin.ActionMetadata.newBuilder()
         .setPreviousMetadata(expectedPreviousMetadataBuilder)
         .setCurrentMetadata(expectedCurrentMetadataBuilder)
         .build();
+  }
+
+  /** Internal buck representation to protocol buffer model */
+  private static com.facebook.buck.cd.model.kotlin.Digests serializeDigests(
+      Map.Entry<Path, String> digests) {
+    Digests.Builder digestsBuilder = Digests.newBuilder();
+
+    digestsBuilder.setPath(digests.getKey().toString());
+    digestsBuilder.setDigest(digests.getValue());
+
+    return digestsBuilder.build();
   }
 
   private static Map<Path, String> createPreviousDigest() {

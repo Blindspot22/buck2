@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -14,8 +15,10 @@ use buck2_data::ActionError;
 use smallvec::SmallVec;
 
 use crate::ErrorTag;
+use crate::ExitCode;
 use crate::Tier;
 use crate::UniqueRootId;
+use crate::classify::ErrorTagExtra;
 use crate::classify::best_tag;
 use crate::classify::error_tag_category;
 use crate::classify::tag_is_generic;
@@ -31,13 +34,10 @@ pub type DynLateFormat = dyn Fn(&mut fmt::Formatter<'_>) -> fmt::Result + Send +
 
 /// The core error type provided by this crate.
 ///
-/// While this type has many of the features of `anyhow::Error`, in most places you should continue
-/// to use `anyhow`. This type is only expected to appear on a small number of APIs which require a
-/// clonable error.
-///
-/// Unlike `anyhow::Error`, this type supports no downcasting. That is an intentional choice -
-/// downcasting errors is fragile and becomes difficult to support in conjunction with anyhow
-/// compatibility.
+/// This type was originally an incremental replacement to `anyhow::Error` but now has almost
+/// entirely replaced it in the Buck2 codebase. It has `From` impls from many common error types.
+/// One off conversions are often also done via `from_any_with_tag`, custom errors are generally
+/// created using the `thiserror` inspired derive macro.
 #[derive(allocative::Allocative, Clone, dupe::Dupe)]
 pub struct Error(pub(crate) Arc<ErrorKind>);
 
@@ -129,13 +129,13 @@ impl Error {
         for kind in self.iter_kinds() {
             match kind {
                 ErrorKind::Root(r) => {
-                    writeln!(s, "ROOT:\n{:#?}", r).unwrap();
+                    writeln!(s, "ROOT:\n{r:#?}").unwrap();
                 }
                 ErrorKind::Emitted(_, _) => {
                     writeln!(s, "EMITTED").unwrap();
                 }
                 ErrorKind::WithContext(ctx, _) => {
-                    writeln!(s, "CONTEXT: {:#}", ctx).unwrap();
+                    writeln!(s, "CONTEXT: {ctx:#?}").unwrap();
                 }
             }
         }
@@ -214,15 +214,6 @@ impl Error {
         )))
     }
 
-    #[cold]
-    #[track_caller]
-    pub(crate) fn new_anyhow_with_context<E, C: Into<ContextValue>>(e: E, c: C) -> anyhow::Error
-    where
-        Error: From<E>,
-    {
-        crate::Error::from(e).context(c).into()
-    }
-
     pub fn tag(self, tags: impl IntoIterator<Item = crate::ErrorTag>) -> Self {
         let tags = SmallVec::from_iter(tags);
         if tags.is_empty() {
@@ -233,7 +224,13 @@ impl Error {
     }
 
     pub fn get_tier(&self) -> Option<Tier> {
-        best_tag(self.tags()).map(error_tag_category).flatten()
+        best_tag(self.tags()).and_then(error_tag_category)
+    }
+
+    pub fn exit_code(&self) -> ExitCode {
+        best_tag(self.tags())
+            .map(|t| t.exit_code())
+            .unwrap_or(ExitCode::UnknownFailure)
     }
 
     /// All tags unsorted and with duplicates.
@@ -254,12 +251,17 @@ impl Error {
     }
 
     pub fn string_tags(&self) -> Vec<String> {
-        self.iter_context()
+        let mut tags: Vec<String> = self
+            .iter_context()
             .filter_map(|kind| match kind {
                 ContextValue::StringTag(val) => Some(val.tag.clone()),
                 _ => None,
             })
-            .collect()
+            .collect();
+
+        tags.sort_unstable();
+        tags.dedup();
+        tags
     }
 
     /// Get all the tags that have been added to this error
@@ -324,7 +326,7 @@ impl Error {
                     b = b_inner;
                 }
                 (_, _) => {
-                    panic!("Left side did not match right: {:?} {:?}", a, b)
+                    panic!("Left side did not match right: {a:?} {b:?}")
                 }
             }
         }
@@ -337,7 +339,6 @@ mod tests {
 
     use crate as buck2_error;
     use crate::Tier;
-    use crate::conversion::from_any_with_tag;
 
     #[derive(Debug, buck2_error_derive::Error)]
     #[error("Test")]
@@ -350,8 +351,7 @@ mod tests {
         assert!(e.is_emitted().is_none());
         let e = e.mark_emitted(Arc::new(|_| Ok(())));
         assert!(e.is_emitted().is_some());
-        let e: anyhow::Error = e.into();
-        let e: crate::Error = from_any_with_tag(e.context("context"), crate::ErrorTag::Input);
+        let e = e.context("context");
         assert!(e.is_emitted().is_some());
     }
 
@@ -400,5 +400,15 @@ mod tests {
             crate::ErrorTag::ReInternal,
         ]);
         assert_eq!(err.category_key(), format!("RE_INTERNAL"));
+    }
+
+    #[test]
+    fn test_duplicate_string_tags() {
+        let err: crate::Error = TestError.into();
+
+        let err = err.string_tag("foo");
+        let err = err.string_tag("foo");
+
+        assert_eq!(err.category_key(), "TestError:foo",);
     }
 }

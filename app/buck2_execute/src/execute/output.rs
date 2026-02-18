@@ -1,16 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
 use std::fmt::Debug;
 
-use buck2_common::file_ops::FileDigest;
+use buck2_common::file_ops::metadata::FileDigest;
 use buck2_error::BuckErrorContext;
 use futures::future;
 use remote_execution::InlinedBlobWithDigest;
@@ -155,7 +156,7 @@ impl fmt::Display for ReStdStream {
                 write!(fmt, "raw = `{}`", String::from_utf8_lossy(raw))?;
             }
             Self::Digest(digest) | Self::PrefetchedLossy { digest, .. } => {
-                write!(fmt, "digest = `{}`", digest,)?;
+                write!(fmt, "digest = `{digest}`",)?;
             }
             Self::None => {
                 write!(fmt, "none")?;
@@ -168,23 +169,22 @@ impl fmt::Display for ReStdStream {
 
 impl fmt::Debug for ReStdStream {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "ReStdStream({})", self)
+        write!(fmt, "ReStdStream({self})")
     }
 }
 
 #[derive(Debug, derive_more::From, Clone)]
+#[derive(Default)]
 pub enum CommandStdStreams {
-    Local { stdout: Vec<u8>, stderr: Vec<u8> },
+    Local {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
 
     Remote(RemoteCommandStdStreams),
 
+    #[default]
     Empty,
-}
-
-impl Default for CommandStdStreams {
-    fn default() -> Self {
-        Self::Empty
-    }
 }
 
 impl CommandStdStreams {

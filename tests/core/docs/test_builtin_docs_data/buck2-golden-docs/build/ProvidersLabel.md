@@ -3,6 +3,8 @@
 # ProvidersLabel
 ## ProvidersLabel.cell
 ## ProvidersLabel.name
+## ProvidersLabel.package
+## ProvidersLabel.package\_path
 ## ProvidersLabel.path
 ## ProvidersLabel.raw\_target
 ## ProvidersLabel.sub\_target

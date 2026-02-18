@@ -1,12 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -23,6 +25,7 @@ extern std::unordered_map<std::string_view, pyinitfunc> _static_extension_info;
 
 namespace {
 
+#if PY_VERSION_HEX < 0x030E0000
 static PyObject* _handle_single_phase_initialization(
     PyObject* mod,
     PyObject* name,
@@ -61,6 +64,8 @@ static PyObject* _handle_single_phase_initialization(
   }
   return mod;
 }
+#endif
+
 static PyObject* _create_module(PyObject* self, PyObject* spec) {
   PyObject* name;
   PyObject* mod;
@@ -96,16 +101,20 @@ static PyObject* _create_module(PyObject* self, PyObject* spec) {
     return nullptr;
   }
 
-  PyObject* modules = nullptr;
-#if PY_VERSION_HEX >= 0x030D0000
+#if PY_VERSION_HEX >= 0x030F0000
+  throw std::runtime_error(
+      "Native python does not support Python 3.15 and later.");
+#elif PY_VERSION_HEX >= 0x030E0000
+  mod = _Ci_PyImport_CreateBuiltinFromSpecAndInitfunc(spec, initfunc);
+#elif PY_VERSION_HEX >= 0x030D0000
   // Python 3.13 has a new C-API for calling module init functions
   mod = _Ci_PyImport_CallInitFuncWithContext(namestr.c_str(), initfunc);
-#elif PY_VERSION_HEX >= 0x030C0000
+#elif PY_VERSION_HEX >= 0x030C0000 && !defined(OSS_PYTHON)
   // Use our custom Python 3.12 C-API to call the statically linked module init
   // function
   mod = _Ci_PyImport_CallInitFuncWithContext(namestr.c_str(), initfunc);
-#else
-  // In Python 3.10 (and earlier) we need to handle package context swapping
+#elif PY_VERSION_HEX >= 0x030A0000
+  // In Python 3.10 we need to handle package context swapping
   // ourselves
   const char* oldcontext = _Py_PackageContext;
   _Py_PackageContext = namestr.c_str();
@@ -116,20 +125,29 @@ static PyObject* _create_module(PyObject* self, PyObject* spec) {
   }
   mod = initfunc();
   _Py_PackageContext = oldcontext;
+#else
+  // _Py_PackageContext undefined in 3.9 and earlier
+  throw std::runtime_error(
+      "Native python does not support Python 3.9 and earlier.");
 #endif
   if (mod == nullptr) {
     Py_DECREF(name);
     return nullptr;
   }
+#if PY_VERSION_HEX < 0x030E0000
   // If the result is a PyModuleDef, then this is multi-phase initialization
   // Return the PyModule so module_exec can be called on it later
   if (PyObject_TypeCheck(mod, &PyModuleDef_Type)) {
     Py_DECREF(name);
     return PyModule_FromDefAndSpec((PyModuleDef*)mod, spec);
   }
+  PyObject* modules = nullptr;
   // At this point we know this is single-phase initialization
   return _handle_single_phase_initialization(
       mod, name, spec, initfunc, modules);
+#else
+  return mod;
+#endif
 }
 
 static PyObject* _exec_module(PyObject* self, PyObject* module) {

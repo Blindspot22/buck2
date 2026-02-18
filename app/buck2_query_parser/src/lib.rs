@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -56,6 +57,7 @@ use enum_map::Enum;
 use gazebo::prelude::*;
 use gazebo::variants::VariantName;
 use nom::IResult;
+use nom::Parser as _;
 use nom::branch::alt;
 use nom::bytes::complete::is_a;
 use nom::bytes::complete::tag;
@@ -70,9 +72,7 @@ use nom::combinator::all_consuming;
 use nom::combinator::cut;
 use nom::combinator::recognize;
 use nom::error::ErrorKind;
-use nom::error::VerboseError;
 use nom::error::context;
-use nom::error::convert_error;
 use nom::multi::many0;
 use nom::multi::many1;
 use nom::multi::separated_list0;
@@ -80,6 +80,8 @@ use nom::sequence::delimited;
 use nom::sequence::pair;
 use nom::sequence::preceded;
 use nom::sequence::terminated;
+use nom_language::error::VerboseError;
+use nom_language::error::convert_error;
 
 use crate::span::Span;
 use crate::spanned::Spanned;
@@ -135,9 +137,9 @@ impl Display for Expr<'_> {
                 // this assert should help ensure this gets updated if the grammar changes
                 // to allow that.
                 assert!(!word.contains(quote));
-                write!(f, "{0}{1}{0}", quote, word)?;
+                write!(f, "{quote}{word}{quote}")?;
             }
-            Expr::Integer(val) => write!(f, "{}", val)?,
+            Expr::Integer(val) => write!(f, "{val}")?,
             Expr::Function {
                 function_name,
                 args,
@@ -228,21 +230,21 @@ where
 }
 
 /// nom's convert_error requires that the error's type be very str-like and Span isn't. So, we convert the Span error into a &str error.
-fn convert_to_str_error(err: VerboseError<Span>) -> VerboseError<&str> {
+fn convert_to_str_error(err: VerboseError<Span<'_>>) -> VerboseError<&str> {
     VerboseError {
         errors: err.errors.into_map(|(span, kind)| (span.fragment(), kind)),
     }
 }
 
 /// Parses a query string into a SpannedExpr. Requires that the entire input is consumed.
-pub fn parse_expr(input: &str) -> buck2_error::Result<SpannedExpr> {
+pub fn parse_expr(input: &str) -> buck2_error::Result<SpannedExpr<'_>> {
     let span = Span::new(input);
     // Parse with fast error (`()`) first,
     // and on error reparse again with `VerboseError` to get detailed errors.
-    match all_consuming(expr)(span) {
+    match all_consuming(expr).parse(span) {
         Ok((_, value)) => Ok(value),
         Err(nom::Err::Failure(())) | Err(nom::Err::Error(())) => {
-            match all_consuming(expr)(span) {
+            match all_consuming(expr).parse(span) {
                 Ok(..) => unreachable!(
                     "if fast parse didn't succeed, slow parse should not succeed as well"
                 ),
@@ -279,7 +281,8 @@ fn single_expr<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Spann
         expr_function,
         expr_int,
         expr_word,
-    ))(input)?;
+    ))
+    .parse(input)?;
 
     Ok((input, left_expr))
 }
@@ -304,7 +307,8 @@ fn expr<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, SpannedExpr<
             }),
             multispace0,
         ),
-    )(input)
+    )
+    .parse(input)
 }
 
 // trailing infix parses a sequence of trailing infix operators. It's important that we don't recurse for each item in such
@@ -312,10 +316,10 @@ fn expr<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, SpannedExpr<
 fn trailing_infix(input: Span) -> NomResult<Vec<(BinaryOp, SpannedExpr)>, ()> {
     fn single_infix(input: Span) -> NomResult<(BinaryOp, SpannedExpr), ()> {
         let (input, operator) = binary_op(input)?;
-        let (input, right) = cut(single_expr)(input)?;
+        let (input, right) = cut(single_expr).parse(input)?;
         Ok((input, (operator, right)))
     }
-    many1(single_infix)(input)
+    many1(single_infix).parse(input)
 }
 
 /// Tries to parse an Expr::Word
@@ -323,7 +327,8 @@ fn expr_word<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Spanned
     spanned(|input| {
         let (remaining, word) = word(input)?;
         Ok((remaining, Expr::String(word.fragment())))
-    })(input)
+    })
+    .parse(input)
 }
 
 /// Tries to parse an Expr::Integer
@@ -348,12 +353,13 @@ fn expr_int<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, SpannedE
         };
 
         Ok((remaining, Expr::Integer(value)))
-    })(input)
+    })
+    .parse(input)
 }
 
 fn word<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Span<'a>, E> {
     fn non_quoted_word<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Span<'a>, E> {
-        recognize(many1(alt((alphanumeric1, is_a("*/@.-_:$#%")))))(input)
+        recognize(many1(alt((alphanumeric1, is_a("*/@.-_:$#%"))))).parse(input)
     }
 
     alt((
@@ -366,18 +372,19 @@ fn word<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Span<'a>, E>
             cut(terminated(take_till(|c| c == '"'), char('"'))),
         ),
         non_quoted_word,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn binary_op(input: Span) -> NomResult<BinaryOp, ()> {
     fn keyword(long: &'static str) -> impl Fn(Span) -> NomResult<Span, ()> {
         // keywords require spaces separating from the exprs
-        move |span| delimited(multispace1, tag(long), multispace1)(span)
+        move |span| delimited(multispace1, tag(long), multispace1).parse(span)
     }
 
     fn symbol(sym: &'static str) -> impl FnMut(Span) -> NomResult<Span, ()> {
         // symbols can have spaces separating from the exprs, but don't require them
-        move |span: Span| delimited(multispace0, tag(sym), multispace0)(span)
+        move |span: Span| delimited(multispace0, tag(sym), multispace0).parse(span)
     }
 
     fn op(
@@ -385,46 +392,51 @@ fn binary_op(input: Span) -> NomResult<BinaryOp, ()> {
         word: &'static str,
         op: BinaryOp,
     ) -> impl Fn(Span) -> NomResult<BinaryOp, ()> {
-        move |span| Ok((alt((symbol(sym), keyword(word)))(span)?.0, op))
+        move |span| Ok((alt((symbol(sym), keyword(word))).parse(span)?.0, op))
     }
 
     alt((
         op(EXCEPT, "except", BinaryOp::Except),
         op(INTERSECT, "intersect", BinaryOp::Intersect),
         op(UNION, "union", BinaryOp::Union),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Tries to parse an Expr::Set. Will fail if it detects an unfinished "set("
 fn expr_set<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, SpannedExpr<'a>, E> {
     fn set_args<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Vec<Span<'a>>, E> {
-        separated_list0(multispace1, word)(input)
+        separated_list0(multispace1, word).parse(input)
     }
 
     spanned(|input| {
-        let (input, _) = tag("set(")(input)?;
+        let (input, _) = tag("set(").parse(input)?;
         cut(move |input| {
-            let (input, args) = delimited(multispace0, set_args, multispace0)(input)?;
-            let (input, _) = char(')')(input)?;
+            let (input, args) = delimited(multispace0, set_args, multispace0).parse(input)?;
+            let (input, _) = char(')').parse(input)?;
             Ok((input, Expr::Set(args)))
-        })(input)
-    })(input)
+        })
+        .parse(input)
+    })
+    .parse(input)
 }
 
 /// Tries to parse an Expr::FileSet. Will fail if it detects an unfinished "fileset("
 fn expr_fileset<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, SpannedExpr<'a>, E> {
     fn set_args<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Vec<Span<'a>>, E> {
-        separated_list0(multispace1, word)(input)
+        separated_list0(multispace1, word).parse(input)
     }
 
     spanned(|input| {
-        let (input, _) = tag("fileset(")(input)?;
+        let (input, _) = tag("fileset(").parse(input)?;
         cut(move |input| {
-            let (input, args) = delimited(multispace0, set_args, multispace0)(input)?;
-            let (input, _) = char(')')(input)?;
+            let (input, args) = delimited(multispace0, set_args, multispace0).parse(input)?;
+            let (input, _) = char(')').parse(input)?;
             Ok((input, Expr::FileSet(args)))
-        })(input)
-    })(input)
+        })
+        .parse(input)
+    })
+    .parse(input)
 }
 
 /// Tries to parse an Expr::Function. Will fail if it detects an unfinished "func("
@@ -433,17 +445,18 @@ fn expr_function<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Spa
     fn function_args<'a, E: NomParseError<'a>>(
         input: Span<'a>,
     ) -> NomResult<'a, Vec<SpannedExpr<'a>>, E> {
-        separated_list0(terminated(tag(","), multispace0), expr)(input)
+        separated_list0(terminated(tag(","), multispace0), expr).parse(input)
     }
 
     spanned(|input| {
         let (input, function_name) = recognize(pair(
             alt((alpha1, tag("_"))),
             many0(alt((alphanumeric1, tag("_")))),
-        ))(input)?;
-        let (input, _) = char('(')(input)?;
+        ))
+        .parse(input)?;
+        let (input, _) = char('(').parse(input)?;
         cut(move |input| {
-            let (input, args) = terminated(function_args, char(')'))(input)?;
+            let (input, args) = terminated(function_args, char(')')).parse(input)?;
             Ok((
                 input,
                 Expr::Function {
@@ -451,8 +464,10 @@ fn expr_function<'a, E: NomParseError<'a>>(input: Span<'a>) -> NomResult<'a, Spa
                     args,
                 },
             ))
-        })(input)
-    })(input)
+        })
+        .parse(input)
+    })
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -471,7 +486,7 @@ mod tests {
             }
             Err(nom::Err::Error(e)) => e,
             _ => {
-                panic!("{} Got `{:?}`", ctx, res);
+                panic!("{ctx} Got `{res:?}`");
             }
         }
     }
@@ -486,7 +501,7 @@ mod tests {
             }
             Err(nom::Err::Failure(e)) => e,
             _ => {
-                panic!("{} Got `{:?}`", ctx, res);
+                panic!("{ctx} Got `{res:?}`");
             }
         }
     }
@@ -512,7 +527,7 @@ mod tests {
                 value: Expr::Set(..),
                 ..
             }) => {}
-            v => panic!("expected set expr, got `{:?}`", v),
+            v => panic!("expected set expr, got `{v:?}`"),
         }
 
         match parse_expr("set(a b c) ^ func()") {
@@ -520,7 +535,7 @@ mod tests {
                 value: Expr::BinaryOpSequence(..),
                 ..
             }) => {}
-            v => panic!("expected intersect expr, got `{:?}`", v),
+            v => panic!("expected intersect expr, got `{v:?}`"),
         }
 
         match parse_expr("func(set(a b c))") {
@@ -528,7 +543,7 @@ mod tests {
                 value: Expr::Function { .. },
                 ..
             }) => {}
-            v => panic!("expected function expr, got `{:?}`", v),
+            v => panic!("expected function expr, got `{v:?}`"),
         }
 
         match parse_expr("//:tgt") {
@@ -536,7 +551,7 @@ mod tests {
                 value: Expr::String("//:tgt"),
                 ..
             }) => {}
-            v => panic!("expected '//:tgt', got `{:?}`", v),
+            v => panic!("expected '//:tgt', got `{v:?}`"),
         }
 
         Ok(())
@@ -552,25 +567,26 @@ mod tests {
             // good_cases the parser should consume the whole thing
             // maybe should consider splitting it into two sets of cases for the caller to
             // explicitly indicate the ones that should be all consuming
-            all_consuming(parser)(Span::new(case)).unwrap_or_else(|err| {
-                panic!(
-                    "Expected successful, complete parse for input `{}`. Got error `{:?}`",
-                    case, err
-                )
-            });
+            all_consuming(parser)
+                .parse(Span::new(case))
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "Expected successful, complete parse for input `{case}`. Got error `{err:?}`"
+                    )
+                });
         }
 
         for case in recoverable_cases {
             assert_err(
                 parser(Span::new(case)),
-                &format!("Expected recoverable error for input `{}`.", case),
+                &format!("Expected recoverable error for input `{case}`."),
             );
         }
 
         for case in nonrecoverable_cases {
             assert_fail(
                 parser(Span::new(case)),
-                &format!("Expected hard failure for input `{}`.", case),
+                &format!("Expected hard failure for input `{case}`."),
             );
         }
     }

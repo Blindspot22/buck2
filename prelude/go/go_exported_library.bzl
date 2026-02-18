@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load("@prelude//cxx:linker.bzl", "get_default_shared_library_name")
@@ -48,6 +49,8 @@ load(
     "map_val",
     "value_or",
 )
+load(":cgo_builder.bzl", "get_cgo_build_context")
+load(":compile.bzl", "GoTestInfo")
 load(":link.bzl", "GoBuildMode", "link")
 load(":package_builder.bzl", "build_package")
 load(":packages.bzl", "cgo_exported_preprocessor", "go_attr_pkg_name")
@@ -56,6 +59,8 @@ load(":toolchain.bzl", "evaluate_cgo_enabled")
 def go_exported_library_impl(ctx: AnalysisContext) -> list[Provider]:
     cxx_toolchain_available = CxxToolchainInfo in ctx.attrs._cxx_toolchain
     pkg_name = go_attr_pkg_name(ctx)
+    cgo_enabled = evaluate_cgo_enabled(cxx_toolchain_available, ctx.attrs.cgo_enabled)
+    cgo_build_context = get_cgo_build_context(ctx)
 
     lib, pkg_info = build_package(
         ctx = ctx,
@@ -63,26 +68,25 @@ def go_exported_library_impl(ctx: AnalysisContext) -> list[Provider]:
         main = True,
         srcs = ctx.attrs.srcs,
         package_root = ctx.attrs.package_root,
+        cgo_build_context = cgo_build_context,
         deps = ctx.attrs.deps,
         compiler_flags = ctx.attrs.compiler_flags,
         build_tags = ctx.attrs._build_tags,
-        race = ctx.attrs._race,
-        asan = ctx.attrs._asan,
         embedcfg = ctx.attrs.embedcfg,
-        cgo_enabled = evaluate_cgo_enabled(cxx_toolchain_available, ctx.attrs.cgo_enabled),
+        embed_srcs = ctx.attrs.embed_srcs,
+        cgo_enabled = cgo_enabled,
     )
 
     def link_variant(build_mode: GoBuildMode):
         (exp_lib, _, _) = link(
             ctx,
             lib,
+            cgo_enabled = cgo_enabled,
             deps = ctx.attrs.deps,
             build_mode = build_mode,
             link_style = value_or(map_val(LinkStyle, ctx.attrs.link_style), LinkStyle("static_pic")),
             linker_flags = ctx.attrs.linker_flags,
             external_linker_flags = ctx.attrs.external_linker_flags,
-            race = ctx.attrs._race,
-            asan = ctx.attrs._asan,
         )
         return exp_lib
 
@@ -130,6 +134,11 @@ def go_exported_library_impl(ctx: AnalysisContext) -> list[Provider]:
         DefaultInfo(
             default_output = c_archive if ctx.attrs.build_mode == "c_archive" else c_shared,
         ),
+        GoTestInfo(
+            deps = ctx.attrs.deps,
+            srcs = ctx.attrs.srcs,
+            pkg_name = pkg_name,
+        ),
         create_merged_link_info(
             ctx,
             cxx_toolchain.pic_behavior,
@@ -156,6 +165,6 @@ def go_exported_library_impl(ctx: AnalysisContext) -> list[Provider]:
             ),
             deps = ctx.attrs.deps,
         ),
-        cxx_merge_cpreprocessors(ctx, own_exported_preprocessors, cxx_inherited_preprocessor_infos(ctx.attrs.deps)),
+        cxx_merge_cpreprocessors(ctx.actions, own_exported_preprocessors, cxx_inherited_preprocessor_infos(ctx.attrs.deps)),
         pkg_info,
     ]

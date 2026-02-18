@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@fbcode//buck2/cfg/experimental:modifiers.bzl", "modifiers")
 load("@prelude//:asserts.bzl", "asserts")
@@ -18,12 +19,12 @@ def _impl(_ctx: bxl.Context):
         tagged_modifiers = TaggedModifiers(
             modifiers = [modifiers.match({
                 "ovr_config//os/constraints:linux": modifiers.match({
-                    "DEFAULT": "ovr_config//build_mode/constraints:no-san",
-                    "ovr_config//cpu/constraints:x86_64": "ovr_config//build_mode/constraints:asan",
+                    "DEFAULT": "ovr_config//build_mode:sanitizer_type[no-san]",
+                    "ovr_config//cpu/constraints:x86_64": "ovr_config//build_mode:sanitizer_type[asan]",
                 }),
                 "ovr_config//os/constraints:windows": modifiers.match({
                     "DEFAULT": modifiers.match({
-                        "ovr_config//cpu/constraints:x86_64": "ovr_config//build_mode/constraints:tsan",
+                        "ovr_config//cpu/constraints:x86_64": "ovr_config//build_mode:sanitizer_type[tsan]",
                     }),
                 }),
             })],

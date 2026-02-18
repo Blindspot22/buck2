@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -17,16 +18,17 @@ use buck2_common::cas_digest::CasDigestConfig;
 use buck2_common::cas_digest::DigestAlgorithmFamily;
 use buck2_common::cas_digest::SHA1_SIZE;
 use buck2_common::cas_digest::SHA256_SIZE;
-use buck2_common::file_ops::FileDigest;
-use buck2_common::file_ops::TrackedFileDigest;
-use buck2_core::fs::fs_util;
+use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_error::BuckErrorContext;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
 use buck2_http::HttpClient;
-use buck2_http::retries::AsBuck2Error;
 use buck2_http::retries::HttpError;
 use buck2_http::retries::HttpErrorForRetry;
+use buck2_http::retries::IntoBuck2Error;
 use buck2_http::retries::http_retry;
 use bytes::Bytes;
 use digest::DynDigest;
@@ -184,8 +186,7 @@ impl HttpDownloadError {
     fn into_final(mut self) -> Self {
         match &mut self {
             Self::Client(..) | Self::IoError(..) => {}
-            Self::InvalidChecksum { ref mut debug, .. }
-            | Self::MaybeNotAllowedOnVpnless { ref mut debug, .. } => {
+            Self::InvalidChecksum { debug, .. } | Self::MaybeNotAllowedOnVpnless { debug, .. } => {
                 debug.is_final = true;
             }
         }
@@ -223,14 +224,14 @@ impl HttpErrorForRetry for HttpDownloadError {
     }
 }
 
-impl AsBuck2Error for HttpHeadError {
-    fn as_buck2_error(self) -> buck2_error::Error {
+impl IntoBuck2Error for HttpHeadError {
+    fn into_buck2_error(self) -> buck2_error::Error {
         buck2_error::Error::from(self)
     }
 }
 
-impl AsBuck2Error for HttpDownloadError {
-    fn as_buck2_error(self) -> buck2_error::Error {
+impl IntoBuck2Error for HttpDownloadError {
+    fn into_buck2_error(self) -> buck2_error::Error {
         buck2_error::Error::from(self)
     }
 }
@@ -265,15 +266,15 @@ pub async fn http_download(
 
     Ok(http_retry(
         || async {
-            let file = fs_util::create_file(&abs_path)
-                .map_err(|e| HttpDownloadError::IoError(buck2_error::Error::from(e)))?;
-
             let response = client
                 .get(url)
                 .await
                 .map_err(|e| HttpDownloadError::Client(HttpError::Client(e)))?;
 
             let (head, stream) = response.into_parts();
+            let file = fs_util::create_file(&abs_path)
+                .categorize_internal()
+                .map_err(HttpDownloadError::IoError)?;
             let buf_writer = std::io::BufWriter::new(file);
 
             let digest = copy_and_hash(
@@ -290,7 +291,7 @@ pub async fn http_download(
 
             if executable {
                 fs.set_executable(path)
-                    .map_err(|e| HttpDownloadError::IoError(e.into()))?;
+                    .map_err(HttpDownloadError::IoError)?;
             }
 
             Result::<_, HttpDownloadError>::Ok(TrackedFileDigest::new(
@@ -360,7 +361,7 @@ async fn copy_and_hash(
 
         writer
             .write(&chunk)
-            .with_buck_error_context(|| format!("write({})", abs_path))
+            .with_buck_error_context(|| format!("write({abs_path})"))
             .map_err(HttpDownloadError::IoError)?;
 
         digester.update(&chunk);
@@ -372,7 +373,7 @@ async fn copy_and_hash(
     }
     writer
         .flush()
-        .with_buck_error_context(|| format!("flush({})", abs_path))
+        .with_buck_error_context(|| format!("flush({abs_path})"))
         .map_err(HttpDownloadError::IoError)?;
 
     let digest = digester.finalize();
@@ -490,14 +491,14 @@ impl fmt::Display for MaybeResponseDebugInfo {
                 write!(f, "<none>")?;
             } else {
                 for (header, header_value) in interesting_headers {
-                    writeln!(f, "{}: {}", header, header_value)?;
+                    writeln!(f, "{header}: {header_value}")?;
                 }
             }
         }
 
         match &self.buff {
             Some(text) => {
-                write!(f, "\n\nResponse started with:\n\n{}", text)?;
+                write!(f, "\n\nResponse started with:\n\n{text}")?;
             }
             None => {
                 write!(f, "Response is not UTF-8")?;

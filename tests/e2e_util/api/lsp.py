@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-unsafe
 
@@ -13,7 +14,6 @@ import json
 import re
 from asyncio import subprocess, wait_for
 from asyncio.streams import StreamReader, StreamWriter
-
 from collections import deque
 from pathlib import Path
 from typing import Any, Optional
@@ -108,6 +108,7 @@ class LspClient(contextlib.AbstractAsyncContextManager):
         await self.send_notification("textDocument/didOpen", payload)
         notif = await self.receive_notification("textDocument/publishDiagnostics")
 
+        assert notif is not None
         assert notif["params"]["uri"] == absolute_path.as_uri()
         return notif["params"]
 

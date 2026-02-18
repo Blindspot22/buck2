@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use dice::DiceComputations;
@@ -18,13 +19,11 @@ impl KeepGoing {
     pub fn try_compute_join_all<'a, T: Send, R: 'a, E: 'a>(
         ctx: &'a mut DiceComputations<'_>,
         items: impl IntoIterator<Item = T>,
-        mapper: (
-            impl for<'x> FnOnce(&'x mut DiceComputations<'a>, T) -> BoxFuture<'x, Result<R, E>>
-            + Send
-            + Sync
-            + Copy
-        ),
-    ) -> impl Future<Output = Result<Vec<R>, E>> + 'a {
+        mapper: impl for<'x> FnOnce(&'x mut DiceComputations<'a>, T) -> BoxFuture<'x, Result<R, E>>
+        + Send
+        + Sync
+        + Copy,
+    ) -> impl Future<Output = Result<Vec<R>, E>> {
         let keep_going = ctx.per_transaction_data().get_keep_going();
 
         let futs = ctx.compute_many(items.into_iter().map(move |v| {

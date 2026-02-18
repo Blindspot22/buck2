@@ -1,15 +1,20 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:artifacts.bzl", "ArtifactOutputs")
+load(":apple_asset_catalog_types.bzl", "AppleAssetCatalogSpec")
+load(":apple_core_data_types.bzl", "AppleCoreDataSpec")
+load(":scene_kit_assets_types.bzl", "SceneKitAssetsSpec")
 
 # Represents the values for the `destination` field of `apple_resource`
 AppleResourceDestination = enum(
     "executables",
+    "extensionkit_extensions",
     "frameworks",
     "loginitems",
     "plugins",
@@ -41,4 +46,12 @@ AppleResourceProcessingOptions = record(
 
 CxxResourceSpec = record(
     resources = field(dict[str, ArtifactOutputs], {}),
+)
+
+AppleResourceSelectionOutput = record(
+    resource_specs = field(list[AppleResourceSpec]),
+    asset_catalog_specs = field(list[AppleAssetCatalogSpec]),
+    core_data_specs = field(list[AppleCoreDataSpec]),
+    scene_kit_assets_spec = field(list[SceneKitAssetsSpec]),
+    cxx_resource_specs = field(list[CxxResourceSpec]),
 )

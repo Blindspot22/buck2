@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -64,9 +65,9 @@ def copy_starlark_docs() -> None:
         write_file(base_path / (name + ".generated.md"), prefix + read_file(x))
 
 
-def generate_api_docs(buck: str) -> None:
+def generate_prelude_rules_docs(buck: str) -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        base_dir = Path("docs") / "prelude"
+        base_dir = Path("docs") / "prelude" / "rules"
         setup_gen_dir(base_dir)
         # Actually generate the docs
         print("Running Buck...")
@@ -79,16 +80,23 @@ def generate_api_docs(buck: str) -> None:
             check=True,
         )
 
-        src = read_file(Path(tmp) / "prelude" / "docs" / "rules.bzl.md")
-        dest = base_dir / "globals.generated.md"
+        # Copy the files under Path(tmp) / prelude / docs / rules to base_dir
+        folder = Path(tmp) / "prelude" / "docs" / "rules.bzl"
+        for orig in folder.rglob("*.md"):
+            path = orig.relative_to(folder)
+            dest = base_dir.joinpath(path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(orig, dest)
 
-        prefix = "---\nid: globals\n---\n"
-        prefix += "# Rules\n\nThese rules are available as standard in Buck2.\n"
-        src = "\n".join(src.splitlines()[1:])
+        index_file_content = (
+            "# Rules\n\nThese rules are available as standard in Buck2.\n"
+        )
 
-        os.makedirs(dest.parent, exist_ok=True)
-        write_file(dest, prefix + src)
+        os.makedirs(base_dir, exist_ok=True)
+        write_file(base_dir / "index.md", index_file_content)
 
+
+def generate_api_docs(buck: str) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base_dir = Path("docs") / "api"
         setup_gen_dir(base_dir)
@@ -162,21 +170,47 @@ def parse_subcommands(output: str) -> List[str]:
 
 
 def generate_help_docs_subcommand(buck: str, args: List[str]) -> str:
-    cmd = buck + " " + " ".join(args) + " --help"
+    cmd = buck + " docs markdown-help-doc " + " ".join(args)
     print("Running " + cmd + " ...")
-    res = subprocess.run(cmd, shell=True, check=True, capture_output=True)
-    root = res.stdout.decode()
-    return (
-        "\n\n```text\n"
-        + root
-        + "\n```"
-        + "\n\n".join(
-            [
-                generate_help_docs_subcommand(buck, args + [sub])
-                for sub in parse_subcommands(root)
-            ]
-        )
-    )
+    res = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE)
+    return res.stdout.decode()
+
+
+def generate_subcommand_short_help(buck: str, args: List[str]) -> str:
+    cmd = buck + " " + " ".join(args) + " -h"
+    print("Running " + cmd + " ...")
+    res = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE)
+    output = res.stdout.decode()
+    # get the first line which is the short help
+    return output.splitlines()[0]
+
+
+def generate_help_docs_index_page(buck: str, subcommands: List[str]) -> str:
+    # Table header
+    titile = """\
+---
+id: index
+title: buck2 commands
+---
+"""
+    common_options_section = """\
+
+For common options available across multiple commands, see [Common Options](./common-options).
+
+"""
+    lines = [
+        "| Command       | Description                  |",
+        "|---------------|------------------------------|",
+    ]
+    for sub in subcommands:
+        full_cmd = f"`buck2 {sub}`"
+        cmd_with_link = f"[{full_cmd}](./{sub})"
+        short_help = generate_subcommand_short_help(buck, [sub])
+        # Escape any pipe characters in the help text
+        safe_help = short_help.replace("|", "\\|")
+        lines.append(f"| {cmd_with_link} | {safe_help} |")
+
+    return titile + common_options_section + "\n".join(lines)
 
 
 def generate_help_docs(buck: str) -> None:
@@ -186,19 +220,18 @@ def generate_help_docs(buck: str) -> None:
     cmd = buck + " --help"
     print("Running " + cmd + " ...")
     res = subprocess.run(cmd, shell=True, check=True, capture_output=True)
-    for sub in parse_subcommands(res.stdout.decode()):
+    subcommands = parse_subcommands(res.stdout.decode())
+    # Use addtional common-options subcommand to generate the common options page
+    for sub in subcommands + ["common-options"]:
         output = generate_help_docs_subcommand(buck, [sub])
         write_file(
             base_dir / (sub + ".generated.md"),
-            "---\nid: "
-            + sub
-            + "\ntitle: "
-            + sub
-            + "\n---\nThese are the flags/commands under `buck2 "
-            + sub
-            + "` and their `--help` output:"
-            + output,
+            "---\nid: " + sub + "\ntitle: " + sub + "\n---\n\n" + output,
         )
+
+    # No need to generate a row for the "common-options"
+    index_page_content = generate_help_docs_index_page(buck, subcommands)
+    write_file(base_dir / "index.md", index_page_content)
 
 
 def generate_query_docs(buck: str) -> None:
@@ -254,6 +287,7 @@ def main() -> None:
 
     buck = buck_command(args)
     copy_starlark_docs()
+    generate_prelude_rules_docs(buck)
     generate_api_docs(buck)
     generate_bxl_utils_api_docs(buck)
     generate_help_docs(buck)

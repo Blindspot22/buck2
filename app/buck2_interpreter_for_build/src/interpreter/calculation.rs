@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Interpreter related Dice calculations
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use allocative::Allocative;
 use async_trait::async_trait;
@@ -20,7 +20,6 @@ use buck2_core::bzl::ImportPath;
 use buck2_core::package::PackageLabel;
 use buck2_events::dispatch::async_record_root_spans;
 use buck2_events::span::SpanId;
-use buck2_futures::cancellation::CancellationContext;
 use buck2_interpreter::file_loader::LoadedModule;
 use buck2_interpreter::file_loader::ModuleDeps;
 use buck2_interpreter::load_module::INTERPRETER_CALCULATION_IMPL;
@@ -38,9 +37,11 @@ use buck2_node::nodes::frontend::TargetGraphCalculation;
 use buck2_node::nodes::frontend::TargetGraphCalculationImpl;
 use buck2_node::package_values_calculation::PACKAGE_VALUES_CALCULATION;
 use buck2_node::package_values_calculation::PackageValuesCalculation;
+use buck2_util::time_span::TimeSpan;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -69,13 +70,15 @@ impl Key for InterpreterResultsKey {
     async fn compute(
         &self,
         ctx: &mut DiceComputations,
-        _cancellation: &CancellationContext,
+        cancellation: &CancellationContext,
     ) -> Self::Value {
-        let ((duration, result), spans) =
-            async_record_root_spans(ctx.get_interpreter_results_uncached(self.0.dupe())).await;
+        let ((time_span, result), spans) = async_record_root_spans(
+            ctx.get_interpreter_results_uncached(self.0.dupe(), cancellation),
+        )
+        .await;
 
         ctx.store_evaluation_data(InterpreterResultsKeyActivationData {
-            duration,
+            time_span,
             result: result.dupe(),
             spans,
         })?;
@@ -99,15 +102,20 @@ impl TargetGraphCalculationImpl for TargetGraphCalculationInstance {
         &self,
         ctx: &mut DiceComputations<'_>,
         package: PackageLabel,
-    ) -> (Duration, buck2_error::Result<Arc<EvaluationResult>>) {
+        cancellation: &CancellationContext,
+    ) -> (TimeSpan, buck2_error::Result<Arc<EvaluationResult>>) {
         match ctx
             .get_interpreter_calculator(OwnedStarlarkPath::PackageFile(
                 PackageFilePath::package_file_for_dir(package.as_cell_path()),
             ))
             .await
         {
-            Ok(mut interpreter) => interpreter.eval_build_file(package.dupe()).await,
-            Err(e) => (Duration::ZERO, Err(e.into())),
+            Ok(mut interpreter) => {
+                interpreter
+                    .eval_build_file(package.dupe(), cancellation)
+                    .await
+            }
+            Err(e) => (TimeSpan::empty_now(), Err(e)),
         }
     }
 
@@ -117,7 +125,7 @@ impl TargetGraphCalculationImpl for TargetGraphCalculationInstance {
         package: PackageLabel,
     ) -> BoxFuture<'a, buck2_error::Result<Arc<EvaluationResult>>> {
         ctx.compute(&InterpreterResultsKey(package.dupe()))
-            .map(|v| v?.map_err(buck2_error::Error::from))
+            .map(|v| v?)
             .boxed()
     }
 }
@@ -136,7 +144,7 @@ impl Key for EvalImportKey {
     async fn compute(
         &self,
         ctx: &mut DiceComputations,
-        _cancellation: &CancellationContext,
+        cancellation: &CancellationContext,
     ) -> Self::Value {
         let starlark_path = self.0.borrow();
         // We cannot just use the inner default delegate's eval_import
@@ -144,7 +152,7 @@ impl Key for EvalImportKey {
         Ok(ctx
             .get_interpreter_calculator(OwnedStarlarkPath::new(starlark_path.starlark_path()))
             .await?
-            .eval_module_uncached(starlark_path)
+            .eval_module_uncached(starlark_path, cancellation)
             .await?)
     }
 
@@ -253,8 +261,8 @@ impl PackageValuesCalculation for PackageValuesCalculationInstance {
 }
 
 pub struct InterpreterResultsKeyActivationData {
-    /// Duration of just the starlark evaluation of the build file.
-    pub duration: Duration,
+    /// TimeSpan of just the starlark evaluation of the build file.
+    pub time_span: TimeSpan,
     pub result: buck2_error::Result<Arc<EvaluationResult>>,
     pub spans: SmallVec<[SpanId; 1]>,
 }

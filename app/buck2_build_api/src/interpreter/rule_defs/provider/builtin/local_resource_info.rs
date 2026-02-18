@@ -1,17 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
 
 use allocative::Allocative;
 use buck2_build_api_derive::internal_provider;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use either::Either;
 use indexmap::IndexMap;
 use starlark::any::ProvidesStaticType;
@@ -20,7 +21,6 @@ use starlark::eval::Evaluator;
 use starlark::values::Coerce;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
-use starlark::values::FreezeResult;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLifetimeless;
@@ -95,7 +95,7 @@ where
     }
 
     let setup = ValueTypedComplex::<StarlarkCmdArgs>::new(info.setup.get().to_value())
-        .internal_error("Validated in constructor")?;
+        .ok_or_else(|| internal_error!("Validated in constructor"))?;
     let setup_is_empty = match setup.unpack() {
         Either::Left(a) => a.is_empty(),
         Either::Right(b) => b.is_empty(),
@@ -155,7 +155,7 @@ impl FrozenLocalResourceInfo {
             .collect()
     }
 
-    pub fn setup_command_line(&self) -> &dyn CommandLineArgLike {
+    pub fn setup_command_line(&self) -> &dyn CommandLineArgLike<'_> {
         ValueAsCommandLineLike::unpack_value_err(self.setup.to_value().get())
             .unwrap()
             .0

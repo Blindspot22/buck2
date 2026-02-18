@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@fbcode//buck2/cfg/experimental:modifiers.bzl", "modifiers")
 load("@prelude//:asserts.bzl", "asserts")
@@ -37,6 +38,7 @@ def _run_cfg_constructor(
         rule_name = rule_name,
         aliases = ALIASES,
         extra_data = struct(),
+        configuring_exec_dep = False,
     )
     refs = {ref: test_refs.get(ref) for ref in refs}
     return cfg_constructor_post_constraint_analysis(refs = refs, params = params)
@@ -234,8 +236,8 @@ def test_cfg_constructor_with_modifiers_match_ordering(
         test_refs: TestRefs):
     target_modifiers = [
         modifiers.match({
-            "ovr_config//cpu/constraints:arm64": "ovr_config//build_mode/constraints:no-san",
-            "ovr_config//cpu/constraints:x86_64": "ovr_config//build_mode/constraints:asan",
+            "ovr_config//cpu/constraints:arm64": "ovr_config//build_mode:sanitizer_type[no-san]",
+            "ovr_config//cpu/constraints:x86_64": "ovr_config//build_mode:sanitizer_type[asan]",
         }),
         modifiers.match({
             "ovr_config//os/constraints:linux": "ovr_config//cpu/constraints:x86_64",
@@ -259,7 +261,7 @@ def test_cfg_constructor_with_modifiers_match_ordering(
     expected_cfg = test_refs.make_cfg([
         "ovr_config//os/constraints:linux",
         "ovr_config//cpu/constraints:x86_64",
-        "ovr_config//build_mode/constraints:asan",
+        "ovr_config//build_mode:sanitizer_type[asan]",
     ])
     asserts.equals(expected_cfg, platform.configuration)
     asserts.equals("cfg:linux-x86_64-asan", platform.label)
@@ -275,7 +277,7 @@ def test_cfg_constructor_with_modifiers_match_ordering(
     expected_cfg = test_refs.make_cfg([
         "ovr_config//os/constraints:macos",
         "ovr_config//cpu/constraints:arm64",
-        "ovr_config//build_mode/constraints:no-san",
+        "ovr_config//build_mode:sanitizer_type[no-san]",
     ])
     asserts.equals(expected_cfg, platform.configuration)
     asserts.equals("cfg:macos-arm64-no-san", platform.label)

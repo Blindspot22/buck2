@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//android:android_providers.bzl",
@@ -48,7 +49,7 @@ def generate_android_manifest(
     if not manifests:
         manifests = []
     elif isinstance(manifests, TransitiveSet):
-        manifests = manifests.project_as_args("artifacts", ordering = "bfs")
+        manifests = manifests.project_as_args("artifacts", ordering = "topological")
 
     library_manifest_paths_file = argfile(actions = ctx.actions, name = "{}/library_manifest_paths_file".format(module_name), args = manifests)
 
@@ -63,11 +64,14 @@ def generate_android_manifest(
 
     output = ctx.actions.declare_output("{}/AndroidManifest.xml".format(module_name))
     merge_report = ctx.actions.declare_output("{}/merge-report.txt".format(module_name))
+    preprocess_log = ctx.actions.declare_output("{}/preprocess-log.txt".format(module_name))
     generate_manifest_cmd.add([
         "--output",
         output.as_output(),
         "--merge-report",
         merge_report.as_output(),
+        "--preprocess-log",
+        preprocess_log.as_output(),
     ])
 
     ctx.actions.run(generate_manifest_cmd, category = "generate_manifest", identifier = module_name)

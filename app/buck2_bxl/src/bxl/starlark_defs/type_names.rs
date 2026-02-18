@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![allow(non_upper_case_globals)]
@@ -29,7 +30,7 @@ use crate::bxl::starlark_defs::context::actions::BxlActions;
 use crate::bxl::starlark_defs::context::build::StarlarkFailedArtifactIterable;
 use crate::bxl::starlark_defs::context::build::StarlarkProvidersArtifactIterable;
 use crate::bxl::starlark_defs::context::fs::BxlFilesystem;
-use crate::bxl::starlark_defs::context::output::OutputStream;
+use crate::bxl::starlark_defs::context::output::StarlarkOutputStream;
 use crate::bxl::starlark_defs::cquery::StarlarkCQueryCtx;
 use crate::bxl::starlark_defs::file_set::StarlarkFileNode;
 use crate::bxl::starlark_defs::lazy_ctx::StarlarkLazyCtx;
@@ -78,7 +79,7 @@ pub(crate) fn register_bxl_type_names_in_bxl_namespace(globals: &mut GlobalsBuil
         StarlarkValueAsType::new();
     const ConfiguredAttr: StarlarkValueAsType<StarlarkConfiguredAttr> = StarlarkValueAsType::new();
     const TargetUniverse: StarlarkValueAsType<StarlarkTargetUniverse> = StarlarkValueAsType::new();
-    const OutputStream: StarlarkValueAsType<OutputStream> = StarlarkValueAsType::new();
+    const OutputStream: StarlarkValueAsType<StarlarkOutputStream> = StarlarkValueAsType::new();
     const LazyContext: StarlarkValueAsType<StarlarkLazyCtx> = StarlarkValueAsType::new();
     const Lazy: StarlarkValueAsType<StarlarkLazy> = StarlarkValueAsType::new();
     const Error: StarlarkValueAsType<StarlarkError> = StarlarkValueAsType::new();

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cmp;
@@ -12,6 +13,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
+use std::io::Write;
 use std::iter;
 use std::mem;
 
@@ -136,6 +138,18 @@ impl Lines {
             .map(|line| {
                 let styled = StyledContent::new(style, line.to_owned());
                 Line::from_iter([Span::new_styled_lossy(styled)])
+            })
+            .collect()
+    }
+
+    /// Same as `from_multiline_string`, but does not use lossy conversion, it allows all whitespace characters
+    /// It's specially designed for emit/emit_aux
+    pub fn from_multiline_string_raw(multiline_string: &str, style: ContentStyle) -> Lines {
+        multiline_string
+            .lines()
+            .map(|line| {
+                let styled = StyledContent::new(style, line.to_owned());
+                Line::from_iter([Span::new_styled_raw(styled)])
             })
             .collect()
     }
@@ -285,30 +299,41 @@ impl Lines {
     /// If a limit is specified, no more than that amount will be drained.
     /// The limit is on the number of *lines*, **NOT** the number of *bytes*.
     /// Care should be taken with calling a limit of 0 - this will cause no lines to render and the buffer to never be drained.
+    ///
+    /// Returns the remain limit after rendering.  If the limit is None, means no limit
     pub(crate) fn render_with_limit(
         &mut self,
         writer: &mut Vec<u8>,
         limit: Option<usize>,
-    ) -> anyhow::Result<()> {
-        let limit = limit.unwrap_or(self.len());
-        let amt = cmp::min(limit, self.len());
+    ) -> Option<usize> {
+        let output_limit = limit.unwrap_or(self.len());
+        let amt = cmp::min(output_limit, self.len());
         for line in self.0.drain(..amt) {
-            line.render_with_clear_and_nl(writer)?;
+            line.render_with_clear_and_nl(writer);
         }
-        Ok(())
+        if limit.is_some() {
+            Some(output_limit - amt)
+        } else {
+            // if the original limit was None, it means no limit, so just return None meaning no limit
+            None
+        }
     }
 
-    /// Formats and renders all lines to `stdout`.
+    /// Formats and renders all lines to `buffer`.
     /// Notably, this *queues* the lines for rendering.  You must flush the buffer.
-    pub(crate) fn render_from_line(
-        &self,
-        writer: &mut Vec<u8>,
-        start: usize,
-    ) -> anyhow::Result<()> {
+    pub(crate) fn render_from_line(&self, writer: &mut Vec<u8>, start: usize) {
         for line in self.0.iter().skip(start) {
-            line.render_with_clear_and_nl(writer)?;
+            line.render_with_clear_and_nl(writer);
         }
-        Ok(())
+    }
+
+    /// Render the lines without an escape sequence to clear the line.
+    /// It will clear the lines at the end.
+    pub(crate) fn render_raw(&mut self, writer: &mut Vec<u8>) {
+        for line in self.0.iter() {
+            writeln!(writer, "{}", line.render()).unwrap();
+        }
+        self.0.clear();
     }
 
     pub(crate) fn lines_equal(&self, other: &Self) -> usize {
@@ -321,11 +346,11 @@ impl Lines {
 
     /// Returns the maximum line width and the number of lines.
     /// This corresponds to how much space a justified version of the output would take.
-    pub fn dimensions(&self) -> anyhow::Result<Dimensions> {
+    pub fn dimensions(&self) -> Dimensions {
         let x = self.max_line_length();
         let y = self.len();
 
-        Ok((x, y).into())
+        (x, y).into()
     }
 
     /// Sets the lines to the exact dimensions specified below, truncating or padding as necessary.
@@ -500,37 +525,33 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_lines_bottom() -> anyhow::Result<()> {
+    fn test_truncate_lines_bottom() {
         let mut test = Lines(vec![
-            vec!["test"].try_into()?,
-            vec!["another"].try_into()?,
-            vec!["one more"].try_into()?,
+            vec!["test"].try_into().unwrap(),
+            vec!["another"].try_into().unwrap(),
+            vec!["one more"].try_into().unwrap(),
         ]);
         test.truncate_lines_bottom(1);
-        let output = Lines(vec![vec!["test"].try_into()?]);
+        let output = Lines(vec![vec!["test"].try_into().unwrap()]);
         assert_eq!(test, output);
-
-        Ok(())
     }
 
     #[test]
-    fn test_justify() -> anyhow::Result<()> {
+    fn test_justify() {
         let mut test = Lines(vec![
-            vec!["test"].try_into()?,
+            vec!["test"].try_into().unwrap(),
             Line::default(),
-            vec!["ok"].try_into()?,
+            vec!["ok"].try_into().unwrap(),
         ]);
 
         test.justify();
         let expected = Lines(vec![
-            vec!["test"].try_into()?,
-            vec![" ".repeat(4)].try_into()?,
-            vec!["ok", "  "].try_into()?,
+            vec!["test"].try_into().unwrap(),
+            vec![" ".repeat(4)].try_into().unwrap(),
+            vec!["ok", "  "].try_into().unwrap(),
         ]);
 
         assert_eq!(test, expected);
-
-        Ok(())
     }
 
     #[test]

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -29,7 +30,7 @@ from buck2.tests.e2e_util.buck_workspace import buck_test
 )
 async def test_pass_common_opts_func(buck: Buck, cmd: str) -> None:
     cmd_call = getattr(buck, cmd)
-    await cmd_call("--config", "client.id=placeholder_id")
+    await cmd_call("--client-metadata", "id=placeholder_id")
 
 
 @buck_test()
@@ -47,9 +48,8 @@ async def test_pass_common_opts_func(buck: Buck, cmd: str) -> None:
 )
 async def test_pass_common_opts(buck: Buck, cmd: str) -> None:
     commands_requiring_target_pattern_arg_value = {"providers", "subtargets"}
-    arg = "//:dummy"
 
     if cmd in commands_requiring_target_pattern_arg_value:
-        await buck.audit(cmd, arg, "--config", "client.id=placeholder_id")
+        await buck.audit(cmd, "//:dummy", "--client-metadata", "id=placeholder_id")
     else:
-        await buck.audit(cmd, "--config", "client.id=placeholder_id")
+        await buck.audit(cmd, "--client-metadata", "id=placeholder_id")

@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+# This script builds buck2 locally from source and then runs it.
+#
+# It uses the installed buck2 to build the buck2 bundle target, then executes
+# the freshly built binary with any additional arguments passed to this script.
+# This is useful for testing local changes to buck2 without a full installation.
+#
+# Example:
+#   ./buck2.py build //my:target
 
 import argparse
+import os
 import platform
 import subprocess
-from typing import List, Tuple
+import sys
+from typing import List, Optional, Tuple
 
 
 def parse_arguments() -> Tuple[argparse.Namespace, List[str]]:
@@ -44,18 +56,29 @@ def get_extra_build_params(args: argparse.Namespace) -> List[str]:
         params.extend(["-m", "x86_64"])
     elif arch_platform == "arm64":
         params.extend(["-m", "arm64"])
+    elif arch_platform == "riscv64":
+        params.extend(["-m", "riscv64"])
 
     return params
 
 
-def build_command(args: argparse.Namespace, extra_args: List[str]) -> List[str]:
-    cmd = ["buck2", "run", "fbcode//buck2:buck2_bundle"]
+def build_command(
+    args: argparse.Namespace, extra_args: List[str], cwd: Optional[str]
+) -> List[str]:
+    cmd = [
+        "buck2",
+        "run",
+        # @oss-disable[end= ]: "fbcode//buck2:buck2_bundle",
+        "//:buck2_bundle", # @oss-enable
+    ]
     inner_buck_isolation_dir = (
         args.run_isolation_dir if args.run_isolation_dir else "v2.self"
     )
     inner_buck_isolation_dir_arg = [f"--isolation-dir={inner_buck_isolation_dir}"]
 
     cmd.extend(get_extra_build_params(args))
+    if cwd is not None and "--chdir" not in extra_args:
+        cmd.extend(["--chdir", os.getcwd()])
 
     cmd.append("--")
     cmd.extend(inner_buck_isolation_dir_arg)
@@ -69,8 +92,12 @@ def build_command(args: argparse.Namespace, extra_args: List[str]) -> List[str]:
 
 def main() -> None:
     args, extra_args = parse_arguments()
-    cmd = build_command(args, extra_args)
-    subprocess.run(cmd)
+    cwd = None
+    if __file__ is not None:
+        cwd = os.path.dirname(__file__)
+    cmd = build_command(args, extra_args, cwd)
+    result = subprocess.run(cmd, cwd=cwd)
+    sys.exit(result.returncode)
 
 
 if __name__ == "__main__":

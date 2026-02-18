@@ -1,14 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
 use std::env::VarError;
+use std::io;
+use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,6 +20,12 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Context;
+use async_compression::tokio::bufread::BrotliDecoder;
+use async_compression::tokio::bufread::BrotliEncoder;
+use async_compression::tokio::bufread::DeflateDecoder;
+use async_compression::tokio::bufread::DeflateEncoder;
+use async_compression::tokio::bufread::ZstdDecoder;
+use async_compression::tokio::bufread::ZstdEncoder;
 use buck2_re_configuration::Buck2OssReConfiguration;
 use buck2_re_configuration::HttpHeader;
 use dupe::Dupe;
@@ -27,6 +36,7 @@ use futures::stream::BoxStream;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use gazebo::prelude::*;
+use hyper_util::client::legacy::connect::HttpConnector;
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use prost::Message;
@@ -40,6 +50,7 @@ use re_grpc_proto::build::bazel::remote::execution::v2::ExecuteOperationMetadata
 use re_grpc_proto::build::bazel::remote::execution::v2::ExecuteRequest as GExecuteRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::ExecuteResponse as GExecuteResponse;
 use re_grpc_proto::build::bazel::remote::execution::v2::ExecutedActionMetadata;
+use re_grpc_proto::build::bazel::remote::execution::v2::ExecutionPolicy;
 use re_grpc_proto::build::bazel::remote::execution::v2::FindMissingBlobsRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::FindMissingBlobsResponse;
 use re_grpc_proto::build::bazel::remote::execution::v2::GetActionResultRequest;
@@ -68,8 +79,12 @@ use re_grpc_proto::google::rpc::Code;
 use re_grpc_proto::google::rpc::Status;
 use regex::Regex;
 use tokio::fs::OpenOptions;
+use tokio::io::AsyncBufRead;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
+use tokio_util::io::StreamReader;
 use tonic::codegen::InterceptedService;
 use tonic::metadata;
 use tonic::metadata::MetadataKey;
@@ -85,6 +100,7 @@ use crate::error::*;
 use crate::metadata::*;
 use crate::request::*;
 use crate::response::*;
+use crate::stats::CountingConnector;
 
 const DEFAULT_MAX_TOTAL_BATCH_SIZE: usize = 4 * 1000 * 1000;
 
@@ -142,7 +158,7 @@ fn ttimestamp_from(ts: Option<::prost_types::Timestamp>) -> TTimestamp {
 }
 
 async fn create_tls_config(opts: &Buck2OssReConfiguration) -> anyhow::Result<ClientTlsConfig> {
-    let config = ClientTlsConfig::new();
+    let config = ClientTlsConfig::new().with_enabled_roots();
 
     let config = match opts.tls_ca_certs.as_ref() {
         Some(tls_ca_certs) => {
@@ -150,7 +166,7 @@ async fn create_tls_config(opts: &Buck2OssReConfiguration) -> anyhow::Result<Cli
                 substitute_env_vars(tls_ca_certs).context("Invalid `tls_ca_certs`")?;
             let data = tokio::fs::read(&tls_ca_certs)
                 .await
-                .with_context(|| format!("Error reading `{}`", tls_ca_certs))?;
+                .with_context(|| format!("Error reading `{tls_ca_certs}`"))?;
             config.ca_certificate(Certificate::from_pem(data))
         }
         None => {
@@ -165,7 +181,7 @@ async fn create_tls_config(opts: &Buck2OssReConfiguration) -> anyhow::Result<Cli
                 substitute_env_vars(tls_client_cert).context("Invalid `tls_client_cert`")?;
             let data = tokio::fs::read(&tls_client_cert)
                 .await
-                .with_context(|| format!("Error reading `{}`", tls_client_cert))?;
+                .with_context(|| format!("Error reading `{tls_client_cert}`"))?;
             config.identity(Identity::from_pem(&data, &data))
         }
         None => config,
@@ -218,8 +234,8 @@ pub struct RECapabilities {
     /// Largest size of a message before being uploaded using bytestream service.
     /// 0 indicates no limit beyond constraint of underlying transport (which is unknown).
     max_total_batch_size: usize,
-    /// Does the remote server support execution.
-    exec_enabled: bool,
+    /// Compressors supported by the "compressed-blobs" bytestream resources.
+    supported_compressors: Vec<Compressor>,
 }
 
 /// Contains runtime options for the remote execution client as set under `buck2_re_client`
@@ -228,6 +244,8 @@ pub struct RERuntimeOpts {
     use_fbcode_metadata: bool,
     /// Maximum number of concurrent upload requests.
     max_concurrent_uploads_per_action: Option<usize>,
+    /// Time that digests are assumed to live in CAS after being touched.
+    cas_ttl_secs: i64,
 }
 
 struct InstanceName(Option<String>);
@@ -242,8 +260,38 @@ impl InstanceName {
 
     fn as_resource_prefix(&self) -> String {
         match &self.0 {
-            Some(instance_name) => format!("{}/", instance_name),
+            Some(instance_name) => format!("{instance_name}/"),
             None => "".to_owned(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Compressor {
+    Zstd,
+    Deflate,
+    Brotli,
+}
+
+impl Compressor {
+    fn from_grpc(val: i32) -> Option<Self> {
+        if val == compressor::Value::Zstd as i32 {
+            Some(Self::Zstd)
+        } else if val == compressor::Value::Deflate as i32 {
+            Some(Self::Deflate)
+        } else if val == compressor::Value::Brotli as i32 {
+            Some(Self::Brotli)
+        } else {
+            None
+        }
+    }
+
+    /// The compressor name used in compressed-blob resource paths
+    fn name(&self) -> &str {
+        match self {
+            Self::Zstd => "zstd",
+            Self::Deflate => "deflate",
+            Self::Brotli => "brotli",
         }
     }
 }
@@ -265,16 +313,35 @@ impl REClientBuilder {
             let uri = address.parse().context("Invalid address")?;
             let uri = prepare_uri(uri, opts.tls).context("Invalid URI")?;
 
-            let mut channel = Channel::builder(uri);
+            let mut endpoint = Channel::builder(uri);
             if opts.tls {
-                channel = channel.tls_config(tls_config.clone())?;
+                endpoint = endpoint.tls_config(tls_config.clone())?;
             }
 
+            // Configure gRPC keepalive settings
+            if let Some(keepalive_time_secs) = opts.grpc_keepalive_time_secs {
+                endpoint =
+                    endpoint.http2_keep_alive_interval(Duration::from_secs(keepalive_time_secs));
+            }
+            if let Some(keepalive_timeout_secs) = opts.grpc_keepalive_timeout_secs {
+                endpoint = endpoint.keep_alive_timeout(Duration::from_secs(keepalive_timeout_secs));
+            }
+            if let Some(keepalive_while_idle) = opts.grpc_keepalive_while_idle {
+                endpoint = endpoint.keep_alive_while_idle(keepalive_while_idle);
+            }
+
+            // Since we are creating the HttpConnector ourselves, any TCP
+            // settings (tcp_nodelay, tcp_keepalive, connect_timeout), need to
+            // be set here instead of on the endpoint
+            let mut http = HttpConnector::new();
+            http.enforce_http(false);
+            let connector = CountingConnector::new(http);
+
             anyhow::Ok(
-                channel
-                    .connect()
+                endpoint
+                    .connect_with_connector(connector)
                     .await
-                    .with_context(|| format!("Error connecting to `{}`", address))?,
+                    .with_context(|| format!("Error connecting to `{address}`"))?,
             )
         };
 
@@ -310,14 +377,10 @@ impl REClientBuilder {
             .await?
         } else {
             RECapabilities {
-                exec_enabled: true,
                 max_total_batch_size: DEFAULT_MAX_TOTAL_BATCH_SIZE,
+                supported_compressors: Vec::new(),
             }
         };
-
-        if !capabilities.exec_enabled {
-            return Err(anyhow::anyhow!("Server has remote execution disabled."));
-        }
 
         let max_decoding_msg_size = opts
             .max_decoding_message_size
@@ -328,6 +391,26 @@ impl REClientBuilder {
                 "Attribute `max_decoding_message_size` must always be equal or higher to `max_total_batch_size`"
             ));
         }
+
+        // Choose a ByteStream compressor
+        let bystream_compressor = if capabilities
+            .supported_compressors
+            .contains(&Compressor::Zstd)
+        {
+            Some(Compressor::Zstd)
+        } else if capabilities
+            .supported_compressors
+            .contains(&Compressor::Brotli)
+        {
+            Some(Compressor::Brotli)
+        } else if capabilities
+            .supported_compressors
+            .contains(&Compressor::Deflate)
+        {
+            Some(Compressor::Deflate)
+        } else {
+            None
+        };
 
         let grpc_clients = GRPCClients {
             cas_client: ContentAddressableStorageClient::with_interceptor(
@@ -354,10 +437,14 @@ impl REClientBuilder {
             RERuntimeOpts {
                 use_fbcode_metadata: opts.use_fbcode_metadata,
                 max_concurrent_uploads_per_action: opts.max_concurrent_uploads_per_action,
+                // NOTE: This is an arbitrary number because RBE does not return information
+                // on the TTL of the remote blob.
+                cas_ttl_secs: opts.cas_ttl_secs.unwrap_or(60),
             },
             grpc_clients,
             capabilities,
             instance_name,
+            bystream_compressor,
         ))
     }
 
@@ -376,7 +463,16 @@ impl REClientBuilder {
             .context("Failed to query capabilities of remote")?
             .into_inner();
 
-        let mut exec_enabled = true;
+        let supported_compressors = if let Some(cache_cap) = &resp.cache_capabilities {
+            cache_cap
+                .supported_compressors
+                .iter()
+                .cloned()
+                .filter_map(Compressor::from_grpc)
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let max_total_batch_size_from_capabilities: Option<usize> =
             if let Some(cache_cap) = resp.cache_capabilities {
@@ -395,13 +491,9 @@ impl REClientBuilder {
                 (None, None) => DEFAULT_MAX_TOTAL_BATCH_SIZE,
             };
 
-        if let Some(exec_cap) = resp.execution_capabilities {
-            exec_enabled = exec_cap.exec_enabled;
-        }
-
         Ok(RECapabilities {
             max_total_batch_size,
-            exec_enabled,
+            supported_compressors,
         })
     }
 }
@@ -423,10 +515,10 @@ impl InjectHeadersInterceptor {
                 let value = substitute_env_vars(&h.value)?;
 
                 let key = MetadataKey::<metadata::Ascii>::from_bytes(key.as_bytes())
-                    .with_context(|| format!("Invalid key in header: `{}: {}`", key, value))?;
+                    .with_context(|| format!("Invalid key in header: `{key}: {value}`"))?;
 
                 let value = MetadataValue::try_from(&value)
-                    .with_context(|| format!("Invalid value in header: `{}: {}`", key, value))?;
+                    .with_context(|| format!("Invalid value in header: `{key}: {value}`"))?;
 
                 anyhow::Ok((key, value))
             })
@@ -460,6 +552,7 @@ pub struct GRPCClients {
     bytestream_client: ByteStreamClient<GrpcService>,
 }
 
+#[derive(Debug, Copy, Clone)]
 enum DigestRemoteState {
     ExistsOnRemote,
     Missing,
@@ -481,13 +574,14 @@ impl FindMissingCache {
         }
     }
 
+    pub fn get(&mut self, digest: &TDigest) -> Option<DigestRemoteState> {
+        self.clear_if_ttl_expires();
+        self.cache.get(digest).copied()
+    }
+
     pub fn put(&mut self, digest: TDigest, state: DigestRemoteState) {
         self.clear_if_ttl_expires();
         self.cache.put(digest, state);
-    }
-    pub fn get(&mut self, digest: &TDigest) -> Option<&DigestRemoteState> {
-        self.clear_if_ttl_expires();
-        self.cache.get(digest)
     }
 }
 
@@ -498,6 +592,7 @@ pub struct REClient {
     instance_name: InstanceName,
     // buck2 calls find_missing for same blobs
     find_missing_cache: Mutex<FindMissingCache>,
+    bystream_compressor: Option<Compressor>,
 }
 
 impl Drop for REClient {
@@ -538,6 +633,12 @@ impl BatchUploadReqAggregator {
             BatchUploadRequest::Blob(blob) => blob.digest.size_in_bytes,
             BatchUploadRequest::File(file) => file.digest.size_in_bytes,
         };
+
+        // As an optimization, we can silently skip uploading empty blobs
+        if size_in_bytes == 0 {
+            return;
+        }
+
         self.curr_request_size += size_in_bytes;
 
         if self.curr_request_size >= self.max_msg_size {
@@ -561,6 +662,7 @@ impl REClient {
         grpc_clients: GRPCClients,
         capabilities: RECapabilities,
         instance_name: InstanceName,
+        bystream_compressor: Option<Compressor>,
     ) -> Self {
         REClient {
             runtime_opts,
@@ -569,9 +671,10 @@ impl REClient {
             instance_name,
             find_missing_cache: Mutex::new(FindMissingCache {
                 cache: LruCache::new(NonZeroUsize::new(50 << 20).unwrap()), // 50Mb
-                ttl: Duration::from_secs(12 * 60 * 60), // 12 hours TODO: Tune this parameter
+                ttl: Duration::from_hours(12), // 12 hours TODO: Tune this parameter
                 last_check: Instant::now(),
             }),
+            bystream_compressor,
         }
     }
 
@@ -614,6 +717,7 @@ impl REClient {
                     action_digest: Some(tdigest_to(request.action_digest)),
                     action_result: Some(convert_t_action_result2(request.action_result)?),
                     results_cache_policy: None,
+                    ..Default::default()
                 },
                 metadata,
                 self.runtime_opts.use_fbcode_metadata,
@@ -641,9 +745,15 @@ impl REClient {
         let request = GExecuteRequest {
             instance_name: self.instance_name.as_str().to_owned(),
             skip_cache_lookup: false,
-            execution_policy: None,
+            execution_policy: Some(ExecutionPolicy {
+                priority: execute_request
+                    .execution_policy
+                    .map(|ep| ep.priority)
+                    .unwrap_or_default(),
+            }),
             results_cache_policy: Some(ResultsCachePolicy { priority: 0 }),
             action_digest: Some(action_digest.clone()),
+            ..Default::default()
         };
 
         let stream = client
@@ -735,7 +845,7 @@ impl REClient {
         let stream = stream.map(move |mut r| {
             match &mut r {
                 Ok(ExecuteWithProgressResponse {
-                    execute_response: Some(ref mut response),
+                    execute_response: Some(response),
                     ..
                 }) => {
                     response.action_digest = std::mem::take(&mut execute_request.action_digest);
@@ -757,6 +867,7 @@ impl REClient {
         upload_impl(
             &self.instance_name,
             request,
+            self.bystream_compressor,
             self.capabilities.max_total_batch_size,
             self.runtime_opts.max_concurrent_uploads_per_action,
             |re_request| async {
@@ -822,6 +933,7 @@ impl REClient {
         download_impl(
             &self.instance_name,
             request,
+            self.bystream_compressor,
             self.capabilities.max_total_batch_size,
             |re_request| async {
                 let metadata = metadata.clone();
@@ -860,69 +972,76 @@ impl REClient {
         request: GetDigestsTtlRequest,
     ) -> anyhow::Result<GetDigestsTtlResponse> {
         let mut cas_client = self.grpc_clients.cas_client.clone();
-        let mut remote_ttl: HashMap<TDigest, DigestWithTtl> = HashMap::new();
+        let mut remote_results: HashMap<TDigest, DigestRemoteState> = HashMap::new();
+        let mut digests_to_check: Vec<TDigest> = Vec::new();
 
-        for digest_chunk in request.digests.chunks(100) {
-            let mut digest_to_check: Vec<TDigest> = Vec::new();
+        let mut digest_iter = request.digests.iter();
+        while digest_iter.len() > 0 {
+            // Sort our blobs based on what action we need to take
             {
                 let mut find_missing_cache = self.find_missing_cache.lock().unwrap();
-                for digest in digest_chunk {
-                    // Assume that all digests are present on the remote because the API
-                    // returns what is *not* present.
-                    remote_ttl.insert(
-                        digest.clone(),
-                        DigestWithTtl {
-                            digest: digest.clone(),
-                            // NOTE: This is an arbitrary number because RBE does not return information
-                            // on the TTL of the remote blob.
-                            ttl: 60,
-                        },
-                    );
-                    match find_missing_cache.get(digest) {
-                        Some(DigestRemoteState::Missing) | None => {
-                            digest_to_check.push(digest.clone());
-                        }
-                        _ => {}
+                for digest in digest_iter.by_ref() {
+                    if let Some(rs) = find_missing_cache.get(&digest) {
+                        // We have our final result already cached
+                        remote_results.insert(digest.clone(), rs);
+                    } else {
+                        // We can check this blob
+                        digests_to_check.push(digest.clone());
+                    }
+                    if digests_to_check.len() >= 100 {
+                        break;
                     }
                 }
             }
 
-            if digest_to_check.is_empty() {
-                continue;
-            }
+            // Send a request and notify others of the result
+            if !digests_to_check.is_empty() {
+                tracing::debug!(num_digests = digests_to_check.len(), "FindMissingBlobs");
+                let missing_blobs = cas_client
+                    .find_missing_blobs(with_re_metadata(
+                        FindMissingBlobsRequest {
+                            instance_name: self.instance_name.as_str().to_owned(),
+                            blob_digests: digests_to_check.map(|b| tdigest_to(b.clone())),
+                            ..Default::default()
+                        },
+                        metadata.clone(),
+                        self.runtime_opts.use_fbcode_metadata,
+                    ))
+                    .await
+                    .context("Failed to request what blobs are not present on remote")?;
+                let resp: FindMissingBlobsResponse = missing_blobs.into_inner();
 
-            let missing_blobs = cas_client
-                .find_missing_blobs(with_re_metadata(
-                    FindMissingBlobsRequest {
-                        instance_name: self.instance_name.as_str().to_owned(),
-                        blob_digests: digest_to_check.map(|b| tdigest_to(b.clone())),
-                    },
-                    metadata.clone(),
-                    self.runtime_opts.use_fbcode_metadata,
-                ))
-                .await
-                .context("Failed to request what blobs are not present on remote")?;
-            let resp: FindMissingBlobsResponse = missing_blobs.into_inner();
-            let mut find_missing_cache = self.find_missing_cache.lock().unwrap();
-            for digest in &digest_to_check {
-                find_missing_cache.put(digest.clone(), DigestRemoteState::ExistsOnRemote);
-            }
-            for digest in &resp.missing_blob_digests.map(|d| tdigest_from(d.clone())) {
-                // If it's present in the MissingBlobsResponse, it's expired on the remote and
-                // needs to be refetched.
-                remote_ttl.insert(
-                    digest.clone(),
-                    DigestWithTtl {
-                        digest: digest.clone(),
-                        ttl: 0,
-                    },
-                );
-                find_missing_cache.put(digest.clone(), DigestRemoteState::Missing);
+                // Update the results and the cache
+                let mut find_missing_cache = self.find_missing_cache.lock().unwrap();
+                for digest in &digests_to_check {
+                    remote_results.insert(digest.clone(), DigestRemoteState::ExistsOnRemote);
+                    find_missing_cache.put(digest.clone(), DigestRemoteState::ExistsOnRemote);
+                }
+
+                for digest in &resp.missing_blob_digests.map(|d| tdigest_from(d.clone())) {
+                    // If it's present in the MissingBlobsResponse, it's expired on the remote and
+                    // needs to be refetched.
+                    remote_results.insert(digest.clone(), DigestRemoteState::Missing);
+                    find_missing_cache.put(digest.clone(), DigestRemoteState::Missing);
+                }
+                digests_to_check.clear();
             }
         }
 
         Ok(GetDigestsTtlResponse {
-            digests_with_ttl: remote_ttl.values().cloned().collect::<Vec<DigestWithTtl>>(),
+            digests_with_ttl: remote_results
+                .iter()
+                .map(|(digest, rs)| match rs {
+                    DigestRemoteState::Missing => DigestWithTtl {
+                        digest: digest.clone(),
+                        ttl: 0,
+                    },
+                    DigestRemoteState::ExistsOnRemote => DigestWithTtl {
+                        digest: digest.clone(),
+                        ttl: self.runtime_opts.cas_ttl_secs,
+                    },
+                })
+                .collect::<Vec<DigestWithTtl>>(),
         })
     }
 
@@ -1120,21 +1239,21 @@ fn convert_t_action_result2(t_action_result: TActionResult2) -> anyhow::Result<A
                 path: output_directory.path,
                 tree_digest: Some(digest.clone()),
                 is_topologically_sorted: false,
+                root_directory_digest: None,
             }
         });
 
     let action_result = ActionResult {
         output_files,
-        output_file_symlinks: Vec::new(),
         output_symlinks,
         output_directories,
-        output_directory_symlinks: Vec::new(),
         exit_code: t_action_result.exit_code,
         stdout_raw: Vec::new(),
         stdout_digest: t_action_result.stdout_digest.map(tdigest_to),
         stderr_raw: Vec::new(),
         stderr_digest: t_action_result.stderr_digest.map(tdigest_to),
         execution_metadata,
+        ..Default::default()
     };
 
     Ok(action_result)
@@ -1143,25 +1262,41 @@ fn convert_t_action_result2(t_action_result: TActionResult2) -> anyhow::Result<A
 async fn download_impl<Byt, BytRet, Cas>(
     instance_name: &InstanceName,
     request: DownloadRequest,
+    bystream_compressor: Option<Compressor>,
     max_total_batch_size: usize,
     cas_f: impl Fn(BatchReadBlobsRequest) -> Cas,
     bystream_fut: impl Fn(ReadRequest) -> Byt + Sync + Send + Copy,
 ) -> anyhow::Result<DownloadResponse>
 where
     Byt: Future<Output = anyhow::Result<Pin<Box<BytRet>>>>,
-    BytRet: Stream<Item = Result<ReadResponse, tonic::Status>>,
+    BytRet: Stream<Item = Result<ReadResponse, tonic::Status>> + Send,
     Cas: Future<Output = anyhow::Result<BatchReadBlobsResponse>>,
 {
-    let bystream_fut = |digest: TDigest| async move {
-        let hash = digest.hash;
-        let size_in_bytes = digest.size_in_bytes;
+    fn resource_name(
+        instance_name: &InstanceName,
+        compressor: Option<Compressor>,
+        digest: &TDigest,
+    ) -> String {
+        if let Some(compressor) = compressor {
+            format!(
+                "{}compressed-blobs/{}/{}/{}",
+                instance_name.as_resource_prefix(),
+                compressor.name(),
+                digest.hash,
+                digest.size_in_bytes,
+            )
+        } else {
+            format!(
+                "{}blobs/{}/{}",
+                instance_name.as_resource_prefix(),
+                digest.hash,
+                digest.size_in_bytes,
+            )
+        }
+    }
 
-        let resource_name = format!(
-            "{}blobs/{}/{}",
-            instance_name.as_resource_prefix(),
-            hash,
-            size_in_bytes
-        );
+    let bystream_fut = |digest: TDigest| async move {
+        let resource_name = resource_name(&instance_name, bystream_compressor, &digest);
 
         bystream_fut(ReadRequest {
             resource_name: resource_name.clone(),
@@ -1169,7 +1304,34 @@ where
             read_limit: 0,
         })
         .await
-        .with_context(|| format!("Failed to read {} from Bytestream service", resource_name))
+        // adapt the tokio Stream of ReadResponse into a StreamReader
+        .map(|p| {
+            let blob_reader = StreamReader::new(
+                p.map(|r| r.map(|rr| Cursor::new(rr.data)).map_err(io::Error::other)),
+            );
+            // Wrap the blob reader in a compression reader
+            let reader: Pin<Box<dyn AsyncRead + Unpin + Send>> = match bystream_compressor {
+                None => Pin::new(Box::new(blob_reader)),
+                Some(Compressor::Zstd) => {
+                    let mut decoder = ZstdDecoder::new(blob_reader);
+                    decoder.multiple_members(true);
+                    Pin::new(Box::new(decoder))
+                }
+                Some(Compressor::Deflate) => {
+                    let mut decoder = DeflateDecoder::new(blob_reader);
+                    decoder.multiple_members(true);
+                    Pin::new(Box::new(decoder))
+                }
+                Some(Compressor::Brotli) => {
+                    let mut decoder = BrotliDecoder::new(blob_reader);
+                    decoder.multiple_members(true);
+                    Pin::new(Box::new(decoder))
+                }
+            };
+
+            reader
+        })
+        .with_context(|| format!("Failed to read {resource_name} from Bytestream service"))
     };
 
     let inlined_digests = request.inlined_digests.unwrap_or_default();
@@ -1196,6 +1358,7 @@ where
                 instance_name: instance_name.as_str().to_owned(),
                 digests: std::mem::take(&mut curr_digests),
                 acceptable_compressors: vec![compressor::Value::Identity as i32],
+                ..Default::default()
             };
             requests.push(read_blob_req);
             curr_size = digest.size_bytes;
@@ -1208,6 +1371,7 @@ where
             instance_name: instance_name.as_str().to_owned(),
             digests: std::mem::take(&mut curr_digests),
             acceptable_compressors: vec![compressor::Value::Identity as i32],
+            ..Default::default()
         };
         requests.push(read_blob_req);
     }
@@ -1231,7 +1395,7 @@ where
 
         Ok(batched_blobs_response
             .get(digest)
-            .with_context(|| format!("Did not receive digest data for `{}`", digest))?
+            .with_context(|| format!("Did not receive digest data for `{digest}`"))?
             .clone())
     };
 
@@ -1239,13 +1403,8 @@ where
     for digest in inlined_digests {
         let data = if digest.size_in_bytes as usize >= max_total_batch_size {
             let mut accum = vec![];
-            let mut responses = bystream_fut(digest.clone()).await?;
-            while let Some(resp) = responses.next().await {
-                let data = resp
-                    .with_context(|| format!("Failed to fetch inline digest: {digest}"))?
-                    .data;
-                accum.extend_from_slice(&data);
-            }
+            let mut reader = bystream_fut(digest.clone()).await?;
+            tokio::io::copy(&mut reader, &mut accum).await?;
             accum
         } else {
             get(&digest)?
@@ -1284,15 +1443,12 @@ where
                     .await
                     .with_context(|| format!("Error writing: {}", req.named_digest.digest))?;
             } else {
-                let mut responses = bystream_fut(req.named_digest.digest.clone()).await?;
-                while let Some(resp) = responses.next().await {
-                    let data = resp
-                        .with_context(|| format!("Failed to fetch file: {:?}", file))?
-                        .data;
-                    file.write_all(&data).await.with_context(|| {
+                let mut reader = bystream_fut(req.named_digest.digest.clone()).await?;
+                tokio::io::copy(&mut reader, &mut file)
+                    .await
+                    .with_context(|| {
                         format!("Error writing chunk of: {}", req.named_digest.digest)
                     })?;
-                }
             }
             file.flush().await.context("Error flushing")?;
             anyhow::Ok(())
@@ -1317,6 +1473,7 @@ where
 async fn upload_impl<Byt, Cas>(
     instance_name: &InstanceName,
     request: UploadRequest,
+    bystream_compressor: Option<Compressor>,
     max_total_batch_size: usize,
     max_concurrent_uploads: Option<usize>,
     cas_f: impl Fn(BatchUpdateBlobsRequest) -> Cas + Sync + Send + Copy,
@@ -1326,12 +1483,82 @@ where
     Cas: Future<Output = anyhow::Result<BatchUpdateBlobsResponse>> + Send,
     Byt: Future<Output = anyhow::Result<WriteResponse>> + Send,
 {
+    fn resource_name(
+        instance_name: &InstanceName,
+        client_uuid: &str,
+        compressor: Option<Compressor>,
+        digest: &TDigest,
+    ) -> String {
+        if let Some(compressor) = compressor {
+            format!(
+                "{}uploads/{}/compressed-blobs/{}/{}/{}",
+                instance_name.as_resource_prefix(),
+                client_uuid,
+                compressor.name(),
+                digest.hash,
+                digest.size_in_bytes,
+            )
+        } else {
+            format!(
+                "{}uploads/{}/blobs/{}/{}",
+                instance_name.as_resource_prefix(),
+                client_uuid,
+                digest.hash,
+                digest.size_in_bytes,
+            )
+        }
+    }
+
     // NOTE if we stop recording blob_hashes, we can drop out a lot of allocations.
     let mut upload_futures: Vec<BoxFuture<anyhow::Result<Vec<String>>>> = vec![];
 
     // For small file uploads the client should group them together and call `BatchUpdateBlobs`
     // https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/execution/v2/remote_execution.proto#L205
     let mut batched_blob_updates = BatchUploadReqAggregator::new(max_total_batch_size);
+
+    // Adapt the given bystream_fut to take in an AsyncBufRead
+    let bystream_fut = |resource_name: String, reader: Box<dyn AsyncBufRead + Unpin + Send>| async move {
+        let mut reader: Pin<Box<dyn AsyncRead + Unpin + Send>> = match bystream_compressor {
+            None => Pin::new(Box::new(reader)),
+            Some(Compressor::Zstd) => Pin::new(Box::new(ZstdEncoder::new(reader))),
+            Some(Compressor::Deflate) => Pin::new(Box::new(DeflateEncoder::new(reader))),
+            Some(Compressor::Brotli) => Pin::new(Box::new(BrotliEncoder::new(reader))),
+        };
+
+        let mut current_offset = 0;
+        let mut upload_segments = Vec::new();
+        let mut buf = vec![0; max_total_batch_size];
+        loop {
+            let n_read = reader.read(&mut buf).await.unwrap();
+            if n_read == 0 {
+                break;
+            }
+            upload_segments.push(WriteRequest {
+                resource_name: resource_name.clone(),
+                write_offset: current_offset,
+                finish_write: false,
+                data: buf[0..n_read].to_vec(),
+            });
+            current_offset += n_read as i64;
+        }
+        if let Some(last_segment) = upload_segments.last_mut() {
+            last_segment.finish_write = true;
+        }
+
+        if upload_segments.is_empty() {
+            // As an optimization, we can silently skip uploading empty blobs
+            return Ok(());
+        }
+
+        let response = bystream_fut(upload_segments).await?;
+        if response.committed_size != current_offset && response.committed_size != -1 {
+            return Err(anyhow::anyhow!(
+                "Failed to upload `{resource_name}`: invalid committed_size from WriteResponse"
+            ));
+        }
+
+        Ok(())
+    };
 
     // Create futures for any blobs that need uploading.
     for blob in request.inlined_blobs_with_digest.unwrap_or_default() {
@@ -1345,32 +1572,14 @@ where
 
         let data = blob.blob;
         let client_uuid = uuid::Uuid::new_v4().to_string();
-        let resource_name = format!(
-            "{}uploads/{}/blobs/{}/{}",
-            instance_name.as_resource_prefix(),
-            client_uuid,
-            hash,
-            size
+        let resource_name = resource_name(
+            &instance_name,
+            &client_uuid,
+            bystream_compressor,
+            &blob.digest,
         );
         let fut = async move {
-            // Number of complete (non-partial) messages
-            let mut upload_segments = vec![];
-            for (i, chunk) in data.chunks(max_total_batch_size).enumerate() {
-                upload_segments.push(WriteRequest {
-                    resource_name: resource_name.to_owned(),
-                    write_offset: (i * max_total_batch_size) as i64,
-                    finish_write: false,
-                    data: chunk.to_owned(),
-                });
-            }
-            upload_segments.last_mut().unwrap().finish_write = true;
-
-            let resp = bystream_fut(upload_segments).await?;
-            if resp.committed_size != size {
-                return Err(anyhow::anyhow!(
-                    "Failed to upload inline blob: invalid committed_size from WriteResponse"
-                ));
-            }
+            bystream_fut(resource_name, Box::new(Cursor::new(data))).await?;
 
             Ok(vec![hash])
         };
@@ -1387,48 +1596,19 @@ where
             continue;
         }
         let client_uuid = uuid::Uuid::new_v4().to_string();
-        let resource_name = format!(
-            "{}uploads/{}/blobs/{}/{}",
-            instance_name.as_resource_prefix(),
-            client_uuid,
-            hash.clone(),
-            size
+        let resource_name = resource_name(
+            &instance_name,
+            &client_uuid,
+            bystream_compressor,
+            &file.digest,
         );
+
         let fut = async move {
-            let mut file = tokio::fs::File::open(&name)
+            let file = tokio::fs::File::open(&name)
                 .await
                 .with_context(|| format!("Opening `{name}` for reading failed"))?;
-            let mut data = vec![0; max_total_batch_size];
 
-            let mut write_offset = 0;
-            let mut upload_segments = Vec::new();
-            loop {
-                let length = file
-                    .read(&mut data)
-                    .await
-                    .with_context(|| format!("Error reading from {name}"))?;
-                if length == 0 {
-                    break;
-                }
-                upload_segments.push(WriteRequest {
-                    resource_name: resource_name.to_owned(),
-                    write_offset,
-                    finish_write: false,
-                    data: data[..length].to_owned(),
-                });
-                write_offset += length as i64;
-            }
-            upload_segments
-                .last_mut()
-                .with_context(|| format!("Read no segments from `{name} "))?
-                .finish_write = true;
-
-            let resp = bystream_fut(upload_segments).await?;
-            if resp.committed_size != size {
-                return Err(anyhow::anyhow!(
-                    "Failed to upload `{name}`: invalid committed_size from WriteResponse"
-                ));
-            }
+            bystream_fut(resource_name, Box::new(BufReader::new(file))).await?;
             Ok(vec![hash])
         };
         upload_futures.push(Box::pin(fut));
@@ -1442,6 +1622,7 @@ where
             let mut re_request = BatchUpdateBlobsRequest {
                 instance_name: instance_name.as_str().to_owned(),
                 requests: vec![],
+                ..Default::default()
             };
             for blob in batch {
                 match blob {
@@ -1699,6 +1880,7 @@ mod tests {
         download_impl(
             &InstanceName(None),
             req,
+            None,
             10000,
             |req| {
                 let res = res.clone();
@@ -1805,6 +1987,7 @@ mod tests {
         download_impl(
             &InstanceName(None),
             req,
+            None,
             10, // kept small to simulate a large file download
             |req| {
                 let res = res.clone();
@@ -1886,6 +2069,7 @@ mod tests {
         let res = download_impl(
             &InstanceName(None),
             req,
+            None,
             100000,
             |req| {
                 let res = res.clone();
@@ -1972,6 +2156,7 @@ mod tests {
         let res = download_impl(
             &InstanceName(None),
             req,
+            None,
             7,
             |req| {
                 counter.fetch_add(1, Ordering::Relaxed);
@@ -2040,6 +2225,7 @@ mod tests {
         let res = download_impl(
             &InstanceName(None),
             req,
+            None,
             10, // intentionally small value to keep data in the test blobs small
             |req| {
                 let res = res.clone();
@@ -2095,6 +2281,7 @@ mod tests {
         let res = download_impl(
             &InstanceName(None),
             req,
+            None,
             100000,
             |req| {
                 let res = res.clone();
@@ -2133,6 +2320,7 @@ mod tests {
         download_impl(
             &InstanceName(Some("instance".to_owned())),
             req,
+            None,
             0,
             |_req| async { panic!("not called") },
             |req| async move {
@@ -2202,6 +2390,7 @@ mod tests {
         upload_impl(
             &InstanceName(None),
             req,
+            None,
             10000,
             None,
             |req| {
@@ -2285,6 +2474,7 @@ mod tests {
         upload_impl(
             &InstanceName(None),
             req,
+            None,
             10, // kept small to simulate a large file upload
             None,
             |req| {
@@ -2359,6 +2549,7 @@ mod tests {
         upload_impl(
             &InstanceName(None),
             req,
+            None,
             10, // kept small to simulate a large inlined upload
             None,
             |req| {
@@ -2420,6 +2611,7 @@ mod tests {
         let resp: Result<UploadResponse, anyhow::Error> = upload_impl(
             &InstanceName(None), // TODO
             req,
+            None,
             10,
             None,
             |_req| async move {
@@ -2481,6 +2673,7 @@ mod tests {
         upload_impl(
             &InstanceName(None),
             req,
+            None,
             3,
             None,
             |_req| async move {
@@ -2510,31 +2703,62 @@ mod tests {
             ..Default::default()
         };
 
-        let req = UploadRequest {
-            files_with_digest: Some(vec![NamedDigest {
-                name: path1.to_owned(),
-                digest: digest1.clone(),
-                ..Default::default()
-            }]),
-            ..Default::default()
-        };
-
-        let res = upload_impl(
-            &InstanceName(None),
-            req,
-            0,
+        for compressor in [
             None,
-            |_req| async move {
-                panic!("Not called");
-            },
-            |_write_reqs| async move {
-                panic!("Not called");
-            },
-        )
-        .await;
+            Some(Compressor::Deflate),
+            Some(Compressor::Brotli),
+            Some(Compressor::Zstd),
+        ] {
+            assert!(
+                upload_impl(
+                    &InstanceName(None),
+                    UploadRequest {
+                        files_with_digest: Some(vec![NamedDigest {
+                            name: path1.to_owned(),
+                            digest: digest1.clone(),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    },
+                    compressor,
+                    0, // max_total_batch_size=0 forces bytestream API
+                    None,
+                    |_req| async move {
+                        panic!("Not called");
+                    },
+                    |_write_reqs| async move {
+                        panic!("Not called");
+                    },
+                )
+                .await
+                .is_ok()
+            );
 
-        assert!(res.is_err()); // Should not panic.
-
+            assert!(
+                upload_impl(
+                    &InstanceName(None),
+                    UploadRequest {
+                        files_with_digest: Some(vec![NamedDigest {
+                            name: path1.to_owned(),
+                            digest: digest1.clone(),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    },
+                    compressor,
+                    1024, // forces the batch API
+                    None,
+                    |_req| async move {
+                        panic!("Not called");
+                    },
+                    |_write_reqs| async move {
+                        panic!("Not called");
+                    },
+                )
+                .await
+                .is_ok()
+            );
+        }
         Ok(())
     }
 
@@ -2568,6 +2792,7 @@ mod tests {
         upload_impl(
             &InstanceName(Some("instance".to_owned())),
             req,
+            None,
             1,
             None,
             |_req| async move {
@@ -2577,6 +2802,57 @@ mod tests {
                 assert!(write_reqs[0].resource_name.starts_with("instance/uploads/"));
                 assert!(write_reqs[0].resource_name.ends_with("/blobs/aa/3"));
                 anyhow::Ok(WriteResponse { committed_size: 3 })
+            },
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_upload_resource_name_compressed() -> anyhow::Result<()> {
+        let digest1 = TDigest {
+            hash: "aa".to_owned(),
+            size_in_bytes: 3,
+            ..Default::default()
+        };
+        let work = tempfile::tempdir()?;
+
+        let path1 = work.path().join("path1");
+        let path1 = path1.to_str().context("tempdir is not utf8")?;
+        tokio::fs::write(path1, "aaa").await?;
+
+        let req = UploadRequest {
+            inlined_blobs_with_digest: Some(vec![InlinedBlobWithDigest {
+                digest: digest1.clone(),
+                blob: b"aaa".to_vec(),
+                ..Default::default()
+            }]),
+            files_with_digest: Some(vec![NamedDigest {
+                name: path1.to_owned(),
+                digest: digest1.clone(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        upload_impl(
+            &InstanceName(Some("instance".to_owned())),
+            req,
+            Some(Compressor::Zstd),
+            1,
+            None,
+            |_req| async move {
+                panic!("Not called");
+            },
+            |write_reqs| async move {
+                assert!(write_reqs[0].resource_name.starts_with("instance/uploads/"));
+                assert!(
+                    write_reqs[0]
+                        .resource_name
+                        .ends_with("/compressed-blobs/zstd/aa/3")
+                );
+                anyhow::Ok(WriteResponse { committed_size: -1 })
             },
         )
         .await?;
@@ -2609,4 +2885,94 @@ mod tests {
         assert_eq!(substitute_env_vars_impl("FOO", getter).unwrap(), "FOO");
         assert!(substitute_env_vars_impl("$FOO$BAZ", getter).is_err());
     }
+}
+
+#[tokio::test]
+async fn test_upload_compressed() -> anyhow::Result<()> {
+    let blob_data = vec![1; 10 * 1024 * 1024];
+    let digest1 = TDigest {
+        hash: "aa".to_owned(),
+        size_in_bytes: blob_data.len() as i64,
+        ..Default::default()
+    };
+
+    let req = UploadRequest {
+        inlined_blobs_with_digest: Some(vec![InlinedBlobWithDigest {
+            digest: digest1.clone(),
+            blob: blob_data.clone(),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+
+    let blob_data_ref = &blob_data;
+    upload_impl(
+        &InstanceName(Some("instance".to_owned())),
+        req,
+        Some(Compressor::Zstd),
+        1,
+        None,
+        |_req| async move {
+            panic!("Not called");
+        },
+        {
+            |write_reqs| async move {
+                let compressed_data: Vec<u8> =
+                    write_reqs.iter().flat_map(|wr| wr.data.clone()).collect();
+                let mut data = vec![];
+                ZstdDecoder::new(Cursor::new(compressed_data))
+                    .read_to_end(&mut data)
+                    .await
+                    .unwrap();
+                assert_eq!(&data, blob_data_ref);
+                anyhow::Ok(WriteResponse { committed_size: -1 })
+            }
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_download_compressed() -> anyhow::Result<()> {
+    let blob_data = vec![1; 1024];
+
+    let mut compressed_data = vec![];
+    ZstdEncoder::new(Cursor::new(blob_data.clone()))
+        .read_to_end(&mut compressed_data)
+        .await
+        .unwrap();
+    let compressed_data_ref = &compressed_data;
+
+    let d_resp = download_impl(
+        &InstanceName(None),
+        DownloadRequest {
+            inlined_digests: Some(vec![TDigest {
+                hash: "aa".to_owned(),
+                size_in_bytes: blob_data.len() as i64,
+                ..Default::default()
+            }]),
+            file_digests: None,
+            ..Default::default()
+        },
+        Some(Compressor::Zstd),
+        10,
+        |_req| async { panic!("not called") },
+        |_req| async move {
+            Ok(Box::pin(futures::stream::iter(
+                compressed_data_ref
+                    .chunks(10)
+                    .map(|d| Result::Ok(ReadResponse { data: d.to_vec() })),
+            )))
+        },
+    )
+    .await?;
+
+    assert_eq!(
+        d_resp.inlined_blobs.as_ref().unwrap()[0].blob.len(),
+        blob_data.len()
+    );
+    assert_eq!(d_resp.inlined_blobs.unwrap()[0].blob, blob_data);
+    Ok(())
 }

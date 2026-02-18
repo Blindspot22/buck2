@@ -1,17 +1,20 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testrunner;
 
-import com.android.ddmlib.IDevice;
 import com.android.ddmlib.testrunner.ITestRunListener;
 import com.android.ddmlib.testrunner.TestIdentifier;
+import com.facebook.buck.android.exopackage.AdbUtils;
+import com.facebook.buck.android.exopackage.AndroidDevice;
+import com.facebook.buck.testresultsoutput.TestResultsOutputEvent.RunFailureStatus;
 import com.facebook.buck.testresultsoutput.TestResultsOutputSender;
 import java.util.Map;
 
@@ -29,12 +32,16 @@ import java.util.Map;
  */
 public class InstrumentationTpxStandardOutputTestListener implements ITestRunListener {
   private final TpxStandardOutputTestListener listener;
-  private final IDevice mDevice;
+  private final TestResultsOutputSender sender;
+  private final AndroidDevice mAndroidDevice;
+  private final AdbUtils mAdbUtils;
 
   public InstrumentationTpxStandardOutputTestListener(
-      TestResultsOutputSender sender, IDevice device) {
+      TestResultsOutputSender sender, AndroidDevice androidDevice, AdbUtils adbUtils) {
+    this.sender = sender;
     this.listener = new TpxStandardOutputTestListener(sender);
-    this.mDevice = device;
+    this.mAndroidDevice = androidDevice;
+    this.mAdbUtils = adbUtils;
   }
 
   /**
@@ -67,8 +74,8 @@ public class InstrumentationTpxStandardOutputTestListener implements ITestRunLis
    */
   @Override
   public void testFailed(TestIdentifier test, String trace) {
-    if (mDevice != null && CrashCapturer.deviceHasCrashLogs(trace)) {
-      trace = CrashCapturer.addDeviceLogcatTrace(mDevice, trace);
+    if (mAndroidDevice != null && mAdbUtils != null && CrashCapturer.deviceHasCrashLogs(trace)) {
+      trace = CrashCapturer.addDeviceLogcatTrace(mAndroidDevice, mAdbUtils, trace);
     }
 
     listener.testFailed(getFullTestName(test), trace);
@@ -116,7 +123,21 @@ public class InstrumentationTpxStandardOutputTestListener implements ITestRunLis
    * @param errorMessage {@link String} describing reason for run failure.
    */
   @Override
-  public void testRunFailed(String errorMessage) {}
+  public void testRunFailed(String errorMessage) {
+    // Enhance error message with device logs if available
+    String enhancedMessage = errorMessage;
+    if (mAndroidDevice != null
+        && mAdbUtils != null
+        && CrashCapturer.deviceHasCrashLogs(errorMessage)) {
+      enhancedMessage = CrashCapturer.addDeviceLogcatTrace(mAndroidDevice, mAdbUtils, errorMessage);
+    }
+
+    sender.sendRunFailure(
+        RunFailureStatus.FATAL,
+        System.currentTimeMillis(),
+        enhancedMessage,
+        null); // stacktrace is embedded in the message
+  }
 
   /**
    * Reports the start of a test run.

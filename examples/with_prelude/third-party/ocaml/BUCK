@@ -1,4 +1,7 @@
 # buildifier: disable=no-effect
+
+oncall("build_infra")
+
 prebuilt_cxx_library(
     name = "ocaml-dev",
     header_dirs = ["opam/lib/ocaml"],

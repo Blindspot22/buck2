@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use crate::types::OptionalVertexId;
@@ -25,7 +26,7 @@ pub struct Graph {
 
 impl Graph {
     #[inline]
-    pub fn iter_vertices(&self) -> impl DoubleEndedIterator<Item = VertexId> {
+    pub fn iter_vertices(&self) -> impl DoubleEndedIterator<Item = VertexId> + use<> {
         self.vertices.keys()
     }
 
@@ -296,9 +297,9 @@ mod tests {
     fn test_graph() -> (Graph, VertexKeys<&'static str>, VertexData<&'static str>) {
         let mut builder = GraphBuilder::new();
         builder.push(K3, std::iter::empty(), K3).unwrap();
-        builder.push(K2, vec![K3].into_iter(), K2).unwrap();
+        builder.push(K2, vec![K3], K2).unwrap();
         builder.push(K1, std::iter::empty(), K1).unwrap();
-        builder.push(K0, vec![K1, K2].into_iter(), K0).unwrap();
+        builder.push(K0, vec![K1, K2], K0).unwrap();
 
         builder.finish()
     }

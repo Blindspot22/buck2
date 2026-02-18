@@ -1,5 +1,7 @@
 load(":platforms.bzl", "execution_platform", "host_configuration")
 
+oncall("build_infra")
+
 execution_platform(
     name = "default",
     cpu_configuration = host_configuration.cpu,

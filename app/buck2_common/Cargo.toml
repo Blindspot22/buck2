@@ -1,12 +1,11 @@
 [package]
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_common"
 repository = { workspace = true }
 version = "0.1.0"
 
 [dependencies]
-anyhow = { workspace = true }
 async-scoped = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
@@ -39,6 +38,7 @@ serde_json = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
+strsim = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -49,6 +49,7 @@ cmp_any = { workspace = true }
 dice = { workspace = true }
 dupe = { workspace = true }
 gazebo = { workspace = true }
+pagable = { workspace = true }
 starlark_map = { workspace = true }
 
 buck2_cli_proto = { workspace = true }
@@ -56,12 +57,14 @@ buck2_core = { workspace = true }
 buck2_data = { workspace = true }
 buck2_error = { workspace = true }
 buck2_events = { workspace = true }
-buck2_futures = { workspace = true }
+buck2_fs = { workspace = true }
 buck2_http = { workspace = true }
 buck2_util = { workspace = true }
 buck2_wrapper_common = { workspace = true }
+dice_futures = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
+hyper-util = { workspace = true }
 nix = { workspace = true }
 tower = { workspace = true }
 xattr = { workspace = true }

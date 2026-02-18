@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _error_handler_impl(ctx: ActionErrorCtx) -> list[ActionSubError]:
     indentation_error = regex(r"IndentationError")
@@ -20,11 +21,8 @@ def _error_handler_impl(ctx: ActionErrorCtx) -> list[ActionSubError]:
         categories.append(ctx.new_sub_error(
             category = "syntax",
             message = "Syntax error!",
-            locations = [
-                # Using regex to find the file is a pain, but let's at least show
-                # that `location` is emitted to the build report as expected
-                ctx.new_error_location(file = "not_really_the_right_file", line = 1),
-            ],
+            file = "not_really_the_right_file",
+            lnum = 1,
         ))
 
     return categories
@@ -33,7 +31,7 @@ def _make_failing_action(ctx, src, name):
     out = ctx.actions.declare_output(src.short_path)
     ctx.actions.run(
         [
-            "python3",
+            "fbpython",
             src,
             out.as_output(),
         ],
@@ -106,7 +104,7 @@ def _error_handler_produced_multiple_categories(ctx):
     return [DefaultInfo(default_outputs = [out])]
 
 def _fail_error_handler_with_output(ctx):
-    out = ctx.actions.declare_output("output")
+    out = ctx.actions.declare_output("output", has_content_based_path = ctx.attrs.use_content_based_path)
 
     def error_handler(ctx: ActionErrorCtx) -> list[ActionSubError]:
         categories = []
@@ -129,7 +127,7 @@ def _fail_error_handler_with_output(ctx):
 
     ctx.actions.run(
         [
-            "python3",
+            "fbpython",
             ctx.attrs.src,
             out.as_output(),
         ],
@@ -144,6 +142,7 @@ fail_error_handler_with_output = rule(
     impl = _fail_error_handler_with_output,
     attrs = {
         "src": attrs.source(),
+        "use_content_based_path": attrs.bool(default = read_config("test", "use_content_based_path", "") in ["true", "True"]),
     },
 )
 

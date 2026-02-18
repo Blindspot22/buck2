@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io::Write;
@@ -240,7 +241,6 @@ impl StreamingCommand for BuildCommand {
         ctx: &mut ClientCommandContext<'_>,
         events_ctx: &mut EventsCtx,
     ) -> ExitResult {
-        let show_default_other_outputs = false;
         let context = ctx.client_context(matches, &self)?;
 
         let result = buckd
@@ -258,13 +258,13 @@ impl StreamingCommand for BuildCommand {
                     response_options: Some(ResponseOptions {
                         return_outputs: self.show_output.format().is_some()
                             || self.output_path.is_some(),
-                        return_default_other_outputs: show_default_other_outputs,
                     }),
                     build_opts: Some(self.build_opts.to_proto()),
                     final_artifact_materializations: self.materializations.to_proto() as i32,
                     final_artifact_uploads: self.upload_final_artifacts.to_proto() as i32,
                     target_universe: self.target_cfg.target_universe,
                     timeout: self.timeout_options.overall_timeout()?,
+                    run_args_missing_separator: false,
                 },
                 events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
@@ -310,6 +310,15 @@ impl StreamingCommand for BuildCommand {
             writeln!(&mut stdout)?;
         }
 
+        if let Some(format) = self.show_output.format() {
+            print_outputs(
+                &mut stdout,
+                &response.build_targets,
+                self.show_output.is_full().then_some(response.project_root),
+                format,
+            )?;
+        }
+
         let res = if success {
             if let Some(stdout) = &self.output_path {
                 copy_to_out(
@@ -320,16 +329,6 @@ impl StreamingCommand for BuildCommand {
                 )
                 .await
                 .buck_error_context("Error requesting specific output path for --out")?;
-            }
-
-            if let Some(format) = self.show_output.format() {
-                print_outputs(
-                    &mut stdout,
-                    response.build_targets,
-                    self.show_output.is_full().then_some(response.project_root),
-                    format,
-                    show_default_other_outputs,
-                )?;
             }
 
             ExitResult::success()
@@ -375,29 +374,26 @@ pub(crate) fn print_build_failed(console: &FinalConsole) -> buck2_error::Result<
 
 pub(crate) fn print_outputs(
     out: impl Write,
-    targets: Vec<BuildTarget>,
+    targets: &[BuildTarget],
     root_path: Option<String>,
     format: PrintOutputsFormat,
-    show_all_outputs: bool,
 ) -> Result<(), ClientIoError> {
     let root_path = root_path.map(PathBuf::from);
     let mut print = PrintOutputs::new(out, root_path, format)?;
 
     for build_target in targets {
         // just print the default info for build command
-        let outputs = build_target.outputs.into_iter().filter(|output| {
+        let outputs = build_target.outputs.iter().filter(|output| {
             output
                 .providers
                 .as_ref()
-                .is_none_or(|p| show_all_outputs || (p.default_info && !p.other))
+                .is_none_or(|p| p.default_info && !p.other)
         });
 
         // only print the unconfigured target for now until we migrate everything to support
         // also printing configurations
-        if outputs.clone().count() > 1 && !show_all_outputs {
-            // We only print the default outputs when we don't `show_all_outputs`,
-            // which shouldn't have more than one output.
-            // (although we currently don't yet restrict this, but we should).
+        if outputs.clone().count() > 1 {
+            // FIXME(JakobDegen): Why exactly do we not show the path?
             print.output(&build_target.target, None)?;
             continue;
         }

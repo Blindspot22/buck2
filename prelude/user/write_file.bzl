@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(":rule_spec.bzl", "RuleRegistrationSpec")
 
@@ -26,6 +27,7 @@ def _impl(ctx: AnalysisContext):
         ctx.attrs.out,
         content,
         is_executable = ctx.attrs.is_executable,
+        has_content_based_path = ctx.attrs.has_content_based_path,
     )
 
     providers = [DefaultInfo(default_output = output)]
@@ -41,6 +43,7 @@ registration_spec = RuleRegistrationSpec(
     attrs = {
         # API based on https://github.com/bazelbuild/bazel-skylib/blob/main/docs/write_file_doc.md.
         "content": attrs.list(attrs.string(), default = []),
+        "has_content_based_path": attrs.bool(default = False),
         "is_executable": attrs.bool(default = False),
         "labels": attrs.list(attrs.string(), default = []),
         "newline": attrs.enum(["auto", "unix", "windows"], default = "auto"),

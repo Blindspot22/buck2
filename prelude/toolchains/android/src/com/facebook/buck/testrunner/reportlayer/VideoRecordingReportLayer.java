@@ -1,19 +1,24 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.testrunner.reportlayer;
 
-import com.android.ddmlib.IDevice;
 import com.facebook.buck.testrunner.InstrumentationTestRunner;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.ProcessBuilder.Redirect;
 import java.nio.file.Path;
+import java.util.regex.Pattern;
 
 /**
  * report layer to start a process to record video of tests before they run and collect the video as
@@ -22,7 +27,7 @@ import java.nio.file.Path;
 public class VideoRecordingReportLayer extends ReportLayer {
 
   private static final String VIDEO_RECORDING_STORAGE_PATH =
-      "/storage/emulated/0/Android/data/%s/files";
+      "/sdcard/test_result/video_recordings/";
   private static final String VIDEO_RECORDING_SCRIPT_NAME = "test-video-record.sh";
   private static final String VIDEO_RECORDING_FILE_NAME = "test-video-record.mp4";
 
@@ -36,23 +41,21 @@ public class VideoRecordingReportLayer extends ReportLayer {
 
   @Override
   public void initialize() {
-    this.videoRecordingProcess = this.startVideoRecording(runner.getDevice());
+    this.videoRecordingProcess = this.startVideoRecording();
   }
 
   @Override
   public void report() {
-    this.collectVideoRecording(runner.getDevice());
+    this.collectVideoRecording();
   }
 
   private String getVideoRecordingStoragePath() {
     return String.format(VIDEO_RECORDING_STORAGE_PATH, this.runner.getPackageName());
   }
 
-  private Process startVideoRecording(IDevice device) {
+  private Process startVideoRecording() {
     try {
-      System.out.println("starting video recording...");
       File scriptFile = File.createTempFile("video-recording-", ".sh");
-      System.out.println("script file: " + scriptFile.getAbsolutePath());
       FileWriter scriptFileWriter = new FileWriter(scriptFile);
       // create local script file
       scriptFileWriter.write(
@@ -73,40 +76,69 @@ public class VideoRecordingReportLayer extends ReportLayer {
       // push script to device
       String remoteScriptPath =
           String.format("%s/%s", this.getVideoRecordingStoragePath(), VIDEO_RECORDING_SCRIPT_NAME);
-      System.out.println("remote script path:" + remoteScriptPath);
-      this.runner.pushFileWithSyncService(device, scriptFile.getAbsolutePath(), remoteScriptPath);
+      this.runner.pushFileWithSyncService(scriptFile.getAbsolutePath(), remoteScriptPath);
       // start recording process
-      return this.runner.exec(String.format("adb shell sh %s", remoteScriptPath));
+      String[] command = new String[] {"adb", "shell", "sh", remoteScriptPath};
+      return new ProcessBuilder(command).redirectOutput(Redirect.PIPE).start();
     } catch (Exception e) {
       System.err.printf("Failed to start video recording process with error: %s\n", e);
       return null;
     }
   }
 
-  private void collectVideoRecording(IDevice device) {
+  private void collectVideoRecording() {
     try {
       // stop video recording
       videoRecordingProcess.getOutputStream().write("STOP".getBytes());
       videoRecordingProcess.getOutputStream().write(System.lineSeparator().getBytes());
       videoRecordingProcess.getOutputStream().flush();
+      StringBuilder output = new StringBuilder();
+      try (InputStream is = videoRecordingProcess.getInputStream()) {
+        byte[] allOutput = readAllBytes(is);
+        output.append(new String(allOutput));
+      } catch (IOException e) {
+        output.append("IOError: ");
+        output.append(e.getMessage());
+        output.append("\n");
+      }
       int exitCode = videoRecordingProcess.waitFor();
       if (exitCode != 0) {
-        throw new Exception(
-            String.format("Failed to stop video recording process with exit code %d", exitCode));
+        // check whether screenrecord terminated before we tried to kill it. We don't want to throw
+        // an error in that case.
+        Pattern noProcessKilled = Pattern.compile("kill: \\d+: No such process");
+        if (!noProcessKilled.matcher(output).find()) {
+          throw new Exception(
+              String.format(
+                  "Failed to stop video recording process with exit code %d, Output: %s",
+                  exitCode, output.toString()));
+        }
       }
       // pull file to TRA
       Path video_artifact =
           this.runner.createTRA(
               "video_recording_test_artifact", "video recording", VIDEO_RECORDING_FILE_NAME);
       if (null == video_artifact) {
-        throw new Exception("Failed to create TRA for vide recording");
+        throw new Exception("Failed to create TRA for video recording");
       }
       this.runner.pullFileWithSyncService(
-          device,
           String.format("%s/%s", this.getVideoRecordingStoragePath(), VIDEO_RECORDING_FILE_NAME),
           video_artifact.toString());
     } catch (Exception e) {
       System.err.printf("Failed to collect video recording process with error: %s", e);
     }
+  }
+
+  private static byte[] readAllBytes(InputStream inputStream) throws IOException {
+    final int bufLen = 1024;
+    byte[] buf = new byte[bufLen];
+    int readLen;
+
+    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+
+    while ((readLen = inputStream.read(buf, 0, bufLen)) != -1) {
+      outputStream.write(buf, 0, readLen);
+    }
+
+    return outputStream.toByteArray();
   }
 }

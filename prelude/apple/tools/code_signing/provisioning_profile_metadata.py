@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -13,7 +14,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, FrozenSet
+from typing import Any
 
 from apple.tools.plistlib_utils import detect_format_and_loads
 
@@ -27,12 +28,12 @@ class ProvisioningProfileMetadata:
     uuid: str
     # Naïve object with ignored timezone, see https://bugs.python.org/msg110249
     expiration_date: datetime
-    platforms: FrozenSet[str]
+    platforms: frozenset[str]
     # Let's agree they are uppercased
-    developer_certificate_fingerprints: FrozenSet[str]
-    entitlements: Dict[str, Any]
+    developer_certificate_fingerprints: frozenset[str]
+    entitlements: dict[str, Any]
 
-    _mergeable_entitlements_keys: FrozenSet[str] = frozenset(
+    _mergeable_entitlements_keys: frozenset[str] = frozenset(
         [
             "application-identifier",
             "beta-reports-active",
@@ -49,12 +50,12 @@ class ProvisioningProfileMetadata:
         ) or self.entitlements.get("com.apple.application-identifier")
         if not maybe_app_id:
             raise RuntimeError(
-                "Entitlements do not contain app ID: {}".format(self.entitlements)
+                f"Entitlements do not contain app ID: {self.entitlements}"
             )
         return AppId.from_string(maybe_app_id)
 
     # See `ProvisioningProfileMetadata::getMergeableEntitlements` from `ProvisioningProfileMetadata.java` in Buck v1
-    def get_mergeable_entitlements(self) -> Dict[str, Any]:
+    def get_mergeable_entitlements(self) -> dict[str, Any]:
         return {
             k: v
             for k, v in self.entitlements.items()
@@ -70,9 +71,9 @@ class ProvisioningProfileMetadata:
         developer_certificate_fingerprints = {
             hashlib.sha1(c).hexdigest().upper() for c in root["DeveloperCertificates"]
         }
-        assert (
-            len(developer_certificate_fingerprints) > 0
-        ), "Expected at least one suitable certificate."
+        assert len(developer_certificate_fingerprints) > 0, (
+            "Expected at least one suitable certificate."
+        )
         return ProvisioningProfileMetadata(
             file_path=file_path,
             uuid=root["UUID"],

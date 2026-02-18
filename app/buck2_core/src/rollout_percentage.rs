@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ffi::OsString;
@@ -58,7 +59,7 @@ impl RolloutPercentage {
                     }
                 }
             }
-            Inner::Rate(pct) => rand::thread_rng().gen::<f64>() < pct,
+            Inner::Rate(pct) => rand::rng().random::<f64>() < pct,
             Inner::Bool(b) => b,
         }
     }
@@ -138,8 +139,8 @@ fn rate(val: f64) -> buck2_error::Result<f64> {
 #[cfg(test)]
 mod tests {
     use assert_matches::assert_matches;
-    use rand::distributions::Alphanumeric;
-    use rand::distributions::DistString;
+    use rand::distr::Alphanumeric;
+    use rand::distr::SampleString;
 
     use super::*;
 
@@ -166,7 +167,7 @@ mod tests {
     fn test_roll() {
         let hostname = || {
             Some(OsString::from(
-                Alphanumeric.sample_string(&mut rand::thread_rng(), 16),
+                Alphanumeric.sample_string(&mut rand::rng(), 16),
             ))
         };
 

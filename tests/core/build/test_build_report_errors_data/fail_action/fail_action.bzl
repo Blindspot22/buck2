@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 def _make_failing_action(ctx, name):
     out = ctx.actions.declare_output(name)
@@ -52,7 +53,7 @@ def _fail_script_impl(ctx):
     out = ctx.actions.declare_output("fail_script")
     ctx.actions.run(
         [
-            "python3",
+            "fbpython",
             "-c",
             "import sys; print('Some random stdout', file=sys.stdout); print('Some random stderr', file=sys.stderr); sys.exit(1)",
             out.as_output(),

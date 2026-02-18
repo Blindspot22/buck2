@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """Self-contained C/C++ toolchain based on zig cc.
 
@@ -223,7 +224,7 @@ def _http_archive_impl(ctx: AnalysisContext) -> list[Provider]:
 
     # Download archive.
     archive = ctx.actions.declare_output("archive." + ext)
-    ctx.actions.download_file(archive.as_output(), url, sha256 = ctx.attrs.sha256, is_deferrable = True)
+    ctx.actions.download_file(archive.as_output(), url, sha256 = ctx.attrs.sha256)
 
     # Unpack archive to output directory.
     output = ctx.actions.declare_output(ctx.label.name)
@@ -327,25 +328,25 @@ def _cxx_zig_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
     zig = ctx.attrs.distribution[RunInfo]
     target = ["-target", ctx.attrs.target] if ctx.attrs.target else []
     zig_cc = cmd_script(
-        ctx = ctx,
+        actions = ctx.actions,
         name = "zig_cc",
         cmd = cmd_args(zig, "cc"),
         language = ScriptLanguage("bat" if dist.os == "windows" else "sh"),
     )
     zig_cxx = cmd_script(
-        ctx = ctx,
+        actions = ctx.actions,
         name = "zig_cxx",
         cmd = cmd_args(zig, "c++"),
         language = ScriptLanguage("bat" if dist.os == "windows" else "sh"),
     )
     zig_ar = cmd_script(
-        ctx = ctx,
+        actions = ctx.actions,
         name = "zig_ar",
         cmd = cmd_args(zig, "ar"),
         language = ScriptLanguage("bat" if dist.os == "windows" else "sh"),
     )
     zig_ranlib = cmd_script(
-        ctx = ctx,
+        actions = ctx.actions,
         name = "zig_ranlib",
         cmd = cmd_args(zig, "ranlib"),
         language = ScriptLanguage("bat" if dist.os == "windows" else "sh"),
@@ -415,7 +416,6 @@ def _cxx_zig_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
         ),
         header_mode = HeaderMode("symlink_tree_only"),  # header map modes require mk_hmap
         #headers_as_raw_headers_mode = None,
-        #conflicting_header_basename_allowlist = [],
         #asm_compiler_info = None,
         #as_compiler_info = None,
         #hip_compiler_info = None,

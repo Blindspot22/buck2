@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Example that demonstrates stylization.
@@ -16,6 +17,7 @@ use superconsole::Dimensions;
 use superconsole::Line;
 use superconsole::Lines;
 use superconsole::Span;
+use superconsole::SpanError;
 use superconsole::SuperConsole;
 use superconsole::components::Blank;
 use superconsole::components::Component;
@@ -38,8 +40,10 @@ struct StoreName(String);
 struct CustomerName(String);
 
 impl Component for Greeter<'_> {
+    type Error = SpanError;
+
     /// Prints a greeting to the current customer.
-    fn draw_unchecked(&self, _dimensions: Dimensions, _mode: DrawMode) -> anyhow::Result<Lines> {
+    fn draw_unchecked(&self, _dimensions: Dimensions, _mode: DrawMode) -> Result<Lines, SpanError> {
         let store_name = self.store_name;
         let customers = self.customers;
         let identification = Line::from_iter([
@@ -49,8 +53,7 @@ impl Component for Greeter<'_> {
         let mut messages = vec![identification];
         for customer_name in customers {
             let greeting = Line::from_iter([Span::new_styled(style(format!(
-                "Welcome to {}, {}!",
-                store_name, customer_name
+                "Welcome to {store_name}, {customer_name}!"
             )))?]);
             messages.push(greeting);
         }

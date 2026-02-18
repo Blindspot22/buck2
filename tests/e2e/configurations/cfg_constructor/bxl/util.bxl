@@ -1,11 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
-load("@prelude//cfg/modifier:conditional_modifier.bzl", _get_modifier_info = "get_modifier_info")
+load("@prelude//cfg/modifier:conditional_modifier.bzl", _get_modifier_info = "get_modifier_info_for_testing")
 load("@prelude//cfg/modifier:types.bzl", "ConditionalModifierInfo", "Modifier", "ModifierInfo")
 load("@prelude//configurations:util.bzl", "util")
 
@@ -16,15 +17,18 @@ _TARGETS = [
     "ovr_config//cpu/constraints:arm64",
     "ovr_config//os/constraints:os",
     "ovr_config//os:linux",
+    "ovr_config//os:linux-no-san",
     "ovr_config//os/constraints:linux",
     "ovr_config//os/constraints:macos",
     "ovr_config//os/constraints:windows",
-    "ovr_config//build_mode/constraints:san",
-    "ovr_config//build_mode/constraints:no-san",
-    "ovr_config//build_mode/constraints:asan",
-    "ovr_config//build_mode/constraints:asan-ubsan",
-    "ovr_config//build_mode/constraints:hwasan",
-    "ovr_config//build_mode/constraints:tsan",
+    "config//os/constraints:windows",  # Cell alias for ovr_config//os/constraints:windows
+    "ovr_config//build_mode:sanitizer_type",
+    "ovr_config//build_mode:sanitizer_type[no-san]",
+    "ovr_config//build_mode:sanitizer_type[asan]",
+    "ovr_config//build_mode:sanitizer_type[asan-ubsan]",
+    "ovr_config//build_mode:sanitizer_type[hwasan]",
+    "ovr_config//build_mode:sanitizer_type[tsan]",
+    "config//build_mode:sanitizer_type[tsan]",  # Cell alias for ovr_config//build_mode:sanitizer_type[tsan]
     # TODO: This will probably get broken by updates to clang constraints.
     # Figure out how to handle this.
     "ovr_config//toolchain/clang/constraints:15",
@@ -53,16 +57,59 @@ TestRefs = record(
     get_modifier_info = field(typing.Callable),
 )
 
+def _parse_target_with_subtarget(ctx: bxl.Context, target_str: str):
+    unconfigured = ctx.unconfigured_sub_targets(target_str)
+    base_target = unconfigured.raw_target()
+    configured = ctx.configured_targets(base_target)
+
+    # If there's a subtarget, add it to the configured label
+    if unconfigured.sub_target:
+        return configured.label.with_sub_target(unconfigured.sub_target)
+    else:
+        return configured
+
 def _get_providers(ctx: bxl.Context, targets: list[str]) -> dict[str, ProviderCollection]:
-    analysis_result = ctx.analysis(targets)
-    return {str(target.raw_target()): v.providers() for target, v in analysis_result.items()}
+    configured = [_parse_target_with_subtarget(ctx, t) for t in targets]
+    analysis_result = ctx.analysis(configured)
+
+    # Build a mapping from resolved target to list of original target strings
+    # This handles cases where multiple target strings resolve to the same target (e.g., cell aliases)
+    resolved_to_originals = {}
+    for original_key, configured_target in zip(targets, configured):
+        # Get the resolved key for this configured target
+        # configured_target can be either a ConfiguredTargetNode (has .label) or ConfiguredProvidersLabel
+        if hasattr(configured_target, "label"):
+            label = configured_target.label
+        else:
+            label = configured_target
+
+        # Extract raw target - handle both with and without sub_target
+        raw = label.raw_target() if hasattr(label, "raw_target") else label
+        sub = label.sub_target if hasattr(label, "sub_target") else None
+        resolved_key = str(raw.with_sub_target(sub)) if sub else str(raw)
+        if resolved_key not in resolved_to_originals:
+            resolved_to_originals[resolved_key] = []
+        resolved_to_originals[resolved_key].append(original_key)
+
+    result = {}
+    for target, v in analysis_result.items():
+        providers = v.providers()
+        resolved_key = str(target.raw_target().with_sub_target(target.sub_target)) if target.sub_target else str(target.raw_target())
+        result[resolved_key] = providers
+
+        # Also add all original target strings as keys if they differ from the resolved key
+        # This allows tests to use cell aliases (e.g., "config//..." instead of "ovr_config//...")
+        for original_key in resolved_to_originals.get(resolved_key, []):
+            if original_key != resolved_key:
+                result[original_key] = providers
+    return result
 
 def get_test_refs(ctx: bxl.Context) -> TestRefs:
     def get(target: str) -> ProviderCollection:
         return self._refs[target]
 
     def make_cfg(targets: list[str]) -> ConfigurationInfo:
-        return util.configuration_info_union([self._refs[target][ConfigurationInfo] for target in targets])
+        return util.configuration_info_union([self._refs[target][ConfigurationInfo] for target in targets if target in self._refs])
 
     def get_modifier_info(modifier: Modifier) -> ModifierInfo:
         key_to_provider = {

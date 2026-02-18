@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use async_trait::async_trait;
@@ -24,6 +25,7 @@ use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::streaming::StreamingCommand;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::TimeZone;
@@ -71,24 +73,24 @@ fn format_result_stats(stats: buck2_data::CleanStaleStats) -> String {
     output += &format!(
         "Found {} stale artifacts ({})\n",
         stats.stale_artifact_count,
-        bytesize::to_string(stats.stale_bytes, true),
+        bytesize::ByteSize::b(stats.stale_bytes).display().iec(),
     );
     output += &format!(
         "Found {} recent artifacts ({})\n",
         stats.retained_artifact_count,
-        bytesize::to_string(stats.retained_bytes, true),
+        bytesize::ByteSize::b(stats.retained_bytes).display().iec(),
     );
     output += &format!(
         "Found {} untracked artifacts ({})\n",
         stats.untracked_artifact_count,
-        bytesize::to_string(stats.untracked_bytes, true),
+        bytesize::ByteSize::b(stats.untracked_bytes).display().iec(),
     );
     if stats.cleaned_artifact_count > 0 || stats.cleaned_bytes > 0 {
         output += &format!("Cleaned {} paths\n", stats.cleaned_artifact_count,);
         output += &format!(
             "{} bytes cleaned ({})\n",
             stats.cleaned_bytes,
-            bytesize::to_string(stats.cleaned_bytes, true),
+            bytesize::ByteSize::b(stats.cleaned_bytes).display().iec(),
         );
     }
     output
@@ -109,7 +111,7 @@ impl StreamingCommand for CleanStaleCommand {
             KeepSinceArg::Duration(duration) => {
                 let keep_since_time: DateTime<Utc> = Utc::now()
                     .checked_sub_signed(duration)
-                    .buck_error_context("Duration underflow")?;
+                    .ok_or_else(|| internal_error!("Duration underflow"))?;
                 buck2_client_ctx::eprintln!(
                     "Cleaning artifacts more than {} old",
                     humantime::format_duration(
@@ -129,7 +131,7 @@ impl StreamingCommand for CleanStaleCommand {
             KeepSinceArg::Time(timestamp) => Utc
                 .timestamp_opt(timestamp, 0)
                 .single()
-                .buck_error_context("Invalid timestamp")?,
+                .ok_or_else(|| internal_error!("Invalid timestamp"))?,
         };
 
         let context = ctx.client_context(matches, &self)?;

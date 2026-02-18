@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
-
-use std::str::FromStr;
 
 use buck2_cli_proto::common_build_options::ExecutionStrategy;
 use buck2_core::buck2_env_name;
+use buck2_error::conversion::clap::buck_error_clap_parser;
 use clap::ArgGroup;
 use clap::builder::FalseyValueParser;
 use tracing::warn;
@@ -27,33 +27,44 @@ pub struct BuildReportOption {
 
     /// Include artifact hash information in the output.
     include_artifact_hash_information: bool,
+
+    /// Exclude error diagnostics from action errors in the build report.
+    exclude_action_error_diagnostics: bool,
+
+    /// Truncate error content in the build report to reduce size.
+    truncate_error_content: bool,
 }
 
-impl FromStr for BuildReportOption {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut fill_out_failures = false;
-        let mut include_package_project_relative_paths = false;
-        let mut include_artifact_hash_information = false;
+fn parse_build_report_option(s: &str) -> buck2_error::Result<BuildReportOption> {
+    let mut fill_out_failures = false;
+    let mut include_package_project_relative_paths = false;
+    let mut include_artifact_hash_information = false;
+    let mut exclude_action_error_diagnostics = false;
+    let mut truncate_error_content = false;
 
-        if s.to_lowercase() == "fill-out-failures" {
-            fill_out_failures = true;
-        } else if s.to_lowercase() == "package-project-relative-paths" {
-            include_package_project_relative_paths = true;
-        } else if s.to_lowercase() == "include-artifact-hash-information" {
-            include_artifact_hash_information = true;
-        } else {
-            warn!(
-                "Incorrect syntax for build report option. Got: `{}` but expected one of `fill-out-failures, package-project-relative-paths`",
-                s.to_owned()
-            )
-        }
-        Ok(BuildReportOption {
-            fill_out_failures,
-            include_package_project_relative_paths,
-            include_artifact_hash_information,
-        })
+    if s.to_lowercase() == "fill-out-failures" {
+        fill_out_failures = true;
+    } else if s.to_lowercase() == "package-project-relative-paths" {
+        include_package_project_relative_paths = true;
+    } else if s.to_lowercase() == "include-artifact-hash-information" {
+        include_artifact_hash_information = true;
+    } else if s.to_lowercase() == "exclude-action-error-diagnostics" {
+        exclude_action_error_diagnostics = true;
+    } else if s.to_lowercase() == "truncate-error-content" {
+        truncate_error_content = true;
+    } else {
+        warn!(
+            "Incorrect syntax for build report option. Got: `{}` but expected one of `fill-out-failures, package-project-relative-paths, include-artifact-hash-information, exclude-action-error-diagnostics, truncate-error-content`",
+            s.to_owned()
+        )
     }
+    Ok(BuildReportOption {
+        fill_out_failures,
+        include_package_project_relative_paths,
+        include_artifact_hash_information,
+        exclude_action_error_diagnostics,
+        truncate_error_content,
+    })
 }
 
 /// Defines common options for build-like commands (build, test, install).
@@ -81,12 +92,26 @@ pub struct CommonBuildOptions {
     ///
     /// `package-project-relative-paths`:
     /// emit the project-relative path of packages for the targets that were built.
+    ///
+    /// `exclude-action-error-diagnostics`:
+    /// exclude error_diagnostics field from action errors in the build report.
+    ///
+    /// `truncate-error-content`:
+    /// truncate error content in the build report to reduce size.
     #[clap(
         long = "build-report-options",
         requires = "build_report",
-        value_delimiter = ','
+        value_delimiter = ',',
+        value_parser = buck_error_clap_parser(parse_build_report_option),
     )]
     build_report_options: Vec<BuildReportOption>,
+
+    /// Stream intermediary build reports to a file in json lines format.
+    ///
+    /// Each output materialization will trigger a new build report which
+    /// will be written to the file as a single line json.
+    #[clap(long = "streaming-build-report", value_name = "PATH")]
+    streaming_build_report: Option<String>,
 
     /// Number of threads to use during execution (default is # cores)
     // TODO(cjhopman): This only limits the threads used for action execution and it doesn't work correctly with concurrent commands.
@@ -107,7 +132,7 @@ pub struct CommonBuildOptions {
     prefer_local: bool,
 
     /// Enable hybrid execution. Will prefer executing actions that can execute remotely on RE and will avoid racing local and remote execution.
-    #[clap(long, group = "build_strategy")]
+    #[clap(long, group = "build_strategy", env = buck2_env_name!("BUCK_PREFER_REMOTE"), value_parser = FalseyValueParser::new())]
     prefer_remote: bool,
 
     /// Experimental: Disable all execution.
@@ -194,6 +219,8 @@ impl CommonBuildOptions {
 
     pub fn to_proto(&self) -> buck2_cli_proto::CommonBuildOptions {
         let (unstable_print_build_report, unstable_build_report_filename) = self.build_report();
+        let unstable_streaming_build_report_filename =
+            self.streaming_build_report.clone().unwrap_or_default();
         let unstable_include_failures_build_report = self
             .build_report_options
             .iter()
@@ -206,6 +233,14 @@ impl CommonBuildOptions {
             .build_report_options
             .iter()
             .any(|option| option.include_artifact_hash_information);
+        let unstable_exclude_action_error_diagnostics = self
+            .build_report_options
+            .iter()
+            .any(|option| option.exclude_action_error_diagnostics);
+        let unstable_truncate_error_content = self
+            .build_report_options
+            .iter()
+            .any(|option| option.truncate_error_content);
         let concurrency = self
             .num_threads
             .map(|num| buck2_cli_proto::Concurrency { concurrency: num });
@@ -246,6 +281,9 @@ impl CommonBuildOptions {
             unstable_include_failures_build_report,
             unstable_include_package_project_relative_paths,
             unstable_include_artifact_hash_information,
+            unstable_streaming_build_report_filename,
+            unstable_exclude_action_error_diagnostics,
+            unstable_truncate_error_content,
         }
     }
 }

@@ -1,0 +1,204 @@
+load(
+    ":defs.bzl",
+    "argsfile_with_incorrectly_declared_output",
+    "cas_artifact_with_content_based_path",
+    "copied_dir",
+    "copy",
+    "download_with_content_based_path",
+    "dynamic_new_with_content_based_path",
+    "dynamic_with_content_based_path",
+    "failing_run_with_content_based_path",
+    "failing_validation_with_content_based_path",
+    "ignores_content_based_artifact",
+    "incremental_action",
+    "not_eligible_for_dedupe",
+    "resolve_promise_artifact",
+    "run_with_content_based_path",
+    "sets_inconsistent_params",
+    "slow_running_local_action_with_content_based_path",
+    "symlink",
+    "symlink_and_copy",
+    "symlinked_dir",
+    "use_projection_with_content_based_path",
+    "uses_relative_to",
+    "write_json_with_content_based_path",
+    "write_macro_with_content_based_path",
+    "write_with_content_based_path",
+    "writes_input_to_output",
+)
+
+write_with_content_based_path(
+    name = "write_with_content_based_path",
+    data = "hello world",
+)
+
+write_macro_with_content_based_path(
+    name = "write_macro_with_content_based_path",
+    arg = "$(@query_outputs :write_with_content_based_path)",
+)
+
+write_json_with_content_based_path(
+    name = "write_json_with_content_based_path",
+    source = ":write_with_content_based_path",
+)
+
+run_with_content_based_path(
+    name = "run_remote_with_content_based_path",
+    data = read_config("test", "data_string", "hello world"),
+    prefer_local = False,
+    _ignored = read_config("test", "ignored_attr", "ignored"),
+)
+
+run_with_content_based_path(
+    name = "run_local_with_content_based_path",
+    data = "hello world",
+    prefer_local = True,
+)
+
+run_with_content_based_path(
+    name = "run_remote_with_dep_on_run_local",
+    data = "hello world",
+    prefer_local = False,
+    depends_on = [":run_local_with_content_based_path"],
+)
+
+run_with_content_based_path(
+    name = "run_local_with_dep_on_run_remote",
+    data = "hello world",
+    prefer_local = True,
+    depends_on = [":run_remote_with_content_based_path"],
+)
+
+copy(
+    name = "copy_with_content_based_path",
+    to_copy = ":write_with_content_based_path",
+)
+
+symlink(
+    name = "symlink_with_content_based_path",
+    to_symlink = ":write_with_content_based_path",
+)
+
+symlink_and_copy(
+    name = "symlink_and_copy_with_content_based_path",
+)
+
+copied_dir(
+    name = "copied_dir_with_content_based_path",
+    to_copy = ":write_with_content_based_path",
+)
+
+symlinked_dir(
+    name = "symlinked_dir_with_content_based_path",
+    to_symlink = ":write_with_content_based_path",
+)
+
+cas_artifact_with_content_based_path(
+    name = "empty_cas_artifact_with_content_based_path",
+    # The empty file is guaranteed to exist in RE.
+    digest = "da39a3ee5e6b4b0d3255bfef95601890afd80709:0",
+    use_case = "buck2-testing",
+    expires_after_timestamp = 0,
+)
+
+download_with_content_based_path(
+    name = "download_with_content_based_path",
+)
+
+download_with_content_based_path(
+    name = "download_with_content_based_path_and_no_metadata",
+    defer_download = False,
+)
+
+failing_validation_with_content_based_path(
+    name = "failing_validation_with_content_based_path",
+)
+
+dynamic_with_content_based_path(
+    name = "dynamic_with_content_based_path",
+)
+
+dynamic_new_with_content_based_path(
+    name = "dynamic_new_with_content_based_path",
+)
+
+use_projection_with_content_based_path(
+    name = "use_projection_with_content_based_path",
+)
+
+ignores_content_based_artifact(
+    name = "ignores_content_based_artifact",
+)
+
+slow_running_local_action_with_content_based_path(
+    name = "slow_running_local_action_with_content_based_path",
+    data = select({
+        ":cat": "meow",
+        "DEFAULT": "default",
+    }),
+)
+
+writes_input_to_output(
+    name = "uses_slow_running_local_action_with_content_based_path1",
+    input = ":slow_running_local_action_with_content_based_path",
+    default_target_platform = ":p_default",
+)
+
+writes_input_to_output(
+    name = "uses_slow_running_local_action_with_content_based_path2",
+    input = ":slow_running_local_action_with_content_based_path",
+    default_target_platform = ":p_cat",
+)
+
+uses_relative_to(
+    name = "uses_relative_to",
+)
+
+sets_inconsistent_params(
+    name = "sets_inconsistent_params",
+)
+
+argsfile_with_incorrectly_declared_output(
+    name = "argsfile_with_incorrectly_declared_output",
+)
+
+incremental_action(
+    name = "incremental_action",
+)
+
+resolve_promise_artifact(
+    name = "resolve_promise_artifact",
+    artifact_has_content_based_path = read_config("test", "artifact_has_content_based_path", "false") == "true",
+    assert_promised_artifact_has_content_based_path = read_config("test", "assert_promised_artifact_has_content_based_path", "false") == "true",
+)
+
+not_eligible_for_dedupe(
+    name = "not_eligible_for_dedupe",
+    expect_eligible_for_dedupe = read_config("test", "expect_eligible_for_dedupe", "false") == "true",
+    run_action_output_has_content_based_path = read_config("test", "run_action_output_has_content_based_path", "true") == "true",
+)
+
+failing_run_with_content_based_path(
+    name = "failing_run_with_content_based_path",
+)
+
+platform(
+    name = "p_default",
+    constraint_values = [],
+)
+
+platform(
+    name = "p_cat",
+    constraint_values = [
+        ":cat",
+    ],
+)
+
+constraint_setting(
+    name = "animal",
+)
+
+constraint_value(
+    name = "cat",
+    constraint_setting = ":animal",
+)

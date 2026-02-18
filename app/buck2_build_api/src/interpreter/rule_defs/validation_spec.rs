@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Display;
@@ -19,12 +20,12 @@ use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
-use starlark::values::FreezeResult;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
+use starlark::values::UnpackValue;
 use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOf;
@@ -32,8 +33,9 @@ use starlark::values::ValueOfUncheckedGeneric;
 use starlark::values::starlark_value;
 
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkArtifactLike;
-use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
+use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueIsInputArtifactAnnotation;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
@@ -42,8 +44,6 @@ enum ValidationSpecError {
     EmptyName,
     #[error("Validation result artifact should be a build artifact, not a source one.")]
     ValidationResultIsSourceArtifact,
-    #[error("Validation result artifact should be bound.")]
-    ValidationResultIsNotBound,
 }
 
 /// Value describing a single identifiable validation.
@@ -67,7 +67,7 @@ pub struct StarlarkValidationSpecGen<V: ValueLifetimeless> {
     name: ValueOfUncheckedGeneric<V, String>,
     /// Build artifact which is the result of running a validation.
     /// Should contain JSON of defined schema setting API between Buck2 and user-created validators/scripts.
-    validation_result: ValueOfUncheckedGeneric<V, ValueAsArtifactLike<'static>>,
+    validation_result: ValueOfUncheckedGeneric<V, ValueIsInputArtifactAnnotation>,
 
     /// Is validation optional, i.e., should it be skipped by default?
     /// By default validations are required unless this flag is specified.
@@ -85,9 +85,8 @@ impl<'v, V: ValueLike<'v>> StarlarkValidationSpecGen<V> {
             .expect("type checked during construction or freezing")
     }
 
-    pub fn validation_result(&self) -> &'v dyn StarlarkArtifactLike {
-        self.validation_result
-            .unpack()
+    pub fn validation_result(&self) -> &'v dyn StarlarkInputArtifactLike<'v> {
+        ValueAsInputArtifactLike::unpack_value_opt(self.validation_result.get().to_value())
             .expect("type checked during construction or freezing")
             .0
     }
@@ -116,11 +115,12 @@ where
     if name.is_empty() {
         return Err(ValidationSpecError::EmptyName.into());
     }
-    let artifact = spec.validation_result.unpack()?;
+    let artifact =
+        ValueAsInputArtifactLike::unpack_value_err(spec.validation_result.get().to_value())?;
     let artifact = match artifact.0.get_bound_artifact() {
         Ok(bound_artifact) => bound_artifact,
         Err(e) => {
-            return Err(e.context(ValidationSpecError::ValidationResultIsNotBound));
+            return Err(e.context("Validation result artifact should be bound."));
         }
     };
     if artifact.is_source() {
@@ -146,7 +146,7 @@ fn validation_spec_methods(builder: &mut MethodsBuilder) {
     /// Name identifying validation.
     fn name<'v>(
         this: &'v StarlarkValidationSpec,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<StringValue<'v>> {
         Ok(heap.alloc_str_intern(this.name()))
     }
@@ -162,7 +162,8 @@ fn validation_spec_methods(builder: &mut MethodsBuilder) {
     fn validation_result<'v>(
         this: &'v StarlarkValidationSpec,
     ) -> starlark::Result<StarlarkArtifact> {
-        let artifact = this.validation_result.unpack()?;
+        let artifact =
+            ValueAsInputArtifactLike::unpack_value_err(this.validation_result.get().to_value())?;
         Ok(artifact.0.get_bound_starlark_artifact()?)
     }
 }
@@ -172,7 +173,7 @@ pub fn register_validation_spec(builder: &mut GlobalsBuilder) {
     #[starlark(as_type = FrozenStarlarkValidationSpec)]
     fn ValidationSpec<'v>(
         #[starlark(require = named)] name: StringValue<'v>,
-        #[starlark(require = named)] validation_result: ValueOf<'v, ValueAsArtifactLike<'v>>,
+        #[starlark(require = named)] validation_result: ValueOf<'v, ValueIsInputArtifactAnnotation>,
         #[starlark(require = named, default = false)] optional: bool,
     ) -> starlark::Result<StarlarkValidationSpec<'v>> {
         let result = StarlarkValidationSpec {

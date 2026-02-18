@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.installer.android;
@@ -72,7 +73,8 @@ class AndroidInstallerManager implements InstallCommand {
 
       AndroidArtifacts androidArtifacts = getOrMakeAndroidArtifacts(installId);
       if (artifactName.equals("options")) {
-        androidArtifacts.setApkOptions(new AndroidInstallApkOptions(artifactPath));
+        androidArtifacts.setApkOptions(
+            new AndroidInstallApkOptions(artifactPath, options.adbExecutablePath));
         LOG.log(Level.INFO, androidArtifacts.getApkOptions().toString());
       } else if (artifactName.equals("manifest")) {
         androidArtifacts.setAndroidManifestPath(AbsPath.of(artifactPath));
@@ -97,8 +99,6 @@ class AndroidInstallerManager implements InstallCommand {
         androidArtifacts.setResourcesExopackageInfoRes(Optional.of(AbsPath.of(artifactPath)));
       } else if (artifactName.equals("resources_exopackage_res_hash")) {
         androidArtifacts.setResourcesExopackageInfoResHash(Optional.of(AbsPath.of(artifactPath)));
-      } else if (artifactName.equals("exopackage_agent_apk")) {
-        androidArtifacts.setAgentApk(Optional.of(AbsPath.of(artifactPath)));
       } else {
         androidArtifacts.setApk(AbsPath.of(artifactPath));
       }
@@ -201,7 +201,6 @@ class AndroidInstallerManager implements InstallCommand {
               IsolatedApkInfo.of(
                   androidArtifacts.getAndroidManifestPath(), androidArtifacts.getApk()),
               isolatedExopackageInfo,
-              androidArtifacts.getAgentApk(),
               installId);
       return androidInstaller.installApk();
 

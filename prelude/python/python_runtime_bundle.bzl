@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """
 A bundled runtime includes the full install of python in the par, allowing a fully hermetic distribution.
@@ -16,9 +17,10 @@ stdlib - the path to the python standard library
 """
 PythonRuntimeBundleInfo = provider(fields = {
     "include": provider_field(Artifact),
-    "libpython": provider_field(Artifact),
+    "libpython": provider_field(Artifact | None),
     "py_bin": provider_field(Artifact),
     "py_version": provider_field(str),
+    "shared_libs": provider_field(list[Dependency]),
     "stdlib": provider_field(Artifact),
 })
 
@@ -28,7 +30,8 @@ def python_runtime_bundle_impl(ctx: AnalysisContext) -> list[Provider]:
         py_version = ctx.attrs.py_version,
         py_bin = root.project(ctx.attrs.py_bin),
         stdlib = root.project(ctx.attrs.stdlib),
-        libpython = root.project(ctx.attrs.libpython),
+        libpython = root.project(ctx.attrs.libpython) if ctx.attrs.libpython else None,
         include = root.project(ctx.attrs.include),
+        shared_libs = ctx.attrs.shared_libs,
     )
     return [DefaultInfo(default_output = root), info]

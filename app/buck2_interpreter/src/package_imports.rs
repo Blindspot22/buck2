@@ -1,13 +1,13 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use allocative::Allocative;
@@ -19,6 +19,8 @@ use buck2_core::cells::cell_path_with_allowed_relative_dir::CellPathWithAllowedR
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::cells::paths::CellRelativePathBuf;
 use buck2_core::package::PackageLabel;
+use pagable::Pagable;
+use starlark_map::ordered_map::OrderedMap;
 
 use crate::parse_import::RelativeImports;
 use crate::parse_import::parse_import;
@@ -32,11 +34,11 @@ enum PackageImportsError {
     MissingColons(String),
 }
 
-#[derive(Debug, Eq, PartialEq, Allocative)]
+#[derive(Debug, Eq, PartialEq, Allocative, Pagable)]
 pub struct ImplicitImport {
     import: ImportPath,
     // Oddly buckv1 allows renaming symbols for these imports.
-    symbols: HashMap<String, String>,
+    symbols: OrderedMap<String, String>,
 }
 
 impl ImplicitImport {
@@ -53,12 +55,12 @@ impl ImplicitImport {
 }
 
 /// Supports parsing and resolution of package implicit imports.
-#[derive(PartialEq, Debug, Allocative)]
+#[derive(PartialEq, Debug, Allocative, Pagable)]
 pub struct PackageImplicitImports {
     /// It would probably be a little nicer if this were a sequence_trie, but
     /// that doesn't support Borrow in the same way normal maps do, so in it's
     /// current state it's unclear if it would be better.
-    mappings: HashMap<CellRelativePathBuf, Arc<ImplicitImport>>,
+    mappings: OrderedMap<CellRelativePathBuf, Arc<ImplicitImport>>,
 }
 
 impl PackageImplicitImports {
@@ -73,7 +75,7 @@ impl PackageImplicitImports {
         cell_alias_resolver: CellAliasResolver,
         encoded_mappings: Option<&str>,
     ) -> buck2_error::Result<Self> {
-        let mut mappings = HashMap::new();
+        let mut mappings = OrderedMap::new();
         if let Some(value) = encoded_mappings {
             let root_path = CellPath::new(
                 cell_name.name(),
@@ -98,7 +100,7 @@ impl PackageImplicitImports {
                 // Package implicit imports are only going to be used for a top-level module in
                 // the same cell, so we can set that early.
                 let import_path = ImportPath::new_with_build_file_cells(import_path, cell_name)?;
-                let mut symbols = HashMap::new();
+                let mut symbols = OrderedMap::new();
                 for spec in symbol_specs.split("::") {
                     let (alias, symbol) = match spec.split_once('=') {
                         Some(v) => v,
@@ -174,7 +176,7 @@ mod tests {
         let expect_import = |cell, path| {
             let package = PackageLabel::testing_new(cell, path);
             match imports.get(package.dupe()) {
-                None => panic!("Should've had implicit import for {}", package),
+                None => panic!("Should've had implicit import for {package}"),
                 Some(v) => v,
             }
         };

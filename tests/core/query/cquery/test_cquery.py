@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -275,3 +276,24 @@ async def test_declared_deps_query(buck: Buck) -> None:
         ),
         stderr_regex="Invalid target pattern `\\$declared_deps` is not allowed",
     )
+
+
+# Tests for intersect and except operators on FileSet, TargetSet, and String types
+# These tests verify the fix for https://github.com/facebook/buck2/issues/1109
+@buck_test(data_dir="set_operators")
+async def test_cquery_fileset_intersect(buck: Buck) -> None:
+    """Test FileSet intersect FileSet using inputs()."""
+    result = await buck.cquery(
+        """inputs(root//:lib_a) intersect inputs(root//:lib_b)"""
+    )
+    assert result.stdout == "common.txt\n"
+
+
+@buck_test(data_dir="set_operators")
+async def test_cquery_targetset_except(buck: Buck) -> None:
+    """Test TargetSet except TargetSet using set()."""
+    result = await buck.cquery(
+        """set(root//:lib_a root//:app) except set(root//:app)"""
+    )
+    assert "root//:lib_a" in result.stdout
+    assert "root//:app" not in result.stdout

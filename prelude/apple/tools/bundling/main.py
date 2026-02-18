@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -11,29 +12,21 @@ import argparse
 import cProfile
 import json
 import logging
+import os
 import pstats
-import shlex
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from apple.tools.code_signing.apple_platform import ApplePlatform
 from apple.tools.code_signing.codesign_bundle import (
-    AdhocSigningContext,
     codesign_bundle,
     CodesignConfiguration,
     CodesignedPath,
-    signing_context_with_profile_selection,
+    write_empty_codesign_manifest,
 )
-from apple.tools.code_signing.list_codesign_identities import (
-    AdHocListCodesignIdentities,
-    ListCodesignIdentities,
-)
-
 from apple.tools.re_compatibility_utils.writable import make_dir_recursively_writable
 
 from .action_metadata import action_metadata_if_present
-
 from .assemble_bundle import assemble_bundle
 from .assemble_bundle_types import BundleSpecItem, IncrementalContext
 from .incremental_state import (
@@ -43,6 +36,10 @@ from .incremental_state import (
     parse_incremental_state,
 )
 from .incremental_utils import codesigned_on_copy_item
+from .signing_context import (
+    add_args_for_signing_context,
+    signing_context_and_selected_identity_from_args,
+)
 from .swift_support import run_swift_stdlib_tool, SwiftSupportArguments
 
 
@@ -68,11 +65,6 @@ def _args_parser() -> argparse.ArgumentParser:
         help="Path to file with JSON representing the bundle contents. It should contain a dictionary which maps bundle relative destination paths to source paths.",
     )
     parser.add_argument(
-        "--codesign",
-        action="store_true",
-        help="Should the final bundle be codesigned.",
-    )
-    parser.add_argument(
         "--codesign-tool",
         metavar="<codesign>",
         type=Path,
@@ -80,17 +72,11 @@ def _args_parser() -> argparse.ArgumentParser:
         help="Path to code signing utility. If not provided standard `codesign` tool will be used.",
     )
     parser.add_argument(
-        "--strict-provisioning-profile-search",
-        action="store_true",
+        "--codesign-manifest",
+        metavar="<manifest_file>",
+        type=Path,
         required=False,
-        help="Fail code signing if more than one matching profile found.",
-    )
-    parser.add_argument(
-        "--provisioning-profile-filter",
-        metavar="<regex>",
-        type=str,
-        required=False,
-        help="Regex to disambiguate multiple matching profiles, evaluated against provisioning profile filename.",
+        help="Path to a file containing codesign invocations.",
     )
     parser.add_argument(
         "--codesign-args",
@@ -101,58 +87,6 @@ def _args_parser() -> argparse.ArgumentParser:
         help="Add additional args to pass during codesigning. Pass as`--codesign-args=ARG` to ensure correct arg parsing.",
     )
     parser.add_argument(
-        "--info-plist-source",
-        metavar="</prepared/Info.plist>",
-        type=Path,
-        required=False,
-        help="Path to Info.plist source file which is used only to make code signing decisions (to be bundled `Info.plist` should be present in spec parameter). Required if code signing is requested.",
-    )
-    parser.add_argument(
-        "--info-plist-destination",
-        metavar="<Info.plist>",
-        type=Path,
-        required=False,
-        help="Required if code signing is requested. Bundle relative destination path to Info.plist file if it is present in bundle.",
-    )
-    parser.add_argument(
-        "--entitlements",
-        metavar="<Entitlements.plist>",
-        type=Path,
-        required=False,
-        help="Path to file with entitlements to be used during code signing. If it's not provided the minimal entitlements are going to be generated.",
-    )
-    parser.add_argument(
-        "--profiles-dir",
-        metavar="</provisioning/profiles/directory>",
-        type=Path,
-        required=False,
-        help="Required if non-ad-hoc code signing is requested. Path to directory with provisioning profile files.",
-    )
-    parser.add_argument(
-        "--codesign-identities-command",
-        metavar='<"/signing/identities --available">',
-        type=str,
-        required=False,
-        help="Command listing available code signing identities. If it's not provided `security` utility is assumed to be available and is used.",
-    )
-    parser.add_argument(
-        "--ad-hoc",
-        action="store_true",
-        help="Perform ad-hoc signing if set.",
-    )
-    parser.add_argument(
-        "--embed-provisioning-profile-when-signing-ad-hoc",
-        action="store_true",
-        help="Perform selection of provisioining profile and embed it into final bundle when ad-hoc signing if set.",
-    )
-    parser.add_argument(
-        "--ad-hoc-codesign-identity",
-        metavar="<identity>",
-        type=str,
-        required=False,
-        help="Codesign identity to use when ad-hoc signing is performed. Should be present when selection of provisioining profile is requested for ad-hoc signing.",
-    )
-    parser.add_argument(
         "--codesign-configuration",
         required=False,
         type=CodesignConfiguration,
@@ -160,16 +94,10 @@ def _args_parser() -> argparse.ArgumentParser:
         help=f"""
             Augments how code signing is run.
             Pass `{CodesignConfiguration.fastAdhoc}` to skip adhoc signing bundles if the executables are already adhoc signed.
+            Pass `{CodesignConfiguration.executionBypass}` to skip executing the actual codesigning commands.
             Pass `{CodesignConfiguration.dryRun}` for code signing to be run in dry mode (instead of actual signing only .plist
             files with signing parameters will be generated in the root of each signed bundle).
         """,
-    )
-    parser.add_argument(
-        "--platform",
-        metavar="<apple platform>",
-        type=ApplePlatform,
-        required=False,
-        help="Required if code signing or Swift support is requested. Apple platform for which the bundle is built.",
     )
     parser.add_argument(
         "--incremental-state",
@@ -200,12 +128,6 @@ def _args_parser() -> argparse.ArgumentParser:
         required=False,
         default="info",
         help="Logging level for messages written to a log file.",
-    )
-    parser.add_argument(
-        "--log-file",
-        type=Path,
-        required=False,
-        help="Path to a log file. If present logging will be directed to this file in addition to stderr.",
     )
     parser.add_argument(
         "--binary-destination",
@@ -262,15 +184,17 @@ def _args_parser() -> argparse.ArgumentParser:
         help="Check there are no path conflicts between different source parts of the bundle if enabled.",
     )
     parser.add_argument(
-        "--fast-provisioning-profile-parsing",
-        action="store_true",
-        help="Uses experimental faster provisioning profile parsing.",
-    )
-    parser.add_argument(
         "--versioned-if-macos",
         action="store_true",
         help="Create symlinks for versioned macOS bundle",
     )
+    parser.add_argument(
+        "--verify-entitlements",
+        action="store_true",
+        help="Verify that the bundle's entitlements match the provisioning profile",
+    )
+
+    add_args_for_signing_context(parser)
 
     return parser
 
@@ -350,6 +274,21 @@ def _main() -> None:
     args_parser = _args_parser()
     args = args_parser.parse_args()
 
+    uname_info = os.uname()
+    sysname = uname_info.sysname
+    major_release = int(uname_info.release.split(".")[0])
+
+    # macOS 26.0.0 Tahoe no longer supports SHA1 as an option in the codesign tool.
+    # Note: This is safe to remove along with the code that adds the digest-algorithm code
+    # in apple_bundle_wrapping_rule.bzl once we are migrated to macOS 26.0.
+    if (
+        "--digest-algorithm=sha1" in args.codesign_args
+        and sysname == "Darwin"
+        and major_release
+        >= 25  # Darwin kernel release 25.0.0 corresponds to macOS 26.0.0 Tahoe
+    ):
+        args.codesign_args.remove("--digest-algorithm=sha1")
+
     if args.log_file:
         with open(args.log_file, "w") as _:
             # We need to open the log file for two reasons:
@@ -368,81 +307,9 @@ def _main() -> None:
     if profiling_enabled:
         pr.enable()
 
-    if args.codesign:
-        if not args.info_plist_source:
-            raise RuntimeError(
-                "Paths to Info.plist source file should be set when code signing is required."
-            )
-        if not args.info_plist_destination:
-            raise RuntimeError(
-                "Info.plist destination path should be set when code signing is required."
-            )
-        if not args.platform:
-            raise RuntimeError(
-                "Apple platform should be set when code signing is required."
-            )
-        list_codesign_identities = (
-            ListCodesignIdentities.override(
-                shlex.split(args.codesign_identities_command)
-            )
-            if args.codesign_identities_command
-            else ListCodesignIdentities.default()
-        )
-        if args.ad_hoc:
-            if args.embed_provisioning_profile_when_signing_ad_hoc:
-                if not args.profiles_dir:
-                    raise RuntimeError(
-                        "Path to directory with provisioning profile files should be set when selection of provisioining profile is enabled for ad-hoc code signing."
-                    )
-                if not args.ad_hoc_codesign_identity:
-                    raise RuntimeError(
-                        "Code signing identity should be set when selection of provisioining profile is enabled for ad-hoc code signing."
-                    )
-                profile_selection_context = signing_context_with_profile_selection(
-                    info_plist_source=args.info_plist_source,
-                    info_plist_destination=args.info_plist_destination,
-                    provisioning_profiles_dir=args.profiles_dir,
-                    entitlements_path=args.entitlements,
-                    platform=args.platform,
-                    list_codesign_identities=AdHocListCodesignIdentities(
-                        original=list_codesign_identities,
-                        subject_common_name=args.ad_hoc_codesign_identity,
-                    ),
-                    log_file_path=args.log_file,
-                    should_use_fast_provisioning_profile_parsing=args.fast_provisioning_profile_parsing,
-                    strict_provisioning_profile_search=args.strict_provisioning_profile_search,
-                    provisioning_profile_filter=args.provisioning_profile_filter,
-                )
-            else:
-                profile_selection_context = None
-            signing_context = AdhocSigningContext(
-                codesign_identity=args.ad_hoc_codesign_identity,
-                profile_selection_context=profile_selection_context,
-            )
-            selected_identity_argument = args.ad_hoc_codesign_identity
-        else:
-            if not args.profiles_dir:
-                raise RuntimeError(
-                    "Path to directory with provisioning profile files should be set when signing is not ad-hoc."
-                )
-            signing_context = signing_context_with_profile_selection(
-                info_plist_source=args.info_plist_source,
-                info_plist_destination=args.info_plist_destination,
-                provisioning_profiles_dir=args.profiles_dir,
-                entitlements_path=args.entitlements,
-                platform=args.platform,
-                list_codesign_identities=list_codesign_identities,
-                log_file_path=args.log_file,
-                should_use_fast_provisioning_profile_parsing=args.fast_provisioning_profile_parsing,
-                strict_provisioning_profile_search=args.strict_provisioning_profile_search,
-                provisioning_profile_filter=args.provisioning_profile_filter,
-            )
-            selected_identity_argument = (
-                signing_context.selected_profile_info.identity.fingerprint
-            )
-    else:
-        signing_context = None
-        selected_identity_argument = None
+    signing_context, selected_identity_argument = (
+        signing_context_and_selected_identity_from_args(args)
+    )
 
     with args.spec.open(mode="rb") as spec_file:
         spec = json.load(spec_file, object_hook=lambda d: BundleSpecItem(**d))
@@ -513,6 +380,13 @@ def _main() -> None:
             codesign_on_copy_paths=codesign_on_copy_paths,
             codesign_tool=args.codesign_tool,
             codesign_configuration=args.codesign_configuration,
+            codesign_manifest_path=args.codesign_manifest,
+        )
+    elif args.codesign_manifest:
+        # Always write the codesign manifest file, even when unsigned
+        write_empty_codesign_manifest(
+            codesign_manifest_path=args.codesign_manifest,
+            bundle_path=args.output,
         )
 
     if incremental_state:

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! This modules contains common options that are shared between different commands.
@@ -23,6 +24,7 @@
 //! ```
 
 pub mod build;
+pub mod profiling;
 pub mod target_cfg;
 pub mod timeout;
 pub mod ui;
@@ -38,17 +40,25 @@ use buck2_common::argv::ArgFilePath;
 use buck2_common::argv::ExpandedArgSource;
 use buck2_common::argv::ExpandedArgv;
 use buck2_common::argv::FlagfileArgSource;
-use buck2_core::fs::paths::abs_path::AbsPath;
-use buck2_core::fs::working_dir::AbsWorkingDir;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::working_dir::AbsWorkingDir;
 use dupe::Dupe;
 use gazebo::prelude::*;
 
+use crate::common::profiling::BuckProfileMode;
 use crate::common::ui::CommonConsoleOptions;
 use crate::immediate_config::ImmediateConfigContext;
 use crate::path_arg::PathArg;
 
 pub const EVENT_LOG: &str = "event-log";
 pub const NO_EVENT_LOG: &str = "no-event-log";
+
+#[derive(Debug, buck2_error::Error)]
+#[error("indices len is not equal to collection len for flag `{flag_name}`")]
+#[buck2(tag = buck2_error::ErrorTag::InternalError)]
+struct IndicesLengthMismatchError {
+    flag_name: String,
+}
 
 #[derive(
     Debug,
@@ -89,6 +99,27 @@ pub enum PreemptibleWhen {
     /// When another command starts that cannot run in parallel with this one,
     /// interrupt this command.
     OnDifferentState, // Read; "if a command comes in, preempt me on different state"
+}
+
+#[derive(
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Dupe,
+    Copy,
+    clap::ValueEnum,
+    Default
+)]
+#[clap(rename_all = "lower")]
+pub enum ExitWhen {
+    /// (default) Execute this command normally.
+    #[default]
+    Never,
+    /// Fail this command if another command is already running with a different state.
+    DifferentState,
+    /// Fail this command if another command is already running (regardless of daemon state).
+    NotIdle,
 }
 
 #[derive(
@@ -203,10 +234,6 @@ pub struct CommonBuildConfigurationOptions {
     #[clap(long)]
     pub reuse_current_config: bool,
 
-    /// Used for exiting a concurrent command when a different state is detected.
-    #[clap(long)]
-    pub exit_when_different_state: bool,
-
     /// Used to configure when this command could be preempted by another command for the same isolation dir.
     ///
     /// Normally, when you run two commands - from different terminals, say - buck2 will attempt
@@ -216,6 +243,9 @@ pub struct CommonBuildConfigurationOptions {
     /// first completes.
     #[clap(long, ignore_case = true, value_enum)]
     pub preemptible: Option<PreemptibleWhen>,
+    /// Whether to proceed with or fail this invocation based on the daemon state.
+    #[clap(long, ignore_case = true, value_enum)]
+    pub exit_when: Option<ExitWhen>,
 }
 
 impl CommonBuildConfigurationOptions {
@@ -233,19 +263,18 @@ impl CommonBuildConfigurationOptions {
             collection: &'a [T],
             name: &str,
             matches: BuckArgMatches<'a>,
-        ) -> impl Iterator<Item = (usize, &'a T)> + 'a {
+        ) -> buck2_error::Result<impl Iterator<Item = (usize, &'a T)> + use<'a, T>> {
             let indices = matches.inner.indices_of(name);
             let indices = indices.unwrap_or_default();
-            assert_eq!(
-                indices.len(),
-                collection.len(),
-                "indices len is not equal to collection len for flag `{}`",
-                name
-            );
-            indices.into_iter().zip(collection)
+            if indices.len() != collection.len() {
+                return Err(buck2_error::Error::from(IndicesLengthMismatchError {
+                    flag_name: name.to_owned(),
+                }));
+            }
+            Ok(indices.into_iter().zip(collection))
         }
 
-        let config_values_args = with_indices(&self.config_values, "config_values", matches)
+        let config_values_args = with_indices(&self.config_values, "config_values", matches)?
             .map(|(index, config_value)| {
                 let (cell, raw_arg) = match config_value.split_once("//") {
                     Some((cell, val)) if !cell.contains('=') => {
@@ -268,7 +297,7 @@ impl CommonBuildConfigurationOptions {
             })
             .collect::<buck2_error::Result<Vec<_>>>()?;
 
-        let config_file_args = with_indices(&self.config_files, "config_files", matches)
+        let config_file_args = with_indices(&self.config_files, "config_files", matches)?
             .map(|(index, file)| {
                 let (cell, path) = match file.split_once("//") {
                     Some((cell, val)) => {
@@ -328,13 +357,13 @@ impl CommonBuildConfigurationOptions {
             fake_arch: None,
             fake_xcode_version: None,
             reuse_current_config: false,
-            exit_when_different_state: false,
             preemptible: Some(PreemptibleWhen::Never),
+            exit_when: None,
         };
         &DEFAULT
     }
 
-    pub fn reuse_current_config_ref() -> &'static Self {
+    pub fn reuse_current_config_and_preemptible_ref() -> &'static Self {
         static OPTS: CommonBuildConfigurationOptions = CommonBuildConfigurationOptions {
             config_values: vec![],
             config_files: vec![],
@@ -342,8 +371,8 @@ impl CommonBuildConfigurationOptions {
             fake_arch: None,
             fake_xcode_version: None,
             reuse_current_config: true,
-            exit_when_different_state: false,
-            preemptible: Some(PreemptibleWhen::Never),
+            preemptible: Some(PreemptibleWhen::OnDifferentState),
+            exit_when: None,
         };
         &OPTS
     }
@@ -377,6 +406,53 @@ pub struct CommonStarlarkOptions {
     /// This is a hack for TD. Do not use this option.
     #[clap(long, hide = true)]
     pub(crate) skip_targets_with_duplicate_names: bool,
+
+    /// Enables profiling for all evaluations whose evaluation identifier matches one of the provided patterns.
+    ///
+    /// Some examples identifiers:
+    ///    analysis/cell//buck2/app/buck2_action_impl:buck2_action_impl (cfg:linux-x86_64#27ac5723e0c99706)
+    ///    load/cell//build_defs/json.bzl
+    ///    load/prelude//playground/test.bxl
+    ///    load/cell//build_defs/json.bzl@other_cell
+    ///    load_buildfile/fbcode//third-party-buck/platform010/build/ncurses
+    ///    load_packagefile/fbcode//cli/rust/cli_delegate
+    ///    anon_analysis/anon//:_anon_link_rule (anon: 766183dc9b6f680a) (fbcode//buck2/platform/execution:linux-x86_64#08961b14cfb182aa)
+    ///    bxl/prelude//playground/test.bxl:playground
+    ///
+    /// You can pass `--profile-patterns=.*` to enable no-op profiling for everything (additionally pass `--profile-patterns-mode=none` to
+    /// use no-op profiling to just get a list of all the identifiers).
+    ///
+    /// The profile results will be written to individual .profile files in `<ROOT_OUTPUT>/<data+time>-<uuid>/` where ROOT_OUTPUT comes from
+    /// the --profile-patterns-output flag. In that directory there will also be a file listing all the identifiers that were profiled.
+    ///
+    /// Enabling/disabling profiling of an evaluation will invalidate the results of that evaluation and it will be recomputed. In some
+    /// cases, this will cause other work to also need to be redone (for example, invalidating the result of loading PACKAGE files
+    /// causes all consumers to be recomputed). But if you keep profiling options consistent between commands, only the work that is
+    /// otherwise invalidated will be redone (and only for those would profiling results be created).
+    ///
+    /// You must also pass --profile-patterns-mode and --profile-patterns-output.
+    #[clap(
+        long,
+        requires = "profile_patterns_output",
+        requires = "profile_patterns_mode"
+    )]
+    pub(crate) profile_patterns: Option<Vec<String>>,
+
+    #[clap(long, value_name = "PATH")]
+    profile_patterns_output: Option<PathArg>,
+
+    /// Profile mode.
+    ///
+    /// Memory profiling modes have suffixes either `-allocated` or `-retained`.
+    ///
+    /// `-retained` means memory kept in frozen starlark heaps after analysis completes.
+    /// `-retained` does not work when profiling loading,
+    /// because no memory is retained after loading and frozen heap is not even created.
+    /// This is probably what you want when profiling analysis.
+    ///
+    /// `-allocated` means allocated memory, including memory which is later garbage collected.
+    #[clap(long, value_enum)]
+    profile_patterns_mode: Option<BuckProfileMode>,
 }
 
 impl CommonStarlarkOptions {
@@ -386,8 +462,29 @@ impl CommonStarlarkOptions {
             unstable_typecheck: false,
             target_call_stacks: false,
             skip_targets_with_duplicate_names: false,
+            profile_patterns: None,
+            profile_patterns_output: None,
+            profile_patterns_mode: None,
         };
         &DEFAULT
+    }
+
+    pub(crate) fn profile_pattern_opts(
+        &self,
+        working_dir: &AbsWorkingDir,
+    ) -> Option<buck2_cli_proto::client_context::ProfilePatternOptions> {
+        self.profile_patterns.as_ref().map(|v| {
+            buck2_cli_proto::client_context::ProfilePatternOptions {
+                profile_patterns: v.clone(),
+                profile_mode: self.profile_patterns_mode.as_ref().unwrap().to_proto() as i32,
+                profile_output: self
+                    .profile_patterns_output
+                    .as_ref()
+                    .unwrap()
+                    .resolve(working_dir)
+                    .to_string(),
+            }
+        })
     }
 }
 
@@ -449,11 +546,15 @@ impl<'a> BuckArgMatches<'a> {
     pub fn get_representative_config_flags(&self) -> Vec<String> {
         self.get_representative_config_flags_by_source()
             .map(|flags| match &flags.source {
-                Some(RepresentativeConfigFlagSource::ConfigFlag(v)) => format!("-c {}", v),
+                Some(RepresentativeConfigFlagSource::ConfigFlag(v)) => format!("-c {v}"),
                 Some(RepresentativeConfigFlagSource::ConfigFile(v)) => {
-                    format!("--config-file {}", v)
+                    format!("--config-file {v}")
                 }
                 Some(RepresentativeConfigFlagSource::ModeFile(v)) => v.clone(),
+                Some(RepresentativeConfigFlagSource::Modifier(v)) => format!("-m {v}"),
+                Some(RepresentativeConfigFlagSource::TargetPlatforms(v)) => {
+                    format!("--target-platforms {v}")
+                }
                 None => unreachable!("impossible flag"),
             })
     }
@@ -477,6 +578,7 @@ impl<'a> BuckArgMatches<'a> {
         enum State {
             None,
             Matched(&'static str),
+            Finished,
         }
         let mut state = State::None;
         let config_args = self
@@ -497,15 +599,51 @@ impl<'a> BuckArgMatches<'a> {
                             state = State::Matched("--config-file");
                             None
                         }
+                        "-m" => {
+                            state = State::Matched("-m");
+                            None
+                        }
+                        v if v.starts_with("-m") => Some(RepresentativeConfigFlagSource::Modifier(
+                            v.split_at("-m".len()).1.trim().to_owned(),
+                        )),
+                        "--modifier" => {
+                            state = State::Matched("-m");
+                            None
+                        }
+                        "--target-platforms" => {
+                            state = State::Matched("--target-platforms");
+                            None
+                        }
                         v if v.starts_with("--config=") || v.starts_with("-c=") => {
                             Some(RepresentativeConfigFlagSource::ConfigFlag(
                                 v.split_once("=").unwrap().1.to_owned(),
                             ))
                         }
+                        v if v.starts_with("-c") => {
+                            Some(RepresentativeConfigFlagSource::ConfigFlag(
+                                v.split_at("-c".len()).1.trim().to_owned(),
+                            ))
+                        }
+
                         v if v.starts_with("--config-file=") => {
                             Some(RepresentativeConfigFlagSource::ConfigFile(
                                 v.split_at("--config-file=".len()).1.to_owned(),
                             ))
+                        }
+                        v if v.starts_with("--modifier=") || v.starts_with("-m=") => {
+                            Some(RepresentativeConfigFlagSource::Modifier(
+                                v.split_once("=").unwrap().1.to_owned(),
+                            ))
+                        }
+                        v if v.starts_with("--target-platforms=") => {
+                            Some(RepresentativeConfigFlagSource::TargetPlatforms(
+                                v.split_once("=").unwrap().1.to_owned(),
+                            ))
+                        }
+                        // The `--` separator indicates the end of Buck flags and the start of args for the target itself.
+                        "--" => {
+                            state = State::Finished;
+                            None
                         }
                         _ => None,
                     },
@@ -518,9 +656,16 @@ impl<'a> BuckArgMatches<'a> {
                             "--config-file" => {
                                 Some(RepresentativeConfigFlagSource::ConfigFile(value.to_owned()))
                             }
+                            "-m" => {
+                                Some(RepresentativeConfigFlagSource::Modifier(value.to_owned()))
+                            }
+                            "--target-platforms" => Some(
+                                RepresentativeConfigFlagSource::TargetPlatforms(value.to_owned()),
+                            ),
                             _ => unreachable!("impossible flag"),
                         }
                     }
+                    State::Finished => None,
                 }
                 .map(|flag_value| (flag_value, source))
             });
@@ -531,7 +676,7 @@ impl<'a> BuckArgMatches<'a> {
         for (flag_value, source) in config_args {
             let flagfile = match source {
                 ExpandedArgSource::Inline => None,
-                ExpandedArgSource::Flagfile(file) => get_flagfile_for_logging(&file),
+                ExpandedArgSource::Flagfile(file) => get_flagfile_for_logging(file),
             };
 
             match flagfile {
@@ -561,17 +706,20 @@ impl<'a> BuckArgMatches<'a> {
 mod tests {
     use buck2_common::argv::ExpandedArgvBuilder;
     use buck2_core::cells::cell_path::CellPath;
-    use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     use buck2_core::fs::project::ProjectRootTemp;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 
     use super::*;
 
     #[test]
-    fn test_get_representative_config_flags() -> anyhow::Result<()> {
+    fn test_get_representative_config_flags() -> buck2_error::Result<()> {
         let mut argv = ExpandedArgvBuilder::new();
 
         argv.push("-c".to_owned());
         argv.push("section.option=value".to_owned());
+
+        argv.push("-c section1.option=value".to_owned());
+        argv.push("-csection2.option=value".to_owned());
 
         argv.push("--other-flag".to_owned());
         argv.push("value".to_owned());
@@ -588,6 +736,16 @@ mod tests {
         argv.push("--config-file".to_owned());
         argv.push("//2.bcfg".to_owned());
 
+        argv.push("-m".to_owned());
+        argv.push("//bar:baz".to_owned());
+        argv.push("-m //bar1:baz".to_owned());
+        argv.push("-m//bar2:baz".to_owned());
+        argv.push("--modifier=//foo:bar".to_owned());
+        argv.push("--modifier".to_owned());
+        argv.push("//bar:foo".to_owned());
+
+        argv.push("--target-platforms=ovr_config//platforms/linux:some_linux_platform".to_owned());
+
         let argv = argv.build();
 
         let clap = clap::ArgMatches::default(); // we don't actually inspect this right now so just use an empty one.
@@ -599,11 +757,19 @@ mod tests {
             flags,
             vec![
                 "-c section.option=value",
+                "-c section1.option=value",
+                "-c section2.option=value",
                 "-c section.option2=value",
                 "-c section.option3=value",
                 "-c section.option4=value",
                 "--config-file //1.bcfg",
                 "--config-file //2.bcfg",
+                "-m //bar:baz",
+                "-m //bar1:baz",
+                "-m //bar2:baz",
+                "-m //foo:bar",
+                "-m //bar:foo",
+                "--target-platforms ovr_config//platforms/linux:some_linux_platform"
             ]
         );
 
@@ -611,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_representative_config_flags_for_flagfiles() -> anyhow::Result<()> {
+    fn test_get_representative_config_flags_for_flagfiles() -> buck2_error::Result<()> {
         let project_argfile = |path: &str| ArgFilePath::Project(CellPath::testing_new(path));
 
         let external_root = ProjectRootTemp::new().unwrap();
@@ -625,11 +791,16 @@ mod tests {
         };
 
         let mut argv = ExpandedArgvBuilder::new();
+        argv.push("-m".to_owned());
+        argv.push("//bar:baz".to_owned());
 
         argv.argfile_scope(ArgFileKind::Path(project_argfile("root//mode/1")), |argv| {
             argv.push("-c=a.b=c".to_owned());
             argv.push("-c=a.b2=c".to_owned());
             argv.push("-c=a.b3=c".to_owned());
+            argv.push("--modifier=//foo:bar".to_owned());
+            argv.push("--modifier".to_owned());
+            argv.push("//bar:foo".to_owned());
         });
 
         argv.argfile_scope(ArgFileKind::Path(external_argfile("mode/1")), |argv| {
@@ -657,7 +828,47 @@ mod tests {
 
         assert_eq!(
             flags,
-            vec!["@root//mode/1", "@root//mode/2", "-c a.b5=c", "-c a.b6=c"]
+            vec![
+                "-m //bar:baz",
+                "@root//mode/1",
+                "@root//mode/2",
+                "-c a.b5=c",
+                "-c a.b6=c"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_representative_config_flags_stops_at_double_dash() -> buck2_error::Result<()> {
+        let mut argv = ExpandedArgvBuilder::new();
+
+        argv.push("-c".to_owned());
+        argv.push("section.option=value".to_owned());
+
+        argv.push("--config".to_owned());
+        argv.push("section.option2=value".to_owned());
+
+        // Add the -- separator
+        argv.push("--".to_owned());
+
+        // These should be ignored after --
+        argv.push("-c".to_owned());
+        argv.push("section.ignored=value".to_owned());
+        argv.push("--config".to_owned());
+        argv.push("section.ignored2=value".to_owned());
+
+        let argv = argv.build();
+
+        let clap = clap::ArgMatches::default();
+        let matches = BuckArgMatches::from_clap(&clap, &argv);
+
+        let flags = matches.get_representative_config_flags();
+
+        // Should only include flags before --, not after
+        assert_eq!(
+            flags,
+            vec!["-c section.option=value", "-c section.option2=value",]
         );
 
         Ok(())

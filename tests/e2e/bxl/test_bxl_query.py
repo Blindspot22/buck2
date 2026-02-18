@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -222,6 +223,27 @@ async def test_uquery_allpaths_filtered(buck: Buck) -> None:
 
 
 @buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_allpaths(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl:uquery.bxl:lazy_allpaths_test",
+    )
+
+    assert (
+        "[root//graph:one, root//graph:ten, root//graph:eleven, root//graph:two, root//graph:three]\n"
+        == result.stdout
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_allpaths_filtered(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl:uquery.bxl:lazy_allpaths_filtered_test",
+    )
+
+    assert "[root//graph:one, root//graph:two, root//graph:three]\n" == result.stdout
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
 async def test_uquery_somepath(buck: Buck) -> None:
     result = await buck.bxl(
         "//bxl:uquery.bxl:somepath_test",
@@ -244,9 +266,41 @@ async def test_uquery_somepath_filtered(buck: Buck) -> None:
 
 
 @buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_somepath(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl:uquery.bxl:lazy_somepath_test",
+    )
+
+    assert "[root//graph:one, root//graph:two, root//graph:three]\n" == result.stdout
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_somepath_filtered(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl:uquery.bxl:lazy_somepath_filtered_test",
+    )
+
+    assert (
+        "[root//graph:one, root//graph:ten, root//graph:twenty]\n"
+        + "[root//graph:one, root//graph:five, root//graph:six, root//graph:twenty]\n"
+        == result.stdout
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
 async def test_uquery_kind(buck: Buck) -> None:
     result = await buck.bxl(
         "//bxl:uquery.bxl:kind_test",
+    )
+
+    assert "foo" in result.stdout
+    assert "bar" not in result.stdout
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_kind(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl:uquery.bxl:lazy_kind_test",
     )
 
     assert "foo" in result.stdout
@@ -263,9 +317,27 @@ async def test_uquery_inputs(buck: Buck) -> None:
 
 
 @buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_inputs(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl:uquery.bxl:lazy_inputs_test",
+    )
+
+    assert "TARGETS.fixture" in result.stdout
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
 async def test_uquery_filter(buck: Buck) -> None:
     result = await buck.bxl(
         "//bxl:uquery.bxl:filter_test",
+    )
+
+    assert "root//bin:the_binary" in result.stdout
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_filter(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl:uquery.bxl:lazy_filter_test",
     )
 
     assert "root//bin:the_binary" in result.stdout
@@ -283,9 +355,31 @@ async def test_uquery_attrregex_filter(buck: Buck) -> None:
 
 
 @buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_attrregex_filter(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_attrregexfilter_test",
+    )
+
+    assert "foo" in result.stdout
+    assert "bzzt" in result.stdout
+    assert "bar" not in result.stdout
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
 async def test_uquery_attrfilter(buck: Buck) -> None:
     result = await buck.bxl(
         "//bxl/uquery.bxl:attrfilter_test",
+    )
+
+    assert "foo" in result.stdout
+    assert "bzzt" not in result.stdout
+    assert "bar" not in result.stdout
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_attrfilter(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_attrfilter_test",
     )
 
     assert "foo" in result.stdout
@@ -318,9 +412,44 @@ async def test_uquery_owner_list(buck: Buck) -> None:
 
 
 @buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_owner(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_owner_test",
+    )
+    assert result.stdout == "[root//bin:the_binary]\n"
+
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_owner_with_cell_path_test",
+    )
+    assert _replace_hash(result.stdout) == "[root//bin:the_binary]\n"
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_owner_list(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_owner_list_test",
+    )
+    assert (
+        _replace_hash(result.stdout)
+        == "[root//bin:the_binary, root//bin:the_binary_with_dir_srcs]\n"
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
 async def test_uquery_targets_in_buildfile(buck: Buck) -> None:
     result = await buck.bxl(
         "//bxl/uquery.bxl:targets_in_buildfile_test",
+    )
+    assert (
+        result.stdout
+        == "[root//bin:the_binary, root//bin:the_binary_with_dir_srcs, root//bin:platform]\n"
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_targets_in_buildfile(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_targets_in_buildfile_test",
     )
     assert (
         result.stdout
@@ -333,6 +462,11 @@ async def test_uquery_buildfile(buck: Buck) -> None:
     await buck.bxl("//bxl/uquery.bxl:buildfile_test")
 
 
+@buck_test(inplace=False, data_dir="bxl/simple", allow_soft_errors=True)
+async def test_uquery_lazy_buildfile(buck: Buck) -> None:
+    await buck.bxl("//bxl/uquery.bxl:lazy_buildfile_test")
+
+
 @buck_test(inplace=False, data_dir="bxl/simple")
 async def test_uquery_rdeps(buck: Buck) -> None:
     result = await buck.bxl(
@@ -342,9 +476,28 @@ async def test_uquery_rdeps(buck: Buck) -> None:
 
 
 @buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_rdeps(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_rdeps_test",
+    )
+    assert result.stdout == "[root//bin:the_binary, root//lib:lib1, root//lib:file1]\n"
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
 async def test_query_deps(buck: Buck) -> None:
     result = await buck.bxl(
         "//bxl/uquery.bxl:deps_test",
+    )
+    assert (
+        result.stdout
+        == "[root//bin:the_binary, root//:data, root//lib:lib1, root//lib:lib2, root//lib:lib3, root//:foo_toolchain, root//:bin]\n"
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_deps(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_deps_test",
     )
     assert (
         result.stdout
@@ -369,6 +522,18 @@ async def test_uquery_eval(buck: Buck) -> None:
 
     result = await buck.bxl(
         "//bxl/uquery.bxl:eval_query_with_query_args",
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_uquery_lazy_eval(buck: Buck) -> None:
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_eval_query_test",
+    )
+    assert result.stdout == "[root//bin/TARGETS.fixture]\n"
+
+    result = await buck.bxl(
+        "//bxl/uquery.bxl:lazy_eval_query_with_query_args",
     )
 
 

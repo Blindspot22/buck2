@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -12,7 +13,7 @@ use std::fmt::Display;
 use std::iter;
 
 use allocative::Allocative;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use display_container::display_pair;
 use display_container::fmt_container;
 use display_container::iter_display_chain;
@@ -23,7 +24,6 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::values::Freeze;
-use starlark::values::FreezeResult;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
@@ -38,6 +38,7 @@ use starlark::values::ValueOfUncheckedGeneric;
 use starlark::values::starlark_value;
 
 use crate::artifact_groups::TransitiveSetProjectionKey;
+use crate::artifact_groups::TransitiveSetProjectionWrapper;
 use crate::interpreter::rule_defs::transitive_set::FrozenTransitiveSet;
 use crate::interpreter::rule_defs::transitive_set::TransitiveSet;
 use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetOrdering;
@@ -80,18 +81,28 @@ impl<'v, V: ValueLike<'v>> Display for TransitiveSetJsonProjectionGen<V> {
 impl<'v, V: ValueLike<'v>> TransitiveSetJsonProjectionGen<V> {
     fn projection_name(&self) -> buck2_error::Result<&'v str> {
         TransitiveSet::from_value(self.transitive_set.get().to_value())
-            .buck_error_context("Invalid transitive_set")?
+            .ok_or_else(|| internal_error!("Invalid transitive_set"))?
             .projection_name(self.projection)
     }
 
-    pub(crate) fn to_projection_key(&self) -> buck2_error::Result<TransitiveSetProjectionKey> {
+    pub(crate) fn to_projection_key_wrapper(
+        &self,
+    ) -> buck2_error::Result<TransitiveSetProjectionWrapper> {
         let set = TransitiveSet::from_value(self.transitive_set.get().to_value())
-            .buck_error_context("Invalid transitive_set")?;
+            .ok_or_else(|| internal_error!("Invalid transitive_set"))?;
 
-        Ok(TransitiveSetProjectionKey {
-            key: set.key().dupe(),
-            projection: self.projection,
-        })
+        Ok(TransitiveSetProjectionWrapper::new(
+            TransitiveSetProjectionKey {
+                key: set.key().dupe(),
+                projection: self.projection,
+            },
+            *set.projection_path_resolution_may_require_artifact_value
+                .get(self.projection)
+                .expect("Valid ID"),
+            *set.projection_is_eligible_for_dedupe
+                .get(self.projection)
+                .expect("Valid ID"),
+        ))
     }
 }
 
@@ -103,7 +114,7 @@ impl<'v, V: ValueLike<'v>> TransitiveSetJsonProjectionGen<V> {
         'v: 'a,
     {
         let set = TransitiveSet::from_value(self.transitive_set.get().to_value())
-            .buck_error_context("Invalid transitive_set")?;
+            .ok_or_else(|| internal_error!("Invalid transitive_set"))?;
         set.iter_projection_values(self.ordering, self.projection)
     }
 }
@@ -125,7 +136,7 @@ where
 fn transitive_set_json_projection_methods(builder: &mut MethodsBuilder) {
     fn traverse<'v>(
         this: ValueOf<'v, &'v TransitiveSetJsonProjection<'v>>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<Value<'v>> {
         Ok(heap.alloc(TransitiveSetProjectionTraversal {
             transitive_set: this.typed.transitive_set,
@@ -137,7 +148,7 @@ fn transitive_set_json_projection_methods(builder: &mut MethodsBuilder) {
     #[starlark(attribute)]
     fn projection_name<'v>(
         this: ValueOf<'v, &'v TransitiveSetJsonProjection<'v>>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<StringValue<'v>> {
         Ok(heap.alloc_str(this.typed.projection_name()?))
     }

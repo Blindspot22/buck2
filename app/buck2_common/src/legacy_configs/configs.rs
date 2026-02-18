@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ use buck2_cli_proto::ConfigOverride;
 use buck2_core::cells::cell_root_path::CellRootPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use dupe::Dupe;
+use pagable::Pagable;
 use starlark_map::sorted_map::SortedMap;
 
 use super::cells::ExternalPathBuckconfigData;
@@ -28,15 +30,15 @@ use crate::legacy_configs::file_ops::ConfigPath;
 use crate::legacy_configs::key::BuckconfigKeyRef;
 use crate::legacy_configs::parser::LegacyConfigParser;
 
-#[derive(Clone, Dupe, Debug, Allocative)]
+#[derive(Clone, Dupe, Debug, Allocative, Pagable)]
 pub struct LegacyBuckConfig(pub(crate) Arc<ConfigData>);
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub(crate) struct ConfigData {
     pub(crate) values: SortedMap<String, LegacyBuckConfigSection>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Allocative)]
+#[derive(Clone, Debug, PartialEq, Eq, Allocative, Pagable)]
 pub(crate) enum ResolvedValue {
     // A placeholder used before we do resolution.
     Unknown,
@@ -46,26 +48,26 @@ pub(crate) enum ResolvedValue {
     Resolved(String),
 }
 
-#[derive(Debug, PartialEq, Eq, Allocative)]
+#[derive(Debug, PartialEq, Eq, Allocative, Pagable)]
 pub(crate) struct ConfigFileLocation {
     pub(crate) path: String,
     pub(crate) include_source: Option<Location>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Allocative)]
+#[derive(Clone, Debug, PartialEq, Eq, Allocative, Pagable)]
 pub(crate) struct ConfigFileLocationWithLine {
     pub(crate) source_file: Arc<ConfigFileLocation>,
     pub(crate) line: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Allocative)]
+#[derive(Clone, Debug, PartialEq, Eq, Allocative, Pagable)]
 pub(crate) enum Location {
     File(ConfigFileLocationWithLine),
     CommandLineArgument,
 }
 
 impl Location {
-    pub(crate) fn as_legacy_buck_config_location(&self) -> LegacyBuckConfigLocation {
+    pub(crate) fn as_legacy_buck_config_location(&self) -> LegacyBuckConfigLocation<'_> {
         match self {
             Self::File(x) => LegacyBuckConfigLocation::File(&x.source_file.path, x.line),
             Self::CommandLineArgument => LegacyBuckConfigLocation::CommandLineArgument,
@@ -128,14 +130,14 @@ pub fn parse_config_section_and_key(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Allocative)]
+#[derive(Debug, Clone, PartialEq, Eq, Allocative, Pagable)]
 pub(crate) struct ConfigValue {
     raw_value: String,
     pub(crate) resolved_value: ResolvedValue,
     pub(crate) source: Location,
 }
 
-#[derive(Debug, Default, Allocative)]
+#[derive(Debug, Default, Allocative, Pagable)]
 pub struct LegacyBuckConfigSection {
     pub(crate) values: SortedMap<String, ConfigValue>,
 }
@@ -186,7 +188,7 @@ impl Display for LegacyBuckConfigLocation<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::File(file, line) => {
-                write!(f, "at {}:{}", file, line)
+                write!(f, "at {file}:{line}")
             }
             Self::CommandLineArgument => {
                 write!(f, "on the command line")
@@ -204,7 +206,7 @@ impl<'a> LegacyBuckConfigValue<'a> {
         self.value.raw_value()
     }
 
-    pub fn location(&self) -> LegacyBuckConfigLocation {
+    pub fn location(&self) -> LegacyBuckConfigLocation<'_> {
         match &self.value.source {
             Location::File(file) => {
                 LegacyBuckConfigLocation::File(&file.source_file.path, file.line)
@@ -213,7 +215,7 @@ impl<'a> LegacyBuckConfigValue<'a> {
         }
     }
 
-    pub fn location_stack(&self) -> Vec<LegacyBuckConfigLocation> {
+    pub fn location_stack(&self) -> Vec<LegacyBuckConfigLocation<'_>> {
         let mut res = Vec::new();
         let mut location = Some(&self.value.source);
 
@@ -406,7 +408,6 @@ pub mod testing {
 
             Ok(Some(
                 file.lines()
-                    .into_iter()
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(buck2_error::Error::from)?,
             ))
@@ -639,9 +640,7 @@ pub(crate) mod tests {
                 let cycle = "`x.d` -> `x.e` -> `x.f` -> `x.g` -> `x.d`";
                 assert!(
                     message.contains(cycle),
-                    "Expected error to contain \"{}\", but was `{}`",
-                    cycle,
-                    message
+                    "Expected error to contain \"{cycle}\", but was `{message}`"
                 );
             }
         }
@@ -818,7 +817,7 @@ pub(crate) mod tests {
                         r#"
                             [cells]
                               root = .
-                            
+
                             [apple]
                               key = value1
                         "#

@@ -1,10 +1,11 @@
 #!/usr/bin/env fbpython
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 import unittest
 
@@ -139,8 +140,11 @@ class TestDistLtoOpt(unittest.TestCase):
                 "-O2",
                 "-ffunction-sections",
                 "-fdata-sections",
+                "-fuse-ld=lld",
                 "-mllvm",
                 "-hot-callsite-threshold=12000",
+                "-fwhole-program-vtables",
+                "-fuse-ld=lld",
                 "-mllvm",
                 "-profile-guided-section-prefix=false",
                 "-mllvm",
@@ -252,6 +256,7 @@ class TestDistLtoOpt(unittest.TestCase):
                 "-O2",
                 "-ffunction-sections",
                 "-fdata-sections",
+                "-fuse-ld=lld",
                 "-fprofile-sample-use=buck-out/v2/gen/fbcode/40fc99293b37c503/fdo/autofdo/default_profile/__autofdo__/out/profile",
                 "-mllvm",
                 "-profile-guided-section-prefix=false",

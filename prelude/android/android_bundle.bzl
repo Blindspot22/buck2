@@ -1,34 +1,45 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:validation_deps.bzl", "get_validation_deps_outputs")
+load("@prelude//android:android_apk.bzl", "get_install_info")
 load("@prelude//android:android_binary.bzl", "get_binary_info")
-load("@prelude//android:android_providers.bzl", "AndroidAabInfo", "AndroidBinaryNativeLibsInfo", "AndroidBinaryResourcesInfo", "DexFilesInfo")
+load("@prelude//android:android_providers.bzl", "AndroidAabInfo", "AndroidBinaryNativeLibsInfo", "AndroidBinaryPrimaryPlatformInfo", "AndroidBinaryResourcesInfo", "AndroidDerivedApkInfo", "DexFilesInfo")
 load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
 load("@prelude//android:bundletool_util.bzl", "derive_universal_apk")
+load("@prelude//android:util.bzl", "package_validators_decorator")
 load("@prelude//java:java_providers.bzl", "KeystoreInfo")
 load("@prelude//java/utils:java_more_utils.bzl", "get_path_separator_for_exec_os")
 load("@prelude//utils:argfile.bzl", "argfile")
 
 def android_bundle_impl(ctx: AnalysisContext) -> list[Provider]:
     android_binary_info = get_binary_info(ctx, use_proto_format = True)
+    native_library_info = android_binary_info.native_library_info
 
-    output_bundle = build_bundle(
-        label = ctx.label,
+    wrapped_build_bundle = package_validators_decorator(
+        ctx,
+        build_bundle,
+        extension = ".aab",
+    )
+
+    output_bundle = wrapped_build_bundle(
+        output_filename = ctx.label.name,
         actions = ctx.actions,
         android_toolchain = ctx.attrs._android_toolchain[AndroidToolchainInfo],
         dex_files_info = android_binary_info.dex_files_info,
-        native_library_info = android_binary_info.native_library_info,
+        native_library_info = native_library_info,
         resources_info = android_binary_info.resources_info,
         bundle_config = ctx.attrs.bundle_config_file,
         validation_deps_outputs = get_validation_deps_outputs(ctx),
         packaging_options = ctx.attrs.packaging_options,
     )
 
+    extra_providers = []
     sub_targets = {}
     sub_targets.update(android_binary_info.sub_targets)
     if ctx.attrs.use_derived_apk:
@@ -39,6 +50,15 @@ def android_bundle_impl(ctx: AnalysisContext) -> list[Provider]:
             app_bundle = output_bundle,
             keystore = keystore,
         )
+        extra_providers.append(AndroidDerivedApkInfo(apk = default_output))
+        extra_providers.append(
+            get_install_info(
+                ctx,
+                exopackage_info = None,
+                manifest = android_binary_info.resources_info.manifest,
+                output_apk = default_output,
+            ),
+        )
         sub_targets["aab"] = [DefaultInfo(
             default_outputs = [output_bundle],
         )]
@@ -48,17 +68,25 @@ def android_bundle_impl(ctx: AnalysisContext) -> list[Provider]:
     java_packaging_deps = android_binary_info.java_packaging_deps
     return [
         DefaultInfo(default_output = default_output, other_outputs = android_binary_info.materialized_artifacts, sub_targets = sub_targets),
-        AndroidAabInfo(aab = output_bundle, manifest = android_binary_info.resources_info.manifest, materialized_artifacts = android_binary_info.materialized_artifacts),
+        AndroidAabInfo(
+            aab = output_bundle,
+            manifest = android_binary_info.resources_info.manifest,
+            materialized_artifacts = android_binary_info.materialized_artifacts,
+            unstripped_shared_libraries = native_library_info.unstripped_shared_libraries,
+        ),
+        AndroidBinaryPrimaryPlatformInfo(
+            primary_platform = android_binary_info.primary_platform,
+        ),
         TemplatePlaceholderInfo(
             keyed_variables = {
                 "classpath": cmd_args([dep.jar for dep in java_packaging_deps if dep.jar], delimiter = get_path_separator_for_exec_os(ctx)),
                 "classpath_including_targets_with_no_output": cmd_args([dep.output_for_classpath_macro for dep in java_packaging_deps], delimiter = get_path_separator_for_exec_os(ctx)),
             },
         ),
-    ]
+    ] + extra_providers
 
 def build_bundle(
-        label: Label,
+        output_filename: str,
         actions: AnalysisActions,
         android_toolchain: AndroidToolchainInfo,
         dex_files_info: DexFilesInfo,
@@ -67,7 +95,7 @@ def build_bundle(
         bundle_config: Artifact | None,
         validation_deps_outputs: [list[Artifact], None] = None,
         packaging_options: dict | None = None) -> Artifact:
-    output_bundle = actions.declare_output("{}.aab".format(label.name))
+    output_bundle = actions.declare_output("{}.aab".format(output_filename))
 
     bundle_builder_args = cmd_args(
         android_toolchain.bundle_builder[RunInfo],
@@ -116,8 +144,6 @@ def build_bundle(
         zip_files,
         "--jar-files-that-may-contain-resources-list",
         jar_files_that_may_contain_resources,
-        "--zipalign_tool",
-        android_toolchain.zipalign[RunInfo],
     ])
 
     if packaging_options:

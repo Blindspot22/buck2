@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 
 use buck2_core::cells::name::CellName;
-use buck2_error::conversion::from_any_with_tag;
 use buck2_test_api::data::ConfiguredTarget;
 use buck2_test_api::data::ExternalRunnerSpec;
 use buck2_test_api::data::ExternalRunnerSpecValue;
@@ -27,7 +27,7 @@ use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectio
 pub trait TestProvider {
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'_>,
     ) -> buck2_error::Result<()>;
 
     fn labels(&self) -> Vec<&str>;
@@ -43,7 +43,7 @@ pub trait TestProvider {
 impl TestProvider for FrozenExternalRunnerTestInfo {
     fn visit_artifacts(
         &self,
-        visitor: &mut dyn CommandLineArtifactVisitor,
+        visitor: &mut dyn CommandLineArtifactVisitor<'_>,
     ) -> buck2_error::Result<()> {
         FrozenExternalRunnerTestInfo::visit_artifacts(self, visitor)
     }
@@ -84,6 +84,7 @@ impl TestProvider for FrozenExternalRunnerTestInfo {
                 )
             })
             .collect();
+        let package_oncall = target.package_oncall.clone();
 
         let spec = ExternalRunnerSpec {
             target,
@@ -92,17 +93,16 @@ impl TestProvider for FrozenExternalRunnerTestInfo {
             env,
             labels: self.labels().map(|l| l.to_owned()).collect(),
             contacts: self.contacts().map(|l| l.to_owned()).collect(),
-            oncall: self.contacts().exactly_one().ok().map(str::to_owned),
+            oncall: self
+                .contacts()
+                .exactly_one()
+                .ok()
+                .map(str::to_owned)
+                .or(package_oncall),
             working_dir_cell,
         };
 
-        async move {
-            executor
-                .external_runner_spec(spec)
-                .await
-                .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
-        }
-        .boxed()
+        async move { executor.external_runner_spec(spec).await }.boxed()
     }
 }
 

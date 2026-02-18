@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin.cd.analytics.logger
@@ -13,6 +14,7 @@ import com.facebook.buck.core.util.log.Logger
 import com.facebook.buck.jvm.cd.command.kotlin.LanguageVersionForLogs
 import com.facebook.buck.jvm.kotlin.cd.analytics.KotlinCDAnalytics
 import com.facebook.buck.jvm.kotlin.cd.analytics.KotlinCDLoggingContext
+import com.facebook.buck.jvm.kotlin.cd.analytics.ModeParam
 import com.facebook.buck.jvm.kotlin.cd.analytics.logger.model.KotlinCDLogEntry
 import java.time.Clock
 import java.time.Duration
@@ -29,13 +31,14 @@ constructor(
     private val numJavaFiles: Long,
     private val numKotlinFiles: Long,
     private val incremental: Boolean,
-    private val clock: Clock = Clock.systemDefaultZone()
+    private val clock: Clock = Clock.systemDefaultZone(),
 ) : KotlinCDAnalytics() {
 
   override fun log(context: KotlinCDLoggingContext) {
     if (buildUuid == null) {
       LOG.debug(
-          "No operation performed. This is expected when running an action downloaded from RE.")
+          "No operation performed. This is expected when running an action downloaded from RE."
+      )
       return
     }
 
@@ -48,17 +51,27 @@ constructor(
       LOG.info(
           "Successfully wrote KotlinCD logs to scribe. Total time: " +
               duration.toMillis() +
-              " milliseconds")
+              " milliseconds"
+      )
     } else {
       LOG.warn(
           (("Failed to write KotlinCD logs to scribe. Total time: " +
               duration.toMillis() +
-              " milliseconds")))
+              " milliseconds"))
+      )
     }
   }
 
   @OptIn(LanguageVersionForLogs::class)
   private fun createKotlinCDLogEntry(context: KotlinCDLoggingContext): KotlinCDLogEntry {
+    val addedAndModifiedFiles: Set<String>? =
+        (context.mode as? ModeParam.Incremental)
+            ?.addedAndModifiedFiles
+            ?.map { it.toString() }
+            ?.toSet()
+    val removedFiles: Set<String>? =
+        (context.mode as? ModeParam.Incremental)?.removedFiles?.map { it.toString() }?.toSet()
+
     return KotlinCDLogEntry(
         time = Instant.now(clock).epochSecond,
         eventTime = Instant.now(clock).epochSecond.toDouble(),
@@ -69,11 +82,14 @@ constructor(
         numKotlinFiles = numKotlinFiles,
         numJavaFiles = numJavaFiles,
         incremental = incremental,
-        kotlincMode = context.kotlincMode?.value,
+        mode = context.mode?.value,
         classpathChanges = context.classpathChangesParam?.value,
         step = context.step.value,
         languageVersion = context.languageVersion.valueForLogs,
-        extras = buildJson(context.extras))
+        extras = buildJson(context.extras),
+        addedAndModifiedFiles = addedAndModifiedFiles,
+        removedFiles = removedFiles,
+    )
   }
 
   private fun buildJson(extras: Map<String, List<String>>): String? {

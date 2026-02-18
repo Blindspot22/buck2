@@ -1,6 +1,6 @@
 [package]
 description = "Implementation of configuration constructor for modifier feature"
-edition = "2021"
+edition = "2024"
 license = { workspace = true }
 name = "buck2_cfg_constructor"
 repository = { workspace = true }
@@ -23,3 +23,4 @@ buck2_events = { workspace = true }
 buck2_interpreter = { workspace = true }
 buck2_interpreter_for_build = { workspace = true }
 buck2_node = { workspace = true }
+dice_futures = { workspace = true }

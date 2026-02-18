@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::convert::Infallible;
@@ -15,16 +16,18 @@ use std::io::Write;
 use std::ops::FromResidual;
 use std::process::Command;
 
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_data::ErrorReport;
 use buck2_error::ErrorTag;
-use buck2_error::Tier;
+use buck2_error::ExitCode;
 use buck2_error::classify::ErrorLike;
+use buck2_error::classify::ErrorTagExtra;
 use buck2_error::classify::best_error;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_wrapper_common::invocation_id::TraceId;
 
 #[derive(Debug)]
@@ -37,13 +40,6 @@ pub struct ExecArgs {
 
 /// ExitResult represents the outcome of a process execution where we care to return a specific
 /// exit code. This is designed to be used as the return value from `main()`.
-///
-/// The exit code is u8 integer and has the following meanings
-/// - Success             : 0
-/// - Uncategorized Error : 1
-/// - Infra Error         : 2
-/// - User Error          : 3
-/// - Signal Interruption : 129-192 (128 + signal number)
 ///
 /// We can easily turn a buck2_error::Result (or buck2_error::Error, or even a message) into a ExitResult,
 /// but the reverse is not possible: once created, the only useful thing we can with a
@@ -106,7 +102,8 @@ impl ExitResult {
         errors
     }
 
-    pub fn status(status: ExitCode) -> Self {
+    /// Only use for commands that did not fail, otherwise return an error
+    fn status(status: ExitCode) -> Self {
         Self {
             variant: ExitResultVariant::Status(status),
             stdout: Vec::new(),
@@ -148,21 +145,17 @@ impl ExitResult {
         ))
     }
 
-    pub fn err(err: buck2_error::Error) -> Self {
-        let exit_code = if err.has_tag(ErrorTag::IoClientBrokenPipe) {
-            ExitCode::BrokenPipe
-        } else {
-            match err.get_tier() {
-                Some(tier) => match tier {
-                    Tier::Input => ExitCode::UserError,
-                    Tier::Tier0 | Tier::Environment => ExitCode::InfraError,
-                },
-                None => ExitCode::UnknownFailure,
-            }
-        };
+    pub fn signal_interrupt() -> Self {
+        Self::status(ExitCode::SignalInterrupt)
+    }
 
+    pub fn timeout() -> Self {
+        Self::status(ExitCode::Timeout)
+    }
+
+    pub fn err(err: buck2_error::Error) -> Self {
         Self {
-            variant: ExitResultVariant::StatusWithErr(exit_code, err.into()),
+            variant: ExitResultVariant::StatusWithErr(err.exit_code(), err),
             stdout: Vec::new(),
             emitted_errors: Vec::new(),
         }
@@ -170,7 +163,7 @@ impl ExitResult {
 
     pub fn err_with_exit_code(err: buck2_error::Error, exit_code: ExitCode) -> Self {
         Self {
-            variant: ExitResultVariant::StatusWithErr(exit_code, err.into()),
+            variant: ExitResultVariant::StatusWithErr(exit_code, err),
             stdout: Vec::new(),
             emitted_errors: Vec::new(),
         }
@@ -205,30 +198,11 @@ impl ExitResult {
                 emitted_errors: errors,
             }
         }
-
-        for e in &errors {
-            if e.tags.contains(&(ErrorTag::DaemonIsBusy as i32)) {
-                return status_with_error_report(ExitCode::DaemonIsBusy, errors);
-            }
-            if e.tags.contains(&(ErrorTag::DaemonPreempted as i32)) {
-                return status_with_error_report(ExitCode::DaemonPreempted, errors);
-            }
-        }
-
-        match best_error(&errors).map(|error| error.category()) {
-            Some(category) => match category {
-                Tier::Input => status_with_error_report(ExitCode::UserError, errors),
-                Tier::Tier0 | Tier::Environment => {
-                    status_with_error_report(ExitCode::InfraError, errors)
-                }
-            },
-            None => {
-                // FIXME(JakobDegen): For compatibility with pre-existing behavior, we return infra failure
-                // here. However, it would be more honest to return the `1` status code that we use for
-                // "unknown"
-                status_with_error_report(ExitCode::InfraError, errors)
-            }
-        }
+        let exit_code = best_error(&errors)
+            .and_then(|e| e.best_tag())
+            .map(|t| t.exit_code())
+            .unwrap_or(ExitCode::UnknownFailure);
+        status_with_error_report(exit_code, errors)
     }
 
     /// Buck2 supports being built as both a "full" binary as well as a "client-only" binary.
@@ -291,7 +265,7 @@ impl ExitResult {
             // No buck_log_dir, no command_report_path, do nothing.
             return Ok(());
         };
-        let file = fs_util::create_file(&path)?;
+        let file = fs_util::create_file(&path).categorize_internal()?;
         let mut file = std::io::BufWriter::new(file);
 
         let error_messages = self
@@ -317,7 +291,8 @@ impl ExitResult {
                 }
                 // buck wrapper depends on command report being written.
                 file.flush()?;
-                fs_util::copy(path, report_path)?;
+                // input path from --command-report-path
+                fs_util::copy(path, report_path).categorize_input()?;
             }
         }
 
@@ -386,11 +361,11 @@ impl ExitResultVariant {
                 tracing::debug!("Exiting with {:?} ({:?})", exit_code, e);
 
                 match exit_code {
-                    ExitCode::SignalInterrupt | ExitCode::BrokenPipe => {
+                    ExitCode::SignalInterrupt | ExitCode::ClientIoBrokenPipe => {
                         // No logging for those.
                     }
                     _ => {
-                        let _ignored = writeln!(io::stderr().lock(), "Command failed: {:?}", e);
+                        let _ignored = writeln!(io::stderr().lock(), "Command failed: {e:?}");
                     }
                 }
 
@@ -469,59 +444,6 @@ impl From<io::Error> for ClientIoError {
             ClientIoError::BrokenPipe(error)
         } else {
             ClientIoError::OtherIo(error)
-        }
-    }
-}
-
-/// Common exit codes for buck with stronger semantic meanings
-#[derive(Clone, Copy, Debug)]
-pub enum ExitCode {
-    Success,
-    UnknownFailure,
-    InfraError,
-    UserError,
-    DaemonIsBusy,
-    DaemonPreempted,
-    Timeout,
-    ConnectError,
-    SignalInterrupt,
-    BrokenPipe,
-    /// Test runner explicitly requested that this exit code be returned
-    TestRunner(u8),
-}
-
-impl ExitCode {
-    pub const fn exit_code(self) -> u32 {
-        use ExitCode::*;
-        match self {
-            Success => 0,
-            UnknownFailure => 1,
-            InfraError => 2,
-            UserError => 3,
-            DaemonIsBusy => 4,
-            DaemonPreempted => 5,
-            Timeout => 6,
-            ConnectError => 11,
-            BrokenPipe => 130,
-            SignalInterrupt => 141,
-            TestRunner(code) => code as u32,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        use ExitCode::*;
-        match self {
-            Success => "SUCCESS",
-            UnknownFailure => "UNKNOWN_FAILURE",
-            InfraError => "INFRA_ERROR",
-            UserError => "USER_ERROR",
-            DaemonIsBusy => "DAEMON_IS_BUSY",
-            DaemonPreempted => "DAEMON_PREEMPTED",
-            Timeout => "TIMEOUT",
-            ConnectError => "CONNECT_ERROR",
-            BrokenPipe => "BROKEN_PIPE",
-            SignalInterrupt => "SIGNAL_INTERRUPT",
-            TestRunner(_) => "TEST_RUNNER",
         }
     }
 }

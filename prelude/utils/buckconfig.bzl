@@ -1,16 +1,17 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """Provides macros for working with .buckconfig."""
 
 load(":expect.bzl", "expect")
 load(":lazy.bzl", "lazy")
 
-def _decode_raw_word(val, start, delimiter = None):
+def _decode_raw_word(val: str, start: int, delimiter: str | None = None) -> (int, str):
     """
     Read characters up to the given delimiter in a string supporting and
     stripping quoting (i.e. `"`) and escape characters (i.e. `\\`).
@@ -52,7 +53,7 @@ def _decode_raw_word(val, start, delimiter = None):
 
     return idx, word
 
-def _next_word(val, start, delimiter):
+def _next_word(val: str, start: int, delimiter: str | None) -> int:
     """
     Advance past delimiter characters.
     """
@@ -98,7 +99,11 @@ LOG_BUCKCONFIGS = bool(_BUCKCONFIG_LOG_KEYS or _BUCKCONFIG_LOG_JSON_KEYS or _BUC
 _BUCKCONFIG_LOG_CALLSTACK = read_root_config("buckconfig", "log_callstack") in ("True", "true")
 _BUCKCONFIG_LOG_VALUE = read_root_config("buckconfig", "log_value") in ("True", "true")
 
-def _log_read_config(read_func, section: str, key: str, default = None):
+def _log_read_config(
+        read_func,
+        section: str,
+        key: str,
+        default = None):
     value = read_func(section, key, default)
 
     maybe_value_dict = {"value": value} if _BUCKCONFIG_LOG_VALUE else {}
@@ -145,7 +150,12 @@ read_root_config_with_logging = partial(_log_read_config, read_root_config)
 _read_config = read_config_with_logging if LOG_BUCKCONFIGS else read_config
 _read_root_config = read_root_config_with_logging if LOG_BUCKCONFIGS else read_root_config
 
-def read(section, field, default = None, root_cell = False, logging = True):
+def read(
+        section: str,
+        field: str,
+        default: str | Select | None = None,
+        root_cell: bool = False,
+        logging: bool = True) -> str | Select | None:
     """Read a `string` from `.buckconfig`."""
     if logging:
         read_config_func = _read_root_config if root_cell else _read_config
@@ -156,7 +166,13 @@ def read(section, field, default = None, root_cell = False, logging = True):
 # Alias for `read` that's explicit about the type being returned.
 read_string = read
 
-def read_choice(section, field, choices, default = None, required = True, root_cell = False):
+def read_choice(
+        section: str,
+        field: str,
+        choices: typing.Iterable,
+        default: str | Select | None = None,
+        required: bool = True,
+        root_cell: bool = False) -> str | None:
     """Read a string from `.buckconfig` that must be one `choices`."""
 
     val = read(section, field, root_cell = root_cell)
@@ -174,7 +190,13 @@ def read_choice(section, field, choices, default = None, required = True, root_c
     else:
         fail("`{}:{}`: no value set".format(section, field))
 
-def read_bool(section, field, default = None, required = True, root_cell = False, logging: bool = True):
+def read_bool(
+        section: str,
+        field: str,
+        default: bool | Select | None = None,
+        required: bool = True,
+        root_cell: bool = False,
+        logging: bool = True) -> bool | Select | None:
     """Read a `boolean` from `.buckconfig`."""
 
     # Treat the empty string as "unset".  This allows the user to "override" a
@@ -203,7 +225,12 @@ def read_bool(section, field, default = None, required = True, root_cell = False
     else:
         fail("`{}:{}`: no value set".format(section, field))
 
-def read_int(section, field, default = None, required = True, root_cell = False):
+def read_int(
+        section: str,
+        field: str,
+        default: int | Select | None = None,
+        required: bool = True,
+        root_cell: bool = False) -> int | Select | None:
     """Read an `int` from `.buckconfig`."""
 
     val = read(section, field, root_cell = root_cell)
@@ -221,7 +248,13 @@ def read_int(section, field, default = None, required = True, root_cell = False)
     else:
         fail("`{}:{}`: no value set".format(section, field))
 
-def read_list(section, field, delimiter = ",", default = None, required = True, root_cell = False):
+def read_list(
+        section: str,
+        field: str,
+        delimiter: str | None = ",",
+        default: typing.Iterable | Select | None = None,
+        required: bool = True,
+        root_cell = False) -> typing.Iterable | Select | None:
     """Read a `list` from `.buckconfig`."""
     val = read(section, field, root_cell = root_cell)
     if val != None:
@@ -247,7 +280,7 @@ def read_list(section, field, delimiter = ",", default = None, required = True, 
     else:
         fail("`{}:{}`: no value set".format(section, field))
 
-def resolve_alias(alias):
+def resolve_alias(alias: str) -> str:
     """Resolves an alias into a target (recursively). `fail`s if the alias does
     not exist.
 

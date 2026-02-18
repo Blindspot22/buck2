@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io;
@@ -34,7 +35,7 @@ PS1='% '
     let mut r = BashRuntime::with_home(home.to_owned())?;
     r.register(completion_name, script)?;
 
-    let one_tab = r.complete(&format!("{}\t", input))?;
+    let one_tab = r.complete(&format!("{input}\t"))?;
     // complete_pty turns on echoing in this case to work around a bash bug, so strip that
     let one_tab = one_tab.strip_prefix(input).unwrap_or(&one_tab).trim_start();
 
@@ -42,11 +43,9 @@ PS1='% '
     extract_from_outputs(
         input,
         std::iter::once(Ok(one_tab.to_owned()))
+            .chain(std::iter::once_with(|| r.complete(&format!("{input}\t\t"))))
             .chain(std::iter::once_with(|| {
-                r.complete(&format!("{}\t\t", input))
-            }))
-            .chain(std::iter::once_with(|| {
-                r.complete(&format!("{}\t\t\t", input))
+                r.complete(&format!("{input}\t\t\t"))
             })),
     )
 }

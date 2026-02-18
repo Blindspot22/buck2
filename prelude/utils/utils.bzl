@@ -1,13 +1,24 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # General utilities shared between multiple rules.
 
 load("@prelude//utils:expect.bzl", "expect")
+
+def as_output(artifact: Artifact | OutputArtifact) -> OutputArtifact:
+    """
+    Convert an Artifact or OutputArtifact to an OutputArtifact.
+    Useful when a function needs to accept either type.
+    """
+    if isinstance(artifact, OutputArtifact):
+        return artifact
+    else:
+        return artifact.as_output()
 
 def value_or(x: [None, typing.Any], default: typing.Any) -> typing.Any:
     return default if x == None else x
@@ -36,7 +47,7 @@ def from_named_set(srcs: [dict[str, Artifact | Dependency], list[Artifact | Depe
     if type(srcs) == type([]):
         srcs_dict = {}
         for src in srcs:
-            if type(src) == "artifact":
+            if isinstance(src, Artifact):
                 name = src.short_path
             else:
                 # If the src is a `dependency`, use the short path of the

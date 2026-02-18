@@ -1,16 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.cd.workertool.grpc;
 
 import com.facebook.buck.core.util.log.Logger;
 import com.facebook.buck.jvm.cd.CompilerDaemonRunner;
+import com.facebook.buck.jvm.cd.ErrorInterceptor;
 import com.facebook.buck.jvm.cd.JvmCDCommand;
 import com.facebook.buck.step.StepExecutionResult;
 import com.facebook.buck.worker.model.ExecuteCommand;
@@ -88,7 +90,7 @@ public class WorkerGrpcService extends WorkerGrpc.WorkerImplBase {
       LOG.error(error);
       return ExecuteResponse.newBuilder()
           .setExitCode(result.getExitCode())
-          .setStderr(error)
+          .setStderr(ErrorInterceptor.prettyPrint(error))
           .build();
     }
     command.postExecute();

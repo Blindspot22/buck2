@@ -1,11 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:artifact_tset.bzl", "ArtifactInfoTag", "ArtifactTSet")
+load(
+    "@prelude//cxx:cuda.bzl",
+    "CudaCompileStyle",
+)
 load(
     "@prelude//cxx:link_groups_types.bzl",
     "LinkGroupInfo",  # @unused Used as a type
@@ -28,6 +33,10 @@ load(
     "SharedLibrary",  # @unused Used as a type
 )
 load(":argsfiles.bzl", "CompileArgsfiles")
+load(
+    ":compile_types.bzl",
+    "IndexStoreFactory",
+)
 load(
     ":cxx_sources.bzl",
     "CxxSrcWithFlags",  # @unused Used as a type
@@ -67,6 +76,7 @@ CxxRuleSubTargetParams = record(
     argsfiles = field(bool, True),
     compilation_database = field(bool, True),
     clang_remarks = field(bool, True),
+    clang_llvm_statistics = field(bool, True),
     clang_traces = field(bool, True),
     headers = field(bool, True),
     link_group_map = field(bool, True),
@@ -97,6 +107,7 @@ CxxRuleProviderParams = record(
     template_placeholders = field(bool, True),
     preprocessor_for_tests = field(bool, True),
     third_party_build = field(bool, False),
+    transitive_diagnostics = field(bool, False),
 )
 
 # Parameters to handle non-Clang sources, e.g Swift on Apple's platforms.
@@ -147,6 +158,7 @@ CxxRuleConstructorParams = record(
     extra_exported_link_flags = field(list[typing.Any], []),
     # Additional hidden inputs for link or archive actions.
     extra_hidden = field(list[Artifact], []),
+    extra_dwp_flags = field(list[typing.Any], []),
     # Additional flags used _only_ when linking the target itself.
     # These flags are _not_ propagated up the dep tree.
     extra_link_flags = field(list[typing.Any], []),
@@ -212,12 +224,23 @@ CxxRuleConstructorParams = record(
     # "follow" their dependents across link group boundaries.
     link_groups_force_static_follows_dependents = field(bool, True),
     # A factory function to produce extra artifacts and output providers for a rule
-    # with signature: f(ctx) -> ExtraLinkerOutputs
+    # with signature: f(ctx, ExtraLinkerOutputsCategory) -> ExtraLinkerOutputs
     extra_linker_outputs_factory = field(typing.Callable | None, None),
     # A factory function to produce linker flags for the extra linker outputs
     # returned from the extra_linker_outputs_factory. It should have the signature
-    # f(ctx, dict[str, Artifact]) -> list[ArgLike]
+    # f(ctx, ExtraLinkerOutputCategory, dict[str, Artifact]) -> list[ArgLike]
     extra_linker_outputs_flags_factory = field(typing.Callable | None, None),
+    # A function to consume extra outputs produced by distributed thin-lto opt actions
+    # and merge them together, as if they were produced by a local thin-lto link.
+    # The signature should be:
+    # f(ctx, dict[str, Artifact], list[dict[str, Artifact]])
+    # The second parameter should be the artifacts field of a call to
+    # extra_linker_outputs_factory(ctx, ExtraLinkerOutputsCategory("produced-during-distributed-thin-lto-opt")),
+    # and the last parameter a list of matching dictionaries representing all the opt outputs
+    # to be merged to bind the final outputs.
+    extra_distributed_thin_lto_opt_outputs_merger = field(typing.Callable | None, None),
+    # Whether to allow cache uploads for locally-executed actions (except for linking, see "exe_allow_cache_upload").
+    allow_cache_upload = field(bool, False),
     # Whether to allow cache uploads for locally-linked executables.
     exe_allow_cache_upload = field(bool, False),
     # Extra shared library interfaces to propagate, eg from mixed Swift libraries.
@@ -225,19 +248,13 @@ CxxRuleConstructorParams = record(
     # Compiler flags
     compiler_flags = field(list[typing.Any], []),
     lang_compiler_flags = field(dict[typing.Any, typing.Any], {}),
-    # Platform compiler flags
-    platform_compiler_flags = field(list[(str, typing.Any)], []),
-    lang_platform_compiler_flags = field(dict[typing.Any, typing.Any], {}),
     # Preprocessor flags
     preprocessor_flags = field(list[typing.Any], []),
     lang_preprocessor_flags = field(dict[typing.Any, typing.Any], {}),
-    # Platform preprocessor flags
-    platform_preprocessor_flags = field(list[(str, typing.Any)], []),
-    lang_platform_preprocessor_flags = field(dict[typing.Any, typing.Any], {}),
     # modulename-Swift.h header for building objc targets that rely on this swift dep
     swift_objc_header = field([Artifact, None], None),
     error_handler = field([typing.Callable, None], None),
-    index_store_factory = field(typing.Callable | None, None),
+    index_store_factory = field(IndexStoreFactory | None, None),
     # Swift index stores to propagate
     index_stores = field(list[Artifact] | None, None),
     # Whether to add header units from dependencies to the command line.
@@ -250,4 +267,29 @@ CxxRuleConstructorParams = record(
     runtime_dependency_handling = field([RuntimeDependencyHandling, None], None),
     # Should this library only be used for build time linkage
     stub = field(bool, False),
+    # The calling context is allowed to use `AnalysisActions#anon_target` API.
+    # This is not allowed in the context of the `dynamic_outputs` callback.
+    anon_targets_allowed = field(bool, True),
+    # Any extra diagnostics to include in transitive diagnostics provider
+    extra_transitive_diagnostics = field(list[Artifact], []),
+    # Any extra diagnostics to include in [check] subtarget, maps from
+    # identifier (usually filename) to diagnostic output.
+    extra_diagnostics = field(dict[str, Artifact] | None, None),
+    # Whether to use fbcc Rust wrapper
+    use_fbcc_rust_wrapper = field(bool, False),
+    # Precompiled header
+    precompiled_header = field(Dependency | None, None),
+    # Prefix header
+    prefix_header = field(Artifact | None, None),
+    # Store "_cxx_toolchain" as "Dependency" for use in "anon_target"
+    _cxx_toolchain = field(Dependency | None, None),
+    # Use content-based filepaths for artifacts
+    use_content_based_paths = field(bool, False),
+    # Coverage instrumentation compiler flags
+    coverage_instrumentation_compiler_flags = field(list[str], []),
+    # Separate debug info
+    separate_debug_info = field(bool, False),
+    # Cuda compile stype
+    cuda_compile_style = field(CudaCompileStyle | None, None),
+    supports_stripping = field(bool, True),
 )

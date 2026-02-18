@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -25,21 +26,20 @@ use buck2_core::configuration::transition::id::TransitionId;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_error::BuckErrorContext;
 use buck2_events::dispatch::get_dispatcher;
-use buck2_futures::cancellation::CancellationContext;
 use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
-use buck2_interpreter::dice::starlark_provider::with_starlark_eval_provider;
+use buck2_interpreter::factory::BuckStarlarkModule;
+use buck2_interpreter::factory::StarlarkEvaluatorProvider;
 use buck2_interpreter::print_handler::EventDispatcherPrintHandler;
 use buck2_interpreter::soft_error::Buck2StarlarkSoftErrorHandler;
-use buck2_interpreter::starlark_profiler::profiler::StarlarkProfilerOpt;
 use buck2_node::attrs::configured_attr::ConfiguredAttr;
 use buck2_node::attrs::display::AttrDisplayWithContextExt;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
 use itertools::Itertools;
-use starlark::environment::Module;
 use starlark::eval::Evaluator;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
@@ -106,18 +106,12 @@ fn call_transition_function<'v>(
                 }
                 Ok(TransitionApplied::Split(SortedMap::from(split)))
             }
-            None => Err(buck2_error::Error::from(
-                ApplyTransitionError::SplitTransitionMustReturnDict,
-            )
-            .into()),
+            None => Err(ApplyTransitionError::SplitTransitionMustReturnDict.into()),
         }
     } else {
         match <&PlatformInfo>::unpack_value_err(new_platforms) {
             Ok(platform) => Ok(TransitionApplied::Single(platform.to_configuration()?)),
-            Err(_) => Err(buck2_error::Error::from(
-                ApplyTransitionError::NonSplitTransitionMustReturnPlatformInfo,
-            )
-            .into()),
+            Err(_) => Err(ApplyTransitionError::NonSplitTransitionMustReturnPlatformInfo.into()),
         }
     }
 }
@@ -127,17 +121,13 @@ async fn do_apply_transition(
     attrs: Option<&[Option<Arc<ConfiguredAttr>>]>,
     conf: &ConfigurationData,
     transition_id: &TransitionId,
+    cancellation: &CancellationContext,
 ) -> buck2_error::Result<TransitionApplied> {
     let transition = ctx.fetch_transition(transition_id).await?;
     let mut refs = Vec::new();
     let mut refs_refs = Vec::new();
     for (s, t) in transition.refs() {
-        let provider_collection_value = ctx
-            .fetch_transition_function_reference(
-                // TODO(T198210718)
-                &ProvidersLabel::default_for(t.dupe()),
-            )
-            .await?;
+        let provider_collection_value = ctx.fetch_transition_function_reference(&t).await?;
         refs.push((
             *s,
             // This is safe because we store a reference to provider collection in `refs_refs`.
@@ -146,76 +136,79 @@ async fn do_apply_transition(
         refs_refs.push(provider_collection_value);
     }
     let print = EventDispatcherPrintHandler(get_dispatcher());
-    with_starlark_eval_provider(
-        ctx,
-        &mut StarlarkProfilerOpt::disabled(),
-        &StarlarkEvalKind::Transition(Arc::new(transition_id.clone())),
-        move |provider, _| {
-            let module = Module::new();
-            let (mut eval, _) = provider.make(&module)?;
-            eval.set_print_handler(&print);
-            eval.set_soft_error_handler(&Buck2StarlarkSoftErrorHandler);
-            let refs = module.heap().alloc(AllocStruct(refs));
-            let attrs = match (transition.attr_names(), attrs) {
-                (Some(names), Some(values)) => {
-                    let mut attrs = Vec::new();
-                    for (name, value) in names.into_iter().zip_eq(values.iter()) {
-                        let value = match value {
-                            Some(value) => (CONFIGURED_ATTR_TO_VALUE.get()?)(
-                                &value,
-                                PackageLabelOption::TransitionAttr,
-                                module.heap(),
-                            )
-                            .with_buck_error_context(|| {
-                                format!(
-                                    "Error converting attribute `{}={}` to Starlark value",
-                                    name,
-                                    value.as_display_no_ctx(),
+    let eval_kind = StarlarkEvalKind::Transition(Arc::new(transition_id.clone()));
+    let provider = StarlarkEvaluatorProvider::new(ctx, eval_kind).await?;
+    BuckStarlarkModule::with_profiling(|module| {
+        let (finished_eval, res) =
+            provider.with_evaluator(&module, cancellation.into(), |eval, _| {
+                eval.set_print_handler(&print);
+                eval.set_soft_error_handler(&Buck2StarlarkSoftErrorHandler);
+                let refs = module.heap().alloc(AllocStruct(refs));
+                let attrs = match (transition.attr_names(), attrs) {
+                    (Some(names), Some(values)) => {
+                        let mut attrs = Vec::new();
+                        for (name, value) in names.into_iter().zip_eq(values.iter()) {
+                            let value = match value {
+                                Some(value) => (CONFIGURED_ATTR_TO_VALUE.get()?)(
+                                    &value,
+                                    PackageLabelOption::TransitionAttr,
+                                    module.heap(),
                                 )
-                            })?,
-                            None => Value::new_none(),
-                        };
-                        attrs.push((name, value));
+                                .with_buck_error_context(|| {
+                                    format!(
+                                        "Error converting attribute `{}={}` to Starlark value",
+                                        name,
+                                        value.as_display_no_ctx(),
+                                    )
+                                })?,
+                                None => Value::new_none(),
+                            };
+                            attrs.push((name, value));
+                        }
+                        Some(module.heap().alloc(AllocStruct(attrs)))
                     }
-                    Some(module.heap().alloc(AllocStruct(attrs)))
-                }
-                (None, None) => None,
-                (Some(_), None) | (None, Some(_)) => {
-                    return Err(ApplyTransitionError::InconsistentTransitionAndComputation.into());
-                }
-            };
-            match call_transition_function(&transition, conf, refs, attrs, &mut eval)? {
-                TransitionApplied::Single(new) => {
-                    let new_2 =
-                        match call_transition_function(&transition, &new, refs, attrs, &mut eval)
-                            .buck_error_context("applying transition again on transition output")?
-                        {
-                            TransitionApplied::Single(new_2) => new_2,
-                            TransitionApplied::Split(_) => {
-                                unreachable!(
-                                    "split transition filtered out in call_transition_function"
-                                )
-                            }
-                        };
-                    if let Err(diff) = cfg_diff(&new, &new_2) {
+                    (None, None) => None,
+                    (Some(_), None) | (None, Some(_)) => {
                         return Err(
-                            ApplyTransitionError::SplitTransitionAgainDifferentPlatformInfo(diff)
-                                .into(),
+                            ApplyTransitionError::InconsistentTransitionAndComputation.into()
                         );
                     }
-                    Ok(TransitionApplied::Single(new))
+                };
+                match call_transition_function(&transition, conf, refs, attrs, eval)? {
+                    TransitionApplied::Single(new) => {
+                        let new_2 =
+                            match call_transition_function(&transition, &new, refs, attrs, eval)
+                                .buck_error_context(
+                                    "applying transition again on transition output",
+                                )? {
+                                TransitionApplied::Single(new_2) => new_2,
+                                TransitionApplied::Split(_) => {
+                                    unreachable!(
+                                        "split transition filtered out in call_transition_function"
+                                    )
+                                }
+                            };
+                        if let Err(diff) = cfg_diff(&new, &new_2) {
+                            return Err(
+                                ApplyTransitionError::SplitTransitionAgainDifferentPlatformInfo(
+                                    diff,
+                                )
+                                .into(),
+                            );
+                        }
+                        Ok(TransitionApplied::Single(new))
+                    }
+                    TransitionApplied::Split(split) => {
+                        // Not validating split transitions yet, because it's not 100% clear what to validate,
+                        // and because it is not that important, because split transitions
+                        // are not used in per-rule transitions.
+                        Ok(TransitionApplied::Split(split))
+                    }
                 }
-                TransitionApplied::Split(split) => {
-                    // Not validating split transitions yet, because it's not 100% clear what to validate,
-                    // and because it is not that important, because split transitions
-                    // are not used in per-rule transitions.
-                    Ok(TransitionApplied::Split(split))
-                }
-            }
-        },
-    )
-    .await
-    .map_err(buck2_error::Error::from)
+            })?;
+        let (token, _) = finished_eval.finish()?;
+        Ok((token, res))
+    })
 }
 
 #[async_trait]
@@ -293,15 +286,21 @@ impl TransitionCalculation for TransitionCalculationImpl {
             async fn compute(
                 &self,
                 ctx: &mut DiceComputations,
-                _cancellation: &CancellationContext,
+                cancellation: &CancellationContext,
             ) -> Self::Value {
                 let v: buck2_error::Result<_> = try {
-                    do_apply_transition(ctx, self.attrs.as_deref(), &self.cfg, &self.transition_id)
-                        .await?
+                    do_apply_transition(
+                        ctx,
+                        self.attrs.as_deref(),
+                        &self.cfg,
+                        &self.transition_id,
+                        cancellation,
+                    )
+                    .await?
                 };
 
                 Ok(Arc::new(v.with_buck_error_context(|| {
-                    format!("Error computing transition `{}`", self)
+                    format!("Error computing transition `{__self}`")
                 })?))
             }
 
@@ -334,6 +333,6 @@ impl TransitionCalculation for TransitionCalculationImpl {
             attrs,
         };
 
-        ctx.compute(&key).await?.map_err(buck2_error::Error::from)
+        ctx.compute(&key).await?
     }
 }

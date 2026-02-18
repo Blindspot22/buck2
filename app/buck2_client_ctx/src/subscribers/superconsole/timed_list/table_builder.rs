@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::time::Duration;
@@ -25,6 +26,7 @@ use superconsole::style::Stylize;
 use superconsole::style::style;
 
 use crate::subscribers::superconsole::timed_list::Cutoffs;
+use crate::subscribers::superconsole::timekeeper::Timekeeper;
 
 #[derive(Debug, Clone, From)]
 pub(crate) enum Row {
@@ -48,12 +50,14 @@ impl Table {
 }
 
 impl Component for Table {
+    type Error = buck2_error::Error;
+
     /// Zips together each time and label lines, but gives the times preferential treatment.
     fn draw_unchecked(
         &self,
         Dimensions { width, .. }: Dimensions,
         _mode: DrawMode,
-    ) -> anyhow::Result<Lines> {
+    ) -> buck2_error::Result<Lines> {
         let combined = self
             .rows
             .iter()
@@ -103,7 +107,7 @@ impl TimedRow {
     pub(crate) fn span(
         padding: usize,
         span: &BuckEventSpanInfo,
-        time_speed: f64,
+        timekeeper: &Timekeeper,
         cutoffs: &Cutoffs,
         display_platform: bool,
     ) -> buck2_error::Result<Self> {
@@ -111,9 +115,9 @@ impl TimedRow {
             &span.event,
             TargetDisplayOptions::for_console(display_platform),
         )?;
-        let time = fmt_duration::fmt_duration(span.start.elapsed(), time_speed);
-        let age = span.start.elapsed().mul_f64(time_speed);
-        Self::text(padding, event, time, age, cutoffs)
+        let elapsed = timekeeper.duration_since(span.start);
+        let time = fmt_duration::fmt_duration(elapsed);
+        Self::text(padding, event, time, elapsed, cutoffs)
     }
 
     pub(crate) fn text(
@@ -152,7 +156,13 @@ impl TimedRow {
 struct LinesComponent(Lines);
 
 impl Component for LinesComponent {
-    fn draw_unchecked(&self, _dimensions: Dimensions, _mode: DrawMode) -> anyhow::Result<Lines> {
+    type Error = buck2_error::Error;
+
+    fn draw_unchecked(
+        &self,
+        _dimensions: Dimensions,
+        _mode: DrawMode,
+    ) -> buck2_error::Result<Lines> {
         Ok(self.0.clone())
     }
 }

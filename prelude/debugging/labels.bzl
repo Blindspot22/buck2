@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 ### Lookup rules used by BXL script (See fdb.bxl) driven by the labels below:
 # 1. If target has no labels we assume a given target is a rule provider and it exposes relevant providers that BXL script depends on for a given language rule
@@ -23,6 +24,10 @@ DBG_INFO_REF = "dbg:info:ref"
 
 DBG_INFO_DISABLE_INCOMPATIBLE_SANITIZERS = "dbg:info:disable-sanitizers"
 
+# This label indicates we want to materialize debuginfo for the "native" (e.g.
+# C++) dependencies of a Python target.
+DBG_INFO_PYTHON_REQUIRES_SECONDARY_NATIVE_DEBUGINFO = "dbg:info:python-secondary-native-debuginfo-required"
+
 def dbg_info_exec(target_label) -> list[str]:
     return ["{}={}".format(DBG_INFO_EXEC, target_label)]
 
@@ -31,7 +36,7 @@ def dbg_info_ref(target_label) -> list[str]:
 
 def get_info_ref(labels: list[str]) -> [str, None]:
     for label in labels:
-        result = _get_value_by_mark(DBG_INFO_REF, label)
+        result = get_value_by_mark(DBG_INFO_REF, label)
         if result:
             return result
     return None
@@ -42,7 +47,7 @@ def get_label_or_mark(label: str) -> str:
             return mark
     return label
 
-def _get_value_by_mark(mark: str, label: str) -> [str, None]:
+def get_value_by_mark(mark: str, label: str) -> [str, None]:
     if label.startswith(mark + "="):
         return label.removeprefix(mark + "=")
     return None

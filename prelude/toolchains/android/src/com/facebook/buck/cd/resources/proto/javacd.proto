@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //----------------------------------------------
@@ -64,7 +65,7 @@ message BaseJarCommand {
   string buildCellRootPath = 16;
   ResolvedJavac resolvedJavac = 17;
   ResolvedJavacOptions resolvedJavacOptions = 18;
-  map<string, string> compileTimeClasspathSnapshotPaths = 19;
+  repeated string compileTimeClasspathSnapshotPaths = 19;
   string pathToClasses = 20;
   string annotationsPath = 23;
 }
@@ -117,7 +118,7 @@ message OutputPathsValue {
 }
 
 message ResolvedJavacOptions {
-  string bootclasspath = 1;
+  // reserved = 1;
   repeated string bootclasspathList = 2;
   JavacLanguageLevelOptions languageLevelOptions = 3;
   bool debug = 4;
@@ -129,6 +130,8 @@ message ResolvedJavacOptions {
   // reserved = 9;
   // reserved = 10;
   // reserved = 11;
+
+  string systemImage = 12;
 
   message JavacLanguageLevelOptions {
     string sourceLevel = 1;

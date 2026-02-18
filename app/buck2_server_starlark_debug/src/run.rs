@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_events::dispatch::span_async;
@@ -35,7 +36,7 @@ impl ToClientMessage {
         match self {
             ToClientMessage::Event(ev) => Ok(serde_json::to_string_pretty(&ev)?),
             ToClientMessage::Response(resp) => Ok(serde_json::to_string_pretty(&resp)?),
-            ToClientMessage::Shutdown(res) => Ok(format!("{:?}", res)),
+            ToClientMessage::Shutdown(res) => Ok(format!("{res:?}")),
         }
     }
 }
@@ -46,16 +47,13 @@ pub async fn run_dap_server_command(
     partial_result_dispatcher: PartialResultDispatcher<buck2_cli_proto::DapMessage>,
     req: StreamingRequestHandler<buck2_cli_proto::DapRequest>,
 ) -> buck2_error::Result<buck2_cli_proto::DapResponse> {
-    let start_event = buck2_data::CommandStart {
-        metadata: ctx.request_metadata().await?,
-        data: Some(buck2_data::StarlarkDebugAttachCommandStart {}.into()),
-    };
+    let start_event = ctx
+        .command_start_event(buck2_data::StarlarkDebugAttachCommandStart {}.into())
+        .await?;
     span_async(start_event, async move {
-        let result = run_dap_server(ctx, partial_result_dispatcher, req)
-            .await
-            .map_err(Into::into);
+        let result = run_dap_server(ctx, partial_result_dispatcher, req).await;
         let end_event = command_end(&result, buck2_data::StarlarkDebugAttachCommandEnd {});
-        (result.map_err(Into::into), end_event)
+        (result, end_event)
     })
     .await
 }
@@ -78,7 +76,7 @@ async fn run_dap_server(
         select! {
             request = req.next() => {
                 let request = match request {
-                    Some(Err(e)) => return Err(e.into()),
+                    Some(Err(e)) => return Err(e),
                     Some(Ok(v)) => v,
                     None => {
                         // client disconnected.

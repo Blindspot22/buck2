@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//utils:arglike.bzl", "ArgLike")  # @unused Used as a type
 
@@ -29,6 +30,14 @@ TargetInfo = record(
     target_type = field(str),
     # labels on the target
     labels = field(list[str], default = []),
+)
+
+# if the target recommends a certain build configuration (e.g. build mode, buck config flags).
+# See documentation in Rust-side for more details.
+TargetPreExecInfo = record(
+    target_info = field(TargetInfo),
+    recommended_build_mode = field(str | None),
+    recommended_build_config = field(list[str]),
 )
 
 # This type mostly represent internal quirks of how python binary debugging is done.
@@ -68,13 +77,13 @@ TargetExtraInfo = record(
     exec_info_version = field(int),
     debugger = field(str),
     # program to run under debugger
-    program = field([str, None], default = None),
+    program = field([cmd_args, None], default = None),
     # unstripped libraries path used for debugging of specific android binaries and apks
     library_search_path = field([str, None], default = None),
     # explicit args to pass to the program run under debugger
     args = field([list[ArgLike], None], default = None),
     # extra environment variables to pass to the debugger
-    env = field(dict[str, str], default = {}),
+    env = field(dict, default = {}),
     source_map = field(list[list[str]] | None, default = None),
     python = field([PythonInfo, None], default = None),
     clr = field([ClrInfo, None], default = None),

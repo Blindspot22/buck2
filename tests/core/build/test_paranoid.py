@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -13,7 +14,7 @@ import json
 import random
 import string
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.asserts import expect_failure
@@ -65,7 +66,7 @@ from buck2.tests.e2e_util.buck_workspace import buck_test
 async def test_paranoid_ignores_preferences(
     buck: Buck,
 ) -> None:
-    def args() -> List[str]:
+    def args() -> list[str]:
         return [
             "root//executor_race_tests:fails_slow_on_re_works_locally_prefer_remote",
             "-c",
@@ -117,7 +118,7 @@ async def test_paranoid_ignores_preferences(
 async def test_paranoid_ignores_low_pass_filter(
     buck: Buck,
 ) -> None:
-    def args() -> List[str]:
+    def args() -> list[str]:
         return [
             "root//executor_race_tests:fails_slow_on_re_works_locally_heavyweight",
             "-c",
@@ -149,7 +150,7 @@ async def test_paranoid_enable_disable(
     # Start the daemon
     await buck.build(env=env)
 
-    async def config() -> Dict[str, Any]:
+    async def config() -> dict[str, Any]:
         status = (await buck.status()).stdout
         config = json.loads(status)["daemon_constraints"]["daemon_startup_config"]
         print(config)

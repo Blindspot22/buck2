@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.android.apk;
@@ -29,8 +30,6 @@ public class ApkBuilderUtils {
    * The type of a keystore created via the {@code jarsigner} command in Sun/Oracle Java. See
    * http://docs.oracle.com/javase/7/docs/technotes/guides/security/StandardNames.html#KeyStore.
    */
-  private static final String JARSIGNER_KEY_STORE_TYPE = "jks";
-
   public static void buildApk(
       Path resourceApk,
       Path pathToOutputApkFile,
@@ -59,23 +58,22 @@ public class ApkBuilderUtils {
             packageMetaInfVersionFiles,
             output,
             excludedResources);
-    for (Path nativeLibraryDirectory : nativeLibraryDirectories) {
+    for (Path nativeLibraryDirectory : nativeLibraryDirectories.stream().sorted().toList()) {
       builder.addNativeLibraries(nativeLibraryDirectory.toFile());
     }
-    for (Path assetDirectory : assetDirectories) {
+    for (Path assetDirectory : assetDirectories.stream().sorted().toList()) {
       builder.addSourceFolder(assetDirectory.toFile());
     }
-    for (Path zipFile : zipFiles) {
+    for (Path zipFile : zipFiles.stream().sorted().toList()) {
       // TODO(natthu): Skipping silently is bad. These should really be assertions.
       if (Files.exists(zipFile) && Files.isRegularFile(zipFile)) {
         builder.addZipFile(zipFile.toFile());
       }
     }
-    for (Path jarFileThatMayContainResources : jarFilesThatMayContainResources) {
+    for (Path jarFileThatMayContainResources :
+        jarFilesThatMayContainResources.stream().sorted().toList()) {
       builder.addResourcesFromJar(jarFileThatMayContainResources.toFile());
     }
-
-    // Build the APK
     builder.sealApk();
   }
 }

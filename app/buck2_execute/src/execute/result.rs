@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::convert::Infallible;
@@ -16,7 +17,11 @@ use std::time::SystemTime;
 
 use allocative::Allocative;
 use buck2_action_metadata_proto::RemoteDepFile;
+use buck2_build_signals::env::WaitingData;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
+use buck2_data::SchedulingMode;
+use buck2_util::time_span::TimeSpan;
 use derivative::Derivative;
 use dupe::Dupe;
 use indexmap::IndexMap;
@@ -30,6 +35,7 @@ use crate::execute::output::CommandStdStreams;
 use crate::execute::request::CommandExecutionOutput;
 use crate::execute::request::ResolvedCommandExecutionOutput;
 use crate::output_size::OutputSize;
+use crate::re::remote_action_result::ReMetadataTiming;
 
 #[derive(Debug)]
 pub enum CommandExecutionErrorType {
@@ -67,6 +73,7 @@ pub enum CommandExecutionStatus {
     },
     // TODO: We should rename this.
     Cancelled {
+        execution_kind: CommandExecutionKind,
         reason: Option<CommandCancellationReason>,
     },
 }
@@ -79,7 +86,7 @@ impl CommandExecutionStatus {
             CommandExecutionStatus::WorkerFailure { execution_kind } => Some(execution_kind),
             CommandExecutionStatus::Error { execution_kind, .. } => execution_kind.as_ref(),
             CommandExecutionStatus::TimedOut { execution_kind, .. } => Some(execution_kind),
-            CommandExecutionStatus::Cancelled { reason: _ } => None,
+            CommandExecutionStatus::Cancelled { execution_kind, .. } => Some(execution_kind),
         }
     }
 }
@@ -88,13 +95,13 @@ impl Display for CommandExecutionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CommandExecutionStatus::Success { execution_kind, .. } => {
-                write!(f, "success {}", execution_kind,)
+                write!(f, "success {execution_kind}",)
             }
             CommandExecutionStatus::WorkerFailure { execution_kind } => {
-                write!(f, "worker failure {}", execution_kind,)
+                write!(f, "worker failure {execution_kind}",)
             }
             CommandExecutionStatus::Failure { execution_kind } => {
-                write!(f, "failure {}", execution_kind,)
+                write!(f, "failure {execution_kind}",)
             }
             CommandExecutionStatus::Error {
                 stage,
@@ -102,7 +109,7 @@ impl Display for CommandExecutionStatus {
                 execution_kind: Some(execution_kind),
                 ..
             } => {
-                write!(f, "error {}:{}\n{:#}", execution_kind, stage, error)
+                write!(f, "error {execution_kind}:{stage}\n{error:#}")
             }
             CommandExecutionStatus::Error {
                 stage,
@@ -110,16 +117,19 @@ impl Display for CommandExecutionStatus {
                 execution_kind: None,
                 ..
             } => {
-                write!(f, "error:{}\n{:#}", stage, error)
+                write!(f, "error:{stage}\n{error:#}")
             }
             CommandExecutionStatus::TimedOut { duration, .. } => {
                 write!(f, "timed out after {:.3}s", duration.as_secs_f64())
             }
-            CommandExecutionStatus::Cancelled { reason } => {
+            CommandExecutionStatus::Cancelled {
+                execution_kind,
+                reason,
+            } => {
                 if let Some(reason) = reason {
-                    write!(f, "Cancelled due to {:?}", reason)
+                    write!(f, "Cancelled {execution_kind} due to {reason:?}")
                 } else {
-                    write!(f, "Cancelled")
+                    write!(f, "Cancelled {execution_kind}")
                 }
             }
         }
@@ -130,8 +140,8 @@ impl Display for CommandExecutionStatus {
 /// data.
 #[derive(Debug, Copy, Clone, Dupe, Allocative)]
 pub struct CommandExecutionMetadata {
-    /// How long this build actually waited for this action to complete
-    pub wall_time: Duration,
+    /// A TimeSpan covering the time that this build actually waited for this action to complete
+    pub time_span: TimeSpan,
 
     /// How long this command actually took to execute. This can be different from the wall_time if
     /// this was e.g. an action cache hit, in which case this field would reflect how long the
@@ -155,32 +165,16 @@ pub struct CommandExecutionMetadata {
 
     /// How long this command spent waiting to run
     pub queue_duration: Option<Duration>,
+
+    pub suspend_duration: Option<Duration>,
+
+    pub suspend_count: Option<u64>,
 }
 
 impl CommandExecutionMetadata {
-    pub fn end_time(&self) -> SystemTime {
-        self.start_time + self.wall_time
-    }
-
-    pub fn to_proto(&self) -> buck2_data::CommandExecutionMetadata {
-        let metadata = self.dupe();
-        buck2_data::CommandExecutionMetadata {
-            wall_time: metadata.wall_time.try_into().ok(),
-            execution_time: metadata.execution_time.try_into().ok(),
-            start_time: Some(metadata.start_time.into()),
-            input_materialization_duration: metadata.input_materialization_duration.try_into().ok(),
-            execution_stats: metadata.execution_stats,
-            hashing_duration: metadata.hashing_duration.try_into().ok(),
-            hashed_artifacts_count: metadata.hashed_artifacts_count.try_into().ok().unwrap_or(0),
-            queue_duration: metadata.queue_duration.and_then(|d| d.try_into().ok()),
-        }
-    }
-}
-
-impl Default for CommandExecutionMetadata {
-    fn default() -> Self {
+    pub fn empty(time_span: TimeSpan) -> Self {
         Self {
-            wall_time: Duration::default(),
+            time_span,
             execution_time: Duration::default(),
             start_time: SystemTime::now(),
             execution_stats: None,
@@ -188,6 +182,43 @@ impl Default for CommandExecutionMetadata {
             hashing_duration: Duration::default(),
             hashed_artifacts_count: 0,
             queue_duration: None,
+            suspend_count: None,
+            suspend_duration: None,
+        }
+    }
+
+    pub fn from_re_timing(re_timing: ReMetadataTiming, time_span: TimeSpan) -> Self {
+        Self {
+            time_span,
+            execution_time: re_timing.execution_time,
+            start_time: re_timing.start_time,
+            execution_stats: re_timing.execution_stats,
+            input_materialization_duration: re_timing.input_materialization_duration,
+            queue_duration: re_timing.queue_duration,
+            hashing_duration: Default::default(),
+            hashed_artifacts_count: 0,
+            suspend_duration: None,
+            suspend_count: None,
+        }
+    }
+
+    pub fn end_time(&self) -> SystemTime {
+        self.start_time + self.time_span.duration()
+    }
+
+    pub fn to_proto(&self) -> buck2_data::CommandExecutionMetadata {
+        let metadata = self.dupe();
+        buck2_data::CommandExecutionMetadata {
+            wall_time: metadata.time_span.duration().try_into().ok(),
+            execution_time: metadata.execution_time.try_into().ok(),
+            start_time: Some(metadata.start_time.into()),
+            input_materialization_duration: metadata.input_materialization_duration.try_into().ok(),
+            execution_stats: metadata.execution_stats,
+            hashing_duration: metadata.hashing_duration.try_into().ok(),
+            hashed_artifacts_count: metadata.hashed_artifacts_count,
+            queue_duration: metadata.queue_duration.and_then(|d| d.try_into().ok()),
+            suspend_duration: metadata.suspend_duration.and_then(|d| d.try_into().ok()),
+            suspend_count: metadata.suspend_count,
         }
     }
 }
@@ -218,6 +249,11 @@ pub struct CommandExecutionResult {
     /// to be re-used when uploading the remote dep file.
     #[derivative(Debug = "ignore")]
     pub action_result: Option<TActionResult2>,
+    /// Description of how local or remote execution were scheduled (currently only set by hybrid executor)
+    pub scheduling_mode: Option<SchedulingMode>,
+
+    /// Data about time spent waiting (not on critical path) during command execution.
+    pub waiting_data: WaitingData,
 }
 
 impl CommandExecutionResult {
@@ -230,60 +266,69 @@ impl CommandExecutionResult {
     }
 
     pub fn was_success(&self) -> bool {
-        match self.report.status {
-            CommandExecutionStatus::Success { .. } => true,
-            _ => false,
-        }
+        matches!(self.report.status, CommandExecutionStatus::Success { .. })
     }
 
     pub fn was_served_by_remote_dep_file_cache(&self) -> bool {
-        match self.report.status {
+        matches!(
+            self.report.status,
             CommandExecutionStatus::Success {
                 execution_kind: CommandExecutionKind::RemoteDepFileCache { .. },
-            } => true,
-            _ => false,
-        }
+            }
+        )
     }
 
     pub fn was_remotely_executed(&self) -> bool {
-        match self.report.status {
+        matches!(
+            self.report.status,
             CommandExecutionStatus::Success {
                 execution_kind: CommandExecutionKind::Remote { .. },
-            } => true,
-            _ => false,
-        }
+            }
+        )
     }
 
     pub fn was_locally_executed(&self) -> bool {
-        match self.report.status {
+        matches!(
+            self.report.status,
             CommandExecutionStatus::Success {
                 execution_kind: CommandExecutionKind::Local { .. },
-            } => true,
-            CommandExecutionStatus::Success {
+            } | CommandExecutionStatus::Success {
                 execution_kind: CommandExecutionKind::LocalWorker { .. },
-            } => true,
-            _ => false,
-        }
+            }
+        )
     }
 
     pub fn was_action_cache_hit(&self) -> bool {
-        match self.report.status {
+        matches!(
+            self.report.status,
             CommandExecutionStatus::Success {
                 execution_kind: CommandExecutionKind::ActionCache { .. },
-            } => true,
-            _ => false,
-        }
+            }
+        )
     }
 
+    /// For content-based outputs, resolve the outputs to the "constant" (non-content-based) paths
+    /// that are used during execution.
     pub fn resolve_outputs<'a>(
         &'a self,
         fs: &'a ArtifactFs,
     ) -> impl Iterator<
         Item = buck2_error::Result<(ResolvedCommandExecutionOutput, &'a ArtifactValue)>,
     > + 'a {
-        self.outputs
-            .iter()
-            .map(|(output, value)| Ok((output.as_ref().resolve(fs)?, value)))
+        self.outputs.iter().map(|(output, value)| {
+            Ok((
+                output.as_ref().resolve(
+                    fs,
+                    if output.has_content_based_path() {
+                        Some(ContentBasedPathHash::OutputArtifact)
+                    } else {
+                        None
+                    }
+                    .as_ref(),
+                )?,
+                value,
+            ))
+        })
     }
 }
 
@@ -297,9 +342,10 @@ pub struct CommandExecutionReport {
     /// No exit_code means the command did not finish executing. Signals get mapped into this as
     /// 128 + SIGNUM, which is the convention shells follow.
     pub exit_code: Option<i32>,
-    /// Any additional message that a command's executor wants to be user vissible in case of a
+    /// Any additional message that a command's executor wants to be user visible in case of a
     /// failure. Provided by non-Meta RE server.
     pub additional_message: Option<String>,
+    pub inline_environment_metadata: buck2_data::InlineCommandExecutionEnvironmentMetadata,
 }
 
 impl CommandExecutionReport {
@@ -335,7 +381,7 @@ impl CommandExecutionReport {
             CommandExecutionStatus::Error { stage, error, .. } => {
                 buck2_data::command_execution::Error {
                     stage: (*stage).to_owned(),
-                    error: format!("{:#}", error),
+                    error: format!("{error:#}"),
                 }
                 .into()
             }
@@ -344,6 +390,7 @@ impl CommandExecutionReport {
         buck2_data::CommandExecution {
             details: Some(details),
             status: Some(status),
+            inline_environment_metadata: Some(self.inline_environment_metadata),
         }
     }
 
@@ -379,8 +426,8 @@ impl CommandExecutionReport {
             .map(|k| k.to_proto(omit_command_details));
 
         buck2_data::CommandExecutionDetails {
-            stdout,
-            stderr,
+            cmd_stdout: stdout,
+            cmd_stderr: stderr,
             command_kind,
             signed_exit_code,
             metadata: Some(self.timing.to_proto()),
@@ -401,7 +448,10 @@ impl FromResidual<ControlFlow<Self, Infallible>> for CommandExecutionResult {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use buck2_common::cas_digest::CasDigest;
+    use buck2_util::time_span::TimeSpan;
     use sorted_vector_map::SortedVectorMap;
 
     use super::*;
@@ -420,7 +470,7 @@ mod tests {
             },
         };
         let timing = CommandExecutionMetadata {
-            wall_time: Duration::from_secs(2),
+            time_span: TimeSpan::from_start_and_duration(Instant::now(), Duration::from_secs(2)),
             execution_time: Duration::from_secs(3),
             start_time: SystemTime::UNIX_EPOCH,
             execution_stats: Some(buck2_data::CommandExecutionStats {
@@ -442,6 +492,8 @@ mod tests {
             hashing_duration: Duration::from_secs(7),
             hashed_artifacts_count: 8,
             queue_duration: Some(Duration::from_secs(9)),
+            suspend_duration: None,
+            suspend_count: None,
         };
         let std_streams = CommandStdStreams::Local {
             stdout: [65, 66, 67].to_vec(), // ABC
@@ -455,14 +507,14 @@ mod tests {
             std_streams,
             exit_code: Some(456),
             additional_message: None,
+            inline_environment_metadata: buck2_data::InlineCommandExecutionEnvironmentMetadata {
+                sandcastle_instance_id: Some(123),
+            },
         }
     }
 
     fn make_simple_proto() -> buck2_data::CommandExecution {
         // The field values correspond to what `make_simple_report()` builds.
-        use prost_types::Duration;
-        use prost_types::Timestamp;
-
         let command_execution_kind = buck2_data::CommandExecutionKind {
             command: Some(buck2_data::command_execution_kind::Command::LocalCommand(
                 buck2_data::LocalCommand {
@@ -491,37 +543,39 @@ mod tests {
             memory_peak: None,
         };
         let command_execution_metadata = buck2_data::CommandExecutionMetadata {
-            wall_time: Some(Duration {
+            wall_time: Some(prost_types::Duration {
                 seconds: 2,
                 nanos: 0,
             }),
-            execution_time: Some(Duration {
+            execution_time: Some(prost_types::Duration {
                 seconds: 3,
                 nanos: 0,
             }),
-            start_time: Some(Timestamp {
+            start_time: Some(prost_types::Timestamp {
                 seconds: 0, // UNIX_EPOCH
                 nanos: 0,
             }),
-            input_materialization_duration: Some(Duration {
+            input_materialization_duration: Some(prost_types::Duration {
                 seconds: 6,
                 nanos: 0,
             }),
             execution_stats: Some(command_execution_stats),
-            hashing_duration: Some(Duration {
+            hashing_duration: Some(prost_types::Duration {
                 seconds: 7,
                 nanos: 0,
             }),
             hashed_artifacts_count: 8,
-            queue_duration: Some(Duration {
+            queue_duration: Some(prost_types::Duration {
                 seconds: 9,
                 nanos: 0,
             }),
+            suspend_duration: None,
+            suspend_count: None,
         };
         let command_execution_details = buck2_data::CommandExecutionDetails {
             signed_exit_code: Some(456),
-            stdout: "ABC".to_owned(),
-            stderr: "DEF".to_owned(),
+            cmd_stdout: "ABC".to_owned(),
+            cmd_stderr: "DEF".to_owned(),
             command_kind: Some(command_execution_kind),
             metadata: Some(command_execution_metadata),
             additional_message: None,
@@ -532,6 +586,11 @@ mod tests {
             status: Some(buck2_data::command_execution::Status::Success(
                 buck2_data::command_execution::Success {},
             )),
+            inline_environment_metadata: Some(
+                buck2_data::InlineCommandExecutionEnvironmentMetadata {
+                    sandcastle_instance_id: Some(123),
+                },
+            ),
         }
     }
 
@@ -550,7 +609,7 @@ mod tests {
         let proto = report.to_command_execution_proto(true, false, false).await;
         let mut expected_proto = make_simple_proto();
 
-        expected_proto.details.as_mut().unwrap().stdout = "".to_owned();
+        expected_proto.details.as_mut().unwrap().cmd_stdout = "".to_owned();
 
         assert_eq!(proto, expected_proto);
     }
@@ -561,7 +620,7 @@ mod tests {
         let proto = report.to_command_execution_proto(false, true, false).await;
         let mut expected_proto = make_simple_proto();
 
-        expected_proto.details.as_mut().unwrap().stderr = "".to_owned();
+        expected_proto.details.as_mut().unwrap().cmd_stderr = "".to_owned();
 
         assert_eq!(proto, expected_proto);
     }

@@ -5,15 +5,12 @@
 %% License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 %% of this source tree.
 
-%%%-------------------------------------------------------------------
-%%% @doc
-%%% A bounded FIFO queue
-%%% @end
-%%% % @format
-
+%% @format
 -module(bounded_buffer).
-
--compile(warn_missing_spec).
+-moduledoc """
+A bounded FIFO queue
+""".
+-compile(warn_missing_spec_all).
 
 %% Public API
 -export([new/1, put/2, get_elements/1]).

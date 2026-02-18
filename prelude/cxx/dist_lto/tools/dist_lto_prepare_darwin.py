@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """
 Prepares for an object-only ThinLTO link by extracting a given archive and
@@ -34,9 +35,31 @@ def _gen_filename(filename: str, num_of_instance: int) -> str:
     # for 2nd instance, it's file_1.o
     if num_of_instance > 1:
         basename, extension = os.path.splitext(filename)
-        return f"{basename}_{num_of_instance-1}{extension}"
+        return f"{basename}_{num_of_instance - 1}{extension}"
     else:
         return filename
+
+
+def is_universal_archive(archive_path: str) -> bool:
+    output = subprocess.check_output(["file", archive_path]).decode()
+    return "Mach-O universal binary" in output
+
+
+def extract_slice_from_universal_archive(
+    lipo_path: str, target_architecture: str, archive_path: str
+) -> str:
+    temp_file_name = os.path.join(tempfile.mkdtemp(), "extracted_archive.a")
+    subprocess.check_call(
+        [
+            lipo_path,
+            "-thin",
+            target_architecture,
+            "-output",
+            temp_file_name,
+            archive_path,
+        ]
+    )
+    return temp_file_name
 
 
 def main(argv: List[str]) -> int:
@@ -46,19 +69,27 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--ar")
     parser.add_argument("--name")
     parser.add_argument("--archive")
+    parser.add_argument("--target-architecture")
+    parser.add_argument("--lipo")
     args = parser.parse_args(argv[1:])
 
     objects_path = args.objects_out
     os.makedirs(objects_path, exist_ok=True)
 
     known_objects = []
+
+    archive_path = os.path.abspath(args.archive)
+    if is_universal_archive(archive_path):
+        archive_path = extract_slice_from_universal_archive(
+            args.lipo, args.target_architecture, archive_path
+        )
+
     # Unfortunately, we use llvm-ar and, while binutils ar has had --output for
     # a long time, llvm-ar does not support --output and the change in llvm-ar
     # looks like it has stalled for years (https://reviews.llvm.org/D69418)
     # So, we need to invoke ar in the directory that we want it to extract into, and so
     # need absolute paths.
     ar_path = os.path.abspath(args.ar)
-    archive_path = os.path.abspath(args.archive)
     output = subprocess.check_output(
         [ar_path, "t", archive_path], cwd=objects_path
     ).decode()
@@ -79,7 +110,7 @@ def main(argv: List[str]) -> int:
         counter[member] += 1
         # Insert all objects at most once into the list of known objects
         if counter[member] == 1:
-            known_objects.append(_gen_path(objects_path, member))
+            known_objects.append(member)
 
     with tempfile.TemporaryDirectory() as temp_dir:
         # For each duplicate member, rename and extract duplicates 1 through N
@@ -107,7 +138,7 @@ def main(argv: List[str]) -> int:
                     os.path.join(os.path.abspath(objects_path), unique_name),
                 )
                 if current > 1:
-                    known_objects.append(_gen_path(objects_path, unique_name))
+                    known_objects.append(unique_name)
 
     manifest = {
         "objects": known_objects,

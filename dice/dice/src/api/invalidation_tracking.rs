@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Dice computations track "invalidation paths" for every node in the computation.
@@ -34,7 +35,7 @@ use dupe::Dupe;
 use gazebo::variants::VariantName;
 
 pub use crate::api::dyn_key::DynKey;
-use crate::impls::dice::DiceModern;
+use crate::impls::dice::Dice;
 use crate::impls::value::InvalidationPath;
 use crate::impls::value::InvalidationPathNode;
 use crate::versions::VersionNumber;
@@ -59,7 +60,7 @@ pub enum DiceTrackedInvalidationPath {
 }
 
 pub struct DiceInvalidationPath {
-    dice: Arc<DiceModern>,
+    dice: Arc<Dice>,
     data: crate::arc::Arc<InvalidationPathNode>,
 }
 
@@ -109,7 +110,7 @@ impl DiceInvalidationPath {
 
 impl DiceKeyTrackedInvalidationPaths {
     pub(crate) fn new(
-        dice: Arc<DiceModern>,
+        dice: Arc<Dice>,
         normal_priority_path: InvalidationPath,
         high_priority_path: InvalidationPath,
     ) -> Self {
@@ -124,7 +125,7 @@ impl DiceKeyTrackedInvalidationPaths {
 }
 
 impl DiceTrackedInvalidationPath {
-    pub(crate) fn new(dice: Arc<DiceModern>, path: InvalidationPath) -> Self {
+    pub(crate) fn new(dice: Arc<Dice>, path: InvalidationPath) -> Self {
         match path {
             InvalidationPath::Clean => DiceTrackedInvalidationPath::Clean,
             InvalidationPath::Unknown => DiceTrackedInvalidationPath::Unknown,

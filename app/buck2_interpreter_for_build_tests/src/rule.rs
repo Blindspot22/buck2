@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_build_api::interpreter::rule_defs::transitive_set::transitive_set_definition::register_transitive_set;
@@ -210,7 +211,7 @@ fn udr_is_recorded() -> buck2_error::Result<()> {
         Tester::build_file_path().package(),
         AttrInspectOptions::All,
     )?;
-    assert_eq!(expected, actual, "`{:#?}` != `{:#?}`", expected, actual);
+    assert_eq!(expected, actual, "`{expected:#?}` != `{actual:#?}`");
     Ok(())
 }
 
@@ -246,7 +247,7 @@ fn udr_rejects_invalid_parameters() {
 
     let run = |content: &str, msg: &str| {
         let mut tester = rule_tester();
-        tester.run_starlark_test_expecting_error(&format!("{}\n{}", prefix, content), msg);
+        tester.run_starlark_test_expecting_error(&format!("{prefix}\n{content}"), msg);
     };
 
     run(
@@ -339,7 +340,7 @@ fn returns_documentation() -> buck2_error::Result<()> {
     fn arg(name: &str, raw_type: Ty, default: Option<&str>) -> DocParam {
         DocParam {
             name: name.to_owned(),
-            docs: DocString::from_docstring(DocStringKind::Starlark, &format!("{} docs", name)),
+            docs: DocString::from_docstring(DocStringKind::Starlark, &format!("{name} docs")),
             typ: raw_type,
             default_value: default.map(String::from),
         }
@@ -350,20 +351,44 @@ fn returns_documentation() -> buck2_error::Result<()> {
     let mut params = empty_spec
         .signature("foo_binary".to_owned())
         .documentation(empty_spec.starlark_types(), empty_spec.docstrings());
+
+    for param in &mut params.named_only {
+        match param.name.as_str() {
+            "default_target_platform" => param.default_value = Some("None".to_owned()),
+            "target_compatible_with" => param.default_value = Some("[]".to_owned()),
+            "compatible_with" => param.default_value = Some("[]".to_owned()),
+            "exec_compatible_with" => param.default_value = Some("[]".to_owned()),
+            "visibility" => param.default_value = Some("[]".to_owned()),
+            "within_view" => param.default_value = Some("[\"PUBLIC\"]".to_owned()),
+            "metadata" => param.default_value = Some("{}".to_owned()),
+            "tests" => param.default_value = Some("[]".to_owned()),
+            "modifiers" => param.default_value = Some("[]".to_owned()),
+            _ => {}
+        }
+    }
+
     params.named_only.extend(vec![
         arg("any", Ty::any(), None),
-        arg("arg", Ty::string(), Some("...")),
-        arg("bool", Ty::bool(), Some("...")),
-        arg("default_only", Ty::string(), Some("...")),
-        arg("dep", Ty::string(), Some("...")),
-        arg("dict", Ty::dict(Ty::string(), Ty::bool()), Some("...")),
-        arg("list", Ty::list(Ty::string()), Some("...")),
-        arg("one_of", Ty::union2(Ty::bool(), Ty::string()), Some("...")),
-        arg("option", Ty::union2(Ty::none(), Ty::string()), Some("...")),
+        arg("arg", Ty::string(), Some("\"arg\"")),
+        arg("bool", Ty::bool(), Some("True")),
+        arg("default_only", Ty::string(), Some("\"default_only\"")),
+        arg("dep", Ty::string(), Some("\"root//:dep\"")),
+        arg(
+            "dict",
+            Ty::dict(Ty::string(), Ty::bool()),
+            Some("{\"dict\": True}"),
+        ),
+        arg("list", Ty::list(Ty::string()), Some("[\"list\"]")),
+        arg("one_of", Ty::union2(Ty::bool(), Ty::string()), Some("\"\"")),
+        arg("option", Ty::union2(Ty::none(), Ty::string()), Some("None")),
         arg("query", Ty::string(), None),
-        arg("source", Ty::string(), Some("...")),
-        arg("string", Ty::string(), Some("...")),
-        arg("tuple", Ty::tuple2(Ty::bool(), Ty::string()), Some("...")),
+        arg("source", Ty::string(), Some("\"root//:src\"")),
+        arg("string", Ty::string(), Some("\"string\"")),
+        arg(
+            "tuple",
+            Ty::tuple2(Ty::bool(), Ty::string()),
+            Some("(True, \"some string\")"),
+        ),
     ]);
 
     let expected_docs = DocItem::Member(DocMember::Function(DocFunction {

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -16,6 +17,7 @@ use std::str;
 use allocative::Allocative;
 use buck2_data::ToProtoMessage;
 use dupe::Dupe;
+use pagable::Pagable;
 use serde::Serialize;
 use serde::Serializer;
 use strong_hash::StrongHash;
@@ -30,7 +32,7 @@ use crate::target::name::TargetNameRef;
 /// These uniquely map to nodes of the build graph with 'Configuration's
 /// applied.
 #[derive(
-    Clone, Dupe, Hash, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash
+    Clone, Dupe, Hash, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash, Pagable
 )]
 pub struct ConfiguredTargetLabel {
     pub(crate) target: TargetLabel,
@@ -41,7 +43,7 @@ impl Display for ConfiguredTargetLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({})", self.target, self.cfg())?;
         if let Some(exec_cfg) = self.exec_cfg() {
-            write!(f, " ({})", exec_cfg)?;
+            write!(f, " ({exec_cfg})")?;
         }
         Ok(())
     }

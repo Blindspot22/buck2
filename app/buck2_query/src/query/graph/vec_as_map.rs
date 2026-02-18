@@ -1,17 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![allow(dead_code)] // Used later in the stack.
 
 use std::fmt;
 use std::fmt::Debug;
-use std::mem;
 
 /// Map `u32` to `T`.
 pub(crate) struct VecAsMap<T> {
@@ -58,6 +58,6 @@ impl<T> VecAsMap<T> {
         if self.vec.len() <= index as usize {
             self.vec.resize_with(index as usize + 1, || None);
         }
-        mem::replace(&mut self.vec[index as usize], Some(value))
+        self.vec[index as usize].replace(value)
     }
 }

@@ -1,19 +1,19 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_certs::validate::validate_certs;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
 use buck2_error::ErrorTag;
+use buck2_fs::paths::abs_path::AbsPathBuf;
 use dupe::Dupe;
 use edenfs::BinaryHash;
 use edenfs::EdenErrorType;
-use edenfs::FileAttributeData;
 use edenfs::FileAttributeDataOrErrorV2;
 use edenfs::FileAttributeDataV2;
 use edenfs::PathString;
@@ -91,24 +91,6 @@ macro_rules! impl_error_from_hanging_mount {
 
 impl_error_from_hanging_mount!(GetDaemonInfoError);
 
-impl<E> std::error::Error for ConnectAndRequestError<E>
-where
-    E: std::error::Error,
-    Self: std::fmt::Debug + std::fmt::Display + std::marker::Send + std::marker::Sync + 'static,
-{
-    fn source(&self) -> std::option::Option<&(dyn std::error::Error + 'static)> {
-        use buck2_error::__for_macro::AsDynError;
-        match self {
-            ConnectAndRequestError::ConnectionError { 0: transparent } => {
-                std::error::Error::source(transparent.as_dyn_error())
-            }
-            ConnectAndRequestError::RequestError { 0: transparent } => {
-                std::error::Error::source(transparent.as_dyn_error())
-            }
-        }
-    }
-}
-
 #[derive(Copy, Clone, Dupe, PartialEq, Eq)]
 pub enum ErrorHandlingStrategy {
     Reconnect,
@@ -152,7 +134,6 @@ macro_rules! impl_has_error_handling_strategy {
     };
 }
 
-impl_has_error_handling_strategy!(GetAttributesFromFilesError);
 impl_has_error_handling_strategy!(GetAttributesFromFilesV2Error);
 impl_has_error_handling_strategy!(GlobFilesError);
 impl_has_error_handling_strategy!(ListMountsError);
@@ -177,7 +158,28 @@ fn eden_posix_error_tag(code: i32) -> ErrorTag {
         libc::ENOSPC => ErrorTag::IoStorageFull,
         libc::ECONNABORTED => ErrorTag::IoConnectionAborted,
         libc::ENOTCONN => ErrorTag::IoNotConnected,
-        _ => ErrorTag::IoEden,
+        libc::EBADMSG => ErrorTag::IoEdenDataCorruption,
+        _ => ErrorTag::IoEdenUncategorized,
+    }
+}
+
+fn eden_network_error_tag(code_opt: Option<i32>) -> ErrorTag {
+    const CURLE_OPERATION_TIMEDOUT: i32 = curl_sys::CURLE_OPERATION_TIMEDOUT as i32;
+    const CURLE_RECV_ERROR: i32 = curl_sys::CURLE_RECV_ERROR as i32;
+    const CURLE_SSL_CERTPROBLEM: i32 = curl_sys::CURLE_SSL_CERTPROBLEM as i32;
+
+    match code_opt {
+        Some(code) => {
+            match code {
+                CURLE_OPERATION_TIMEDOUT => ErrorTag::IoEdenNetworkCurlTimedout, // 28
+                CURLE_RECV_ERROR | CURLE_SSL_CERTPROBLEM => ErrorTag::IoEdenNetworkTls, // 56 and 58
+                401 => ErrorTag::HttpUnauthorized, // http::StatusCode::UNAUTHORIZED
+                403 => ErrorTag::HttpForbidden,    // http::StatusCode::FORBIDDEN
+                503 => ErrorTag::HttpServiceUnavailable, // http::StatusCode::SERVICE_UNAVAILABLE
+                _ => ErrorTag::IoEdenNetworkUncategorized,
+            }
+        }
+        None => ErrorTag::IoEdenNetworkUncategorized,
     }
 }
 
@@ -191,7 +193,8 @@ fn eden_service_error_tag(error: &edenfs::EdenError) -> ErrorTag {
         EdenErrorType::JOURNAL_TRUNCATED => ErrorTag::IoEdenJournalTruncated,
         EdenErrorType::CHECKOUT_IN_PROGRESS => ErrorTag::IoEdenCheckoutInProgress,
         EdenErrorType::OUT_OF_DATE_PARENT => ErrorTag::IoEdenOutOfDateParent,
-        _ => ErrorTag::IoEden,
+        EdenErrorType::ATTRIBUTE_UNAVAILABLE => ErrorTag::IoEdenAttributeUnavailable,
+        _ => ErrorTag::IoEdenUncategorized,
     }
 }
 
@@ -201,6 +204,13 @@ pub enum EdenError {
     #[error("Eden POSIX error (code = {code}): {0}", error.message)]
     #[buck2(tag = eden_posix_error_tag(code))]
     PosixError { error: edenfs::EdenError, code: i32 },
+
+    #[error("Eden network error (code = {code:?}): {0}", error.message)]
+    #[buck2(tag = eden_network_error_tag(code))]
+    NetworkError {
+        error: edenfs::EdenError,
+        code: Option<i32>,
+    },
 
     #[error("Eden service error: {0}", error.message)]
     #[buck2(tag = eden_service_error_tag(&error))]
@@ -220,11 +230,17 @@ impl From<edenfs::EdenError> for EdenError {
                     code: error_code,
                 };
             }
+        } else if error.errorType == EdenErrorType::NETWORK_ERROR {
+            let code_opt = error.errorCode;
+            return Self::NetworkError {
+                error,
+                code: code_opt,
+            };
         } else if error.errorType == EdenErrorType::GENERIC_ERROR {
             // TODO(minglunli): Hacky solution to check if Eden errors are cert related
             if let Err(e) = futures::executor::block_on(validate_certs()) {
                 let eden_err = edenfs::EdenError {
-                    message: format!("{}", e),
+                    message: format!("{e}"),
                     ..error
                 };
 
@@ -263,8 +279,6 @@ impl_eden_data_into_result!(
     SourceControlType,
     sourceControlType
 );
-
-impl_eden_data_into_result!(FileAttributeDataOrError, FileAttributeData, data);
 
 impl_eden_data_into_result!(
     FileAttributeDataOrErrorV2,

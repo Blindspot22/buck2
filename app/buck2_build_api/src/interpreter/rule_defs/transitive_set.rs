@@ -1,13 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 pub mod globals;
+#[allow(clippy::module_inception)]
 mod transitive_set;
 mod transitive_set_args_projection;
 pub mod transitive_set_definition;
@@ -27,6 +29,7 @@ pub use self::transitive_set_definition::TransitiveSetOperations;
 pub use self::transitive_set_definition::TransitiveSetProjectionKind;
 pub use self::transitive_set_definition::TransitiveSetProjectionSpec;
 use self::transitive_set_iterator::BfsTransitiveSetIteratorGen;
+use self::transitive_set_iterator::DfsTransitiveSetIteratorGen;
 use self::transitive_set_iterator::PostorderTransitiveSetIteratorGen;
 use self::transitive_set_iterator::PreorderTransitiveSetIteratorGen;
 use self::transitive_set_iterator::TopologicalTransitiveSetIteratorGen;
@@ -107,6 +110,6 @@ pub(crate) enum TransitiveSetError {
         valid_reductions: Vec<String>,
     },
 
-    #[error("Expected ordering to be one of `preorder`, `postorder`, `topological`, or `bfs`,  but got `{0}`", .ordering)]
+    #[error("Expected ordering to be one of `preorder`, `postorder`, `topological`, `bfs`, or `dfs`,  but got `{0}`", .ordering)]
     OrderingUnexpectedValue { ordering: String },
 }

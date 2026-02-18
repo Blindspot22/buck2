@@ -1,12 +1,23 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//apple:apple_toolchain_types.bzl", "AppleToolsInfo")
+load(
+    ":apple_bundle_types.bzl",
+    "AppleBundleLinkerMapInfo",
+    "AppleInfoPlistInfo",
+)
 load(":apple_package_config.bzl", "IpaCompressionLevel")
+load(":apple_package_types.bzl", "ApplePackageInfo")
+load(
+    ":debug.bzl",
+    "AppleDebuggableInfo",
+)
 
 def apple_package_impl(ctx: AnalysisContext) -> list[Provider]:
     package_name = ctx.attrs.package_name if ctx.attrs.package_name else ctx.attrs.bundle.label.name
@@ -48,6 +59,13 @@ def apple_package_impl(ctx: AnalysisContext) -> list[Provider]:
     return [DefaultInfo(
         default_output = package,
         sub_targets = sub_targets,
+    ), ApplePackageInfo(
+        name = package_name,
+        extension = ctx.attrs.ext,
+        package = package,
+        dsyms = ctx.attrs.bundle[AppleDebuggableInfo].dsyms,
+        info_plist = ctx.attrs.bundle[AppleInfoPlistInfo].info_plist,
+        linker_maps = ctx.attrs.bundle[AppleBundleLinkerMapInfo].linker_maps,
     )]
 
 def _get_ipa_contents(ctx: AnalysisContext) -> Artifact:

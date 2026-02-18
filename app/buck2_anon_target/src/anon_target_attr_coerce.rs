@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cmp::Ordering;
@@ -12,7 +13,7 @@ use std::fmt::Debug;
 use std::iter;
 
 use buck2_build_api::artifact_groups::promise::PromiseArtifactAttr;
-use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_promise_artifact::StarlarkPromiseArtifact;
 use buck2_build_api::interpreter::rule_defs::provider::dependency::Dependency;
 use buck2_build_api::interpreter::rule_defs::resolved_macro::ResolvedStringWithMacros;
@@ -102,7 +103,8 @@ impl AnonTargetAttrTypeCoerce for AttrType {
                             DepAttrTransition::Exec => {
                                 match dep.execution_platform()? {
                                 Some(exec_dep_resolution) => {
-                                    if !exec_dep_resolution.eq(&ctx.execution_platform_resolution) {
+                                    // Compare only base platform, not the full resolution
+                                    if exec_dep_resolution.platform()? != ctx.execution_platform_resolution.platform()? {
                                         return Err(AnonTargetCoercionError::ExecDepPlatformMismatch(exec_dep_resolution.platform()?.id(), ctx.execution_platform_resolution.platform()?.id()).into());
                                     }
                                 },
@@ -128,10 +130,11 @@ impl AnonTargetAttrTypeCoerce for AttrType {
                 // allow anon targets to accept unresolved promise artifacts.
                 if let Some(promise_artifact) = StarlarkPromiseArtifact::from_value(value) {
                     Ok(AnonTargetAttr::PromiseArtifact(PromiseArtifactAttr {
-                        id: promise_artifact.artifact.id.as_ref().clone(),
+                        id: promise_artifact.artifact.id.clone(),
                         short_path: promise_artifact.short_path.clone(),
+                        has_content_based_path: promise_artifact.has_content_based_path,
                     }))
-                } else if let Some(artifact_like) = ValueAsArtifactLike::unpack_value(value)? {
+                } else if let Some(artifact_like) = ValueAsInputArtifactLike::unpack_value(value)? {
                     let artifact = artifact_like.0.get_bound_artifact()?;
                     Ok(AnonTargetAttr::Artifact(artifact))
                 } else {
@@ -186,10 +189,10 @@ pub(crate) enum AnonTargetCoercionError {
     #[error("Used one_of with an empty list.")]
     #[buck2(tag = Input)]
     OneOfEmpty,
-    #[error("one_of fails, the errors against each alternative in turn were:\n{}", .0.map(|x| format!("{:#}", x)).join("\n"))]
+    #[error("one_of fails, the errors against each alternative in turn were:\n{}", .0.map(|x| format!("{x:#}")).join("\n"))]
     #[buck2(tag = Input)]
     OneOfMany(Vec<buck2_error::Error>),
-    #[error("enum called with `{0}`, only allowed: {}", .1.map(|x| format!("`{}`", x)).join(", "))]
+    #[error("enum called with `{0}`, only allowed: {}", .1.map(|x| format!("`{x}`")).join(", "))]
     #[buck2(tag = Input)]
     InvalidEnumVariant(String, Vec<String>),
     #[error("Cannot coerce value of type `{0}` to any: `{1}`")]
@@ -329,7 +332,7 @@ fn to_anon_target_one_of(
             }
         }
     }
-    Err(AnonTargetCoercionError::one_of_many(errs).into())
+    Err(AnonTargetCoercionError::one_of_many(errs))
 }
 
 fn to_anon_target_tuple(

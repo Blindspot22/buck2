@@ -1,4 +1,4 @@
-load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+load("@fbsource//tools/build_defs:rust_library.bzl", "rust_library")
 
 oncall("build_infra")
 
@@ -6,9 +6,9 @@ rust_library(
     name = "buck2_critical_path",
     srcs = glob(["src/**/*.rs"]),
     test_deps = [
-        "fbsource//third-party/rust:rand",
+        "fbsource//third-party/rust:rand_08",
         "fbsource//third-party/rust:rand_chacha",
-        "fbsource//third-party/rust:rand_distr",
+        "fbsource//third-party/rust:rand_distr_04",
     ],
     deps = [
         "fbsource//third-party/rust:crossbeam",

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::io;
@@ -12,7 +13,7 @@ use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
 
-use anyhow::Context as _;
+use buck2_error::BuckErrorContext as _;
 use futures::future;
 use pin_project::pin_project;
 use tokio::io::AsyncRead;
@@ -80,22 +81,32 @@ impl<R, W> Connected for DuplexChannel<R, W> {
 
 /// Create a channel using a pre-existing I/O instance. This will not support reconnecting since
 /// there is no way to establish connections here. We're just using one that already exists.
-pub async fn make_channel<T>(io: T, name: &str) -> anyhow::Result<Channel>
+pub async fn make_channel<T>(io: T, name: &str) -> buck2_error::Result<Channel>
 where
     T: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
 {
+    // We have otherwise standardized on using tokio::io::Async*
+    // to define our type constraints in the vicinity of this file,
+    // (mostly because switching the impl to the Hyper equivalents isn't as
+    // convenient - we cannot simply use the TokioIo wrapper when going
+    // from Hyper->Tokio because the wrapper doesn't have an implementation for Connected)
+    // but we need a Hyper object here for backward compatibility
+    let io = hyper_util::rt::tokio::TokioIo::new(io);
     let mut io = Some(io);
-
     // NOTE: The uri here is only used to populate the requests we send. We don't actually connect
     // anywhere since we already have an I/O channel on hand.
-    let channel = Endpoint::try_from(format!("http://{}.invalid", name))
-        .context("Invalid endpoint")?
+    let channel = Endpoint::try_from(format!("http://{name}.invalid"))
+        .buck_error_context("Invalid endpoint")?
         .connect_with_connector(service_fn(move |_: Uri| {
-            let io = io.take().context("Cannot reconnect after connection loss");
+            let io = io
+                .take()
+                // Must be a `String` not a `&'static str`, the lifetime otherwise makes the
+                // compiler very confused in very non-local ways
+                .ok_or_else(|| "Cannot reconnect after connection loss".to_owned());
             future::ready(io)
         }))
         .await
-        .context("Failed to create channel")?;
+        .buck_error_context("Failed to create channel")?;
 
     Ok(channel)
 }

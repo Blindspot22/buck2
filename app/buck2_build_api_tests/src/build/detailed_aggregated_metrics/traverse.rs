@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #[cfg(test)]
@@ -33,10 +34,11 @@ mod tests {
     use buck2_core::deferred::dynamic::DynamicLambdaResultsKey;
     use buck2_core::deferred::key::DeferredHolderKey;
     use buck2_core::execution_types::executor_config::CommandExecutorConfig;
+    use buck2_core::fs::buck_out_path::BuckOutPathKind;
     use buck2_core::fs::buck_out_path::BuildArtifactPath;
-    use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
     use buck2_core::package::source_path::SourcePath;
     use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
+    use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
     use dupe::Dupe;
     use dupe::IterDupedExt;
     use indexmap::indexset;
@@ -168,7 +170,7 @@ mod tests {
                     indexset! {output.dupe()},
                     Vec::new(),
                     Category::new("category".to_owned()).unwrap(),
-                    Some(format!("id-{}", idx)),
+                    Some(format!("id-{idx}")),
                 )),
                 CommandExecutorConfig::testing_local(),
             );
@@ -182,6 +184,7 @@ mod tests {
                 BuildArtifactPath::new(
                     self.holder_key.owner().dupe(),
                     ForwardRelativePathBuf::unchecked_new(format!("output-{}", key.action_index())),
+                    BuckOutPathKind::default(),
                 ),
                 key.dupe(),
                 buck2_execute::execute::request::OutputType::File,

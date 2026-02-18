@@ -4,3 +4,5 @@
 #     deps = ["//cpp/python_cextension:cpprint"],
 #     main = "cext/cext.py"
 # )
+
+oncall("build_infra")

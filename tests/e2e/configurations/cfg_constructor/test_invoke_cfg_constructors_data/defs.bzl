@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 KEY = "buck.cfg_modifiers"
 
@@ -20,7 +21,9 @@ def _cfg_constructor_pre_constraint_analysis(
         cli_modifiers: list[str],
         rule_name: str,
         aliases: struct | None,
-        extra_data: dict[str, typing.Any] | None):
+        extra_data: dict[str, typing.Any] | None,
+        **kwargs):
+    _unused = kwargs  # buildifier: disable=unused-variable
     _unused = target_modifiers  # buildifier: disable=unused-variable
     _unused = cli_modifiers  # buildifier: disable=unused-variable
     _unused = extra_data  # buildifier: disable=unused-variable

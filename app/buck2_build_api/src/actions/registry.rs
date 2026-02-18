@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -20,9 +21,8 @@ use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_core::category::Category;
 use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
+use buck2_core::fs::buck_out_path::BuckOutPathKind;
 use buck2_core::fs::buck_out_path::BuildArtifactPath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_directory::directory;
 use buck2_directory::directory::builder::DirectoryBuilder;
 use buck2_directory::directory::builder::DirectoryInsertError;
@@ -30,39 +30,42 @@ use buck2_directory::directory::directory::Directory;
 use buck2_directory::directory::directory_hasher::NoDigest;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
 use buck2_directory::directory::entry::DirectoryEntry;
-use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
 use buck2_execute::execute::request::OutputType;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
 use gazebo::prelude::SliceExt;
 use indexmap::IndexSet;
 use starlark::codemap::FileSpan;
 use starlark::collections::SmallMap;
+use starlark::collections::SmallSet;
+use starlark::values::Heap;
+use starlark::values::Trace;
 
 use crate::actions::ActionErrors;
 use crate::actions::ActionToBeRegistered;
 use crate::actions::RegisteredAction;
 use crate::actions::UnregisteredAction;
 use crate::analysis::registry::AnalysisValueFetcher;
-use crate::artifact_groups::ArtifactGroup;
 use crate::deferred::calculation::ActionLookup;
 
 /// The actions registry for a particular analysis of a rule, dynamic actions, anon target, BXL.
-#[derive(Allocative)]
-pub struct ActionsRegistry {
+#[derive(Allocative, Trace)]
+pub struct ActionsRegistry<'v> {
     owner: DeferredHolderKey,
-    artifacts: IndexSet<DeclaredArtifact>,
+    artifacts: SmallSet<DeclaredArtifact<'v>>,
 
     // For a dynamic_output, maps the ActionKeys for the outputs that have been bound
     // to this dynamic_output to the DeclaredArtifact created in the dynamic_output.
-    declared_dynamic_outputs: SmallMap<ActionKey, DeclaredArtifact>,
+    declared_dynamic_outputs: SmallMap<ActionKey, DeclaredArtifact<'v>>,
     pending: Vec<ActionToBeRegistered>,
     pub execution_platform: ExecutionPlatformResolution,
     claimed_output_paths: DirectoryBuilder<Option<FileSpan>, NoDigest>,
 }
 
-impl ActionsRegistry {
+impl<'v> ActionsRegistry<'v> {
     pub fn new(owner: DeferredHolderKey, execution_platform: ExecutionPlatformResolution) -> Self {
         Self {
             owner,
@@ -77,7 +80,8 @@ impl ActionsRegistry {
     pub fn declare_dynamic_output(
         &mut self,
         artifact: &BuildArtifact,
-    ) -> buck2_error::Result<DeclaredArtifact> {
+        heap: Heap<'v>,
+    ) -> buck2_error::Result<DeclaredArtifact<'v>> {
         if !self.pending.is_empty() {
             return Err(internal_error!(
                 "output for dynamic_output/actions declared after actions: {}, {:?}",
@@ -92,7 +96,7 @@ impl ActionsRegistry {
         // never escape the dynamic lambda.
         // TODO(cjhopman): dynamic values mean this can escape. does this need to be updated for that?
         let new_artifact =
-            DeclaredArtifact::new(artifact.get_path().dupe(), artifact.output_type(), 0);
+            DeclaredArtifact::new(artifact.get_path().dupe(), artifact.output_type(), 0, heap);
 
         assert!(
             self.declared_dynamic_outputs
@@ -167,14 +171,20 @@ impl ActionsRegistry {
         path: ForwardRelativePathBuf,
         output_type: OutputType,
         declaration_location: Option<FileSpan>,
-    ) -> buck2_error::Result<DeclaredArtifact> {
+        path_resolution_method: BuckOutPathKind,
+        heap: Heap<'v>,
+    ) -> buck2_error::Result<DeclaredArtifact<'v>> {
         let (path, hidden) = match prefix {
             None => (path, 0),
             Some(prefix) => (prefix.join(path), prefix.iter().count()),
         };
         self.claim_output_path(&path, declaration_location)?;
-        let out_path = BuildArtifactPath::with_dynamic_actions_action_key(self.owner.dupe(), path);
-        let declared = DeclaredArtifact::new(out_path, output_type, hidden);
+        let out_path = BuildArtifactPath::with_dynamic_actions_action_key(
+            self.owner.dupe(),
+            path,
+            path_resolution_method,
+        );
+        let declared = DeclaredArtifact::new(out_path, output_type, hidden, heap);
         if !self.artifacts.insert(declared.dupe()) {
             panic!("not expected duplicate artifact after output path was successfully claimed");
         }
@@ -185,7 +195,6 @@ impl ActionsRegistry {
     pub fn register<A: UnregisteredAction + 'static>(
         &mut self,
         self_key: &DeferredHolderKey,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<OutputArtifact>,
         action: A,
     ) -> buck2_error::Result<ActionKey> {
@@ -203,22 +212,19 @@ impl ActionsRegistry {
             let bound = output.bind(key.dupe())?.as_base_artifact().dupe();
             bound_outputs.insert(bound);
         }
-        self.pending.push(ActionToBeRegistered::new(
-            key.dupe(),
-            inputs,
-            bound_outputs,
-            action,
-        ));
+        self.pending
+            .push(ActionToBeRegistered::new(key.dupe(), bound_outputs, action));
 
         Ok(key)
     }
 
     /// Consumes the registry so no more 'Action's can be registered. This returns
     /// an 'ActionAnalysisResult' that holds all the registered 'Action's
-    pub fn ensure_bound(
+    pub fn finalize(
         self,
-        analysis_value_fetcher: &AnalysisValueFetcher,
-    ) -> buck2_error::Result<RecordedActions> {
+    ) -> buck2_error::Result<
+        impl FnOnce(&AnalysisValueFetcher) -> buck2_error::Result<RecordedActions> + use<>,
+    > {
         for artifact in self.artifacts {
             artifact.ensure_bound()?;
         }
@@ -230,54 +236,57 @@ impl ActionsRegistry {
             actions.insert_dynamic_output(key, artifact.ensure_bound()?.action_key().dupe());
         }
 
-        // Buck2 has an invariant that pairs of categories and identifiers are unique throughout a build. That
-        // invariant is enforced here, using observed_names to keep track of the categories and identifiers that we've seen.
-        let mut observed_names: HashMap<Category, HashSet<String>> = HashMap::new();
-        for a in self.pending.into_iter() {
-            let key = a.key().dupe();
-            let (starlark_data, error_handler) = analysis_value_fetcher.get_action_data(&key)?;
-            let action = a.register(starlark_data, error_handler)?;
-            match (action.category(), action.identifier()) {
-                (category, Some(identifier)) => {
-                    let existing_identifiers = observed_names
-                        .entry(category.to_owned())
-                        .or_insert_with(HashSet::<String>::new);
-                    // false -> identifier was already present in the set
-                    if !existing_identifiers.insert(identifier.to_owned()) {
-                        return Err(ActionErrors::ActionCategoryIdentifierNotUnique(
-                            category.to_owned(),
-                            identifier.to_owned(),
-                        )
-                        .into());
+        Ok(move |analysis_value_fetcher: &AnalysisValueFetcher| {
+            // Buck2 has an invariant that pairs of categories and identifiers are unique throughout a build. That
+            // invariant is enforced here, using observed_names to keep track of the categories and identifiers that we've seen.
+            let mut observed_names: HashMap<Category, HashSet<String>> = HashMap::new();
+            for a in self.pending.into_iter() {
+                let key = a.key().dupe();
+                let (starlark_data, error_handler) =
+                    analysis_value_fetcher.get_action_data(&key)?;
+                let action = a.register(starlark_data, error_handler)?;
+                match (action.category(), action.identifier()) {
+                    (category, Some(identifier)) => {
+                        let existing_identifiers = observed_names
+                            .entry(category.to_owned())
+                            .or_insert_with(HashSet::<String>::new);
+                        // false -> identifier was already present in the set
+                        if !existing_identifiers.insert(identifier.to_owned()) {
+                            return Err(ActionErrors::ActionCategoryIdentifierNotUnique(
+                                category.to_owned(),
+                                identifier.to_owned(),
+                            )
+                            .into());
+                        }
+                    }
+                    (category, None) => {
+                        if observed_names
+                            .insert(category.to_owned(), HashSet::new())
+                            .is_some()
+                        {
+                            return Err(ActionErrors::ActionCategoryDuplicateSingleton(
+                                category.to_owned(),
+                            )
+                            .into());
+                        };
                     }
                 }
-                (category, None) => {
-                    if observed_names
-                        .insert(category.to_owned(), HashSet::new())
-                        .is_some()
-                    {
-                        return Err(ActionErrors::ActionCategoryDuplicateSingleton(
-                            category.to_owned(),
-                        )
-                        .into());
-                    };
-                }
+
+                actions.insert(
+                    key.dupe(),
+                    Arc::new(RegisteredAction::new(
+                        key,
+                        action,
+                        (*self.execution_platform.executor_config()?).dupe(),
+                    )),
+                );
             }
 
-            actions.insert(
-                key.dupe(),
-                Arc::new(RegisteredAction::new(
-                    key,
-                    action,
-                    (*self.execution_platform.executor_config()?).dupe(),
-                )),
-            );
-        }
-
-        Ok(actions)
+            Ok(actions)
+        })
     }
 
-    pub fn testing_artifacts(&self) -> &IndexSet<DeclaredArtifact> {
+    pub fn testing_artifacts(&self) -> &SmallSet<DeclaredArtifact<'v>> {
         &self.artifacts
     }
 
@@ -348,7 +357,7 @@ impl RecordedActions {
         self.actions
             .get(key.action_index().0 as usize)
             .duped()
-            .with_internal_error(|| format!("action key missing in recorded actions {}", key))
+            .ok_or_else(|| internal_error!("action key missing in recorded actions {key}"))
     }
 
     /// Iterates over the actions created in this analysis.

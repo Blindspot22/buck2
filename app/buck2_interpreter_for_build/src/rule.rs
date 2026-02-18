@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::RefCell;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_core::plugins::PluginKind;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_interpreter::late_binding_ty::AnalysisContextReprLate;
 use buck2_interpreter::late_binding_ty::ProviderReprLate;
 use buck2_interpreter::late_binding_ty::TransitionReprLate;
@@ -22,6 +23,7 @@ use buck2_interpreter::types::rule::FROZEN_PROMISE_ARTIFACT_MAPPINGS_GET_IMPL;
 use buck2_interpreter::types::rule::FROZEN_RULE_GET_IMPL;
 use buck2_interpreter::types::transition::transition_id_from_value;
 use buck2_node::attrs::attr::Attribute;
+use buck2_node::attrs::display::AttrDisplayWithContextExt;
 use buck2_node::attrs::spec::AttributeSpec;
 use buck2_node::bzl_or_bxl_path::BzlOrBxlPath;
 use buck2_node::nodes::unconfigured::RuleKind;
@@ -166,7 +168,7 @@ enum RuleError {
 }
 
 impl<'v> AllocValue<'v> for StarlarkRuleCallable<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -338,15 +340,18 @@ impl<'v> StarlarkRuleCallable<'v> {
             .borrow()
             .as_ref()
             .map_or_else(|| "unbound_rule".to_owned(), |rt| rt.name.clone());
-        // TODO(nmj): These return 'None' for default values right now. It's going to take some
-        //            refactoring to get that pulled out of the attributespec
-        let parameters_spec = self.attributes.signature(name);
-
+        let parameters_spec = self.attributes.signature_with_default_value(name);
         let parameter_types = self.attributes.starlark_types();
         let parameter_docs = self.attributes.docstrings();
+        let params = parameters_spec.documentation_with_default_value_formatter(
+            parameter_types,
+            parameter_docs,
+            |v| v.as_display_no_ctx().to_string(),
+        );
+
         let function_docs = DocFunction::from_docstring(
             DocStringKind::Starlark,
-            parameters_spec.documentation(parameter_types, parameter_docs),
+            params,
             Ty::none(),
             self.docs.as_deref(),
         );
@@ -375,9 +380,7 @@ impl<'v> StarlarkValue<'v> for StarlarkRuleCallable<'v> {
         _args: &Arguments<'v, '_>,
         _eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
-        Err(starlark::Error::new_other(buck2_error::Error::from(
-            RuleError::RuleCalledBeforeFreezing,
-        )))
+        Err(buck2_error::Error::from(RuleError::RuleCalledBeforeFreezing).into())
     }
 
     fn documentation(&self) -> DocItem {
@@ -434,6 +437,10 @@ impl<'v> Freeze for StarlarkRuleCallable<'v> {
         };
         let rule_type = Arc::new(id);
         let rule_name = rule_type.name.to_owned();
+
+        // For StarlarkRuleCallable, it doesn't rely on `signature` to get the default value, instead we get the default value from `Rule.attributes`,
+        // so use `signature(rule_name)` method here.
+        // TODO(nero): It need to some refactor to make it more clear, e.g. add a new type `ParametersSpec<NoDefaults>` here.
         let signature = self.attributes.signature(rule_name).freeze(freezer)?;
 
         let artifact_promise_mappings = match self.artifact_promise_mappings {
@@ -473,6 +480,8 @@ pub struct FrozenStarlarkRuleCallable {
     /// Identical to `rule.rule_type` but more specific type.
     rule_type: Arc<StarlarkRuleType>,
     implementation: FrozenRuleImpl,
+    /// We don't need rely on `signature` to get the default value here, instead we get the default
+    /// value from `Rule.attributes`. So use in the ParametersSpecNoDefaults for more clarity
     signature: ParametersSpec<FrozenValue>,
     rule_docs: DocItem,
     ty: Ty,
@@ -485,7 +494,7 @@ fn unpack_frozen_rule(
     rule: FrozenValue,
 ) -> buck2_error::Result<FrozenRef<'static, FrozenStarlarkRuleCallable>> {
     rule.downcast_frozen_ref::<FrozenStarlarkRuleCallable>()
-        .buck_error_context("Expecting FrozenRuleCallable")
+        .ok_or_else(|| internal_error!("Expecting FrozenRuleCallable"))
 }
 
 pub(crate) fn init_frozen_rule_get_impl() {
@@ -538,24 +547,22 @@ impl<'v> StarlarkValue<'v> for FrozenStarlarkRuleCallable {
             None
         };
         let arg_count = args.len()?;
-        self.signature
-            .parser(args, eval, |param_parser, eval| {
-                // The body of the callable returned by `rule()`.
-                // Records the target in this package's `TargetMap`.
-                let internals = ModuleInternals::from_context(eval, self.rule.rule_type.name())?;
-                let target_node = TargetNode::from_params(
-                    self.rule.dupe(),
-                    internals.package(),
-                    internals,
-                    param_parser,
-                    arg_count,
-                    self.ignore_attrs_for_profiling,
-                    call_stack,
-                )?;
-                internals.record(target_node)?;
-                Ok(Value::new_none())
-            })
-            .map_err(Into::into)
+        self.signature.parser(args, eval, |param_parser, eval| {
+            // The body of the callable returned by `rule()`.
+            // Records the target in this package's `TargetMap`.
+            let internals = ModuleInternals::from_context(eval, self.rule.rule_type.name())?;
+            let target_node = TargetNode::from_params(
+                self.rule.dupe(),
+                internals.package(),
+                internals,
+                param_parser,
+                arg_count,
+                self.ignore_attrs_for_profiling,
+                call_stack,
+            )?;
+            internals.record(target_node)?;
+            Ok(Value::new_none())
+        })
     }
 
     fn documentation(&self) -> DocItem {
@@ -635,7 +642,7 @@ pub fn register_rule_function(builder: &mut GlobalsBuilder) {
             StarlarkCallable<'v, (FrozenValue,), UnpackList<FrozenValue>>,
         >,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<StarlarkRuleCallable<'v>> {
+    ) -> starlark::Result<StarlarkRuleCallable<'v>> {
         StarlarkRuleCallable::new_anon(r#impl, attrs, doc, artifact_promise_mappings, eval)
             .map_err(Into::into)
     }

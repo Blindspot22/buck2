@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::thread::sleep;
@@ -14,6 +15,7 @@ use superconsole::Component;
 use superconsole::Line;
 use superconsole::Lines;
 use superconsole::Span;
+use superconsole::SpanError;
 use superconsole::SuperConsole;
 use superconsole::style::Stylize;
 
@@ -27,12 +29,14 @@ struct LoadingBar<'a> {
 }
 
 impl Component for LoadingBar<'_> {
+    type Error = SpanError;
+
     fn draw_unchecked(
         &self,
 
         _dimensions: superconsole::Dimensions,
         mode: superconsole::DrawMode,
-    ) -> anyhow::Result<superconsole::Lines> {
+    ) -> Result<superconsole::Lines, SpanError> {
         let res = match mode {
             superconsole::DrawMode::Normal => {
                 const BUILDING: &str = "   Building ";

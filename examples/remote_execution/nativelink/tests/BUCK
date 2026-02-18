@@ -1,3 +1,5 @@
 load(":defs.bzl", "tests")
 
+oncall("build_infra")
+
 tests(name = "tests")

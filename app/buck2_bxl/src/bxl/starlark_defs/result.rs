@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -20,7 +21,6 @@ use starlark::starlark_complex_values;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::Freeze;
-use starlark::values::FreezeResult;
 use starlark::values::FrozenValue;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
@@ -51,9 +51,15 @@ enum BxlResultError {
     Allocative,
     Trace
 )]
-#[display("bxl.Error({})", StarlarkStr::repr(&format!("{:?}", err)))]
+#[display("bxl.Error({})", StarlarkStr::repr(&format!("{err:?}")))]
 pub(crate) struct StarlarkError {
     err: buck2_error::Error,
+}
+
+impl StarlarkError {
+    pub(crate) fn new(err: buck2_error::Error) -> Self {
+        Self { err }
+    }
 }
 
 starlark_simple_value!(StarlarkError);
@@ -105,7 +111,7 @@ impl<T: Display> Display for StarlarkResultGen<T> {
                 "Result(Err = ",
                 ")",
                 // TODO(nero): implement multiline when multiline is requested
-                [StarlarkStr::repr(&format!("{:?}", err))],
+                [StarlarkStr::repr(&format!("{err:?}"))],
             ),
         }
     }
@@ -201,7 +207,7 @@ impl<'v, V: ValueLike<'v>> StarlarkResultGen<V> {
     fn unwrap_err(&self) -> buck2_error::Result<StarlarkError> {
         match self {
             StarlarkResultGen::Ok(val) => {
-                let display_str = format!("{}", val);
+                let display_str = format!("{val}");
                 Err(BxlResultError::UnwrapErrOnOk(display_str).into())
             }
             StarlarkResultGen::Err(err) => Ok(StarlarkError { err: err.dupe() }),

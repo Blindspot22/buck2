@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -12,8 +13,9 @@ use std::sync::Arc;
 use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_common::dice::cells::HasCellResolver;
-use buck2_common::dice::file_ops::DiceFileComputations;
-use buck2_common::file_ops::RawPathMetadata;
+use buck2_common::file_ops::dice::DiceFileComputations;
+use buck2_common::file_ops::error::FileReadErrorContext;
+use buck2_common::file_ops::metadata::RawPathMetadata;
 use buck2_common::legacy_configs::dice::HasLegacyConfigs;
 use buck2_common::legacy_configs::key::BuckconfigKeyRef;
 use buck2_common::legacy_configs::view::LegacyBuckConfigView;
@@ -21,9 +23,9 @@ use buck2_core::cells::CellAliasResolver;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::cell_path_with_allowed_relative_dir::CellPathWithAllowedRelativeDir;
 use buck2_core::cells::paths::CellRelativePathBuf;
-use buck2_futures::cancellation::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 
 #[derive(buck2_error::Error, Debug)]
 #[buck2(input)]
@@ -150,7 +152,9 @@ async fn validate_no_symlinks_between_current_dir_and_allowed_dir(
     let mut current_dir = current_dir.as_ref();
     loop {
         if let RawPathMetadata::Symlink { at, to: _ } =
-            DiceFileComputations::read_path_metadata(ctx, current_dir).await?
+            DiceFileComputations::read_path_metadata(ctx, current_dir)
+                .await
+                .without_package_context_information()?
         {
             return Err(RelativePathParseError::SymlinkFound(
                 current_dir.to_string(),

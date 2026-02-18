@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Traits to help implementing dynamic comparisons.
@@ -35,10 +36,10 @@
 /// ```
 #[macro_export]
 macro_rules! cmp_chain {
-    ($e:expr_2021) => {
+    ($e:expr) => {
         $e
     };
-    ($e:expr_2021, $($x:expr_2021),+ $(,)?) => {
+    ($e:expr, $($x:expr),+ $(,)?) => {
         match $e {
             std::cmp::Ordering::Equal => {
                 cmp_chain!($($x),+)
@@ -73,10 +74,10 @@ macro_rules! cmp_chain {
 /// ```
 #[macro_export]
 macro_rules! eq_chain {
-    ($e:expr_2021) => {
+    ($e:expr) => {
         $e
     };
-    ($e:expr_2021, $($x:expr_2021),+ $(,)?) => {
+    ($e:expr, $($x:expr),+ $(,)?) => {
         if $e {
             eq_chain!($($x),+)
         } else {
@@ -127,7 +128,7 @@ mod tests {
             Box::new(|| unreachable!("should return less")),
         );
         assert_eq!(fake.cmp(&fake), Ordering::Less);
-        assert_eq!(fake.eq(&fake), false);
+        assert!(!fake.eq(&fake));
 
         let fake = FakeComparable(
             Box::new(|| Ordering::Greater),
@@ -135,7 +136,7 @@ mod tests {
             Box::new(|| unreachable!("should return less")),
         );
         assert_eq!(fake.cmp(&fake), Ordering::Greater);
-        assert_eq!(fake.eq(&fake), false);
+        assert!(!fake.eq(&fake));
 
         let fake = FakeComparable(
             Box::new(|| Ordering::Equal),
@@ -143,7 +144,7 @@ mod tests {
             Box::new(|| unreachable!("should return less")),
         );
         assert_eq!(fake.cmp(&fake), Ordering::Less);
-        assert_eq!(fake.eq(&fake), false);
+        assert!(!fake.eq(&fake));
 
         let fake = FakeComparable(
             Box::new(|| Ordering::Equal),
@@ -151,7 +152,7 @@ mod tests {
             Box::new(|| Ordering::Greater),
         );
         assert_eq!(fake.cmp(&fake), Ordering::Greater);
-        assert_eq!(fake.eq(&fake), false);
+        assert!(!fake.eq(&fake));
 
         let fake = FakeComparable(
             Box::new(|| Ordering::Equal),
@@ -159,6 +160,6 @@ mod tests {
             Box::new(|| Ordering::Equal),
         );
         assert_eq!(fake.cmp(&fake), Ordering::Equal);
-        assert_eq!(fake.eq(&fake), true);
+        assert!(fake.eq(&fake));
     }
 }

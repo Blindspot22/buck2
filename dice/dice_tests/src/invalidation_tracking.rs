@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::hash::Hash;
@@ -12,7 +13,6 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use derive_more::Display;
 use dice::DetectCycles;
 use dice::Dice;
@@ -22,6 +22,7 @@ use dice::DiceTrackedInvalidationPath;
 use dice::InjectedKey;
 use dice::InvalidationSourcePriority;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::future::FutureExt;
 use gazebo::prelude::*;
@@ -185,7 +186,7 @@ fn test_compute_tracks_invalidations() -> anyhow::Result<()> {
     // Spawn the root task
     rt.block_on(async {
         let dice = {
-            let builder = Dice::modern();
+            let builder = Dice::builder();
             builder.build(DetectCycles::Enabled)
         };
 
@@ -242,7 +243,7 @@ fn test_compute_tracks_invalidations() -> anyhow::Result<()> {
                         ctx.compute(&Top(n - 1)).await.unwrap();
                     }
                     k => {
-                        panic!("don't request such a big key {}", k)
+                        panic!("don't request such a big key {k}")
                     }
                 }
 
@@ -320,7 +321,7 @@ fn test_compute_tracks_invalidations_over_versions() -> anyhow::Result<()> {
     // Spawn the root task
     rt.block_on(async {
         let dice = {
-            let builder = Dice::modern();
+            let builder = Dice::builder();
             builder.build(DetectCycles::Enabled)
         };
 

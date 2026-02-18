@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -77,7 +78,7 @@ impl IgnoreSet {
                 );
             } else {
                 patterns_builder.add(
-                    globset::Glob::new(&format!("{{{},{}/**}}", val, val))
+                    globset::Glob::new(&format!("{{{val},{val}/**}}"))
                         .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?,
                 );
             }
@@ -114,6 +115,7 @@ mod tests {
     fn test_ignore_set_defaults() {
         let set = IgnoreSet::from_ignore_spec("", true).unwrap();
         assert!(set.is_match(CellRelativePath::testing_new("buck-out/gen/src/file.txt")));
+        assert!(set.is_match(CellRelativePath::testing_new("buck-out/art/src/file.txt")));
         assert!(!set.is_match(CellRelativePath::testing_new("src/file.txt")));
     }
 }

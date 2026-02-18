@@ -1,23 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:artifact_tset.bzl", "make_artifact_tset")
-load("@prelude//:validation_deps.bzl", "VALIDATION_DEPS_ATTR_NAME", "VALIDATION_DEPS_ATTR_TYPE", "get_validation_deps_outputs")
-load("@prelude//apple:apple_common.bzl", "apple_common")
+load("@prelude//:validation_deps.bzl", "get_validation_deps_outputs")
 load("@prelude//apple:apple_library.bzl", "AppleLibraryForDistributionInfo")
 load("@prelude//apple:apple_library_types.bzl", "AppleLibraryInfo")
-load("@prelude//apple:apple_rules_impl_utility.bzl", "get_apple_toolchain_attr")
 load("@prelude//apple:apple_toolchain_types.bzl", "AppleToolchainInfo", "AppleToolsInfo")
 load("@prelude//linking:link_info.bzl", "LinkStrategy", "get_link_args_for_strategy", "unpack_link_args")
 load("@prelude//linking:linkables.bzl", "linkables")
-load("@prelude//user:rule_spec.bzl", "RuleRegistrationSpec")
 load("@prelude//utils:arglike.bzl", "ArgLike")
 
-def _apple_static_archive_impl(ctx: AnalysisContext) -> list[Provider]:
+def apple_static_archive_impl(ctx: AnalysisContext) -> list[Provider]:
     libtool = ctx.attrs._apple_toolchain[AppleToolchainInfo].libtool
     static_archive_linker = ctx.attrs._apple_tools[AppleToolsInfo].static_archive_linker
     archive_name = ctx.attrs.name if ctx.attrs.archive_name == None else ctx.attrs.archive_name
@@ -47,7 +45,7 @@ def _get_apple_library_info(ctx: AnalysisContext) -> AppleLibraryInfo:
     flat_public_framework_headers = []
     for apple_library_info in flat_apple_library_infos:
         tset = apple_library_info.public_framework_headers._tset
-        if tset != None:
+        if tset != None and tset.value:
             for headers in tset.value:
                 flat_public_framework_headers += headers.artifacts
 
@@ -101,21 +99,9 @@ def _get_static_link_args(ctx: AnalysisContext) -> list[ArgLike]:
         ctx,
         [x.merged_link_info for x in linkables(ctx.attrs.deps)],
         LinkStrategy("static"),
+        prefer_stripped = False,
+        transformation_spec_context = None,
     )
     args.append(unpack_link_args(transitive_link_args))
 
     return args
-
-registration_spec = RuleRegistrationSpec(
-    name = "apple_static_archive",
-    impl = _apple_static_archive_impl,
-    attrs = {
-        "archive_name": attrs.option(attrs.string(), default = None),
-        "deps": attrs.list(attrs.dep(), default = []),
-        "distribution_flat_dep": attrs.option(attrs.dep(), default = None),
-        "flat_deps": attrs.list(attrs.dep(), default = []),
-        "labels": attrs.list(attrs.string(), default = []),
-        VALIDATION_DEPS_ATTR_NAME: VALIDATION_DEPS_ATTR_TYPE,
-        "_apple_toolchain": get_apple_toolchain_attr(),
-    } | apple_common.apple_tools_arg(),
-)

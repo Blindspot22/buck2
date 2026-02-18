@@ -1,17 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.installer;
 
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 
-import com.facebook.buck.util.types.Unit;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.SettableFuture;
@@ -39,14 +39,14 @@ public class InstallerServer extends ServerTransportFilter {
   boolean clientConnected = false;
 
   public InstallerServer(InstallCommand installer, int tcpPort) {
-    SettableFuture<Unit> isDone = SettableFuture.create();
+    SettableFuture<Void> isDone = SettableFuture.create();
     InstallerService installerService = new InstallerService(installer, isDone);
     this.grpcServer = buildServer(installerService, tcpPort);
     Futures.addCallback(
         isDone,
-        new FutureCallback<>() {
+        new FutureCallback<Void>() {
           @Override
-          public void onSuccess(Unit unit) {
+          public void onSuccess(Void result) {
             LOG.info("Installer Server shutting down...");
             stopServer();
           }

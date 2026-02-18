@@ -1,19 +1,22 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use allocative::Allocative;
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_common::local_resource_state::LocalResourceState;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
+use buck2_core::execution_types::executor_config::ReGangWorker;
 use buck2_core::execution_types::executor_config::RemoteExecutorCustomImage;
 use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
@@ -23,8 +26,10 @@ use buck2_core::fs::buck_out_path::BuildArtifactPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::soft_error;
+use buck2_directory::directory::dashmap_directory_interner::DashMapDirectoryInterner;
 use buck2_directory::directory::directory::Directory;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
+use buck2_directory::directory::fingerprinted_directory::FingerprintedDirectory;
 use buck2_error::buck2_error;
 use derive_more::Display;
 use dupe::Dupe;
@@ -40,11 +45,12 @@ use starlark_map::sorted_set::SortedSet;
 use super::dep_file_digest::DepFileDigest;
 use crate::artifact::group::artifact_group_values_dyn::ArtifactGroupValuesDyn;
 use crate::digest_config::DigestConfig;
+use crate::directory::ActionDirectoryEntry;
 use crate::directory::ActionDirectoryMember;
 use crate::directory::ActionImmutableDirectory;
+use crate::directory::ActionSharedDirectory;
 use crate::execute::environment_inheritance::EnvironmentInheritance;
 use crate::execute::inputs_directory::inputs_directory;
-use crate::execute::paths_with_digest::PathsWithDigestBlobData;
 
 /// What protobuf messages can be stored in the action metadata blobs.
 pub trait ActionMetadataBlobMessage: Message {}
@@ -71,15 +77,19 @@ impl ActionMetadataBlobData {
 
 #[derive(Clone)]
 pub struct ActionMetadataBlob {
-    pub data: PathsWithDigestBlobData,
     pub digest: TrackedFileDigest,
     pub path: BuildArtifactPath,
+    pub content_hash: ContentBasedPathHash,
 }
 
 pub enum CommandExecutionInput {
     Artifact(Box<dyn ArtifactGroupValuesDyn>),
     ActionMetadata(ActionMetadataBlob),
     ScratchPath(BuckOutScratchPath),
+    IncrementalRemoteOutput(
+        ProjectRelativePathBuf,
+        ActionDirectoryEntry<ActionSharedDirectory>,
+    ),
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Dupe, Hash)]
@@ -191,10 +201,7 @@ impl ExecutorPreference {
     }
 
     fn erases_preferences(self) -> bool {
-        match self {
-            Self::DefaultErasePreferences => true,
-            _ => false,
-        }
+        matches!(self, Self::DefaultErasePreferences)
     }
 }
 
@@ -215,8 +222,9 @@ impl CommandExecutionPaths {
         outputs: IndexSet<CommandExecutionOutput>,
         fs: &ArtifactFs,
         digest_config: DigestConfig,
+        interner: Option<&DashMapDirectoryInterner<ActionDirectoryMember, TrackedFileDigest>>,
     ) -> buck2_error::Result<Self> {
-        let mut builder = inputs_directory(&inputs, fs)?;
+        let mut builder = inputs_directory(&inputs, digest_config, fs)?;
 
         // RE spec requires outputs to be sorted:
         // https://github.com/bazelbuild/remote-apis/blob/1f36c310b28d762b258ea577ed08e8203274efae/build/bazel/remote/execution/v2/remote_execution.proto#L667-L669
@@ -226,7 +234,7 @@ impl CommandExecutionPaths {
             .sorted_by_key(|e| {
                 let resolved = e
                     .as_ref()
-                    .resolve(fs)
+                    .resolve(fs, Some(&ContentBasedPathHash::for_output_artifact()))
                     .expect("Failed to resolve output path");
                 resolved.into_path()
             })
@@ -235,7 +243,9 @@ impl CommandExecutionPaths {
         let output_paths = outputs
             .iter()
             .map(|o| {
-                let resolved = o.as_ref().resolve(fs)?;
+                let resolved = o
+                    .as_ref()
+                    .resolve(fs, Some(&ContentBasedPathHash::for_output_artifact()))?;
                 if let Some(dir) = resolved.path_to_create() {
                     builder.mkdir(dir)?;
                 }
@@ -246,6 +256,27 @@ impl CommandExecutionPaths {
 
         let input_directory = builder.fingerprint(digest_config.as_directory_serializer());
 
+        let input_directory = match interner {
+            Some(i) => input_directory.shared(i).as_immutable(),
+            None => input_directory,
+        };
+
+        let input_files_bytes = if buck2_core::faster_directories::is_enabled() {
+            input_directory.size()
+        } else {
+            Self::calculate_inputs_size_bytes(&input_directory)
+        };
+
+        Ok(Self {
+            inputs,
+            outputs,
+            input_directory,
+            output_paths,
+            input_files_bytes,
+        })
+    }
+
+    fn calculate_inputs_size_bytes(input_directory: &ActionImmutableDirectory) -> u64 {
         let mut input_files_bytes = 0;
 
         for entry in input_directory.unordered_walk_leaves().without_paths() {
@@ -257,13 +288,25 @@ impl CommandExecutionPaths {
             };
         }
 
-        Ok(Self {
-            inputs,
+        input_files_bytes
+    }
+
+    pub fn add_outputs_as_inputs(
+        self,
+        output_paths: impl IntoIterator<Item = CommandExecutionInput>,
+        fs: &ArtifactFs,
+        digest_config: DigestConfig,
+        interner: Option<&DashMapDirectoryInterner<ActionDirectoryMember, TrackedFileDigest>>,
+    ) -> buck2_error::Result<Self> {
+        let Self {
+            mut inputs,
             outputs,
-            input_directory,
-            output_paths,
-            input_files_bytes,
-        })
+            input_directory: _,
+            output_paths: _,
+            input_files_bytes: _,
+        } = self;
+        inputs.extend(output_paths);
+        Self::new(inputs, outputs, fs, digest_config, interner)
     }
 
     pub fn input_directory(&self) -> &ActionImmutableDirectory {
@@ -282,13 +325,28 @@ impl CommandExecutionPaths {
 #[derive(Copy, Clone, Dupe, Debug, Display, Allocative, Hash, PartialEq, Eq)]
 pub struct WorkerId(pub u64);
 
-#[derive(Clone, Debug)]
 pub struct WorkerSpec {
     pub id: WorkerId,
     pub exe: Vec<String>,
+    pub env: SortedVectorMap<String, String>,
     pub concurrency: Option<usize>,
     pub streaming: bool,
     pub remote_key: Option<TrackedFileDigest>,
+    pub input_paths: CommandExecutionPaths,
+}
+
+impl WorkerSpec {
+    pub fn inputs(&self) -> &[CommandExecutionInput] {
+        &self.input_paths.inputs
+    }
+}
+
+pub struct RemoteWorkerSpec {
+    pub id: WorkerId,
+    pub init: Vec<String>,
+    pub env: SortedVectorMap<String, String>,
+    pub input_paths: CommandExecutionPaths,
+    pub concurrency: Option<usize>,
 }
 
 /// The data contains the information about the command to be executed.
@@ -322,20 +380,28 @@ pub struct CommandExecutionRequest {
     required_local_resources: SortedSet<LocalResourceState>,
     /// Persistent worker to use for execution
     worker: Option<WorkerSpec>,
+    /// Persistent remote worker to use for execution
+    remote_worker: Option<RemoteWorkerSpec>,
     /// Whether the executor should guarantee that the inodes for all inputs are unique (i.e. avoid
     /// hardlinking identical input files, for example)
     unique_input_inodes: bool,
     /// Remote dep file key, if the action has a dep file.
     /// If this key is set and remote dep file caching is enabled, it will be used to query the cache.
     pub remote_dep_file_key: Option<DepFileDigest>,
+    /// RE gang workers for gang scheduling.
+    re_gang_workers: Vec<ReGangWorker>,
     /// RE dependencies to pass in action metadata.
     remote_execution_dependencies: Vec<RemoteExecutorDependency>,
     /// RE custom tupperware image.
     remote_execution_custom_image: Option<RemoteExecutorCustomImage>,
     /// RE execution policy.
     meta_internal_extra_params: MetaInternalExtraParams,
-    // Failed action outputs to materialize
-    outputs_for_error_handler: Vec<ProjectRelativePathBuf>,
+    /// Failed action outputs to materialize
+    outputs_for_error_handler: Vec<BuildArtifactPath>,
+    /// String representation of a key that uniquely identifies a RunAction
+    run_action_key: Option<String>,
+
+    is_test: bool,
 }
 
 impl CommandExecutionRequest {
@@ -362,17 +428,37 @@ impl CommandExecutionRequest {
             disable_miniperf: false,
             required_local_resources: SortedSet::new(),
             worker: None,
+            remote_worker: None,
             unique_input_inodes: false,
             remote_dep_file_key: None,
+            re_gang_workers: Vec::new(),
             remote_execution_dependencies: Vec::new(),
             remote_execution_custom_image: None,
             meta_internal_extra_params: MetaInternalExtraParams::default(),
             outputs_for_error_handler: Vec::new(),
+            run_action_key: None,
+            is_test: false,
         }
     }
 
     pub fn paths(&self) -> &CommandExecutionPaths {
         &self.paths
+    }
+
+    pub fn with_outputs_paths_added_as_inputs(
+        self,
+        output_paths: impl IntoIterator<Item = CommandExecutionInput>,
+        fs: &ArtifactFs,
+        digest_config: DigestConfig,
+        interner: Option<&DashMapDirectoryInterner<ActionDirectoryMember, TrackedFileDigest>>,
+    ) -> buck2_error::Result<Self> {
+        let override_paths =
+            self.paths
+                .add_outputs_as_inputs(output_paths, fs, digest_config, interner)?;
+        Ok(Self {
+            paths: override_paths,
+            ..self
+        })
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -454,8 +540,17 @@ impl CommandExecutionRequest {
         &self.worker
     }
 
+    pub fn remote_worker(&self) -> &Option<RemoteWorkerSpec> {
+        &self.remote_worker
+    }
+
     pub fn with_worker(mut self, worker: Option<WorkerSpec>) -> Self {
         self.worker = worker;
+        self
+    }
+
+    pub fn with_remote_worker(mut self, remote_worker: Option<RemoteWorkerSpec>) -> Self {
+        self.remote_worker = remote_worker;
         self
     }
 
@@ -549,6 +644,15 @@ impl CommandExecutionRequest {
         self.unique_input_inodes
     }
 
+    pub fn with_re_gang_workers(mut self, re_gang_workers: Vec<ReGangWorker>) -> Self {
+        self.re_gang_workers = re_gang_workers;
+        self
+    }
+
+    pub fn re_gang_workers(&self) -> &Vec<ReGangWorker> {
+        &self.re_gang_workers
+    }
+
     pub fn with_remote_execution_dependencies(
         mut self,
         remote_execution_dependencies: Vec<RemoteExecutorDependency>,
@@ -563,13 +667,13 @@ impl CommandExecutionRequest {
 
     pub fn with_outputs_for_error_handler(
         mut self,
-        outputs_for_error_handler: Vec<ProjectRelativePathBuf>,
+        outputs_for_error_handler: Vec<BuildArtifactPath>,
     ) -> Self {
         self.outputs_for_error_handler = outputs_for_error_handler;
         self
     }
 
-    pub fn outputs_for_error_handler(&self) -> &Vec<ProjectRelativePathBuf> {
+    pub fn outputs_for_error_handler(&self) -> &Vec<BuildArtifactPath> {
         &self.outputs_for_error_handler
     }
 
@@ -595,6 +699,24 @@ impl CommandExecutionRequest {
 
     pub fn meta_internal_extra_params(&self) -> &MetaInternalExtraParams {
         &self.meta_internal_extra_params
+    }
+
+    pub fn with_run_action_key(mut self, run_action_key: Option<String>) -> Self {
+        self.run_action_key = run_action_key;
+        self
+    }
+
+    pub fn run_action_key(&self) -> &Option<String> {
+        &self.run_action_key
+    }
+
+    pub fn with_is_test(mut self) -> Self {
+        self.is_test = true;
+        self
+    }
+
+    pub fn is_test(&self) -> bool {
+        self.is_test
     }
 }
 
@@ -668,6 +790,7 @@ pub enum CommandExecutionOutputRef<'a> {
     BuildArtifact {
         path: &'a BuildArtifactPath,
         output_type: OutputType,
+        supports_incremental_remote: bool,
     },
     TestPath {
         path: &'a BuckOutTestPath,
@@ -678,10 +801,42 @@ pub enum CommandExecutionOutputRef<'a> {
 impl CommandExecutionOutputRef<'_> {
     /// Resolve this output to a ResolvedCommandExecutionOutput that allows access to the output
     /// path as well as any dirs to create.
-    pub fn resolve(&self, fs: &ArtifactFs) -> buck2_error::Result<ResolvedCommandExecutionOutput> {
+    pub fn resolve(
+        &self,
+        fs: &ArtifactFs,
+        content_hash: Option<&ContentBasedPathHash>,
+    ) -> buck2_error::Result<ResolvedCommandExecutionOutput> {
         match self {
-            Self::BuildArtifact { path, output_type } => Ok(ResolvedCommandExecutionOutput {
-                path: fs.resolve_build(path)?,
+            Self::BuildArtifact {
+                path,
+                output_type,
+                supports_incremental_remote: _,
+            } => Ok(ResolvedCommandExecutionOutput {
+                path: fs.resolve_build(path, content_hash)?,
+                create: OutputCreationBehavior::Parent,
+                output_type: *output_type,
+            }),
+            Self::TestPath { path, create } => Ok(ResolvedCommandExecutionOutput {
+                path: fs.buck_out_path_resolver().resolve_test(path),
+                create: *create,
+                output_type: OutputType::FileOrDirectory,
+            }),
+        }
+    }
+
+    /// Same as `resolve`, but the underlying output path that is returned uses the
+    /// configuration hash regardless of whether the output is content-based or not.
+    pub fn resolve_configuration_hash_path(
+        &self,
+        fs: &ArtifactFs,
+    ) -> buck2_error::Result<ResolvedCommandExecutionOutput> {
+        match self {
+            Self::BuildArtifact {
+                path,
+                output_type,
+                supports_incremental_remote: _,
+            } => Ok(ResolvedCommandExecutionOutput {
+                path: fs.resolve_build_configuration_hash_path(path)?,
                 create: OutputCreationBehavior::Parent,
                 output_type: *output_type,
             }),
@@ -695,14 +850,26 @@ impl CommandExecutionOutputRef<'_> {
 
     pub fn cloned(&self) -> CommandExecutionOutput {
         match self {
-            Self::BuildArtifact { path, output_type } => CommandExecutionOutput::BuildArtifact {
+            Self::BuildArtifact {
+                path,
+                output_type,
+                supports_incremental_remote,
+            } => CommandExecutionOutput::BuildArtifact {
                 path: (*path).dupe(),
                 output_type: *output_type,
+                supports_incremental_remote: *supports_incremental_remote,
             },
             Self::TestPath { path, create } => CommandExecutionOutput::TestPath {
                 path: (*path).clone(),
                 create: *create,
             },
+        }
+    }
+
+    pub fn has_content_based_path(&self) -> bool {
+        match self {
+            Self::BuildArtifact { path, .. } => path.is_content_based_path(),
+            Self::TestPath { .. } => false,
         }
     }
 }
@@ -712,6 +879,7 @@ pub enum CommandExecutionOutput {
     BuildArtifact {
         path: BuildArtifactPath,
         output_type: OutputType,
+        supports_incremental_remote: bool,
     },
     TestPath {
         path: BuckOutTestPath,
@@ -723,16 +891,25 @@ impl CommandExecutionOutput {
     pub fn as_ref(&self) -> CommandExecutionOutputRef<'_> {
         match self {
             Self::BuildArtifact {
-                ref path,
+                path,
                 output_type,
+                supports_incremental_remote,
             } => CommandExecutionOutputRef::BuildArtifact {
                 path,
                 output_type: *output_type,
+                supports_incremental_remote: *supports_incremental_remote,
             },
-            Self::TestPath { ref path, create } => CommandExecutionOutputRef::TestPath {
+            Self::TestPath { path, create } => CommandExecutionOutputRef::TestPath {
                 path,
                 create: *create,
             },
+        }
+    }
+
+    pub fn has_content_based_path(&self) -> bool {
+        match self {
+            Self::BuildArtifact { path, .. } => path.is_content_based_path(),
+            Self::TestPath { .. } => false,
         }
     }
 }

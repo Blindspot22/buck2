@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::RefCell;
@@ -19,7 +20,7 @@ use buck2_core::soft_error;
 use dice::DiceComputations;
 use hashbrown::HashTable;
 use starlark::collections::Hashed;
-use starlark::environment::Module;
+use starlark::eval::Evaluator;
 use starlark::values::FrozenStringValue;
 use starlark::values::StringValue;
 
@@ -52,7 +53,6 @@ struct BuckConfigsInner<'a> {
 
 /// Version of cell buckconfig optimized for fast query from `read_config` Starlark function.
 pub(crate) struct LegacyBuckConfigsForStarlark<'a> {
-    module: &'a Module,
     inner: RefCell<BuckConfigsInner<'a>>,
 }
 
@@ -82,11 +82,9 @@ impl<'a> LegacyBuckConfigsForStarlark<'a> {
 
     /// Constructor.
     pub(crate) fn new(
-        module: &'a Module,
         configs_view: &'a mut (dyn BuckConfigsViewForStarlark + 'a),
     ) -> LegacyBuckConfigsForStarlark<'a> {
         LegacyBuckConfigsForStarlark {
-            module,
             inner: RefCell::new(BuckConfigsInner {
                 configs_view,
                 current_cell_cache: HashTable::new(),
@@ -100,14 +98,15 @@ impl<'a> LegacyBuckConfigsForStarlark<'a> {
         section: Hashed<&str>,
         key: Hashed<&str>,
         from_root_cell: bool,
+        eval: &mut Evaluator<'_, '_, '_>,
     ) -> buck2_error::Result<Option<FrozenStringValue>> {
         let hash = Self::mix_hashes(section.hash().get(), key.hash().get());
 
         let mut inner = self.inner.borrow_mut();
         let BuckConfigsInner {
-            ref mut configs_view,
-            ref mut current_cell_cache,
-            ref mut root_cell_cache,
+            configs_view,
+            current_cell_cache,
+            root_cell_cache,
         } = inner.deref_mut();
 
         let cache = if from_root_cell {
@@ -132,7 +131,7 @@ impl<'a> LegacyBuckConfigsForStarlark<'a> {
                 property: key.key(),
             })?
         }
-        .map(|v| self.module.frozen_heap().alloc_str(&v));
+        .map(|v| eval.frozen_heap().alloc_str(&v));
 
         cache.insert_unique(
             hash,
@@ -152,22 +151,24 @@ impl<'a> LegacyBuckConfigsForStarlark<'a> {
         &self,
         section: StringValue,
         key: StringValue,
+        eval: &mut Evaluator<'_, '_, '_>,
     ) -> buck2_error::Result<Option<FrozenStringValue>> {
         // Note here we reuse the hashes of `section` and `key`,
         // if `read_config` is called repeatedly with the same constant arguments:
         // `StringValue` caches the hashes.
-        self.get_impl(section.get_hashed_str(), key.get_hashed_str(), false)
+        self.get_impl(section.get_hashed_str(), key.get_hashed_str(), false, eval)
     }
 
     pub(crate) fn root_cell_get(
         &self,
         section: StringValue,
         key: StringValue,
+        eval: &mut Evaluator<'_, '_, '_>,
     ) -> buck2_error::Result<Option<FrozenStringValue>> {
         // Note here we reuse the hashes of `section` and `key`,
         // if `read_config` is called repeatedly with the same constant arguments:
         // `StringValue` caches the hashes.
-        self.get_impl(section.get_hashed_str(), key.get_hashed_str(), true)
+        self.get_impl(section.get_hashed_str(), key.get_hashed_str(), true, eval)
     }
 }
 
@@ -231,7 +232,7 @@ fn read_config_and_report_deprecated(
         let prop = transform_logview_category(key.property);
 
         soft_error!(
-            format!("deprecated_config_{}_{}", section, prop).as_str(),
+            format!("deprecated_config_{section}_{prop}").as_str(),
             DeprecatedConfigError(property, msg).into(),
             quiet: true
         )?;

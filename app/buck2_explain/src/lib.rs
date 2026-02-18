@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(used_with_arg)]
@@ -15,14 +16,16 @@ use std::io::Cursor;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use buck2_core::buck2_env;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::paths::abs_path::AbsPathBuf;
 
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unused_imports)]
 #[allow(unused_extern_crates)]
 #[allow(clippy::extra_unused_lifetimes)]
 mod explain_generated;
 mod flatbuffers;
 mod output_format_flatbuffers;
+#[allow(unsafe_op_in_unsafe_fn)]
 #[allow(unused_imports)]
 #[allow(unused_extern_crates)]
 #[allow(clippy::extra_unused_lifetimes)]
@@ -59,7 +62,7 @@ pub async fn main(
     output: Option<&AbsPathBuf>,
     fbs_dump: Option<&AbsPathBuf>,
     manifold_path: Option<&str>,
-) -> anyhow::Result<()> {
+) -> buck2_error::Result<()> {
     let fbs = flatbuffers::gen_fbs(data, executed_actions, changed_files)?;
 
     let fbs = fbs.finished_data();
@@ -73,7 +76,6 @@ pub async fn main(
     };
 
     if let Some(p) = manifold_path {
-        // TODO iguridi: compress before upload
         // TODO iguridi: write and upload concurrently
         let manifold = ManifoldClient::new().await?;
 

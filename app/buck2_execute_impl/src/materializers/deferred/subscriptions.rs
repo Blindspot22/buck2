@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![allow(unused)]
@@ -17,6 +18,7 @@ use async_trait::async_trait;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_execute::materialize::materializer::DeferredMaterializerSubscription;
 use derivative::Derivative;
@@ -186,7 +188,7 @@ where
                     .subscriptions
                     .active
                     .get_mut(&index)
-                    .with_buck_error_context(|| format!("Invalid subscription: {}", index))
+                    .ok_or_else(|| internal_error!("Invalid subscription: {index}"))
                     .unwrap();
 
                 for path in paths_to_report {
@@ -202,7 +204,7 @@ where
                     .subscriptions
                     .active
                     .get_mut(&index)
-                    .with_buck_error_context(|| format!("Invalid subscription: {}", index))
+                    .ok_or_else(|| internal_error!("Invalid subscription: {index}"))
                     .unwrap();
 
                 for path in &paths {

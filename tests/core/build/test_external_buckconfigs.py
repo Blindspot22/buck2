@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -11,13 +12,12 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test
 from buck2.tests.e2e_util.helper.golden import golden_replace_temp_path
-from buck2.tests.e2e_util.helper.utils import filter_events, read_invocation_record
+from buck2.tests.e2e_util.helper.utils import filter_events
 
 
 @buck_test(
@@ -141,9 +141,9 @@ async def test_external_buckconfigs(buck: Buck) -> None:
         and config_file_value["key"] == "test_key"
         and config_file_value["value"] == "test_value"
     )
-    assert (
-        f.name in config_file["origin_path"]
-    ), f"Origin path should contain config-file name: {f.name}"
+    assert f.name in config_file["origin_path"], (
+        f"Origin path should contain config-file name: {f.name}"
+    )
 
 
 @buck_test(
@@ -152,9 +152,10 @@ async def test_external_buckconfigs(buck: Buck) -> None:
             "external_path_configs_key": "external_path_configs_value",
         }
     },
+    write_invocation_record=True,
 )
 async def test_previous_command_with_mismatched_config(
-    buck: Buck, tmp_path: Path
+    buck: Buck,
 ) -> None:
     await buck.build(
         "@root//mode/my_mode",
@@ -216,14 +217,11 @@ async def test_previous_command_with_mismatched_config(
 
     # Previous command didn't change any external configs but still has new_configs_used = 1 due to changes to project-relative configs.
     # We don't capture that by design at the moment.
-    record_file = tmp_path / "record.json"
     res = await buck.build(
         "@root//mode/my_mode",
         "//:test",
         "-c",
         "my_section.my_key=my_new_value",
-        "--unstable-write-invocation-record",
-        str(record_file),
     )
     trace_id = json.loads(res.stdout)["trace_id"]
 
@@ -231,7 +229,7 @@ async def test_previous_command_with_mismatched_config(
         buck, "Event", "data", "Instant", "data", "PreviousCommandWithMismatchedConfig"
     )
     assert len(previous_invalidating_command) == 0
-    assert read_invocation_record(record_file)["new_configs_used"] == 1
+    assert res.invocation_record()["new_configs_used"] == 1
 
     # Make a change to .buckconfig.local
     with open(buck.cwd / ".buckconfig.local", "w") as localconfig:
@@ -303,9 +301,9 @@ async def test_log_external_configs(buck: Buck) -> None:
     for s, e in zip(external_configs, expected):
         assert s.descriptor == e.descriptor
         if s.origin and e.origin:
-            assert (
-                e.origin == s.origin
-            ), f"Expected origin '{e.origin}', but got '{s.origin}'"
+            assert e.origin == s.origin, (
+                f"Expected origin '{e.origin}', but got '{s.origin}'"
+            )
 
 
 @buck_test()

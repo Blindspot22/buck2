@@ -1,15 +1,15 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 
 from buck2.tests.e2e.fdb.types import ExecInfo
-
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test
 
@@ -107,6 +107,18 @@ async def test_apk_gen_rule(buck: Buck) -> None:
         "com.example.sampleapp.Helper",
         "com.example.sampleapp.Helper$SomeInterface",
     ]
+
+
+@buck_test(inplace=True, skip_for_os=["windows"])
+async def test_instrumentation_test(buck: Buck) -> None:
+    result = await buck.bxl(
+        "prelude//debugging/fdb.bxl:inspect_target",
+        "--",
+        "--target",
+        "fbsource//fbandroid/buck2/tests/good/instrumentation_test:single_apk_test",
+    )
+    exec_info: ExecInfo = ExecInfo.from_buck_result(result)
+    assert any("args_file" in str(arg) for arg in exec_info.data["program"])
 
 
 # This is to ensure at least one of the tests is passing on Windows otherwise CI fails

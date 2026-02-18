@@ -1,17 +1,17 @@
 #!/usr/bin/env fbpython
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-unsafe
 
 import contextlib
 import hashlib
 import json
-
 import os
 import platform
 import shutil
@@ -46,6 +46,8 @@ BuckTestMarker = namedtuple(
         "extra_buck_config",
         "skip_final_kill",
         "setup_eden",
+        "disable_daemon_cgroup",
+        "write_invocation_record",
     ],
 )
 
@@ -79,20 +81,25 @@ async def buck_fixture(  # noqa C901 : "too complex"
     env["BUCK2_TEST_BLOCK_ON_UPLOAD"] = "true"
     # Require the events dispatcher to be set for e2e tests.
     env["ENFORCE_DISPATCHER_SET"] = "true"
-    # Auto-destroy after a while. This should be longer than the test timeout.
-    env["BUCK2_TERMINATE_AFTER"] = "650"
+    # Inform buck of the test timeout
+    env["BUCK2_SELF_TEST_TIMEOUT_S"] = "600"
     # Timeout Watchman requests because we often see it hang and crash.
     env["BUCK2_WATCHMAN_TIMEOUT"] = "30"
     env["BUCK2_RUNTIME_THREADS"] = "8"
     # Avoid noise in stderr.
     env["BUCK2_IGNORE_VERSION_EXTRACTION_FAILURE"] = "true"
+    env["SUPERCONSOLE_TESTING_WIDTH"] = "100"
+    env["SUPERCONSOLE_TESTING_HEIGHT"] = "100"
+    # Don't try to assign to a new cgroup during tests.
+    if marker.disable_daemon_cgroup:
+        env["BUCK2_TEST_DISABLE_DAEMON_CGROUP"] = "true"
 
-    assert (
-        "BUCK2_RUNTIME_THREADS" in env
-    ), "BUCK2_RUNTIME_THREADS should be set by the test macros"
-    assert (
-        "BUCK2_MAX_BLOCKING_THREADS" in env
-    ), "BUCK2_MAX_BLOCKING_THREADS should be set by the test macros"
+    assert "BUCK2_RUNTIME_THREADS" in env, (
+        "BUCK2_RUNTIME_THREADS should be set by the test macros"
+    )
+    assert "BUCK2_MAX_BLOCKING_THREADS" in env, (
+        "BUCK2_MAX_BLOCKING_THREADS should be set by the test macros"
+    )
     # Windows uses blocking threads for subprocess I/O so we can't do this there.
     del env["BUCK2_MAX_BLOCKING_THREADS"]
 
@@ -128,9 +135,9 @@ async def buck_fixture(  # noqa C901 : "too complex"
 
     try:
         if marker.setup_eden:
-            assert (
-                not marker.inplace
-            ), "EdenFS for e2e tests is not supported for inplace tests"
+            assert not marker.inplace, (
+                "EdenFS for e2e tests is not supported for inplace tests"
+            )
 
             _setup_eden(
                 eden_dir,
@@ -159,7 +166,7 @@ async def buck_fixture(  # noqa C901 : "too complex"
             if sys.platform == "linux":
                 extra_config_lines.append("[host_features]\ngvfs = true\n")
             # NOTE: This buckconfig is depended on by our CI validation for
-            # CLI modifiers in tools/build_defs/buck2/cfg/validation.bzl. If
+            # CLI modifiers in tools/build_defs/buck2/cfg/validation/validation.bzl. If
             # the name of this buckconfig ever changes, please update the validation
             # as well.
             extra_config_lines.append("[buildfile]\nextra_for_test = TARGETS.test\n")
@@ -207,6 +214,7 @@ async def buck_fixture(  # noqa C901 : "too complex"
             cwd=buck_cwd,
             encoding="utf-8",
             env=env,
+            write_invocation_record=marker.write_invocation_record,
         )
 
         if isolation_prefix is not None:
@@ -246,7 +254,12 @@ async def _get_common_dir() -> Path:
     """
     Returns a temporary directory using mkscratch.
     The advantage of using mkscratch is that it can return the same directory on multiple calls.
+    If mkscratch is not available (e.g., Windows or remote environments), fall back to the system temp directory.
     """
+    # Check if mkscratch is available, fall back to tempfile.gettempdir() if not
+    if shutil.which("mkscratch") is None:
+        return Path(tempfile.gettempdir())
+
     # Need to use `--hash` over `--subdir` here because the tmp path would be too long and
     # Eden would fail with `Socket path too large to fit into sockaddr_un` otherwise
     mkscratch_proc = await subprocess.create_subprocess_exec(
@@ -444,6 +457,7 @@ def _maybe_setup_prelude_and_ovr_config(path: Path) -> None:
         print("[repositories]", file=f)
         print("ovr_config = arvr/tools/build_defs/config", file=f)
         print("fbcode_macros = tools/build_defs/fbcode_macros", file=f)
+        print("config = arvr/tools/build_defs/config", file=f)
     with Path(path, "arvr", "tools", "build_defs", "config", ".buckconfig").open(
         "w"
     ) as f:
@@ -468,6 +482,8 @@ def buck_test(
     extra_buck_config: Optional[Dict[str, Dict[str, str]]] = None,
     skip_final_kill=False,
     setup_eden=False,
+    disable_daemon_cgroup=True,
+    write_invocation_record=False,
 ) -> Callable:
     """
     Defines a buck test. This is a must have decorator on all test case functions.
@@ -534,6 +550,8 @@ def buck_test(
             extra_buck_config=extra_buck_config or {},
             skip_final_kill=skip_final_kill,
             setup_eden=setup_eden,
+            disable_daemon_cgroup=disable_daemon_cgroup,
+            write_invocation_record=write_invocation_record,
         )
     )
 

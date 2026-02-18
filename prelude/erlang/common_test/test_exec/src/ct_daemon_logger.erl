@@ -5,21 +5,17 @@
 %% License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 %% of this source tree.
 
-%%%-------------------------------------------------------------------
-%%% @doc
-%%% CT handles logging and printing by sending a message to the ct_logs
-%%%  process. We intercept those messages for test shell by starting a
-%%%  gen_server that intercepts the messages and prints them to the test
-%%%  shell. We do this instead of using the ct_logs process to have more
-%%%  control over the output and to avoid starting ct processes that
-%%%  might interfere with test shell's functionality.
-%%% @end
-%%% % @format
-
+%% @format
 -module(ct_daemon_logger).
--eqwalizer(ignore).
-
--include_lib("kernel/include/logger.hrl").
+-moduledoc """
+CT handles logging and printing by sending a message to the ct_logs
+ process. We intercept those messages for test shell by starting a
+ gen_server that intercepts the messages and prints them to the test
+ shell. We do this instead of using the ct_logs process to have more
+ control over the output and to avoid starting ct processes that
+ might interfere with test shell's functionality.
+""".
+-compile(warn_missing_spec_all).
 
 -behaviour(gen_server).
 
@@ -36,9 +32,21 @@
     Result :: {ok, state()}.
 init(_) -> {ok, #{}}.
 
--spec handle_info(Info, State) -> {noreply, State} when
-    Info :: term(),
-    State :: state().
+-spec handle_info
+    (LogMsg, State) -> {noreply, State} when
+        LogMsg :: {
+            log,
+            sync | async,
+            FromPid :: pid(),
+            GL :: pid(),
+            Category :: atom(),
+            Importance :: non_neg_integer(),
+            Content :: [{io:format(), [term()]}],
+            EscChars :: boolean()
+        };
+    (Info, State) -> {noreply, State} when
+        Info :: none(),
+        State :: state().
 handle_info({log, _SyncOrAsync, _FromPid, _GL, _Category, _Importance, Content, _EscChars} = _Info, State) when
     is_list(Content)
 ->
@@ -70,7 +78,9 @@ handle_call(_Info, _From, State) -> {noreply, State}.
     State :: state().
 handle_cast(_Info, State) -> {noreply, State}.
 
-%% @doc mocks for ct_logs functions
+-doc """
+mocks for ct_logs functions
+""".
 -spec start(file:filename_all()) -> ok.
 start(OutputDir) ->
     LogFile = test_logger:get_log_file(OutputDir, ct_daemon),

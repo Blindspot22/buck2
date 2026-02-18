@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_artifact::actions::key::ActionIndex;
@@ -24,55 +25,81 @@ use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_core::execution_types::execution::ExecutionPlatform;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
+use buck2_core::fs::buck_out_path::BuckOutPathKind;
 use buck2_core::fs::buck_out_path::BuildArtifactPath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_execute::execute::request::OutputType;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use dupe::Dupe;
 use indexmap::indexset;
 use itertools::Itertools;
+use starlark::values::Heap;
 
 use crate::actions::testings::SimpleUnregisteredAction;
 
 #[test]
-fn declaring_artifacts() -> anyhow::Result<()> {
-    let base = BaseDeferredKey::TargetLabel(ConfiguredTargetLabel::testing_parse(
-        "cell//pkg:foo",
-        ConfigurationData::testing_new(),
-    ));
-    let mut actions = ActionsRegistry::new(
-        DeferredHolderKey::Base(base.dupe()),
-        ExecutionPlatformResolution::unspecified(),
-    );
-    let out1 = ForwardRelativePathBuf::unchecked_new("bar.out".into());
-    let buckout1 = BuildArtifactPath::new(base.dupe(), out1.clone());
-    let declared1 = actions.declare_artifact(None, out1.clone(), OutputType::File, None)?;
-    declared1
-        .get_path()
-        .with_full_path(|p| assert_eq!(p, buckout1.path()));
+fn declaring_artifacts() -> buck2_error::Result<()> {
+    Heap::temp(|heap| {
+        let base = BaseDeferredKey::TargetLabel(ConfiguredTargetLabel::testing_parse(
+            "cell//pkg:foo",
+            ConfigurationData::testing_new(),
+        ));
+        let mut actions = ActionsRegistry::new(
+            DeferredHolderKey::Base(base.dupe()),
+            ExecutionPlatformResolution::unspecified(),
+        );
+        let out1 = ForwardRelativePathBuf::unchecked_new("bar.out".into());
+        let buckout1 =
+            BuildArtifactPath::new(base.dupe(), out1.clone(), BuckOutPathKind::default());
+        let declared1 = actions.declare_artifact(
+            None,
+            out1.clone(),
+            OutputType::File,
+            None,
+            BuckOutPathKind::default(),
+            heap,
+        )?;
+        declared1
+            .get_path()
+            .with_full_path(|p| assert_eq!(p, buckout1.path()));
 
-    let out2 = ForwardRelativePathBuf::unchecked_new("bar2.out".into());
-    let buckout2 = BuildArtifactPath::new(base, out2.clone());
-    let declared2 = actions.declare_artifact(None, out2, OutputType::File, None)?;
-    declared2
-        .get_path()
-        .with_full_path(|p| assert_eq!(p, buckout2.path()));
+        let out2 = ForwardRelativePathBuf::unchecked_new("bar2.out".into());
+        let buckout2 = BuildArtifactPath::new(base, out2.clone(), BuckOutPathKind::default());
+        let declared2 = actions.declare_artifact(
+            None,
+            out2,
+            OutputType::File,
+            None,
+            BuckOutPathKind::default(),
+            heap,
+        )?;
+        declared2
+            .get_path()
+            .with_full_path(|p| assert_eq!(p, buckout2.path()));
 
-    if actions
-        .declare_artifact(None, out1, OutputType::File, None)
-        .is_ok()
-    {
-        panic!("should error due to duplicate artifact")
-    }
+        if actions
+            .declare_artifact(
+                None,
+                out1,
+                OutputType::File,
+                None,
+                BuckOutPathKind::default(),
+                heap,
+            )
+            .is_ok()
+        {
+            panic!("should error due to duplicate artifact")
+        }
 
-    assert_eq!(actions.testing_artifacts().contains(&declared1), true);
-    assert_eq!(actions.testing_artifacts().contains(&declared2), true);
+        assert!(actions.testing_artifacts().contains(&declared1));
+        assert!(actions.testing_artifacts().contains(&declared2));
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[test]
-fn claiming_conflicting_path() -> anyhow::Result<()> {
+fn claiming_conflicting_path() -> buck2_error::Result<()> {
     let mut actions = ActionsRegistry::new(
         DeferredHolderKey::testing_new("cell//pkg:my_target"),
         ExecutionPlatformResolution::unspecified(),
@@ -119,97 +146,115 @@ fn claiming_conflicting_path() -> anyhow::Result<()> {
 }
 
 #[test]
-fn register_actions() -> anyhow::Result<()> {
-    let base = BaseDeferredKey::TargetLabel(ConfiguredTargetLabel::testing_parse(
-        "cell//pkg:foo",
-        ConfigurationData::testing_new(),
-    ));
-    let mut actions = ActionsRegistry::new(
-        DeferredHolderKey::Base(base.dupe()),
-        ExecutionPlatformResolution::unspecified(),
-    );
-    let out = ForwardRelativePathBuf::unchecked_new("bar.out".into());
-    let declared = actions.declare_artifact(None, out, OutputType::File, None)?;
+fn register_actions() -> buck2_error::Result<()> {
+    Heap::temp(|heap| {
+        let base = BaseDeferredKey::TargetLabel(ConfiguredTargetLabel::testing_parse(
+            "cell//pkg:foo",
+            ConfigurationData::testing_new(),
+        ));
+        let mut actions = ActionsRegistry::new(
+            DeferredHolderKey::Base(base.dupe()),
+            ExecutionPlatformResolution::unspecified(),
+        );
+        let out = ForwardRelativePathBuf::unchecked_new("bar.out".into());
+        let declared = actions.declare_artifact(
+            None,
+            out,
+            OutputType::File,
+            None,
+            BuckOutPathKind::default(),
+            heap,
+        )?;
 
-    let inputs = indexset![ArtifactGroup::Artifact(
-        BuildArtifact::testing_new(
-            base.unpack_target_label().unwrap().dupe(),
-            "input",
-            ActionIndex::new(1),
-        )
-        .into()
-    )];
-    let outputs = indexset![declared.as_output()];
+        let inputs = indexset![ArtifactGroup::Artifact(
+            BuildArtifact::testing_new(
+                base.unpack_target_label().unwrap().dupe(),
+                "input",
+                ActionIndex::new(1),
+            )
+            .into()
+        )];
+        let outputs = indexset![declared.as_output()];
 
-    let unregistered_action = SimpleUnregisteredAction::new(
-        vec![],
-        CategoryRef::new("fake_action").unwrap().to_owned(),
-        None,
-    );
+        let unregistered_action = SimpleUnregisteredAction::new(
+            inputs,
+            vec![],
+            CategoryRef::new("fake_action").unwrap().to_owned(),
+            None,
+        );
 
-    let key = actions.register(
-        &DeferredHolderKey::Base(base.dupe()),
-        inputs,
-        outputs,
-        unregistered_action.clone(),
-    )?;
+        let key = actions.register(
+            &DeferredHolderKey::Base(base.dupe()),
+            outputs,
+            unregistered_action.clone(),
+        )?;
 
-    assert_eq!(actions.testing_pending_action_keys(), vec![key]);
-    assert_eq!(declared.testing_is_bound(), true);
+        assert_eq!(actions.testing_pending_action_keys(), vec![key]);
+        assert!(declared.testing_is_bound());
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[test]
-fn finalizing_actions() -> anyhow::Result<()> {
-    let base = BaseDeferredKey::TargetLabel(ConfiguredTargetLabel::testing_parse(
-        "cell//pkg:foo",
-        ConfigurationData::testing_new(),
-    ));
-    let mut actions = ActionsRegistry::new(
-        DeferredHolderKey::Base(base.dupe()),
-        ExecutionPlatformResolution::new(
-            Some(ExecutionPlatform::legacy_execution_platform(
-                CommandExecutorConfig::testing_local(),
-                ConfigurationNoExec::testing_new(),
-            )),
-            Vec::new(),
-        ),
-    );
-    let out = ForwardRelativePathBuf::unchecked_new("bar.out".into());
-    let declared = actions.declare_artifact(None, out, OutputType::File, None)?;
+fn finalizing_actions() -> buck2_error::Result<()> {
+    Heap::temp(|heap| {
+        let base = BaseDeferredKey::TargetLabel(ConfiguredTargetLabel::testing_parse(
+            "cell//pkg:foo",
+            ConfigurationData::testing_new(),
+        ));
+        let mut actions = ActionsRegistry::new(
+            DeferredHolderKey::Base(base.dupe()),
+            ExecutionPlatformResolution::new(
+                Some(ExecutionPlatform::legacy_execution_platform(
+                    CommandExecutorConfig::testing_local(),
+                    ConfigurationNoExec::testing_new(),
+                )),
+                Vec::new(),
+            ),
+        );
+        let out = ForwardRelativePathBuf::unchecked_new("bar.out".into());
+        let declared = actions.declare_artifact(
+            None,
+            out,
+            OutputType::File,
+            None,
+            BuckOutPathKind::default(),
+            heap,
+        )?;
 
-    let inputs = indexset![ArtifactGroup::Artifact(
-        BuildArtifact::testing_new(
-            base.unpack_target_label().unwrap().dupe(),
-            "input",
-            ActionIndex::new(1),
-        )
-        .into()
-    )];
-    let outputs = indexset![declared.as_output()];
+        let inputs = indexset![ArtifactGroup::Artifact(
+            BuildArtifact::testing_new(
+                base.unpack_target_label().unwrap().dupe(),
+                "input",
+                ActionIndex::new(1),
+            )
+            .into()
+        )];
+        let outputs = indexset![declared.as_output()];
 
-    let unregistered_action = SimpleUnregisteredAction::new(
-        vec![],
-        CategoryRef::new("fake_action").unwrap().to_owned(),
-        None,
-    );
-    let holder_key = DeferredHolderKey::Base(base.dupe());
-    actions.register(&holder_key, inputs, outputs, unregistered_action)?;
+        let unregistered_action = SimpleUnregisteredAction::new(
+            inputs,
+            vec![],
+            CategoryRef::new("fake_action").unwrap().to_owned(),
+            None,
+        );
+        let holder_key = DeferredHolderKey::Base(base.dupe());
+        actions.register(&holder_key, outputs, unregistered_action)?;
 
-    let result = actions.ensure_bound(&AnalysisValueFetcher::testing_new(holder_key))?;
+        let result = (actions.finalize()?)(&AnalysisValueFetcher::testing_new(holder_key))?;
 
-    assert_eq!(
-        result
-            .lookup(&declared.testing_action_key().unwrap())
-            .is_ok(),
-        true,
-        "Expected results to contain `{}`, had `[{}]`",
-        declared.testing_action_key().unwrap(),
-        result.iter_actions().map(|v| v.key()).join(", ")
-    );
+        assert!(
+            result
+                .lookup(&declared.testing_action_key().unwrap())
+                .is_ok(),
+            "Expected results to contain `{}`, had `[{}]`",
+            declared.testing_action_key().unwrap(),
+            result.iter_actions().map(|v| v.key()).join(", ")
+        );
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[test]
@@ -256,14 +301,15 @@ fn category_identifier_test(
     );
     for (category, identifier) in action_names {
         let unregistered_action = SimpleUnregisteredAction::new(
+            indexset![],
             vec![],
             Category::new((*category).to_owned()).unwrap(),
             identifier.map(|i| i.to_owned()),
         );
 
-        actions.register(&base, indexset![], indexset![], unregistered_action)?;
+        actions.register(&base, indexset![], unregistered_action)?;
     }
 
-    actions.ensure_bound(&AnalysisValueFetcher::testing_new(base))?;
+    (actions.finalize()?)(&AnalysisValueFetcher::testing_new(base))?;
     Ok(())
 }

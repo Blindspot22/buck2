@@ -1,16 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//apple:apple_toolchain_types.bzl", "AppleToolsInfo")
 load("@prelude//apple/user:apple_xcframework.bzl", "XCFrameworkInfo")
-load("@prelude//user:rule_spec.bzl", "RuleRegistrationSpec")
 load("@prelude//utils:utils.bzl", "flatten")
 
-def _apple_spm_package_impl(ctx: AnalysisContext) -> list[Provider]:
+def apple_spm_package_impl(ctx: AnalysisContext) -> list[Provider]:
     apple_tools = ctx.attrs._apple_tools[AppleToolsInfo]
 
     spm_packager = apple_tools.spm_packager
@@ -33,19 +33,3 @@ def _apple_spm_package_impl(ctx: AnalysisContext) -> list[Provider]:
     return [
         DefaultInfo(default_output = output_dir),
     ]
-
-registration_spec = RuleRegistrationSpec(
-    name = "apple_spm_package",
-    impl = _apple_spm_package_impl,
-    attrs = {
-        "deps": attrs.list(attrs.dep(), default = []),
-        "package_name": attrs.string(),
-        "_apple_tools": attrs.exec_dep(default = "prelude//apple/tools:apple-tools", providers = [AppleToolsInfo]),
-    },
-)
-
-def apple_spm_package_extra_attrs():
-    attribs = {
-        "_apple_tools": attrs.exec_dep(default = "prelude//apple/tools:apple-tools", providers = [AppleToolsInfo]),
-    }
-    return attribs

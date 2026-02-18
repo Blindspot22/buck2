@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ffi::OsString;
@@ -16,7 +17,15 @@ use dupe::Dupe;
 const ENV_ALLOW_LIST: &[&str] = test_env_allowlist::LEGACY_TESTPILOT_ALLOW_LIST;
 
 #[cfg(all(unix, not(fbcode_build)))]
-const ENV_ALLOW_LIST: &[&str] = &["PATH", "USER", "LOGNAME", "HOME", "TMPDIR"];
+const ENV_ALLOW_LIST: &[&str] = &[
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "HOME",
+    "TMPDIR",
+    // Generally needed to keep systemd working
+    "XDG_RUNTIME_DIR",
+];
 
 // The standard (built-in) variables.
 // https://ss64.com/nt/syntax-variables.html
@@ -117,11 +126,11 @@ impl EnvironmentInheritance {
         }
     }
 
-    pub fn values(&self) -> impl Iterator<Item = (&'static str, &'static OsString)> {
+    pub fn values(&self) -> impl Iterator<Item = (&'static str, &'static OsString)> + use<> {
         self.values.iter().map(|(k, v)| (*k, v))
     }
 
-    pub fn exclusions(&self) -> impl Iterator<Item = &'static str> {
+    pub fn exclusions(&self) -> impl Iterator<Item = &'static str> + use<> {
         self.exclusions.iter().copied()
     }
 

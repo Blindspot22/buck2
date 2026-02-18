@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Implementation of common cquery/uquery pieces.
@@ -83,20 +84,16 @@ where
                 scope.spawn_cancellable(
                     async move {
                         let result = eval_single_query(functions, &query.query, env);
-                        let result: buck2_error::Result<_> = result.await.map_err(|e| e.into());
-                        (i, arg, result)
+                        (i, arg, result.await)
                     },
                     move || {
                         (
                             i,
                             arg_1,
-                            Err::<_, buck2_error::Error>(
-                                buck2_error::buck2_error!(
-                                    buck2_error::ErrorTag::Tier0,
-                                    "future was cancelled"
-                                )
-                                .into(),
-                            ),
+                            Err::<_, buck2_error::Error>(buck2_error::buck2_error!(
+                                buck2_error::ErrorTag::Tier0,
+                                "future was cancelled"
+                            )),
                         )
                     },
                 )

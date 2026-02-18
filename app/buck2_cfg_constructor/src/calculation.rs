@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::package::PackageLabel;
 use buck2_core::target::label::label::TargetLabel;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_interpreter_for_build::interpreter::package_file_calculation::EvalPackageFile;
 use buck2_node::cfg_constructor::CfgConstructorCalculationImpl;
 use buck2_node::cfg_constructor::CfgConstructorImpl;
@@ -46,7 +47,7 @@ async fn get_cfg_constructor_uncached(
     ctx: &mut DiceComputations<'_>,
 ) -> buck2_error::Result<Option<Arc<dyn CfgConstructorImpl>>> {
     let root_cell = ctx.get_cell_resolver().await?.root_cell();
-    let package_label = PackageLabel::new(root_cell, CellRelativePath::empty());
+    let package_label = PackageLabel::new(root_cell, CellRelativePath::empty())?;
     // This returns empty super package if `PACKAGE` file does not exist.
     let super_package = ctx.eval_package_file(package_label).await?;
     Ok(super_package.cfg_constructor().duped())
@@ -67,9 +68,7 @@ async fn get_cfg_constructor(
             ctx: &mut DiceComputations,
             _cancellations: &CancellationContext,
         ) -> Self::Value {
-            get_cfg_constructor_uncached(ctx)
-                .await
-                .map_err(buck2_error::Error::from)
+            get_cfg_constructor_uncached(ctx).await
         }
 
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
@@ -77,9 +76,7 @@ async fn get_cfg_constructor(
         }
     }
 
-    ctx.compute(&GetCfgConstructorKey)
-        .await?
-        .map_err(buck2_error::Error::from)
+    ctx.compute(&GetCfgConstructorKey).await?
 }
 
 #[async_trait]
@@ -92,6 +89,7 @@ impl CfgConstructorCalculationImpl for CfgConstructorCalculationInstance {
         cfg: ConfigurationData,
         cli_modifiers: &Arc<Vec<String>>,
         rule_type: &RuleType,
+        configuring_exec_dep: bool,
     ) -> buck2_error::Result<ConfigurationData> {
         #[derive(Clone, Display, Dupe, Debug, Eq, Hash, PartialEq, Allocative)]
         #[display("CfgConstructorInvocationKey")]
@@ -101,6 +99,7 @@ impl CfgConstructorCalculationImpl for CfgConstructorCalculationInstance {
             cfg: ConfigurationData,
             cli_modifiers: Arc<Vec<String>>,
             rule_type: RuleType,
+            configuring_exec_dep: bool,
         }
 
         #[async_trait]
@@ -110,11 +109,11 @@ impl CfgConstructorCalculationImpl for CfgConstructorCalculationInstance {
             async fn compute(
                 &self,
                 ctx: &mut DiceComputations,
-                _cancellations: &CancellationContext,
+                cancellation: &CancellationContext,
             ) -> Self::Value {
-                let cfg_constructor = get_cfg_constructor(ctx).await?.buck_error_context(
-                    "Internal error: Global cfg constructor instance should exist",
-                )?;
+                let cfg_constructor = get_cfg_constructor(ctx).await?.ok_or_else(|| {
+                    internal_error!("Global cfg constructor instance should exist")
+                })?;
                 cfg_constructor
                     .eval(
                         ctx,
@@ -123,9 +122,10 @@ impl CfgConstructorCalculationImpl for CfgConstructorCalculationInstance {
                         self.target_cfg_modifiers.as_ref(),
                         &self.cli_modifiers,
                         &self.rule_type,
+                        self.configuring_exec_dep,
+                        cancellation,
                     )
                     .await
-                    .map_err(buck2_error::Error::from)
             }
 
             fn equality(x: &Self::Value, y: &Self::Value) -> bool {
@@ -178,6 +178,7 @@ impl CfgConstructorCalculationImpl for CfgConstructorCalculationInstance {
             cfg,
             cli_modifiers: cli_modifiers.dupe(),
             rule_type: rule_type.dupe(),
+            configuring_exec_dep,
         };
         Ok(ctx.compute(&key).await??)
     }

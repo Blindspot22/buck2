@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Write;
@@ -49,6 +50,7 @@ impl<'a> ActionExecutionTarget<'a> {
             self.action.category(),
             self.action.identifier(),
             self.action.action_key(),
+            self.action.all_outputs_are_content_based(),
         )
         .unwrap()
     }
@@ -65,7 +67,7 @@ impl CommandExecutionTarget for ActionExecutionTarget<'_> {
         )
         .unwrap();
         if let Some(ident) = self.action.identifier().as_ref() {
-            write!(&mut key, " {}", ident).unwrap();
+            write!(&mut key, " {ident}").unwrap();
         }
         key
     }

@@ -5,23 +5,23 @@
 %% License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 %% of this source tree.
 
-%%%-------------------------------------------------------------------
-%%% @doc
-%%% Artefact directory file management.
-%%% Used by TPX to upload diagnostic reports.
-%%% @end
-%%% % @format
-
+%% @format
 -module(test_artifact_directory).
--compile(warn_missing_spec).
+-moduledoc """
+Artefact directory file management.
+Used by TPX to upload diagnostic reports.
+""".
+-compile(warn_missing_spec_all).
 
--include_lib("kernel/include/logger.hrl").
 -include_lib("common/include/buck_ct_records.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -import(common_util, [unicode_characters_to_list/1]).
 
+-define(raw_file_access, prim_file).
+
 %% Public API
--export([prepare/2, link_to_artifact_dir/3]).
+-export([prepare/3, link_to_artifact_dir/3, find_log_private/1]).
 
 -export_type([dir_path/0]).
 
@@ -65,45 +65,79 @@ with_artifact_annotation_dir(Func) ->
         Dir -> Func(Dir)
     end.
 
+-spec coverage_tmp_dir() -> file:filename_all() | undefined.
+coverage_tmp_dir() ->
+    case os:getenv("COVERAGE_COLLECTION_TMPDIR") of
+        false ->
+            undefined;
+        Dir ->
+            filename:absname(Dir)
+    end.
+
 % Collect, create and link the logs and other relevant files in
 % the artefacts directory.
--spec prepare(file:filename(), #test_env{}) -> ok.
-prepare(ExecutionDir, TestInfo) ->
+-spec prepare(ExecutionDir, Tests, ArtifactAnnotationFunction) -> ok when
+    ExecutionDir :: file:filename_all(),
+    Tests :: [#ct_test{}],
+    ArtifactAnnotationFunction :: artifact_annotations:annotation_function().
+prepare(ExecutionDir, Tests, ArtifactAnnotationFunction) ->
     with_artifact_dir(
         fun(_ArtifactDir) ->
             link_tar_ball(ExecutionDir),
+            link_to_artifact_dir(
+                join_paths(ExecutionDir, "erlang.perfetto-trace"), ExecutionDir, ArtifactAnnotationFunction
+            ),
+            case coverage_tmp_dir() of
+                undefined ->
+                    ok;
+                CoverageTmpDir ->
+                    link_to_artifact_dir(
+                        join_paths(CoverageTmpDir, "feature_coverage.json"),
+                        CoverageTmpDir,
+                        ArtifactAnnotationFunction
+                    )
+            end,
             case find_log_private(ExecutionDir) of
                 {error, log_private_not_found} ->
                     ok;
                 LogPrivate ->
+                    LogFiles = find_log_files(LogPrivate),
                     [
-                        link_to_artifact_dir(File, LogPrivate, TestInfo)
-                     || File <- filelib:wildcard(join_paths(LogPrivate, "**/*.log")),
-                        filelib:is_regular(File)
-                    ]
+                        link_to_artifact_dir(File, LogPrivate, ArtifactAnnotationFunction)
+                     || File <- LogFiles,
+                        filelib:is_regular(File, ?raw_file_access)
+                    ],
+                    link_to_artifact_dir(
+                        join_paths(LogPrivate, "test_metrics.tcompact.b64"),
+                        LogPrivate,
+                        fun(FileName) -> artifact_annotations:test_metrics_artifact_annotation(FileName, Tests) end
+                    )
             end,
             ok
         end
     ).
 
--spec link_to_artifact_dir(file:filename_all(), file:filename_all(), #test_env{}) -> ok.
-link_to_artifact_dir(File, Root, TestEnv) ->
+-spec link_to_artifact_dir(File, Root, ArtifactAnnotationMFA) -> ok when
+    File :: file:filename_all(),
+    Root :: file:filename_all(),
+    ArtifactAnnotationMFA :: artifact_annotations:annotation_function().
+link_to_artifact_dir(File, Root, ArtifactAnnotationMFA) ->
     with_artifact_dir(
         fun(ArtifactDir) ->
             RelativePath =
                 case string:prefix(File, Root) of
                     nomatch ->
-                        ?LOG_ERROR("~s should be a prefix of ~s", [Root, File]),
+                        ?LOG_ERROR("~ts should be a prefix of ~ts", [Root, File]),
                         error(unexpected_path);
                     Suffix ->
                         string:strip(unicode_characters_to_list(Suffix), left, $/)
                 end,
             FullFileName =
                 unicode_characters_to_list(string:replace(RelativePath, "/", ".", all)),
-            case filelib:is_file(File) of
+            case filelib:is_file(File, ?raw_file_access) of
                 true ->
-                    file:make_symlink(File, join_paths(ArtifactDir, FullFileName)),
-                    Annotation = artifact_annotations:create_artifact_annotation(FullFileName, TestEnv),
+                    file:make_symlink(filename:absname(File), join_paths(ArtifactDir, FullFileName)),
+                    Annotation = artifact_annotations:create_artifact_annotation(FullFileName, ArtifactAnnotationMFA),
                     dump_annotation(Annotation, FullFileName);
                 _ ->
                     ok
@@ -111,7 +145,7 @@ link_to_artifact_dir(File, Root, TestEnv) ->
         end
     ).
 
--spec link_tar_ball(file:filename()) -> ok.
+-spec link_tar_ball(file:filename_all()) -> ok.
 link_tar_ball(LogDir) ->
     with_artifact_dir(
         fun(ArtifactDir) ->
@@ -140,22 +174,38 @@ dump_annotation(Annotation, FileName) ->
         fun(ArtifactAnnotationDir) ->
             AnnotationName = FileName ++ ".annotation",
             {ok, AnnotationFile} = file:open(
-                filename:join(ArtifactAnnotationDir, AnnotationName), [write]
+                filename:join(ArtifactAnnotationDir, AnnotationName), [write, raw]
             ),
             file:write(AnnotationFile, artifact_annotations:serialize(Annotation)),
+            file:close(AnnotationFile),
             ok
         end
     ).
 
--spec find_log_private(file:filename()) -> {error, log_private_not_found} | file:filename().
+-spec find_log_private(file:filename_all()) -> {error, log_private_not_found} | file:filename().
 find_log_private(LogDir) ->
-    Candidates = [
-        Folder
-     || Folder <- filelib:wildcard(join_paths(LogDir, "**/log_private")), filelib:is_dir(Folder)
-    ],
-    case Candidates of
-        [] -> {error, log_private_not_found};
-        [LogPrivate | _Tail] -> LogPrivate
+    % Use system find command for much faster directory traversal
+    % -type d: find directories only
+    % -name "log_private": match exact name
+    % -print -quit: print first match and exit immediately
+    FindCmd = lists:flatten(
+        io_lib:format("find '~s' -type d -name \"log_private\" -print -quit 2>/dev/null", [LogDir])
+    ),
+    case string:trim(os:cmd(FindCmd)) of
+        "" -> {error, log_private_not_found};
+        Result -> Result
+    end.
+
+-spec find_log_files(file:filename()) -> [file:filename()].
+find_log_files(LogPrivate) ->
+    % Use system find command for much faster directory traversal
+    % -type f: find files only
+    % -name "*.log": match files ending with .log
+    FindCmd = lists:flatten(io_lib:format("find '~s' -type f -name \"*.log\" 2>/dev/null", [LogPrivate])),
+    Output = string:trim(os:cmd(FindCmd)),
+    case Output of
+        "" -> [];
+        _ -> string:split(Output, "\n", all)
     end.
 
 -spec join_paths(file:filename_all(), file:filename_all()) -> string().

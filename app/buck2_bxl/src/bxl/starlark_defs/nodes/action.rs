@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::convert::Infallible;
@@ -121,7 +122,7 @@ impl<'a> UnpackValue<'a> for StarlarkActionQueryNode {
 fn action_query_node_value_methods(builder: &mut MethodsBuilder) {
     /// Gets the attributes from the action query node. Returns a struct.
     #[starlark(attribute)]
-    fn attrs<'v>(this: StarlarkActionQueryNode, heap: &Heap) -> starlark::Result<Value<'v>> {
+    fn attrs<'v>(this: StarlarkActionQueryNode, heap: Heap<'_>) -> starlark::Result<Value<'v>> {
         let mut result = Vec::new();
         this.0.attrs_for_each(|k, v| {
             result.push((k.to_owned(), StarlarkActionAttr(v.to_owned())));
@@ -134,7 +135,7 @@ fn action_query_node_value_methods(builder: &mut MethodsBuilder) {
     /// Gets optional action from the action query target node.
     fn action<'v>(
         this: &StarlarkActionQueryNode,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<NoneOr<ValueTyped<'v, StarlarkAction>>> {
         let action = this.0.action();
         match action {
@@ -146,14 +147,11 @@ fn action_query_node_value_methods(builder: &mut MethodsBuilder) {
     /// Gets optional analysis from the action query target node.
     fn analysis<'v>(
         this: &StarlarkActionQueryNode,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<NoneOr<ValueTyped<'v, StarlarkAnalysisResult>>> {
         match this.0.analysis_opt() {
             Some(a) => Ok(NoneOr::Other(heap.alloc_typed(
-                StarlarkAnalysisResult::new(
-                    a.analysis_result().clone(),
-                    a.target().as_ref().clone(),
-                )?,
+                StarlarkAnalysisResult::new(a.analysis_result().clone(), a.target().dupe())?,
             ))),
             None => Ok(NoneOr::None),
         }
@@ -186,7 +184,7 @@ impl<'v> StarlarkValue<'v> for StarlarkActionAttr {
 #[starlark_module]
 fn action_attr_methods(builder: &mut MethodsBuilder) {
     /// Returns the value of this attribute.
-    fn value<'v>(this: &StarlarkActionAttr, heap: &'v Heap) -> starlark::Result<StringValue<'v>> {
+    fn value<'v>(this: &StarlarkActionAttr, heap: Heap<'v>) -> starlark::Result<StringValue<'v>> {
         Ok(heap.alloc_str(&this.0.0))
     }
 }

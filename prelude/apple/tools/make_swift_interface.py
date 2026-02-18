@@ -1,10 +1,11 @@
 #!/usr/bin/env fbpython
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 """
 Remaps swiftc arguments to be usable by swift-ide-test, and invokes
@@ -17,13 +18,13 @@ import optparse
 import pathlib
 import subprocess as proc
 import sys
-
+from collections.abc import Iterable
 from contextlib import contextmanager
-from typing import Iterable, List, Optional
+from typing import Optional
 
 
 @dataclasses.dataclass
-class SwiftIDETestArguments(object):
+class SwiftIDETestArguments:
     sdk: Optional[str]
     target: Optional[str]
     xcc: Iterable[str]
@@ -37,7 +38,7 @@ class SwiftIDETestArguments(object):
     explicit_swift_module_map: Optional[str]
     swift_version: Optional[str]
 
-    def to_args(self) -> List[str]:
+    def to_args(self) -> list[str]:
         args = []
         if self.target:
             args.append("--target")
@@ -145,7 +146,7 @@ class IgnoreUnknownLongSingleDashOptParser(optparse.OptionParser):
                 continue
 
 
-def parse_swiftc_args(arguments: List[str]) -> SwiftIDETestArguments:  # noqa: C901
+def parse_swiftc_args(arguments: list[str]) -> SwiftIDETestArguments:  # noqa: C901
     """
     We can't use argparse to do our parsing because arguments like -Xcc
     need to accept arguments that are prefixed with `-`.

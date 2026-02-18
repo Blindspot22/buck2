@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use dupe::Dupe;
@@ -31,13 +32,11 @@ pub struct MiniperfCounters {
     /// Total instructions executed.
     pub user_instructions: MiniperfCounter,
     pub kernel_instructions: MiniperfCounter,
-    /// Action peak memory
-    pub memory_peak: Option<u64>,
 }
 
 impl MiniperfOutput {
     // This is the size we expect this record to take if the command worked out fine.
-    pub const EXPECTED_SIZE: usize = 69;
+    pub const EXPECTED_SIZE: usize = 60;
 }
 
 /// The fields here come straight out of `perf_event_open`. The count is
@@ -119,7 +118,6 @@ mod tests {
             counters: Ok(MiniperfCounters {
                 user_instructions: max_counter,
                 kernel_instructions: max_counter,
-                memory_peak: Some(u64::MAX),
             }),
         };
 

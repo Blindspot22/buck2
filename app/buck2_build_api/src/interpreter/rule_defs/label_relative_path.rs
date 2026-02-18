@@ -1,21 +1,23 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_interpreter::types::cell_path::StarlarkCellPath;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 
-impl CommandLineArgLike for StarlarkCellPath {
+impl<'v> CommandLineArgLike<'v> for StarlarkCellPath {
     fn register_me(&self) {
         command_line_arg_like_impl!(StarlarkCellPath::starlark_type_repr());
     }
@@ -24,6 +26,7 @@ impl CommandLineArgLike for StarlarkCellPath {
         &self,
         cli: &mut dyn CommandLineBuilder,
         ctx: &mut dyn CommandLineContext,
+        _artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         cli.push_location(ctx.resolve_cell_path(self.0.as_ref())?);
         Ok(())
@@ -36,6 +39,7 @@ impl CommandLineArgLike for StarlarkCellPath {
     fn visit_write_to_file_macros(
         &self,
         _visitor: &mut dyn crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor,
+        _artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<()> {
         Ok(())
     }

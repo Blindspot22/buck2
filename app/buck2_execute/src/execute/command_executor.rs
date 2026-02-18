@@ -1,19 +1,22 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_core::execution_types::executor_config::CommandGenerationOptions;
 use buck2_core::execution_types::executor_config::OutputPathsBehavior;
+use buck2_core::execution_types::executor_config::ReGangWorker;
+use buck2_core::execution_types::executor_config::RemoteExecutorCafFbpkg;
 use buck2_core::execution_types::executor_config::RemoteExecutorCustomImage;
 use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
@@ -22,7 +25,7 @@ use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::fingerprinted_directory::FingerprintedDirectory;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
-use buck2_futures::cancellation::CancellationContext;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use remote_execution as RE;
 use remote_execution::TActionResult2;
@@ -39,15 +42,14 @@ use crate::execute::cache_uploader::IntoRemoteDepFile;
 use crate::execute::cache_uploader::UploadCache;
 use crate::execute::executor_stage;
 use crate::execute::manager::CommandExecutionManager;
-use crate::execute::paths_with_digest::PathsWithDigestBlobData;
 use crate::execute::prepared::PreparedAction;
 use crate::execute::prepared::PreparedCommand;
 use crate::execute::prepared::PreparedCommandExecutor;
 use crate::execute::prepared::PreparedCommandOptionalExecutor;
-use crate::execute::request::CommandExecutionInput;
 use crate::execute::request::CommandExecutionRequest;
 use crate::execute::request::ExecutorPreference;
 use crate::execute::request::OutputType;
+use crate::execute::request::RemoteWorkerSpec;
 use crate::execute::result::CommandExecutionMetadata;
 use crate::execute::result::CommandExecutionResult;
 
@@ -67,7 +69,7 @@ impl Default for ActionExecutionTimingData {
 impl From<CommandExecutionMetadata> for ActionExecutionTimingData {
     fn from(command: CommandExecutionMetadata) -> Self {
         Self {
-            wall_time: command.wall_time,
+            wall_time: command.time_span.duration(),
         }
     }
 }
@@ -110,7 +112,7 @@ impl CommandExecutor {
         &self.0.artifact_fs
     }
 
-    pub fn executor_fs(&self) -> ExecutorFs {
+    pub fn executor_fs(&self) -> ExecutorFs<'_> {
         ExecutorFs::new(&self.0.artifact_fs, self.0.options.path_separator)
     }
 
@@ -190,19 +192,13 @@ impl CommandExecutor {
         &self,
         request: &CommandExecutionRequest,
         digest_config: DigestConfig,
+        re_outputs_required: bool,
     ) -> buck2_error::Result<PreparedAction> {
         executor_stage(buck2_data::PrepareAction {}, || {
             let input_digest = request.paths().input_directory().fingerprint();
 
-            let action_metadata_blobs = request.inputs().iter().filter_map(|x| match x {
-                CommandExecutionInput::Artifact(_) => None,
-                CommandExecutionInput::ActionMetadata(metadata) => {
-                    Some((metadata.data.clone(), metadata.digest.dupe()))
-                }
-                CommandExecutionInput::ScratchPath(_) => None,
-            });
             let mut platform = self.0.re_platform.clone();
-            let args = if self.0.options.use_bazel_protocol_remote_persistent_workers
+            let all_args = if self.0.options.use_bazel_protocol_remote_persistent_workers
                 && let Some(worker) = request.worker()
                 && let Some(key) = worker.remote_key.as_ref()
             {
@@ -232,12 +228,12 @@ impl CommandExecutor {
                 request.all_args_vec()
             };
             let action = re_create_action(
-                args,
+                request.args().to_vec(),
+                all_args,
                 request.paths().output_paths(),
                 request.working_directory(),
                 request.env(),
                 input_digest,
-                action_metadata_blobs,
                 request.timeout(),
                 platform,
                 false,
@@ -245,7 +241,13 @@ impl CommandExecutor {
                 self.0.options.output_paths_behavior,
                 request.unique_input_inodes(),
                 request.remote_execution_dependencies(),
+                request.re_gang_workers(),
                 request.remote_execution_custom_image(),
+                &request
+                    .meta_internal_extra_params()
+                    .remote_execution_caf_fbpkgs,
+                request.remote_worker(),
+                re_outputs_required,
             )?;
 
             buck2_error::Ok(action)
@@ -255,11 +257,11 @@ impl CommandExecutor {
 
 fn re_create_action(
     args: Vec<String>,
+    all_args: Vec<String>,
     outputs: &[(ProjectRelativePathBuf, OutputType)],
     working_directory: &ProjectRelativePath,
     environment: &SortedVectorMap<String, String>,
     input_digest: &TrackedFileDigest,
-    blobs: impl IntoIterator<Item = (PathsWithDigestBlobData, TrackedFileDigest)>,
     timeout: Option<Duration>,
     platform: RE::Platform,
     do_not_cache: bool,
@@ -267,10 +269,50 @@ fn re_create_action(
     output_paths_behavior: OutputPathsBehavior,
     unique_input_inodes: bool,
     remote_execution_dependencies: &Vec<RemoteExecutorDependency>,
+    re_gang_workers: &Vec<ReGangWorker>,
     remote_execution_custom_image: &Option<RemoteExecutorCustomImage>,
+    remote_execution_caf_fbpkgs: &[RemoteExecutorCafFbpkg],
+    worker: &Option<RemoteWorkerSpec>,
+    re_outputs_required: bool,
 ) -> buck2_error::Result<PreparedAction> {
+    let (worker_tool_init_action, command_args) = if let Some(worker) = worker {
+        let mut action_and_blobs = ActionDigestAndBlobsBuilder::new(digest_config);
+        let command = RE::Command {
+            arguments: worker.init.clone(),
+            #[allow(deprecated)]
+            platform: Some(platform.clone()),
+            working_directory: working_directory.as_str().to_owned(),
+            environment_variables: worker
+                .env
+                .iter()
+                .map(|(k, v)| RE::EnvironmentVariable {
+                    name: (*k).clone(),
+                    value: (*v).clone(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let input_digest = worker.input_paths.input_directory().fingerprint();
+
+        let action = RE::Action {
+            input_root_digest: Some(input_digest.to_grpc()),
+            command_digest: Some(action_and_blobs.add_command(&command).to_grpc()),
+            timeout: timeout
+                .map(|t| t.try_into())
+                .transpose()
+                .buck_error_context("Cannot convert timeout to GRPC")?,
+            do_not_cache,
+            ..Default::default()
+        };
+        let action_and_blobs = action_and_blobs.build(&action);
+        (Some(action_and_blobs), args)
+    } else {
+        (None, all_args)
+    };
+
     let mut command = RE::Command {
-        arguments: args,
+        arguments: command_args,
+        #[allow(deprecated)]
         platform: Some(platform),
         working_directory: working_directory.as_str().to_owned(),
         environment_variables: environment
@@ -288,6 +330,7 @@ fn re_create_action(
             for (output, output_type) in outputs {
                 let path = output.as_str().to_owned();
 
+                #[allow(deprecated)]
                 match output_type {
                     OutputType::FileOrDirectory => {
                         command.output_files.push(path.clone());
@@ -302,6 +345,7 @@ fn re_create_action(
             for (output, output_type) in outputs {
                 let path = output.as_str().to_owned();
 
+                #[allow(deprecated)]
                 match output_type {
                     OutputType::FileOrDirectory => {
                         command.output_files.push(path);
@@ -331,10 +375,6 @@ fn re_create_action(
 
     let mut action_and_blobs = ActionDigestAndBlobsBuilder::new(digest_config);
 
-    for (data, digest) in blobs {
-        action_and_blobs.add_paths(digest, data);
-    }
-
     let mut action = RE::Action {
         input_root_digest: Some(input_digest.to_grpc()),
         command_digest: Some(action_and_blobs.add_command(&command).to_grpc()),
@@ -343,6 +383,8 @@ fn re_create_action(
             .transpose()
             .buck_error_context("Cannot convert timeout to GRPC")?,
         do_not_cache,
+        #[cfg(fbcode_build)]
+        worker_tool_action_digest: worker_tool_init_action.clone().map(|a| a.action.to_grpc()),
         ..Default::default()
     };
 
@@ -364,6 +406,26 @@ fn re_create_action(
         let _unused = remote_execution_custom_image;
     }
 
+    #[cfg(fbcode_build)]
+    {
+        action.caf_fbpkgs = remote_execution_caf_fbpkgs
+            .iter()
+            .map(|caf_fbpkg| RE::CafFbpkg {
+                id: Some(RE::CafFbpkgIdentifier {
+                    name: caf_fbpkg.name.clone(),
+                    uuid: caf_fbpkg.uuid.clone(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .collect();
+    }
+
+    #[cfg(not(fbcode_build))]
+    {
+        let _unused = remote_execution_caf_fbpkgs;
+    }
+
     if unique_input_inodes {
         #[cfg(fbcode_build)]
         {
@@ -376,18 +438,27 @@ fn re_create_action(
         action.respect_exec_bit = true;
     }
 
+    #[cfg(fbcode_build)]
+    {
+        action.outputs_required = re_outputs_required;
+    }
+
     #[cfg(not(fbcode_build))]
     {
         let _unused = &mut action;
+        let _unused = re_outputs_required;
     }
 
     let action_and_blobs = action_and_blobs.build(&action);
 
     Ok(PreparedAction {
         action_and_blobs,
+        #[allow(deprecated)]
         platform: command
             .platform
             .expect("We did put a platform a few lines up"),
         remote_execution_dependencies: remote_execution_dependencies.to_owned(),
+        re_gang_workers: re_gang_workers.to_owned(),
+        worker_tool_init_action,
     })
 }

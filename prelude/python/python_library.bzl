@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifacts.bzl",
@@ -33,22 +34,22 @@ load(
     "create_linkable_graph_node",
 )
 load("@prelude//linking:shared_libraries.bzl", "SharedLibraryInfo", "merge_shared_libraries")
-load("@prelude//python:toolchain.bzl", "PythonPlatformInfo", "get_platform_attr")
+load("@prelude//linking:stamp_build_info.bzl", "PRE_STAMPED_SUFFIX")
 load(
     "@prelude//python/linking:native_python_util.bzl",
     "merge_cxx_extension_info",
+    "merge_native_deps",
 )
 load(
     "@prelude//third-party:build.bzl",
     "create_third_party_build_root",
     "prefix_from_label",
-    "project_from_label",
 )
 load("@prelude//third-party:providers.bzl", "ThirdPartyBuild", "third_party_build_info")
 load("@prelude//unix:providers.bzl", "UnixEnv", "create_unix_env_info")
 load("@prelude//utils:arglike.bzl", "ArgLike")  # @unused Used as a type
 load("@prelude//utils:expect.bzl", "expect")
-load("@prelude//utils:utils.bzl", "flatten", "from_named_set")
+load("@prelude//utils:utils.bzl", "from_named_set")
 load(":compile.bzl", "PycInvalidationMode", "compile_manifests")
 load(
     ":manifest.bzl",
@@ -56,7 +57,7 @@ load(
     "create_manifest_for_source_map",
 )
 load(":needed_coverage.bzl", "PythonNeededCoverageInfo")
-load(":python.bzl", "PythonLibraryInfo", "PythonLibraryManifests", "PythonLibraryManifestsTSet")
+load(":python.bzl", "NativeDepsInfoTSet", "PythonLibraryInfo", "PythonLibraryManifests", "PythonLibraryManifestsTSet")
 load(":source_db.bzl", "create_python_source_db_info", "create_source_db_no_deps")
 load(":toolchain.bzl", "PythonToolchainInfo")
 load(":typing.bzl", "create_per_target_type_check")
@@ -115,6 +116,8 @@ def create_python_needed_coverage_info(
 def create_python_library_info(
         actions: AnalysisActions,
         label: Label,
+        native_deps: NativeDepsInfoTSet,
+        is_native_dep: bool,
         srcs: [ManifestInfo, None] = None,
         src_types: [ManifestInfo, None] = None,
         bytecode: [dict[PycInvalidationMode, ManifestInfo], None] = None,
@@ -123,7 +126,8 @@ def create_python_library_info(
         extensions: [dict[str, LinkedObject], None] = None,
         deps: list[PythonLibraryInfo] = [],
         shared_libraries: list[SharedLibraryInfo] = [],
-        extension_shared_libraries: list[SharedLibraryInfo] = []):
+        extension_shared_libraries: list[SharedLibraryInfo] = [],
+        par_style: str | None = None):
     """
     Create a `PythonLibraryInfo` for a set of sources and deps
 
@@ -165,6 +169,9 @@ def create_python_library_info(
         manifests = actions.tset(PythonLibraryManifestsTSet, value = manifests, children = [dep.manifests for dep in deps]),
         shared_libraries = new_shared_libraries,
         extension_shared_libraries = new_extension_shared_libraries,
+        is_native_dep = is_native_dep,
+        native_deps = native_deps,
+        par_style = par_style,
     )
 
 def gather_dep_libraries(
@@ -215,24 +222,13 @@ def _exclude_deps_from_omnibus(
     return False
 
 def _attr_srcs(ctx: AnalysisContext) -> dict[str, Artifact]:
-    python_platform = ctx.attrs._python_toolchain[PythonPlatformInfo]
-    cxx_toolchain = ctx.attrs._cxx_toolchain
     all_srcs = {}
     all_srcs.update(from_named_set(ctx.attrs.srcs))
-    for srcs in get_platform_attr(python_platform, cxx_toolchain, ctx.attrs.platform_srcs):
-        all_srcs.update(from_named_set(srcs))
     return all_srcs
 
 def _attr_resources(ctx: AnalysisContext) -> dict[str, Artifact | Dependency]:
-    python_platform = ctx.attrs._python_toolchain[PythonPlatformInfo]
-    cxx_toolchain = ctx.attrs._cxx_toolchain
     all_resources = {}
     all_resources.update(from_named_set(ctx.attrs.resources))
-
-    # `python_binary` doesn't have `platform_resources`
-    platform_resources = getattr(ctx.attrs, "platform_resources", [])
-    for resources in get_platform_attr(python_platform, cxx_toolchain, platform_resources):
-        all_resources.update(from_named_set(resources))
     return all_resources
 
 def py_attr_resources(ctx: AnalysisContext) -> (dict[str, ArtifactOutputs], dict[str, ArtifactOutputs]):
@@ -244,7 +240,7 @@ def py_attr_resources(ctx: AnalysisContext) -> (dict[str, ArtifactOutputs], dict
     standalone_artifacts = {}
     for key, value in resources.items():
         resource = value
-        if type(value) != "artifact" and DefaultInfo in value:
+        if not isinstance(value, Artifact) and DefaultInfo in value:
             if "standalone" in value[DefaultInfo].sub_targets:
                 resource = value[DefaultInfo].sub_targets["standalone"][DefaultInfo].default_outputs[0]
         standalone_artifacts[key] = resource
@@ -264,7 +260,20 @@ def py_resources(
     hidden = []
     for name, resource in resources.items():
         for o in resource.nondebug_runtime_files:
-            if type(o) == "artifact" and o.basename == shared_libs_symlink_tree_name(resource.default_output):
+            # HACK: this is a heuristic to detect shared libs emitted from cpp_binary rules.
+            if (isinstance(o, Artifact) and
+                (
+                    (o.basename == (
+                        shared_libs_symlink_tree_name(
+                            resource.default_output.short_path,
+                        )
+                    )) or
+                    (o.basename == (
+                        shared_libs_symlink_tree_name(
+                            resource.default_output.short_path + PRE_STAMPED_SUFFIX,
+                        )
+                    ))
+                )):
                 # Package the binary's shared libs next to the binary
                 # (the path is stored in RPATH relative to the binary).
                 d[paths.join(paths.dirname(name), o.basename)] = o
@@ -296,9 +305,6 @@ def python_library_impl(ctx: AnalysisContext) -> list[Provider]:
     expect(not ctx.attrs.versioned_srcs)
     expect(not ctx.attrs.versioned_resources)
 
-    python_platform = ctx.attrs._python_toolchain[PythonPlatformInfo]
-    cxx_toolchain = ctx.attrs._cxx_toolchain
-
     providers = []
     sub_targets = {}
 
@@ -314,21 +320,22 @@ def python_library_impl(ctx: AnalysisContext) -> list[Provider]:
     python_toolchain = ctx.attrs._python_toolchain[PythonToolchainInfo]
     src_type_manifest = create_manifest_for_source_map(ctx, "type_stubs", src_types) if src_types else None
 
+    # TODO(T245694881) let the toolchain decide whether pyc's should be precompiled
     # Compile bytecode.
     bytecode = None
-    if src_manifest != None:
+    py_version = ctx.attrs._python_toolchain[PythonToolchainInfo].version
+    if src_manifest != None and (py_version == None or "3.15" not in py_version):
         bytecode = compile_manifests(ctx, [src_manifest])
         sub_targets["compile"] = [DefaultInfo(default_output = bytecode[PycInvalidationMode("unchecked_hash")].artifacts[0][0])]
         sub_targets["src-manifest"] = [DefaultInfo(default_output = src_manifest.manifest, other_outputs = [a for a, _ in src_manifest.artifacts])]
 
     raw_deps = ctx.attrs.deps
-    raw_deps.extend(flatten(
-        get_platform_attr(python_platform, cxx_toolchain, ctx.attrs.platform_deps),
-    ))
     default_resource_manifest = py_resources(ctx, default_resources) if default_resources else None
     standalone_resource_manifest = py_resources(ctx, standalone_resources, "_standalone") if standalone_resources else None
     deps, shared_libraries = gather_dep_libraries(raw_deps, resolve_versioned_deps = False)
     providers.append(gather_versioned_dependencies(raw_deps))
+
+    native_deps = merge_native_deps(ctx, raw_deps)
 
     library_info = create_python_library_info(
         ctx.actions,
@@ -340,6 +347,8 @@ def python_library_impl(ctx: AnalysisContext) -> list[Provider]:
         bytecode = bytecode,
         deps = deps,
         shared_libraries = shared_libraries,
+        native_deps = native_deps,
+        is_native_dep = False,
     )
     providers.append(library_info)
 
@@ -355,36 +364,43 @@ def python_library_impl(ctx: AnalysisContext) -> list[Provider]:
     )
 
     # Allow third-party-build rules to depend on Python rules.
-    tp_project = project_from_label(ctx.label)
     tp_prefix = prefix_from_label(ctx.label)
-    providers.append(
-        third_party_build_info(
-            actions = ctx.actions,
-            build = ThirdPartyBuild(
-                # TODO(agallagher): Figure out a way to get a unique name?
-                project = tp_project,
-                prefix = tp_prefix,
-                root = create_third_party_build_root(
-                    ctx = ctx,
-                    # TODO(agallagher): use constraints to get py version.
-                    manifests = (
-                        [("lib/python", src_manifest)] if src_manifest != None else []
-                    ) + (
-                        [("lib/python", default_resource_manifest[0])] if default_resource_manifest != None else []
-                    ),
-                ),
-                manifest = ctx.actions.write_json(
-                    "third_party_build_manifest.json",
-                    dict(
-                        project = tp_project,
-                        prefix = tp_prefix,
-                        py_lib_paths = ["lib/python"],
-                    ),
+    third_party_build = third_party_build_info(
+        actions = ctx.actions,
+        build = ThirdPartyBuild(
+            prefix = tp_prefix,
+            root = create_third_party_build_root(
+                ctx = ctx,
+                # TODO(agallagher): use constraints to get py version.
+                manifests = (
+                    [("lib/python", src_manifest)] if src_manifest != None else []
+                ) + (
+                    [("lib/python", default_resource_manifest[0])] if default_resource_manifest != None else []
                 ),
             ),
-            deps = raw_deps,
+            manifest = ctx.actions.write_json(
+                "third_party_build_manifest.json",
+                dict(
+                    prefix = tp_prefix,
+                    py_lib_paths = ["lib/python"],
+                    bin_paths = [],
+                    lib_paths = [],
+                    runtime_lib_paths = [],
+                    libs = [],
+                ),
+            ),
         ),
+        deps = raw_deps,
     )
+    providers.append(third_party_build)
+    sub_targets["third-party-build"] = [
+        DefaultInfo(
+            default_output = third_party_build.build.root.artifact,
+            sub_targets = dict(
+                manifest = [DefaultInfo(default_output = third_party_build.build.manifest)],
+            ),
+        ),
+    ]
 
     providers.append(create_python_needed_coverage_info(ctx.label, ctx.attrs.base_module, srcs.keys()))
 

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::env;
@@ -14,29 +15,26 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
-use buck2_common::dice::file_ops::delegate::FileOpsDelegate;
-use buck2_common::file_ops::FileMetadata;
-use buck2_common::file_ops::FileType;
-use buck2_common::file_ops::RawDirEntry;
-use buck2_common::file_ops::RawPathMetadata;
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_common::file_ops::delegate::FileOpsDelegate;
+use buck2_common::file_ops::dice::ReadFileProxy;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::FileType;
+use buck2_common::file_ops::metadata::RawDirEntry;
+use buck2_common::file_ops::metadata::RawPathMetadata;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_common::io::fs::is_executable;
 use buck2_core::cells::external::ExternalCellOrigin;
 use buck2_core::cells::name::CellName;
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::cells::paths::CellRelativePathBuf;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_core::directory_digest::DirectoryDigest;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::builder::DirectoryBuilder;
 use buck2_directory::directory::directory::Directory;
-use buck2_directory::directory::directory_hasher::NoDigest;
-use buck2_directory::directory::directory_hasher::NoDigestDigester;
+use buck2_directory::directory::directory_hasher::DirectoryDigester;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
 use buck2_directory::directory::directory_ref::DirectoryRef;
+use buck2_directory::directory::directory_ref::FingerprintedDirectoryRef;
 use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_directory::directory::find::DirectoryFindError;
 use buck2_directory::directory::find::find;
@@ -44,6 +42,7 @@ use buck2_directory::directory::immutable_directory::ImmutableDirectory;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::digest_config::HasDigestConfig;
 use buck2_execute::materialize::materializer::HasMaterializer;
@@ -51,10 +50,18 @@ use buck2_execute::materialize::materializer::WriteRequest;
 use buck2_external_cells_bundled::BundledCell;
 use buck2_external_cells_bundled::BundledFile;
 use buck2_external_cells_bundled::get_bundled_data;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_util::strong_hasher::Blake3StrongHasher;
 use cmp_any::PartialEqAny;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
+use dupe::Dupe;
 
 fn load_nano_prelude() -> buck2_error::Result<BundledCell> {
     let path = env::var("NANO_PRELUDE")
@@ -83,12 +90,12 @@ fn load_nano_prelude() -> buck2_error::Result<BundledCell> {
                 entry
                     .file_name()
                     .to_str()
-                    .buck_error_context("not UTF-8 string")?,
+                    .ok_or_else(|| internal_error!("not UTF-8 string"))?,
             )?);
             match FileType::from(entry.file_type()?) {
                 FileType::Directory => dir_stack.push((entry_path, entry_rel_path)),
                 FileType::File => {
-                    let contents = fs_util::read(&entry_path)?;
+                    let contents = fs_util::read(&entry_path).categorize_internal()?;
                     files.push(BundledFile {
                         path: entry_rel_path.as_str().to_owned().leak(),
                         contents: contents.leak(),
@@ -150,9 +157,66 @@ struct ContentsAndMetadata {
     metadata: FileMetadata,
 }
 
-#[derive(allocative::Allocative, PartialEq, Eq)]
+/// We don't actually need the directory digest, but unfortunately the directory tooling kind of
+/// requires us to have one.
+#[derive(
+    allocative::Allocative,
+    derive_more::Display,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Copy,
+    Clone
+)]
+struct BundledDirectoryDigest(#[allocative(skip)] blake3::Hash);
+
+impl Dupe for BundledDirectoryDigest {
+    fn dupe(&self) -> Self {
+        *self
+    }
+}
+
+impl DirectoryDigest for BundledDirectoryDigest {}
+
+struct BundledDirectoryDigester;
+
+impl DirectoryDigester<ContentsAndMetadata, BundledDirectoryDigest> for BundledDirectoryDigester {
+    fn hash_entries<'a, D, I>(&self, entries: I) -> BundledDirectoryDigest
+    where
+        I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ContentsAndMetadata>)>,
+        D: FingerprintedDirectoryRef<
+                'a,
+                Leaf = ContentsAndMetadata,
+                DirectoryDigest = BundledDirectoryDigest,
+            > + 'a,
+        Self: Sized,
+    {
+        use std::hash::Hash;
+
+        let mut hasher = Blake3StrongHasher::default();
+        for (name, entry) in entries {
+            name.hash(&mut hasher);
+            match entry {
+                DirectoryEntry::Dir(dir) => {
+                    dir.as_fingerprinted_dyn().fingerprint().hash(&mut hasher);
+                }
+                DirectoryEntry::Leaf(leaf) => {
+                    leaf.metadata.hash(&mut hasher);
+                }
+            }
+        }
+        BundledDirectoryDigest(hasher.finalize())
+    }
+
+    fn leaf_size(&self, leaf: &ContentsAndMetadata) -> u64 {
+        leaf.contents.len() as u64
+    }
+}
+
+#[derive(allocative::Allocative)]
 pub(crate) struct BundledFileOpsDelegate {
-    dir: ImmutableDirectory<ContentsAndMetadata, NoDigest>,
+    dir: ImmutableDirectory<ContentsAndMetadata, BundledDirectoryDigest>,
 }
 
 #[derive(buck2_error::Error, Debug)]
@@ -173,7 +237,11 @@ impl BundledFileOpsDelegate {
     ) -> buck2_error::Result<
         Option<
             DirectoryEntry<
-                impl DirectoryRef<Leaf = ContentsAndMetadata, DirectoryDigest = NoDigest>,
+                impl DirectoryRef<
+                    '_,
+                    Leaf = ContentsAndMetadata,
+                    DirectoryDigest = BundledDirectoryDigest,
+                > + use<'_>,
                 &ContentsAndMetadata,
             >,
         >,
@@ -191,37 +259,17 @@ impl BundledFileOpsDelegate {
         path: &CellRelativePath,
     ) -> buck2_error::Result<
         DirectoryEntry<
-            impl DirectoryRef<Leaf = ContentsAndMetadata, DirectoryDigest = NoDigest>,
+            impl DirectoryRef<'_, Leaf = ContentsAndMetadata, DirectoryDigest = BundledDirectoryDigest>
+            + use<'_>,
             &ContentsAndMetadata,
         >,
     > {
         self.get_entry_at_path_if_exists(path)?
             .ok_or_else(|| BundledPathSearchError::MissingFile(path.to_owned()).into())
     }
-}
-
-#[async_trait::async_trait]
-impl FileOpsDelegate for BundledFileOpsDelegate {
-    async fn read_file_if_exists(
-        &self,
-        path: &'async_trait CellRelativePath,
-    ) -> buck2_error::Result<Option<String>> {
-        match self.get_entry_at_path_if_exists(path)? {
-            Some(DirectoryEntry::Leaf(leaf)) => {
-                Ok(Some(String::from_utf8(leaf.contents.to_vec())?))
-            }
-            Some(DirectoryEntry::Dir(_)) => {
-                Err(BundledPathSearchError::ExpectedFile(path.to_owned()).into())
-            }
-            None => Ok(None),
-        }
-    }
 
     /// Return the list of file outputs, sorted.
-    async fn read_dir(
-        &self,
-        path: &'async_trait CellRelativePath,
-    ) -> buck2_error::Result<Vec<RawDirEntry>> {
+    async fn read_dir(&self, path: &CellRelativePath) -> buck2_error::Result<Arc<[RawDirEntry]>> {
         let dir = match self.get_entry_at_path(path)? {
             DirectoryEntry::Dir(dir) => dir,
             DirectoryEntry::Leaf(_) => {
@@ -243,9 +291,22 @@ impl FileOpsDelegate for BundledFileOpsDelegate {
         Ok(entries)
     }
 
-    async fn read_path_metadata_if_exists(
+    fn read_file_if_exists(
         &self,
-        path: &'async_trait CellRelativePath,
+        path: &CellRelativePath,
+    ) -> buck2_error::Result<Option<&'static str>> {
+        match self.get_entry_at_path_if_exists(path)? {
+            Some(DirectoryEntry::Leaf(leaf)) => Ok(Some(str::from_utf8(leaf.contents)?)),
+            Some(DirectoryEntry::Dir(_)) => {
+                Err(BundledPathSearchError::ExpectedFile(path.to_owned()).into())
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn read_path_metadata_if_exists(
+        &self,
+        path: &CellRelativePath,
     ) -> buck2_error::Result<Option<RawPathMetadata>> {
         match self.get_entry_at_path_if_exists(path)? {
             Some(DirectoryEntry::Leaf(leaf)) => {
@@ -255,9 +316,40 @@ impl FileOpsDelegate for BundledFileOpsDelegate {
             None => Ok(None),
         }
     }
+}
 
-    fn eq_token(&self) -> PartialEqAny {
-        PartialEqAny::new(self)
+#[async_trait::async_trait]
+impl FileOpsDelegate for BundledFileOpsDelegate {
+    async fn read_file_if_exists(
+        &self,
+        _ctx: &mut DiceComputations<'_>,
+        path: &'async_trait CellRelativePath,
+    ) -> buck2_error::Result<ReadFileProxy> {
+        let res = self.read_file_if_exists(path)?;
+        Ok(ReadFileProxy::new_with_captures(res, |res| async move {
+            Ok(res.map(|s| s.to_owned()))
+        }))
+    }
+
+    /// Return the list of file outputs, sorted.
+    async fn read_dir(
+        &self,
+        _ctx: &mut DiceComputations<'_>,
+        path: &'async_trait CellRelativePath,
+    ) -> buck2_error::Result<Arc<[RawDirEntry]>> {
+        self.read_dir(path).await
+    }
+
+    async fn read_path_metadata_if_exists(
+        &self,
+        _ctx: &mut DiceComputations<'_>,
+        path: &'async_trait CellRelativePath,
+    ) -> buck2_error::Result<Option<RawPathMetadata>> {
+        self.read_path_metadata_if_exists(path)
+    }
+
+    fn eq_token(&self) -> PartialEqAny<'_> {
+        PartialEqAny::always_false()
     }
 }
 
@@ -265,13 +357,14 @@ fn get_file_ops_delegate_impl(
     data: BundledCell,
     digest_config: DigestConfig,
 ) -> buck2_error::Result<BundledFileOpsDelegate> {
-    let mut builder: DirectoryBuilder<ContentsAndMetadata, NoDigest> = DirectoryBuilder::empty();
-    let digest_config = digest_config.cas_digest_config().source_files_config();
+    let mut builder: DirectoryBuilder<ContentsAndMetadata, BundledDirectoryDigest> =
+        DirectoryBuilder::empty();
+    let source_digest_config = digest_config.cas_digest_config().source_files_config();
     for file in data.files {
         let path = ForwardRelativePath::new(file.path)
             .internal_error("non-forward relative bundled path")?;
         let metadata = FileMetadata {
-            digest: TrackedFileDigest::from_content(file.contents, digest_config),
+            digest: TrackedFileDigest::from_content(file.contents, source_digest_config),
             is_executable: file.is_executable,
         };
 
@@ -285,9 +378,8 @@ fn get_file_ops_delegate_impl(
             )
             .internal_error("conflicting bundled source paths")?;
     }
-    Ok(BundledFileOpsDelegate {
-        dir: builder.fingerprint(&NoDigestDigester),
-    })
+    let builder = builder.fingerprint(&BundledDirectoryDigester);
+    Ok(BundledFileOpsDelegate { dir: builder })
 }
 
 async fn declare_all_source_artifacts(
@@ -400,7 +492,6 @@ mod tests {
         let ops = testing_ops();
         let content = ops
             .read_file_if_exists(&CellRelativePath::unchecked_new("dir/src.txt"))
-            .await
             .unwrap()
             .unwrap();
         let content = if cfg!(windows) {
@@ -408,12 +499,11 @@ mod tests {
             // We could configure git, but it's more reliable to handle it in the test.
             content.replace("\r\n", "\n")
         } else {
-            content
+            content.to_owned()
         };
         assert_eq!(content, "foobar\n");
         assert!(
             ops.read_file_if_exists(&CellRelativePath::unchecked_new("dir/does_not_exist.txt"))
-                .await
                 .unwrap()
                 .is_none()
         );
@@ -424,7 +514,6 @@ mod tests {
         let ops = testing_ops();
         assert_matches!(
             ops.read_path_metadata_if_exists(&CellRelativePath::unchecked_new("dir/src.txt"))
-                .await
                 .unwrap()
                 .unwrap(),
             RawPathMetadata::File(FileMetadata {
@@ -434,7 +523,6 @@ mod tests {
         );
         assert_matches!(
             ops.read_path_metadata_if_exists(&CellRelativePath::unchecked_new("dir/src2.txt"))
-                .await
                 .unwrap()
                 .unwrap(),
             RawPathMetadata::File(FileMetadata {
@@ -449,16 +537,12 @@ mod tests {
         let ops = testing_ops();
 
         let root = CellRelativePath::unchecked_new("");
-        let root_metadata = ops
-            .read_path_metadata_if_exists(root)
-            .await
-            .unwrap()
-            .unwrap();
+        let root_metadata = ops.read_path_metadata_if_exists(root).unwrap().unwrap();
         assert_matches!(root_metadata, RawPathMetadata::Directory);
         let root_entries = ops.read_dir(root).await.unwrap();
         assert!(root_entries.is_sorted());
         assert_eq!(
-            &root_entries,
+            &*root_entries,
             &[
                 RawDirEntry {
                     file_name: ".buckconfig".into(),
@@ -476,11 +560,7 @@ mod tests {
         );
 
         let dir = CellRelativePath::unchecked_new("dir");
-        let dir_metadata = ops
-            .read_path_metadata_if_exists(dir)
-            .await
-            .unwrap()
-            .unwrap();
+        let dir_metadata = ops.read_path_metadata_if_exists(dir).unwrap().unwrap();
         assert_matches!(dir_metadata, RawPathMetadata::Directory);
         let dir_entries = ops.read_dir(dir).await.unwrap();
         assert!(dir_entries.is_sorted());

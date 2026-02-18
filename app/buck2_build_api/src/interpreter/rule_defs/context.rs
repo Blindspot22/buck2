@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::RefCell;
@@ -19,19 +20,19 @@ use buck2_core::provider::label::ProvidersName;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::internal_error;
 use buck2_execute::digest_config::DigestConfig;
-use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_interpreter::late_binding_ty::AnalysisContextReprLate;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use buck2_util::late_binding::LateBinding;
 use derive_more::Display;
 use dice::DiceComputations;
+use futures::FutureExt;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
-use starlark::eval::Evaluator;
 use starlark::typing::Ty;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
@@ -50,6 +51,7 @@ use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::structs::StructRef;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
+use crate::analysis::anon_promises_dyn::RunAnonPromisesAccessor;
 use crate::analysis::registry::AnalysisRegistry;
 use crate::deferred::calculation::GET_PROMISED_ARTIFACT;
 use crate::interpreter::rule_defs::plugins::AnalysisPlugins;
@@ -71,35 +73,38 @@ pub struct AnalysisActions<'v> {
 }
 
 impl<'v> AnalysisActions<'v> {
-    pub fn state(&self) -> buck2_error::Result<RefMut<AnalysisRegistry<'v>>> {
+    pub fn state(&self) -> buck2_error::Result<RefMut<'_, AnalysisRegistry<'v>>> {
         let state = self
             .state
             .try_borrow_mut()
             .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
-            .internal_error("AnalysisActions.state is already borrowed")?;
+            .buck_error_context("AnalysisActions.state is already borrowed")?;
         RefMut::filter_map(state, |x| x.as_mut())
             .ok()
-            .internal_error("state to be present during execution")
+            .ok_or_else(|| internal_error!("state to be present during execution"))
     }
 
-    pub async fn run_promises(
+    pub async fn run_promises<'a, 'e: 'a>(
         &self,
-        dice: &mut DiceComputations<'_>,
-        eval: &mut Evaluator<'v, '_, '_>,
-        eval_kind: &StarlarkEvalKind,
-    ) -> buck2_error::Result<()> {
+        accessor: &mut dyn RunAnonPromisesAccessor<'v, 'a, 'e>,
+    ) -> buck2_error::Result<()>
+    where
+        'v: 'a,
+    {
         // We need to loop here because running the promises evaluates promise.map, which might produce more promises.
         // We keep going until there are no promises left.
         loop {
             let promises = self.state()?.take_promises();
             if let Some(promises) = promises {
-                promises.run_promises(dice, eval, eval_kind).await?;
+                promises.run_promises(accessor).await?;
             } else {
                 break;
             }
         }
 
-        self.assert_short_paths_and_resolve(dice).await?;
+        accessor
+            .with_dice(|dice| self.assert_short_paths_and_resolve(dice).boxed_local())
+            .await?;
 
         Ok(())
     }
@@ -109,18 +114,24 @@ impl<'v> AnalysisActions<'v> {
         &self,
         dice: &mut DiceComputations<'_>,
     ) -> buck2_error::Result<()> {
-        let (short_path_assertions, consumer_analysis_artifacts) = {
+        let (short_path_assertions, content_based_path_assertions, consumer_analysis_artifacts) = {
             let state = self.state()?;
             (
                 state.short_path_assertions.clone(),
+                state.content_based_path_assertions.clone(),
                 state.consumer_analysis_artifacts(),
             )
         };
 
         for consumer_artifact in consumer_analysis_artifacts {
             let artifact = (GET_PROMISED_ARTIFACT.get()?)(&consumer_artifact, dice).await?;
-            let short_path = short_path_assertions.get(consumer_artifact.id()).cloned();
-            consumer_artifact.resolve(artifact.clone(), &short_path)?;
+            let id = consumer_artifact.id();
+            let short_path = short_path_assertions.get(id).cloned();
+            consumer_artifact.resolve(
+                artifact.clone(),
+                &short_path,
+                content_based_path_assertions.contains(id),
+            )?;
         }
         Ok(())
     }
@@ -138,7 +149,7 @@ impl<'v> StarlarkValue<'v> for AnalysisActions<'v> {
 }
 
 impl<'v> AllocValue<'v> for AnalysisActions<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -178,7 +189,7 @@ impl<'v> Display for AnalysisContext<'v> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "<ctx")?;
         if let Some(label) = &self.label {
-            write!(f, " label=\"{}\"", label)?;
+            write!(f, " label=\"{label}\"")?;
         }
         write!(f, " attrs=...")?;
         write!(f, " actions=...")?;
@@ -190,7 +201,7 @@ impl<'v> Display for AnalysisContext<'v> {
 impl<'v> AnalysisContext<'v> {
     /// The context that is provided to users' UDR implementation functions. Comprised of things like attribute values, actions, etc
     fn new(
-        heap: &'v Heap,
+        heap: Heap<'v>,
         attrs: Option<ValueOfUnchecked<'v, StructRef<'static>>>,
         label: Option<ValueTyped<'v, StarlarkConfiguredProvidersLabel>>,
         plugins: Option<ValueTypedComplex<'v, AnalysisPlugins<'v>>>,
@@ -211,7 +222,7 @@ impl<'v> AnalysisContext<'v> {
     }
 
     pub fn prepare(
-        heap: &'v Heap,
+        heap: Heap<'v>,
         attrs: Option<ValueOfUnchecked<'v, StructRef<'static>>>,
         label: Option<ConfiguredTargetLabel>,
         plugins: Option<ValueTypedComplex<'v, AnalysisPlugins<'v>>>,
@@ -251,7 +262,7 @@ impl<'v> StarlarkValue<'v> for AnalysisContext<'v> {
 }
 
 impl<'v> AllocValue<'v> for AnalysisContext<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -294,10 +305,9 @@ fn analysis_context_methods(builder: &mut MethodsBuilder) {
     fn attrs<'v>(
         this: RefAnalysisContext<'v>,
     ) -> starlark::Result<ValueOfUnchecked<'v, StructRef<'static>>> {
-        Ok(this
-            .0
-            .attrs
-            .buck_error_context("`attrs` is not available for `dynamic_output` or BXL")?)
+        Ok(this.0.attrs.ok_or_else(|| {
+            internal_error!("`attrs` is not available for `dynamic_output` or BXL")
+        })?)
     }
 
     /// Returns an `actions` value containing functions to define actual actions that are run.
@@ -325,10 +335,9 @@ fn analysis_context_methods(builder: &mut MethodsBuilder) {
     fn plugins<'v>(
         this: RefAnalysisContext<'v>,
     ) -> starlark::Result<ValueTypedComplex<'v, AnalysisPlugins<'v>>> {
-        Ok(this
-            .0
-            .plugins
-            .buck_error_context("`plugins` is not available for `dynamic_output` or BXL")?)
+        Ok(this.0.plugins.ok_or_else(|| {
+            internal_error!("`plugins` is not available for `dynamic_output` or BXL")
+        })?)
     }
 }
 

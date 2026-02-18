@@ -1,21 +1,23 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use buck2_core::package::PackageLabel;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_error::BuckErrorContext;
 use buck2_util::late_binding::LateBinding;
+use buck2_util::time_span::TimeSpan;
 use dice::DiceComputations;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -31,7 +33,8 @@ pub trait TargetGraphCalculationImpl: Send + Sync + 'static {
         &self,
         ctx: &mut DiceComputations<'_>,
         package: PackageLabel,
-    ) -> (Duration, buck2_error::Result<Arc<EvaluationResult>>);
+        cancellation: &CancellationContext,
+    ) -> (TimeSpan, buck2_error::Result<Arc<EvaluationResult>>);
 
     /// Returns the full interpreter evaluation result for a Package. This consists of the full set
     /// of `TargetNode`s of interpreting that build file.
@@ -51,7 +54,8 @@ pub trait TargetGraphCalculation {
     async fn get_interpreter_results_uncached(
         &mut self,
         package: PackageLabel,
-    ) -> (Duration, buck2_error::Result<Arc<EvaluationResult>>);
+        cancellation: &CancellationContext,
+    ) -> (TimeSpan, buck2_error::Result<Arc<EvaluationResult>>);
 
     /// Returns the full interpreter evaluation result for a Package. This consists of the full set
     /// of `TargetNode`s of interpreting that build file.
@@ -80,10 +84,14 @@ impl TargetGraphCalculation for DiceComputations<'_> {
     async fn get_interpreter_results_uncached(
         &mut self,
         package: PackageLabel,
-    ) -> (Duration, buck2_error::Result<Arc<EvaluationResult>>) {
+        cancellation: &CancellationContext,
+    ) -> (TimeSpan, buck2_error::Result<Arc<EvaluationResult>>) {
         match TARGET_GRAPH_CALCULATION_IMPL.get() {
-            Ok(calc) => calc.get_interpreter_results_uncached(self, package).await,
-            Err(e) => (Duration::ZERO, Err(e)),
+            Ok(calc) => {
+                calc.get_interpreter_results_uncached(self, package, cancellation)
+                    .await
+            }
+            Err(e) => (TimeSpan::empty_now(), Err(e)),
         }
     }
 

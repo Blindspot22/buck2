@@ -1,21 +1,23 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeMap;
 
 use buck2_cli_proto::new_generic::DocsResponse;
 use buck2_cli_proto::new_generic::DocsStarlarkBuiltinsRequest;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
+use buck2_fs::error::IoResultExt;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_interpreter_for_build::interpreter::globals::register_analysis_natives;
 use buck2_interpreter_for_build::interpreter::globals::register_bxl_natives;
 use buck2_interpreter_for_build::interpreter::globals::register_load_natives;
@@ -32,11 +34,13 @@ pub(crate) fn write_docs_to_subdir(
     modules_infos: Vec<DocModuleInfo<'_>>,
     base_path: &str,
     linked_ty_mapper: Option<fn(&str, &str) -> String>,
+    render_signature_at_bottom: bool,
 ) -> buck2_error::Result<()> {
     let base_path = AbsPathBuf::new(base_path)?;
-    let mut docs: BTreeMap<_, _> = render_markdown_multipage(modules_infos, linked_ty_mapper)
-        .into_iter()
-        .collect();
+    let mut docs: BTreeMap<_, _> =
+        render_markdown_multipage(modules_infos, linked_ty_mapper, render_signature_at_bottom)
+            .into_iter()
+            .collect();
     while let Some((mut doc_path, rendered)) = docs.pop_first() {
         let mut path = base_path.clone();
         // Map:
@@ -46,7 +50,7 @@ pub(crate) fn write_docs_to_subdir(
         if doc_path.is_empty()
             || docs
                 .first_key_value()
-                .is_some_and(|(k, _)| k.starts_with(&format!("{}/", doc_path)))
+                .is_some_and(|(k, _)| k.starts_with(&format!("{doc_path}/")))
         {
             path.push(
                 ForwardRelativePath::new(&doc_path)
@@ -68,7 +72,8 @@ pub(crate) fn write_docs_to_subdir(
         }
         // Since we just <Link> to the docs, we need to import the Link component at the top of the file
         let final_rendered_conent = format!("import Link from '@docusaurus/Link';\n\n{rendered}");
-        fs_util::write(path, &final_rendered_conent)?;
+        // input path from --output-dir
+        fs_util::write(path, &final_rendered_conent).categorize_input()?;
     }
 
     Ok(())
@@ -118,7 +123,7 @@ pub(crate) async fn docs_starlark_builtins(
         format!("<Link to=\"/docs/api/{path}\">{type_name}</Link>")
     }
 
-    write_docs_to_subdir(modules_infos, &request.path, Some(linked_ty_mapper))?;
+    write_docs_to_subdir(modules_infos, &request.path, Some(linked_ty_mapper), false)?;
 
     Ok(DocsResponse { json_output: None })
 }

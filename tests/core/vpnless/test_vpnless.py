@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -28,9 +29,9 @@ async def test_vpnless_disabled_by_host(buck: Buck) -> None:
     await buck.build()
     result = await buck.status()
     status = json.loads(result.stdout)
-    assert not status[
-        "supports_vpnless"
-    ], "vpnless should be disabled by non-supporting host"
+    assert not status["supports_vpnless"], (
+        "vpnless should be disabled by non-supporting host"
+    )
 
 
 @buck_test()

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
@@ -14,8 +15,6 @@ import static com.facebook.buck.jvm.java.abi.AbiGenerationModeUtils.getDiagnosti
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 
 import com.facebook.buck.cd.model.java.AbiGenerationMode;
-import com.facebook.buck.core.exceptions.BuckUncheckedExecutionException;
-import com.facebook.buck.core.exceptions.HumanReadableException;
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.core.filesystems.RelPath;
 import com.facebook.buck.core.util.log.Logger;
@@ -32,7 +31,6 @@ import com.facebook.buck.jvm.java.plugin.api.BuckJavacTaskListener;
 import com.facebook.buck.jvm.java.plugin.api.BuckJavacTaskProxy;
 import com.facebook.buck.jvm.java.plugin.api.PluginClassLoader;
 import com.facebook.buck.jvm.java.plugin.api.PluginClassLoaderFactory;
-import com.facebook.buck.util.concurrent.MostExecutors.NamedThreadFactory;
 import com.facebook.buck.util.zip.JarBuilder;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
@@ -44,6 +42,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.io.IOException;
 import java.io.Writer;
 import java.nio.file.Path;
@@ -74,7 +73,7 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
 
   private static final ListeningExecutorService THREAD_POOL =
       MoreExecutors.listeningDecorator(
-          Executors.newCachedThreadPool(new NamedThreadFactory("javac")));
+          Executors.newCachedThreadPool(new ThreadFactoryBuilder().setNameFormat("javac").build()));
 
   private static final int SUCCESS_EXIT_CODE = 0;
   private static final int ERROR_EXIT_CODE = 1;
@@ -134,10 +133,11 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
   }
 
   @Override
-  public int buildSourceOnlyAbiJar() throws InterruptedException {
+  public int buildSourceOnlyAbiJar(boolean isMixedModule) throws InterruptedException {
     return getWorker()
         .buildSourceOnlyAbiJar(
-            compilerOutputPathsValue.getSourceOnlyAbiCompilerOutputPath().getOutputJarDirPath());
+            compilerOutputPathsValue.getSourceOnlyAbiCompilerOutputPath().getOutputJarDirPath(),
+            isMixedModule);
   }
 
   @Override
@@ -164,7 +164,7 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
                   .iterator(),
           pathToSrcsList.getPath());
     } catch (IOException e) {
-      throw new HumanReadableException(e, "Error writing list of .java files to compile.");
+      throw new RuntimeException("Error writing list of .java files to compile.", e);
     }
 
     return getWorker().buildClasses();
@@ -207,15 +207,17 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
       this.classUsageTracker = trackClassUsage ? new ClassUsageTracker() : null;
     }
 
-    public int buildSourceOnlyAbiJar(RelPath outputJarDirPath) throws InterruptedException {
-      return buildAbiJar(true, outputJarDirPath);
+    public int buildSourceOnlyAbiJar(RelPath outputJarDirPath, boolean isMixedModule)
+        throws InterruptedException {
+      return buildAbiJar(true, outputJarDirPath, isMixedModule);
     }
 
     public int buildSourceAbiJar(RelPath outputJarDirPath) throws InterruptedException {
-      return buildAbiJar(false, outputJarDirPath);
+      return buildAbiJar(false, outputJarDirPath, false);
     }
 
-    private int buildAbiJar(boolean buildSourceOnlyAbi, RelPath outputJarDirPath)
+    private int buildAbiJar(
+        boolean buildSourceOnlyAbi, RelPath outputJarDirPath, boolean isMixedModule)
         throws InterruptedException {
       SettableFuture<Integer> abiResult = SettableFuture.create();
       // abi is ready when compiler task finished
@@ -245,21 +247,32 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
               if (buildSuccessful()) {
                 // Only attempt to build stubs if the build is successful so far; errors can
                 // put javac into an unknown state.
-                JarBuilder jarBuilder = newJarBuilder(jarParameters).setShouldHashEntries(true);
+                JarBuilder jarBuilder = null;
+                if (!isMixedModule) {
+                  jarBuilder = newJarBuilder(jarParameters).setShouldHashEntries(true);
+                }
                 StubGenerator stubGenerator =
                     new StubGenerator(
                         getTargetVersion(options),
                         javacTask.getElements(),
                         javacTask.getTypes(),
-                        javacTask.getMessager(),
+                        isMixedModule
+                            ? new DowngradeMissingAnnotationErrorMessager(javacTask.getMessager())
+                            : javacTask.getMessager(),
                         jarBuilder,
                         abiCompatibilityMode,
                         options.contains("-parameters"),
-                        false);
+                        false,
+                        isMixedModule
+                            ? abiJarParameters.getEntriesToJar().first().toAbsolutePath()
+                            : null);
                 stubGenerator.generate(topLevelTypes);
-                jarBuilder.createJarFile(
-                    ProjectFilesystemUtils.getPathForRelativePath(
-                        ruleCellRoot, jarParameters.getJarPath()));
+
+                if (!isMixedModule) {
+                  jarBuilder.createJarFile(
+                      ProjectFilesystemUtils.getPathForRelativePath(
+                          ruleCellRoot, jarParameters.getJarPath()));
+                }
               }
 
               debugLogDiagnostics();
@@ -302,7 +315,7 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
         return abiResult.get();
       } catch (ExecutionException e) {
         Throwables.throwIfUnchecked(e.getCause());
-        throw new HumanReadableException("Failed to generate abi: %s", e.getCause().getMessage());
+        throw new RuntimeException("Failed to generate abi: %s", e.getCause());
       }
     }
 
@@ -323,7 +336,7 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
         return compilerResult.get();
       } catch (ExecutionException e) {
         Throwables.throwIfUnchecked(e.getCause());
-        throw new HumanReadableException("Failed to compile: %s", e.getCause().getMessage());
+        throw new RuntimeException("Failed to compile", e.getCause());
       }
     }
 
@@ -459,18 +472,16 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
         if (e.getCause() instanceof StopCompilation) {
           return SUCCESS_EXIT_CODE;
         } else if (javacTask instanceof FrontendOnlyJavacTaskProxy) {
-          throw new HumanReadableException(
-              e,
-              "The compiler crashed attempting to generate a source-only ABI: %s.\n"
-                  + "Try building %s instead and fixing any errors that are emitted.\n"
-                  + "If there are none, file an issue, with the crash trace from the log.\n"
-                  + "Exception: %s\n",
-              fullyQualifiedName,
-              compilerOutputPathsValue.getLibraryTargetFullyQualifiedName(),
+          throw new RuntimeException(
+              String.format(
+                  "The compiler crashed attempting to generate a source-only ABI: %s.\n"
+                      + "Try building %s instead and fixing any errors that are emitted.\n"
+                      + "If there are none, file an issue, with the crash trace from the log.\n",
+                  fullyQualifiedName,
+                  compilerOutputPathsValue.getLibraryTargetFullyQualifiedName()),
               e);
         } else {
-          throw new BuckUncheckedExecutionException(
-              e.getCause() != null ? e.getCause() : e, "When running javac");
+          throw new RuntimeException(e.getCause() != null ? e.getCause() : e);
         }
       } finally {
         for (AutoCloseable closeable : Lists.reverse(closeables)) {
@@ -597,7 +608,7 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
           lazyJavacTask = javacTask;
         } catch (IOException e) {
           LOG.error(e);
-          throw new HumanReadableException("IOException during compilation: ", e.getMessage());
+          throw new RuntimeException("IOException during compilation", e);
         }
       }
 
@@ -657,6 +668,12 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
           if (!hasZipFileBeenUsed) {
             zipFile.close();
           }
+        } else {
+          throw new RuntimeException(
+              String.format(
+                  "Unexpected file in java source paths: %s. Only .java files, .src.zip files, "
+                      + "and .src.jar files are allowed.",
+                  pathString));
         }
       }
 
@@ -668,7 +685,7 @@ class Jsr199JavacInvocation implements ResolvedJavac.Invocation {
       // annotations to process. Since this process is automated, it doesn't make sense to raise
       // a human-facing error message in that case.
       if (!seenZipOrJarSources && !javaSourceFilePaths.isEmpty() && compilationUnits.isEmpty()) {
-        throw new HumanReadableException(NO_JAVA_FILES_ERROR_MESSAGE);
+        throw new RuntimeException(NO_JAVA_FILES_ERROR_MESSAGE);
       }
       return compilationUnits;
     }

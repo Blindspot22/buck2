@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cell::RefCell;
@@ -39,6 +40,7 @@ pub struct PackageFileEvalCtx {
     /// When evaluating root `PACKAGE` file, parent is still defined.
     pub(crate) parent: SuperPackage,
     pub(crate) visibility: RefCell<Option<PackageFileVisibilityFields>>,
+    pub(crate) test_config_unification_rollout: RefCell<Option<bool>>,
 }
 
 impl PackageFileEvalCtx {
@@ -110,11 +112,18 @@ impl PackageFileEvalCtx {
             }
         };
 
+        let test_config_unification_rollout =
+            match self.test_config_unification_rollout.into_inner() {
+                Some(test_config_unification_rollout) => test_config_unification_rollout,
+                None => self.parent.test_config_unification_rollout(),
+            };
+
         SuperPackage::new(
             merged_package_values,
             visibility,
             within_view,
             cfg_constructor,
+            test_config_unification_rollout,
         )
     }
 }

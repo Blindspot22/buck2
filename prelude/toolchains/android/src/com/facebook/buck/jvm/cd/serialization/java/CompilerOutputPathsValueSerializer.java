@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.cd.serialization.java;
@@ -19,20 +20,6 @@ import java.util.Optional;
 public class CompilerOutputPathsValueSerializer {
 
   private CompilerOutputPathsValueSerializer() {}
-
-  /** Serializes {@link CompilerOutputPathsValue} into javacd model's {@link OutputPathsValue}. */
-  public static OutputPathsValue serialize(CompilerOutputPathsValue value) {
-    OutputPathsValue.Builder builder = OutputPathsValue.newBuilder();
-    builder.setLibraryPaths(toOutputPaths(value.getLibraryCompilerOutputPath()));
-    builder.setSourceAbiPaths(toOutputPaths(value.getSourceAbiCompilerOutputPath()));
-    builder.setSourceOnlyAbiPaths(toOutputPaths(value.getSourceOnlyAbiCompilerOutputPath()));
-    builder.setLibraryTargetFullyQualifiedName(value.getLibraryTargetFullyQualifiedName());
-    return builder.build();
-  }
-
-  private static OutputPathsValue.OutputPaths toOutputPaths(CompilerOutputPaths outputPaths) {
-    return CompilerOutputPathsSerializer.serialize(outputPaths);
-  }
 
   /** Deserializes javacd model's {@link OutputPathsValue} into {@link CompilerOutputPathsValue}. */
   public static CompilerOutputPathsValue deserialize(OutputPathsValue outputPathsValue) {

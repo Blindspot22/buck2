@@ -1,14 +1,14 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeMap;
-use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 
@@ -20,11 +20,12 @@ use dupe::Dupe;
 use equivalent::Equivalent;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
+use pagable::Pagable;
 use serde::Serialize;
 use serde::Serializer;
 use static_interner::Intern;
 use static_interner::InternDisposition;
-use static_interner::Interner;
+use static_interner::interner;
 use strong_hash::StrongHash;
 
 use crate::configuration::bound_id::BoundConfigurationId;
@@ -50,8 +51,8 @@ enum ConfigurationError {
         "Attempted to access the configuration data for the \"unspecified_exec\" platform. This platform is used when no execution platform was resolved for a target."
     )]
     UnspecifiedExec,
-    #[error("Internal error: NEW_PLATFORM_HASH_ROLLOUT_THRESHOLD is already initialized")]
-    NewPlatformHashRolloutThresholdAlreadyInitialized,
+    #[error("Internal error: DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT is already initialized")]
+    DeconflictContentBasedPathsRolloutAlreadyInitialized,
 }
 
 #[derive(Debug, buck2_error::Error)]
@@ -69,18 +70,15 @@ enum ConfigurationLookupError {
     ConfigFoundByHashLabelMismatch(ConfigurationData, BoundConfigurationId),
 }
 
-pub static NEW_PLATFORM_HASH_ROLLOUT_THRESHOLD: OnceCell<u8> = OnceCell::new();
+pub static DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT: OnceCell<bool> = OnceCell::new();
 
-pub fn init_new_platform_hash_rollout_threshold(rollout: Option<f64>) -> buck2_error::Result<()> {
-    let rollout_threshold = if let Some(rollout) = rollout {
-        (rollout * (u64::MAX as f64)) as u8
-    } else {
-        // disabled by default
-        0u8
-    };
-    NEW_PLATFORM_HASH_ROLLOUT_THRESHOLD
-        .set(rollout_threshold)
-        .map_err(|_| ConfigurationError::NewPlatformHashRolloutThresholdAlreadyInitialized)?;
+pub fn init_deconflict_content_based_paths_rollout(
+    rollout: Option<bool>,
+) -> buck2_error::Result<()> {
+    let rollout = rollout.unwrap_or(false);
+    DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT
+        .set(rollout)
+        .map_err(|_| ConfigurationError::DeconflictContentBasedPathsRolloutAlreadyInitialized)?;
     Ok(())
 }
 
@@ -126,7 +124,8 @@ fn emit_configuration_instant_event(cfg: &ConfigurationData) -> buck2_error::Res
     PartialOrd,
     Allocative,
     derive_more::Display,
-    StrongHash
+    StrongHash,
+    Pagable
 )]
 pub struct ConfigurationData(Intern<HashedConfigurationPlatform>);
 
@@ -139,7 +138,7 @@ impl Equivalent<HashedConfigurationPlatform> for ConfigurationHashRef<'_> {
     }
 }
 
-static INTERNER: Interner<HashedConfigurationPlatform, BuckHasher> = Interner::new();
+interner!(INTERNER, BuckHasher, HashedConfigurationPlatform);
 
 impl ConfigurationData {
     /// Produces a "bound" configuration for a platform. The label should be a unique identifier for the data.
@@ -284,10 +283,10 @@ impl ConfigurationData {
     }
 
     pub fn is_unbound(&self) -> bool {
-        match &self.0.configuration_platform {
-            ConfigurationPlatform::Builtin(BuiltinPlatform::Unbound) => true,
-            _ => false,
-        }
+        matches!(
+            &self.0.configuration_platform,
+            ConfigurationPlatform::Builtin(BuiltinPlatform::Unbound)
+        )
     }
 
     pub fn bound(&self) -> Option<&BoundConfigurationLabel> {
@@ -305,10 +304,10 @@ impl ConfigurationData {
     }
 
     pub fn is_bound(&self) -> bool {
-        match &self.0.configuration_platform {
-            ConfigurationPlatform::Bound(..) => true,
-            _ => false,
-        }
+        matches!(
+            &self.0.configuration_platform,
+            ConfigurationPlatform::Bound(..)
+        )
     }
 
     pub fn output_hash(&self) -> &ConfigurationHash {
@@ -344,7 +343,9 @@ impl ToProtoMessage for ConfigurationData {
     }
 }
 
-#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash)]
+#[derive(
+    Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash, Pagable
+)]
 enum ConfigurationPlatform {
     /// This represents the normal case where a platform has been defined by a `platform()` (or similar) target.
     Bound(BoundConfigurationLabel, ConfigurationDataData),
@@ -361,7 +362,7 @@ impl ConfigurationPlatform {
 }
 
 /// A set of values used in configuration-related contexts.
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Allocative, StrongHash, Pagable)]
 pub struct ConfigurationDataData {
     // contains the full specification of the platform configuration
     pub constraints: BTreeMap<ConstraintKey, ConstraintValue>,
@@ -413,7 +414,8 @@ impl ConfigurationDataData {
     Ord,
     PartialOrd,
     Allocative,
-    derive_more::Display
+    derive_more::Display,
+    Pagable
 )]
 #[display("{}", full_name)]
 pub(crate) struct HashedConfigurationPlatform {
@@ -445,29 +447,11 @@ impl HashedConfigurationPlatform {
         let mut hasher = Blake3StrongHasher::new();
         configuration_platform.strong_hash(&mut hasher);
         let output_hash = hasher.finish();
-
-        let rollout_threshold = match NEW_PLATFORM_HASH_ROLLOUT_THRESHOLD.get() {
-            Some(v) => *v,
-            // We only hit the uninitialized case in unit tests. In this case, we don't want to throw an
-            // error because it would fail a bunch of unit tests, and we don't want to
-            // unit tests explicitly initialize this value because this is a temporary migration value
-            // that we will get rid of later. We have e2e tests checking that this does not enable
-            // new hashing in production.
-            None => u8::MAX,
-        };
-
-        let output_hash = if output_hash as u8 <= rollout_threshold {
-            output_hash
-        } else {
-            let mut hasher = DefaultHasher::new();
-            configuration_platform.hash(&mut hasher);
-            hasher.finish()
-        };
         let output_hash = ConfigurationHash::new(output_hash);
 
         let full_name = match &configuration_platform {
             ConfigurationPlatform::Bound(label, _cfg) => {
-                format!("{:#}#{}", label, output_hash)
+                format!("{label:#}#{output_hash}")
             }
             ConfigurationPlatform::Builtin(builtin) => builtin.label().to_owned(),
         };
@@ -488,7 +472,6 @@ mod tests {
     use crate::configuration::constraints::ConstraintValue;
     use crate::configuration::data::ConfigurationData;
     use crate::configuration::data::ConfigurationDataData;
-    use crate::target::label::label::TargetLabel;
 
     /// We don't want the output hash to change by accident. This test is here to assert that it
     /// doesn't. If we have a legit reason to update the config hash, we can update the hash here,
@@ -500,22 +483,22 @@ mod tests {
             ConfigurationDataData {
                 constraints: BTreeMap::from_iter([
                     (
-                        ConstraintKey(TargetLabel::testing_parse("foo//bar:c")),
-                        ConstraintValue(TargetLabel::testing_parse("foo//bar:v")),
+                        ConstraintKey::testing_new("foo//bar:c"),
+                        ConstraintValue::testing_new("foo//bar:v", None),
                     ),
                     (
-                        ConstraintKey(TargetLabel::testing_parse("foo//qux:c")),
-                        ConstraintValue(TargetLabel::testing_parse("foo//qux:vx")),
+                        ConstraintKey::testing_new("foo//qux:c"),
+                        ConstraintValue::testing_new("foo//qux:vx", None),
                     ),
                 ]),
             },
         )
         .unwrap();
 
-        assert_eq!(configuration.output_hash().as_str(), "aa02f1990fb35119");
+        assert_eq!(configuration.output_hash().as_str(), "6770d7f2ebfc0845");
         assert_eq!(
             configuration.to_string(),
-            "cfg_for//:testing_exec#aa02f1990fb35119"
+            "cfg_for//:testing_exec#6770d7f2ebfc0845"
         );
 
         Ok(())
@@ -528,19 +511,19 @@ mod tests {
             ConfigurationDataData {
                 constraints: BTreeMap::from_iter([
                     (
-                        ConstraintKey(TargetLabel::testing_parse("foo//bar:c")),
-                        ConstraintValue(TargetLabel::testing_parse("foo//bar:v")),
+                        ConstraintKey::testing_new("foo//bar:c"),
+                        ConstraintValue::testing_new("foo//bar:v", None),
                     ),
                     (
-                        ConstraintKey(TargetLabel::testing_parse("foo//qux:c")),
-                        ConstraintValue(TargetLabel::testing_parse("foo//qux:vx")),
+                        ConstraintKey::testing_new("foo//qux:c"),
+                        ConstraintValue::testing_new("foo//qux:vx", None),
                     ),
                 ]),
             },
         )
         .unwrap();
 
-        let expected_cfg_str = "cfg_for//:testing_exec#aa02f1990fb35119";
+        let expected_cfg_str = "cfg_for//:testing_exec#6770d7f2ebfc0845";
         assert_eq!(expected_cfg_str, configuration.to_string());
 
         let looked_up =

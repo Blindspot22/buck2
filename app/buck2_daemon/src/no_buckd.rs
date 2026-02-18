@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_client_ctx::daemon::client::BuckdLifecycleLock;
@@ -14,7 +15,6 @@ use buck2_client_ctx::startup_deadline::StartupDeadline;
 use buck2_common::init::DaemonStartupConfig;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_core::logging::LogConfigurationReloadHandle;
-use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_util::threads::thread_spawn;
 
@@ -34,8 +34,7 @@ pub fn start_in_process_daemon(
             daemon_dir,
             StartupDeadline::duration_from_now(buckd_startup_timeout()?)?,
         )
-        .await
-        .with_buck_error_context(|| "Error locking buckd lifecycle.lock")?;
+        .await?;
 
         kill_command_impl(&lifecycle_lock, "A command with `--no-buckd` is invoked").await
     })?;

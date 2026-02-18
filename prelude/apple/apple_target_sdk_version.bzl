@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//apple:versions.bzl", "TARGET_SDK_VERSIONS")
 load("@prelude//cxx:target_sdk_version.bzl", "get_target_sdk_version")
@@ -51,6 +52,9 @@ _MACCATALYST_IOS_TO_MACOS_VERSION_MAP = {
     "18.2": "15.2",
     "18.3": "15.3",
     "18.4": "15.4",
+    "18.5": "15.5",
+    "18.6": "15.6",
+    "19.0": "16.0",  # Tahoe
 }
 
 _SDK_NAME_TO_PLATFORM_NAME_OVERRIDE_MAP = {
@@ -66,6 +70,12 @@ def get_target_sdk_version_map() -> dict[str, str]:
 
 def get_platform_version_for_sdk_version(sdk_name: str, sdk_version: str) -> str:
     if sdk_name == "maccatalyst":
+        sdk_major, _ = sdk_version.split(".", 2)
+
+        # Version numbers are aligned from 26 and up
+        if int(sdk_major) >= 26:
+            return sdk_version
+
         macos_version = _MACCATALYST_IOS_TO_MACOS_VERSION_MAP.get(sdk_version, None)
         if macos_version == None:
             fail("No macos version for maccatalyst version {}".format(sdk_version))

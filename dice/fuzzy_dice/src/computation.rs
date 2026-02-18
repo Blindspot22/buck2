@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -12,7 +13,6 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_futures::cancellation::CancellationContext;
 use crossbeam::queue::SegQueue;
 use derivative::Derivative;
 use derive_more::Display;
@@ -20,6 +20,7 @@ use dice::DiceComputations;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
 use dice::Key;
+use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future;
@@ -206,7 +207,7 @@ impl Key for EvalVar {
     ) -> Self::Value {
         let step = self.state.next_step_for_var(self.key);
         let ret = match &*lookup_unit(ctx, self.key).await.map_err(Arc::new)? {
-            Expr::Unit(unit) => resolve_units(ctx, &[unit.clone()], self.state.dupe())
+            Expr::Unit(unit) => resolve_units(ctx, std::slice::from_ref(unit), self.state.dupe())
                 .await
                 .map_err(Arc::new)?[0],
             Expr::Cond {
@@ -214,15 +215,15 @@ impl Key for EvalVar {
                 then,
                 otherwise,
             } => {
-                if resolve_units(ctx, &[test.clone()], self.state.dupe())
+                if resolve_units(ctx, std::slice::from_ref(test), self.state.dupe())
                     .await
                     .map_err(Arc::new)?[0]
                 {
-                    resolve_units(ctx, &[then.clone()], self.state.dupe())
+                    resolve_units(ctx, std::slice::from_ref(then), self.state.dupe())
                         .await
                         .map_err(Arc::new)?[0]
                 } else {
-                    resolve_units(ctx, &[otherwise.clone()], self.state.dupe())
+                    resolve_units(ctx, std::slice::from_ref(otherwise), self.state.dupe())
                         .await
                         .map_err(Arc::new)?[0]
                 }

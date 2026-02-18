@@ -1,21 +1,24 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
 use buck2_core::package::package_relative_path::PackageRelativePath;
 use buck2_util::arc_str::ArcS;
 use dupe::Dupe;
+use serde::Deserialize;
+use serde::Serialize;
 use starlark_map::sorted_set::SortedSet;
 
 use crate::package_listing::binary_search::binary_search_by;
 
-#[derive(Eq, PartialEq, Debug, Allocative)]
+#[derive(Eq, PartialEq, Debug, Allocative, Serialize, Deserialize)]
 pub struct PackageFileListing {
     /// This is kept sorted for efficient prefix matching.
     pub(crate) files: SortedSet<ArcS<PackageRelativePath>>,
@@ -29,7 +32,7 @@ impl PackageFileListing {
     pub(crate) fn files_within(
         &self,
         prefix: &PackageRelativePath,
-    ) -> impl Iterator<Item = &ArcS<PackageRelativePath>> {
+    ) -> impl Iterator<Item = &ArcS<PackageRelativePath>> + use<'_> {
         let len = prefix.as_str().len();
         self.files_with_prefix(prefix.as_str()).filter(move |x| {
             // Same logic as PackageRelativePath.starts_with,
@@ -41,7 +44,7 @@ impl PackageFileListing {
     pub fn files_with_prefix(
         &self,
         prefix: &str,
-    ) -> impl Iterator<Item = &ArcS<PackageRelativePath>> {
+    ) -> impl Iterator<Item = &ArcS<PackageRelativePath>> + use<'_> {
         use std::cmp::Ordering;
         let files = &self.files;
         let len = files.len();

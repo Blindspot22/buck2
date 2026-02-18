@@ -1,18 +1,22 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
+use std::iter;
+use std::sync::Arc;
 
 use allocative::Allocative;
 use anyhow::Context;
 use futures_intrusive::sync::SharedSemaphore;
 use futures_intrusive::sync::SharedSemaphoreReleaser;
+use starlark_map::sorted_vec::SortedVec;
 
 use crate::NamedSemaphores;
 
@@ -39,7 +43,7 @@ pub enum WeightClass {
 impl fmt::Display for WeightClass {
     fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Permits(p) => write!(w, "{}", p),
+            Self::Permits(p) => write!(w, "{p}"),
             Self::Percentage(p) => write!(w, "{}%", p.into_value()),
         }
     }
@@ -85,6 +89,8 @@ pub enum HostSharingRequirements {
     ExclusiveAccess,
     /// Can share with other processes, but not with others requiring the same token
     OnePerToken(String, WeightClass),
+    /// Can share with other processes, but not with any others requiring any of the same tokens
+    OnePerTokens(SortedVec<String>, WeightClass),
     /// Run with any other processes within reasonable limits.
     Shared(WeightClass),
 }
@@ -94,9 +100,12 @@ impl fmt::Display for HostSharingRequirements {
         match &self {
             HostSharingRequirements::ExclusiveAccess => write!(f, "ExclusiveAccess"),
             HostSharingRequirements::OnePerToken(name, class) => {
-                write!(f, "OnePerToken({},{})", name, class)
+                write!(f, "OnePerToken({name},{class})")
             }
-            HostSharingRequirements::Shared(class) => write!(f, "Shared({})", class),
+            HostSharingRequirements::OnePerTokens(names, class) => {
+                write!(f, "OnePerTokens({names:?},{class})")
+            }
+            HostSharingRequirements::Shared(class) => write!(f, "Shared({class})"),
         }
     }
 }
@@ -112,14 +121,14 @@ impl Default for HostSharingRequirements {
 /// Semaphores are held until this struct is dropped.
 pub struct HostSharingGuard {
     _run_guard: SharedSemaphoreReleaser,
-    _name_guard: Option<SharedSemaphoreReleaser>,
+    _name_guards: Vec<SharedSemaphoreReleaser>,
 }
 
 /// Used to ensure that host resources are properly reserved before executing a command spec.
 pub struct HostSharingBroker {
     permits: SharedSemaphore,
     num_machine_permits: usize,
-    named_semaphores: NamedSemaphores,
+    named_semaphores: Arc<NamedSemaphores>,
 }
 
 pub struct RequestedPermits {
@@ -155,7 +164,11 @@ impl HostSharingBroker {
         }
     }
 
-    pub fn new(host_sharing_strategy: HostSharingStrategy, num_machine_permits: usize) -> Self {
+    pub fn new_with_named_semaphores(
+        host_sharing_strategy: HostSharingStrategy,
+        num_machine_permits: usize,
+        named_semaphores: Arc<NamedSemaphores>,
+    ) -> Self {
         let permits = match host_sharing_strategy {
             HostSharingStrategy::Fifo => SharedSemaphore::new(true, num_machine_permits),
             HostSharingStrategy::SmallerTasksFirst => {
@@ -166,8 +179,16 @@ impl HostSharingBroker {
         Self {
             permits,
             num_machine_permits,
-            named_semaphores: NamedSemaphores::new(),
+            named_semaphores,
         }
+    }
+
+    pub fn new(host_sharing_strategy: HostSharingStrategy, num_machine_permits: usize) -> Self {
+        Self::new_with_named_semaphores(
+            host_sharing_strategy,
+            num_machine_permits,
+            Arc::new(NamedSemaphores::new()),
+        )
     }
 
     pub fn num_machine_permits(&self) -> usize {
@@ -181,33 +202,48 @@ impl HostSharingBroker {
         match host_sharing_requirements {
             HostSharingRequirements::Shared(weight_class) => {
                 let permits = self.requested_permits(weight_class).into_count();
-                let _run_guard = self.permits.acquire(permits).await;
-                HostSharingGuard {
-                    _run_guard,
-                    _name_guard: None,
-                }
+                self.acquire_from_permits_and_identifiers(permits, iter::empty())
+                    .await
             }
             HostSharingRequirements::ExclusiveAccess => {
-                let _run_guard = self.permits.acquire(self.num_machine_permits).await;
-                HostSharingGuard {
-                    _run_guard,
-                    _name_guard: None,
-                }
+                self.acquire_from_permits_and_identifiers(self.num_machine_permits, iter::empty())
+                    .await
             }
             HostSharingRequirements::OnePerToken(identifier, weight_class) => {
-                // Ensure that there is only one active run per identifier.
-                // Acquire the identifier semaphore first, then acquire the permits needed to actually run.
-                // This is so that no permits (which map to system resources / cores) are held while waiting
-                // for the previous run on this identifier to finish.
-                let run_semaphore = self.named_semaphores.get(identifier);
-                let _name_guard = Some(run_semaphore.acquire(SINGLE_RUN).await);
                 let permits = self.requested_permits(weight_class).into_count();
-                let _run_guard = self.permits.acquire(permits).await;
-                HostSharingGuard {
-                    _run_guard,
-                    _name_guard,
-                }
+                self.acquire_from_permits_and_identifiers(permits, iter::once(identifier))
+                    .await
             }
+            HostSharingRequirements::OnePerTokens(sorted_identifiers, weight_class) => {
+                let permits = self.requested_permits(weight_class).into_count();
+                self.acquire_from_permits_and_identifiers(permits, sorted_identifiers.iter())
+                    .await
+            }
+        }
+    }
+
+    async fn acquire_from_permits_and_identifiers<'a>(
+        &self,
+        num_requested_permits: usize,
+        sorted_identifiers: impl Iterator<Item = &'a String>,
+    ) -> HostSharingGuard {
+        // Ensure that there is only one active run per identifier. The identifiers must be sorted
+        // to avoid a potential deadlock.
+        //
+        // Acquire the identifier semaphores first, then acquire the permits needed to actually run.
+        // This is so that no permits (which map to system resources / cores) are held while waiting
+        // for the previous runs on these identifiers to finish.
+        let mut name_guards = Vec::new();
+        for identifier in sorted_identifiers {
+            let run_semaphore = self.named_semaphores.get(identifier);
+            let name_guard = run_semaphore.acquire(SINGLE_RUN).await;
+            name_guards.push(name_guard);
+        }
+        let run_guard = self.permits.acquire(num_requested_permits).await;
+
+        HostSharingGuard {
+            _run_guard: run_guard,
+            _name_guards: name_guards,
         }
     }
 }

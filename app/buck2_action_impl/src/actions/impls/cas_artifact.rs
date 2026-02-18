@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -22,13 +23,16 @@ use buck2_build_api::actions::execute::action_executor::ActionExecutionMetadata;
 use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
 use buck2_build_api::artifact_groups::ArtifactGroup;
-use buck2_common::file_ops::FileDigest;
-use buck2_common::file_ops::FileMetadata;
-use buck2_common::file_ops::TrackedFileDigest;
+use buck2_build_signals::env::WaitingData;
+use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_common::io::trace::TracingIoProvider;
 use buck2_core::category::CategoryRef;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
+use buck2_core::soft_error;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest::CasDigestToReExt;
 use buck2_execute::directory::ActionDirectoryEntry;
@@ -37,6 +41,7 @@ use buck2_execute::directory::re_directory_to_re_tree;
 use buck2_execute::directory::re_tree_to_directory;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::CasDownloadInfo;
+use buck2_execute::materialize::materializer::DeclareArtifactPayload;
 use chrono::DateTime;
 use chrono::TimeZone;
 use chrono::Utc;
@@ -49,9 +54,6 @@ use crate::actions::impls::offline;
 
 #[derive(Debug, buck2_error::Error)]
 enum CasArtifactActionDeclarationError {
-    #[error("CAS artifact action should not have inputs, got {0}")]
-    #[buck2(tag = ReCasArtifactWrongNumberOfInputs)]
-    WrongNumberOfInputs(usize),
     #[error("CAS artifact action should have exactly 1 output, got {0}")]
     #[buck2(tag = ReCasArtifactWrongNumberOfOutputs)]
     WrongNumberOfOutputs(usize),
@@ -59,18 +61,15 @@ enum CasArtifactActionDeclarationError {
 
 #[derive(Debug, buck2_error::Error)]
 enum CasArtifactActionExecutionError {
-    #[error("Error accessing digest expiration for: `{0}`")]
-    #[buck2(tag = ReCasArtifactGetDigestExpirationError)]
-    GetDigestExpirationError(FileDigest),
-
     #[error(
-        "The digest `{digest}` was declared to expire after `{declared_expiration}`, but it expires at `{effective_expiration}`"
-    )]
+        "The digest `{digest}` was declared to expire after `{declared_expiration}`, but it was set to expire at `{effective_expiration}`{}"
+    , (if .effective_expiration != .updated_expiration {format!(" (updated to {})", .updated_expiration)} else {"".to_owned()}))]
     #[buck2(tag = ReCasArtifactInvalidExpiration)]
     InvalidExpiration {
         digest: FileDigest,
         declared_expiration: DateTime<Utc>,
         effective_expiration: DateTime<Utc>,
+        updated_expiration: DateTime<Utc>,
     },
 }
 
@@ -106,12 +105,11 @@ pub(crate) struct UnregisteredCasArtifactAction {
 impl UnregisteredAction for UnregisteredCasArtifactAction {
     fn register(
         self: Box<Self>,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         _starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
-        Ok(Box::new(CasArtifactAction::new(inputs, outputs, *self)?))
+        Ok(Box::new(CasArtifactAction::new(outputs, *self)?))
     }
 }
 
@@ -123,16 +121,9 @@ struct CasArtifactAction {
 
 impl CasArtifactAction {
     fn new(
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         inner: UnregisteredCasArtifactAction,
     ) -> buck2_error::Result<Self> {
-        if !inputs.is_empty() {
-            return Err(
-                CasArtifactActionDeclarationError::WrongNumberOfInputs(inputs.len()).into(),
-            );
-        }
-
         let outputs_len = outputs.len();
         let mut outputs = outputs.into_iter();
 
@@ -152,7 +143,7 @@ impl CasArtifactAction {
         &self,
         ctx: &mut dyn ActionExecutionCtx,
     ) -> buck2_error::Result<(ActionOutputs, ActionExecutionMetadata)> {
-        let outputs = offline::declare_copy_from_offline_cache(ctx, &self.output).await?;
+        let outputs = offline::declare_copy_from_offline_cache(ctx, &[&self.output]).await?;
 
         Ok((
             outputs,
@@ -160,6 +151,7 @@ impl CasArtifactAction {
                 execution_kind: ActionExecutionKind::Deferred,
                 timing: ActionExecutionTimingData::default(),
                 input_files_bytes: None,
+                waiting_data: WaitingData::new(),
             },
         ))
     }
@@ -183,7 +175,7 @@ impl Action for CasArtifactAction {
         &self.output
     }
 
-    fn category(&self) -> CategoryRef {
+    fn category(&self) -> CategoryRef<'_> {
         CategoryRef::unchecked_new("cas_artifact")
     }
 
@@ -194,6 +186,7 @@ impl Action for CasArtifactAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
+        waiting_data: WaitingData,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
         // If running in offline environment, try to restore from cached outputs.
         if ctx.run_action_knobs().use_network_action_output_cache {
@@ -201,40 +194,77 @@ impl Action for CasArtifactAction {
         }
 
         let re_client = ctx.re_client().with_use_case(self.inner.re_use_case);
-        let expiration = re_client
-            .get_digest_expirations(vec![self.inner.digest.to_re()])
-            .await
-            .with_buck_error_context(|| {
-                CasArtifactActionExecutionError::GetDigestExpirationError(self.inner.digest.dupe())
-            })?
-            .into_iter()
-            .next()
-            .buck_error_context("get_digest_expirations did not return anything")?
-            .1;
+
+        let get_expiration = || async {
+            buck2_error::Ok(
+                re_client
+                    .get_digest_expirations(vec![self.inner.digest.to_re()])
+                    .await
+                    .with_buck_error_context(|| {
+                        format!(
+                            "Error accessing digest expiration for: `{}`",
+                            self.inner.digest,
+                        )
+                    })?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        internal_error!("get_digest_expirations did not return anything")
+                    })
+                    .tag(buck2_error::ErrorTag::ReCasArtifactGetDigestExpirationError)?
+                    .1,
+            )
+        };
+
+        let expiration = get_expiration().await?;
 
         if expiration < self.inner.expires_after {
-            return Err(buck2_error::Error::from(
-                CasArtifactActionExecutionError::InvalidExpiration {
-                    digest: self.inner.digest.dupe(),
-                    declared_expiration: self.inner.expires_after,
-                    effective_expiration: expiration,
-                },
-            )
-            .into());
+            // The expires_after mechanism is intended to support users storing prebuilt artifacts in cas and asserting that their builds will continue
+            // working for some minimum time period (typically years).
+            //
+            // If the observed expiration is too short, we'll log a soft error and try to extend it.
+            //
+            // TODO(cjhopman): It would be reasonable for this behavior to be more configurable, there just hasn't been need for it yet.
+            let now = Utc::now();
+
+            // Adds a small buffer to avoid minor clock skew issues.
+            let new_ttl =
+                self.inner.expires_after.signed_duration_since(now) + chrono::Duration::minutes(5);
+
+            re_client
+                .extend_digest_ttl(
+                    vec![self.inner.digest.to_re()],
+                    new_ttl
+                        .to_std()
+                        .map_err(|e| internal_error!("casting ttl to std duration `{}`", e))?,
+                )
+                .await?;
+
+            // We were able to extend the ttl, so this won't be failing builds, but we need to report it so we can track it.
+            let new_expiration = get_expiration().await?;
+            let error: buck2_error::Error = CasArtifactActionExecutionError::InvalidExpiration {
+                digest: self.inner.digest.dupe(),
+                declared_expiration: self.inner.expires_after,
+                effective_expiration: expiration,
+                updated_expiration: new_expiration,
+            }
+            .into();
+            soft_error!("cas_artifact_invalid_expiration", error, quiet: true).ok();
         }
 
         let value = match self.inner.kind {
             ArtifactKind::Directory(directory_kind) => {
+                // TODO: should honor the semaphore here from OutputTreesDownloadConfig.
+
                 let tree = match directory_kind {
                     DirectoryKind::Tree => re_client
                         .download_typed_blobs::<RE::Tree>(None, vec![self.inner.digest.to_re()])
                         .await
-                        .map_err(buck2_error::Error::from)
                         .and_then(|trees| {
                             trees
                                 .into_iter()
                                 .next()
-                                .buck_error_context("RE response was empty")
+                                .ok_or_else(|| internal_error!("RE response was empty"))
                         })
                         .with_buck_error_context(|| {
                             format!("Error downloading tree: {}", self.inner.digest)
@@ -246,11 +276,10 @@ impl Action for CasArtifactAction {
                                 vec![self.inner.digest.to_re()],
                             )
                             .await
-                            .map_err(buck2_error::Error::from)
                             .and_then(|dirs| {
                                 dirs.into_iter()
                                     .next()
-                                    .buck_error_context("RE response was empty")
+                                    .ok_or_else(|| internal_error!("RE response was empty"))
                             })
                             .with_buck_error_context(|| {
                                 format!("Error downloading dir: {}", self.inner.digest)
@@ -266,6 +295,8 @@ impl Action for CasArtifactAction {
                     &tree,
                     &Utc.timestamp_opt(0, 0).unwrap(),
                     ctx.digest_config(),
+                    ctx.output_trees_download_config()
+                        .fingerprint_re_output_trees_eagerly(),
                 )
                 .buck_error_context("Invalid directory")?;
 
@@ -291,12 +322,23 @@ impl Action for CasArtifactAction {
             }
         };
 
-        let path = ctx.fs().resolve_build(self.output.get_path())?;
+        let path = ctx.fs().resolve_build(
+            self.output.get_path(),
+            if self.output.get_path().is_content_based_path() {
+                Some(value.content_based_path_hash())
+            } else {
+                None
+            }
+            .as_ref(),
+        )?;
         ctx.materializer()
             .declare_cas_many(
                 Arc::new(CasDownloadInfo::new_declared(self.inner.re_use_case)),
-                vec![(path, value.dupe())],
-                ctx.cancellation_context(),
+                vec![DeclareArtifactPayload {
+                    path,
+                    artifact: value.dupe(),
+                    persist_full_directory_structure: false,
+                }],
             )
             .await?;
 
@@ -314,6 +356,7 @@ impl Action for CasArtifactAction {
                 execution_kind: ActionExecutionKind::Deferred,
                 timing: ActionExecutionTimingData::default(),
                 input_files_bytes: None,
+                waiting_data,
             },
         ))
     }

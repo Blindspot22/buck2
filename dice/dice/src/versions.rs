@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //!
@@ -87,7 +88,7 @@ impl Display for VersionRange {
                 write!(f, "Unbounded")?;
             }
             Some(end) => {
-                write!(f, "{}", end)?;
+                write!(f, "{end}")?;
             }
         }
         write!(f, ")")
@@ -261,7 +262,7 @@ impl Display for VersionRanges {
             if i != 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{}", range)?;
+            write!(f, "{range}")?;
         }
         write!(f, "}}")
     }
@@ -590,20 +591,20 @@ mod tests {
     #[test]
     fn version_range_contains() {
         let r1 = VersionRange::bounded(VersionNumber::new(3), VersionNumber::new(6));
-        assert_eq!(r1.contains(&VersionNumber::new(1)), false);
-        assert_eq!(r1.contains(&VersionNumber::new(2)), false);
-        assert_eq!(r1.contains(&VersionNumber::new(3)), true);
-        assert_eq!(r1.contains(&VersionNumber::new(4)), true);
-        assert_eq!(r1.contains(&VersionNumber::new(5)), true);
-        assert_eq!(r1.contains(&VersionNumber::new(6)), false);
-        assert_eq!(r1.contains(&VersionNumber::new(7)), false);
-        assert_eq!(r1.contains(&VersionNumber::new(8)), false);
+        assert!(!(r1.contains(&VersionNumber::new(1))));
+        assert!(!(r1.contains(&VersionNumber::new(2))));
+        assert!(r1.contains(&VersionNumber::new(3)));
+        assert!(r1.contains(&VersionNumber::new(4)));
+        assert!(r1.contains(&VersionNumber::new(5)));
+        assert!(!(r1.contains(&VersionNumber::new(6))));
+        assert!(!(r1.contains(&VersionNumber::new(7))));
+        assert!(!(r1.contains(&VersionNumber::new(8))));
 
         let r1 = VersionRange::begins_with(VersionNumber::new(3));
-        assert_eq!(r1.contains(&VersionNumber::new(2)), false);
-        assert_eq!(r1.contains(&VersionNumber::new(3)), true);
-        assert_eq!(r1.contains(&VersionNumber::new(4)), true);
-        assert_eq!(r1.contains(&VersionNumber::new(5000)), true);
+        assert!(!(r1.contains(&VersionNumber::new(2))));
+        assert!(r1.contains(&VersionNumber::new(3)));
+        assert!(r1.contains(&VersionNumber::new(4)));
+        assert!(r1.contains(&VersionNumber::new(5000)));
     }
 
     #[test]
@@ -705,56 +706,57 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::nonminimal_bool)]
     fn version_range_ops() {
         let r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
         let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
 
-        assert_eq!(r1 == r2, true);
-        assert_eq!(r1 < r2, false);
-        assert_eq!(r1 > r2, false);
+        assert!(r1 == r2);
+        assert!(!(r1 < r2));
+        assert!(!(r1 > r2));
 
         let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
-        assert_eq!(r1 == r2, false);
-        assert_eq!(r1 < r2, true);
-        assert_eq!(r1 > r2, false);
+        assert!(!(r1 == r2));
+        assert!(r1 < r2);
+        assert!(!(r1 > r2));
 
         let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(3));
-        assert_eq!(r1 == r2, false);
-        assert_eq!(r1 < r2, true);
-        assert_eq!(r1 > r2, false);
+        assert!(!(r1 == r2));
+        assert!(r1 < r2);
+        assert!(!(r1 > r2));
 
         let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(3));
-        assert_eq!(r1 == r2, false);
-        assert_eq!(r1 < r2, false);
-        assert_eq!(r1 > r2, true);
+        assert!(!(r1 == r2));
+        assert!(!(r1 < r2));
+        assert!(r1 > r2);
 
         let r2 = VersionRange::begins_with(VersionNumber::new(2));
-        assert_eq!(r1 == r2, false);
-        assert_eq!(r1 < r2, true);
-        assert_eq!(r1 > r2, false);
+        assert!(!(r1 == r2));
+        assert!(r1 < r2);
+        assert!(!(r1 > r2));
 
         let r2 = VersionRange::begins_with(VersionNumber::new(0));
-        assert_eq!(r1 == r2, false);
-        assert_eq!(r1 < r2, false);
-        assert_eq!(r1 > r2, true);
+        assert!(!(r1 == r2));
+        assert!(!(r1 < r2));
+        assert!(r1 > r2);
 
         let r1 = VersionRange::begins_with(VersionNumber::new(1));
         let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
-        assert_eq!(r1 == r2, false);
-        assert_eq!(r1 < r2, false);
-        assert_eq!(r1 > r2, true);
+        assert!(!(r1 == r2));
+        assert!(!(r1 < r2));
+        assert!(r1 > r2);
 
         let r1 = VersionRange::begins_with(VersionNumber::new(1));
         let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(4));
-        assert_eq!(r1 == r2, false);
-        assert_eq!(r1 < r2, true);
-        assert_eq!(r1 > r2, false);
+        assert!(!(r1 == r2));
+        assert!(r1 < r2);
+        assert!(!(r1 > r2));
 
         let r1 = VersionRange::begins_with(VersionNumber::new(1));
         let r2 = VersionRange::begins_with(VersionNumber::new(1));
-        assert_eq!(r1 == r2, true);
-        assert_eq!(r1 < r2, false);
-        assert_eq!(r1 > r2, false);
+        assert!(r1 == r2);
+        assert!(!(r1 < r2));
+        assert!(!(r1 > r2));
     }
 
     #[test]
@@ -835,8 +837,7 @@ mod tests {
 
             assert_eq!(
                 as_ranges, expected_ranges,
-                "in assert_intersect_range(\n  {:?},\n  {:?},\n  {:?}\n)",
-                initial, intersect_with, expected
+                "in assert_intersect_range(\n  {initial:?},\n  {intersect_with:?},\n  {expected:?}\n)"
             )
         }
 
@@ -918,11 +919,7 @@ mod tests {
             let expected = into_ranges(expected);
             assert!(
                 r == expected,
-                "test_insert assertion failed\n initial: {}\n range: {}\n expected: {}\n actual: {}",
-                initial,
-                range,
-                expected,
-                r
+                "test_insert assertion failed\n initial: {initial}\n range: {range}\n expected: {expected}\n actual: {r}"
             );
         }
 

@@ -1,5 +1,8 @@
 load(":defs.bzl", "empty_dir")
 
-empty_dir(name = "empty_dir")
+empty_dir(
+    name = "empty_dir",
+    has_content_based_path = read_config("test", "has_content_based_path", "False") in ["True", "true"],
+)
 
 trivial_build(name = "dummy")

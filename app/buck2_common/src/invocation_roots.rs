@@ -1,24 +1,26 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
 use buck2_core::buck2_env;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::paths::file_name::FileName;
-use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileNameBuf;
+use buck2_fs::working_dir::AbsWorkingDir;
 use once_cell::sync::Lazy;
 
 use crate::invocation_paths::InvocationPaths;
@@ -116,7 +118,7 @@ pub fn get_invocation_paths_result(
         Ok(None) => {
             InvocationPathsResult::OutsideOfRepo(BuckCliError::NoBuckRoot(from.to_owned()).into())
         }
-        Err(e) => InvocationPathsResult::OtherError(e.into()),
+        Err(e) => InvocationPathsResult::OtherError(e),
     }
 }
 
@@ -140,15 +142,14 @@ pub fn get_invocation_paths_result(
 ///    output directories between different buckd instances.
 pub(crate) fn home_buck_dir() -> buck2_error::Result<&'static AbsNormPath> {
     fn find_dir() -> buck2_error::Result<AbsNormPathBuf> {
-        let home =
-            dirs::home_dir().buck_error_context("Expected a HOME directory to be available")?;
+        let home = dirs::home_dir()
+            .ok_or_else(|| internal_error!("Expected a HOME directory to be available"))?;
         let home =
             AbsNormPathBuf::new(home).buck_error_context("Expected an absolute HOME directory")?;
         Ok(home.join(FileName::new(".buck")?))
     }
 
-    static DIR: Lazy<buck2_error::Result<AbsNormPathBuf>> =
-        Lazy::new(|| find_dir().map_err(buck2_error::Error::from));
+    static DIR: Lazy<buck2_error::Result<AbsNormPathBuf>> = Lazy::new(find_dir);
 
     Ok(&Lazy::force(&DIR).as_ref().map_err(dupe::Dupe::dupe)?)
 }

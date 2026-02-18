@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Debug;
@@ -16,9 +17,10 @@ use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::values::Freeze;
-use starlark::values::FreezeResult;
 use starlark::values::FrozenRef;
+use starlark::values::FrozenStringValue;
 use starlark::values::FrozenValue;
+use starlark::values::StringValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLifetimeless;
@@ -52,10 +54,21 @@ enum ExecutionPlatformRegistrationTypeError {
 #[derive(Clone, Debug, Trace, Coerce, Freeze, ProvidesStaticType, Allocative)]
 #[repr(C)]
 pub struct ExecutionPlatformRegistrationInfoGen<V: ValueLifetimeless> {
+    /// The list of execution platforms that are available for the build.
     platforms: ValueOfUncheckedGeneric<V, Vec<FrozenExecutionPlatformInfo>>,
-    // OneOf<ExecutionPlatformInfo, \"error\", \"unspecified\", None>
+    /// Specifies the behavior when no compatible execution platform is found from the `platforms` list.
+    /// Can be one of:
+    /// - `None` or `"use_unspecified"`: Proceed with an unspecified execution platform.
+    ///   This allows the build to continue without explicitly matching an execution platform.
+    /// - `"error"`: Fail the build with an error message indicating no compatible platform was found.
+    /// - An `ExecutionPlatformInfo`: Use this specific platform as a fallback when no other
+    ///   platform from the `platforms` list matches.
     // TODO(nga): specify type more precisely.
     fallback: ValueOfUncheckedGeneric<V, FrozenValue>,
+    /// Optional marker constraint that identifies platforms as execution platforms.
+    /// If set, every execution platform in `platforms` will be marked with this constraint,
+    /// allowing to distinguish execution platforms from target platforms.
+    exec_marker_constraint: ValueOfUncheckedGeneric<V, Option<FrozenStringValue>>,
 }
 
 impl FrozenExecutionPlatformRegistrationInfo {
@@ -107,6 +120,15 @@ impl FrozenExecutionPlatformRegistrationInfo {
             .into()),
         }
     }
+
+    pub fn exec_marker_constraint(&self) -> Option<&str> {
+        let value = self.exec_marker_constraint.get().to_value();
+        if value.is_none() {
+            None
+        } else {
+            value.unpack_str()
+        }
+    }
 }
 
 #[starlark_module]
@@ -117,12 +139,19 @@ fn info_creator(globals: &mut GlobalsBuilder) {
             ListType<ValueTypedComplex<'v, ExecutionPlatformInfo<'v>>>,
         >,
         #[starlark(require = named, default = NoneOr::None)] fallback: NoneOr<Value<'v>>,
+        #[starlark(require = named, default = NoneOr::None)] exec_marker_constraint: NoneOr<
+            StringValue<'v>,
+        >,
     ) -> starlark::Result<ExecutionPlatformRegistrationInfo<'v>> {
         Ok(ExecutionPlatformRegistrationInfo {
             platforms: ValueOfUnchecked::new(platforms.value),
             fallback: ValueOfUnchecked::new(match fallback {
                 NoneOr::None => Value::new_none(),
                 NoneOr::Other(v) => v,
+            }),
+            exec_marker_constraint: ValueOfUnchecked::new(match exec_marker_constraint {
+                NoneOr::None => Value::new_none(),
+                NoneOr::Other(v) => v.to_value(),
             }),
         })
     }

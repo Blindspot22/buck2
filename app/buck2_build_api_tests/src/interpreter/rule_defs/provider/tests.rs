@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_build_api::interpreter::rule_defs::provider::callable::register_provider;
@@ -21,7 +22,7 @@ fn provider_tester() -> Tester {
 }
 
 #[test]
-fn creates_providers() -> anyhow::Result<()> {
+fn creates_providers() -> buck2_error::Result<()> {
     // TODO(nmj): Starlark doesn't let you call 'new_invoker()' on is_mutable types.
     //                 Once that's fixed, make sure we can call 'FooInfo' before the module is
     //                 frozen.

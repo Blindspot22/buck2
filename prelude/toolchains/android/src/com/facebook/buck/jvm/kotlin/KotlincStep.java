@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin;
@@ -38,6 +39,8 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Optional;
 import javax.annotation.Nullable;
 
@@ -77,6 +80,7 @@ public class KotlincStep implements IsolatedStep {
   private final KotlincMode kotlincMode;
   private final KotlinCDAnalytics kotlinCDAnalytics;
   private final LanguageVersion languageVersion;
+  private final boolean shouldKosabiJvmAbiGenUseK2;
 
   KotlincStep(
       BuildTargetValue invokingRule,
@@ -101,7 +105,8 @@ public class KotlincStep implements IsolatedStep {
       Optional<AbsPath> depTrackerPath,
       KotlincMode kotlincMode,
       KotlinCDAnalytics kotlinCDAnalytics,
-      LanguageVersion languageVersion) {
+      LanguageVersion languageVersion,
+      boolean shouldKosabiJvmAbiGenUseK2) {
     this.invokingRule = invokingRule;
     this.outputDirectory = outputDirectory;
     this.sourceFilePaths = sourceFilePaths;
@@ -125,6 +130,7 @@ public class KotlincStep implements IsolatedStep {
     this.kotlincMode = kotlincMode;
     this.kotlinCDAnalytics = kotlinCDAnalytics;
     this.languageVersion = languageVersion;
+    this.shouldKosabiJvmAbiGenUseK2 = shouldKosabiJvmAbiGenUseK2;
   }
 
   @Override
@@ -144,6 +150,8 @@ public class KotlincStep implements IsolatedStep {
 
       KotlinCDLoggingContext loggingContext =
           KotlinCDLoggingContextFactory.create(this, languageVersion, kotlincMode);
+      Instant compilationStart = Instant.now();
+
       int declaredDepsBuildResult =
           kotlinc.buildWithClasspath(
               firstOrderContext,
@@ -156,6 +164,12 @@ public class KotlincStep implements IsolatedStep {
               context.getRuleCellRoot(),
               kotlincMode,
               loggingContext);
+
+      Instant compilationEnd = Instant.now();
+      Duration compilationDuration = Duration.between(compilationStart, compilationEnd);
+      loggingContext.addExtras(
+          this.getClass().getSimpleName(),
+          "Kotlinc step duration: " + compilationDuration.toMillis() + " ms");
       kotlinCDAnalytics.log(loggingContext);
 
       String firstOrderStderr = stderr.getContentsAsString(StandardCharsets.UTF_8);
@@ -196,17 +210,19 @@ public class KotlincStep implements IsolatedStep {
         returnedStderr = Optional.of(firstOrderStderr);
       } else {
         returnedStderr = Optional.empty();
-        if (trackClassUsage) {
-          AbsPath ruleCellRoot = context.getRuleCellRoot();
-          RelPath outputJarDirPath = outputPaths.getOutputJarDirPath();
-          ClassUsageFileWriterFactory.create(kotlincMode)
-              .writeFile(
-                  KotlinClassUsageHelper.getClassUsageData(reportDirPath, ruleCellRoot),
-                  CompilerOutputPaths.getKotlinDepFilePath(outputJarDirPath),
-                  ruleCellRoot,
-                  configuredBuckOut);
-        }
       }
+
+      if (declaredDepsBuildResult == StepExecutionResults.SUCCESS_EXIT_CODE && trackClassUsage) {
+        AbsPath ruleCellRoot = context.getRuleCellRoot();
+        RelPath outputJarDirPath = outputPaths.getOutputJarDirPath();
+        ClassUsageFileWriterFactory.create(kotlincMode)
+            .writeFile(
+                KotlinClassUsageHelper.getClassUsageData(reportDirPath, ruleCellRoot),
+                CompilerOutputPaths.getKotlinDepFilePath(outputJarDirPath),
+                ruleCellRoot,
+                configuredBuckOut);
+      }
+
       return new StepExecutionResult(declaredDepsBuildResult, returnedStderr);
     } catch (IOException | InterruptedException e) {
       throw new RuntimeException(e);
@@ -244,7 +260,7 @@ public class KotlincStep implements IsolatedStep {
     }
 
     if (invokingRule.isSourceOnlyAbi()) {
-      configureSourceOnlyOptions(builder);
+      configureSourceOnlyOptions(builder, languageVersion, ruleCellRoot);
     } else if (invokingRule.isSourceAbi()) {
       throw new Error("Source ABI flavor is not supported for Kotlin targets");
     } else if (!buildClasspathEntries.isEmpty()) {
@@ -305,34 +321,59 @@ public class KotlincStep implements IsolatedStep {
     return builder.build();
   }
 
-  protected void configureSourceOnlyOptions(ImmutableList.Builder<String> builder) {
-    if (resolvedKosabiPluginOptionPath.containsKey(KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_PLUGIN)) {
+  protected void configureSourceOnlyOptions(
+      ImmutableList.Builder<String> builder,
+      LanguageVersion languageVersion,
+      AbsPath ruleCellRoot) {
+    if (languageVersion.getSupportsK2()
+        && resolvedKosabiPluginOptionPath.containsKey(
+            KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_K2_PLUGIN)) {
+      AbsPath stubPlugin =
+          resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_K2_PLUGIN);
+      builder.add(X_PLUGIN_ARG + stubPlugin);
+    } else if (resolvedKosabiPluginOptionPath.containsKey(
+        KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_PLUGIN)) {
       AbsPath stubPlugin =
           resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_PLUGIN);
       builder.add(X_PLUGIN_ARG + stubPlugin);
     }
-    if (resolvedKosabiPluginOptionPath.containsKey(
-        KosabiConfig.PROPERTY_KOSABI_SOURCE_MODIFIER_PLUGIN)) {
-      AbsPath sourceModifierPlugin =
-          resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_SOURCE_MODIFIER_PLUGIN);
-      builder.add(X_PLUGIN_ARG + sourceModifierPlugin);
-    }
-    if (resolvedKosabiPluginOptionPath.containsKey(
-        KosabiConfig.PROPERTY_KOSABI_JVM_ABI_GEN_PLUGIN)) {
+
+    if (shouldKosabiJvmAbiGenUseK2) {
+      if (!resolvedKosabiPluginOptionPath.containsKey(
+          KosabiConfig.PROPERTY_KOSABI_JVM_ABI_GEN_K2_PLUGIN)) {
+        throw new RuntimeException("KosabiJvmAbiGenK2Plugin is not provided");
+      }
       AbsPath jvmAbiPlugin =
-          resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_JVM_ABI_GEN_PLUGIN);
+          resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_JVM_ABI_GEN_K2_PLUGIN);
       builder.add(X_PLUGIN_ARG + jvmAbiPlugin);
       builder.add(PLUGIN);
-      builder.add("plugin:com.facebook.jvm.abi.gen:outputDir=" + outputPaths.getClassesDir());
-      builder.add(PLUGIN);
-      builder.add("plugin:com.facebook.jvm.abi.gen:earlyTermination=true");
-      // Kosabi can only works with legacy jvm abi gen which use AnalysisHandlerExtension
-      builder.add(PLUGIN);
-      builder.add("plugin:com.facebook.jvm.abi.gen:useLegacyAbiGen=true");
-      // Enable Mixed compilation if KspAnnotationProcessors are supported
-      if (kosabiShouldEnableMixedCompilation) {
+      builder.add(
+          "plugin:com.facebook.k2.jvm.abi.gen:outputDir="
+              + ruleCellRoot.resolve(outputDirectory).toString());
+    } else {
+      if (resolvedKosabiPluginOptionPath.containsKey(
+          KosabiConfig.PROPERTY_KOSABI_JVM_ABI_GEN_PLUGIN)) {
+        AbsPath jvmAbiPlugin =
+            resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_JVM_ABI_GEN_PLUGIN);
+        builder.add(X_PLUGIN_ARG + jvmAbiPlugin);
         builder.add(PLUGIN);
-        builder.add("plugin:com.facebook.jvm.abi.gen:enableMixedCompilation=true");
+        builder.add("plugin:com.facebook.jvm.abi.gen:outputDir=" + outputPaths.getClassesDir());
+        builder.add(PLUGIN);
+        builder.add("plugin:com.facebook.jvm.abi.gen:earlyTermination=true");
+        // Kosabi can only works with legacy jvm abi gen which use AnalysisHandlerExtension
+        builder.add(PLUGIN);
+        builder.add("plugin:com.facebook.jvm.abi.gen:useLegacyAbiGen=true");
+        // Enable Mixed compilation if KspAnnotationProcessors are supported
+        if (kosabiShouldEnableMixedCompilation) {
+          builder.add(PLUGIN);
+          builder.add("plugin:com.facebook.jvm.abi.gen:enableMixedCompilation=true");
+        }
+      }
+      if (resolvedKosabiPluginOptionPath.containsKey(
+          KosabiConfig.PROPERTY_KOSABI_SOURCE_MODIFIER_PLUGIN)) {
+        AbsPath sourceModifierPlugin =
+            resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_SOURCE_MODIFIER_PLUGIN);
+        builder.add(X_PLUGIN_ARG + sourceModifierPlugin);
       }
     }
 

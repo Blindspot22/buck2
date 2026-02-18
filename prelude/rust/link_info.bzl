@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # Implementation of the Rust build rules.
 
@@ -16,12 +17,20 @@ load(
     "@prelude//cxx:cxx.bzl",
     "get_auto_link_group_specs",
 )
-load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
 load(
     "@prelude//cxx:cxx_library_utility.bzl",
     "cxx_is_gnu",
 )
-load("@prelude//cxx:cxx_toolchain_types.bzl", "PicBehavior")
+load(
+    "@prelude//cxx:cxx_link_utility.bzl",
+    "ExecutableSharedLibArguments",  # @unused Used as a type
+    "executable_shared_lib_arguments_template",
+)
+load(
+    "@prelude//cxx:cxx_toolchain_types.bzl",
+    "CxxToolchainInfo",  # @unused Used as a type
+    "PicBehavior",
+)
 load(
     "@prelude//cxx:link_groups.bzl",
     "BuildLinkGroupsContext",
@@ -41,9 +50,8 @@ load(
     "LinkGroupInfo",  # @unused Used as a type
 )
 load(
-    "@prelude//cxx:linker.bzl",
-    "get_default_shared_library_name",
-    "get_shared_library_name_for_param",
+    "@prelude//cxx:transformation_spec.bzl",
+    "TransformationSpecContext",  # @unused Used as a type
 )
 load(
     "@prelude//linking:link_groups.bzl",
@@ -56,8 +64,6 @@ load(
     "LinkInfo",
     "LinkStrategy",
     "MergedLinkInfo",
-    "get_link_args_for_strategy",
-    "unpack_external_debug_info",
 )
 load(
     "@prelude//linking:linkable_graph.bzl",
@@ -68,11 +74,17 @@ load(
 load(
     "@prelude//linking:shared_libraries.bzl",
     "SharedLibraryInfo",
+    "traverse_shared_library_info",
 )
 load(
     "@prelude//linking:types.bzl",
     "Linkage",  # @unused Used as a type
 )
+load(
+    "@prelude//rust/tools:attrs.bzl",
+    "RustInternalToolsInfo",  # @unused Used as a type
+)
+load("@prelude//third-party:providers.bzl", "ThirdPartyBuildInfo")
 load(
     "@prelude//utils:type_defs.bzl",
     "is_dict",
@@ -110,21 +122,66 @@ RustProcMacroMarker = provider(fields = {
     "label": typing.Any,
 })
 
+# Artifact produced by a Rust compiler invocation.
+#
+# The artifact is assigned a provisional filepath at analysis time. However, the
+# real name of the crate may not be known until build time. For loading this
+# artifact as a transitive dependency, the filename matters and must match the
+# real crate name. We keep track of the crate name in its own artifact and use
+# it to create a symlink to make the Rust artifact appear with the required name
+# to later rustc executions.
+RustArtifact = record(
+    artifact = field(Artifact),
+    crate = field(CrateName),
+)
+
+def _project_artifacts(dep: RustArtifact) -> (Artifact, Artifact | None):
+    return (dep.artifact, dep.crate.dynamic)
+
+def _project_as_dynamic_name_args(dep: RustArtifact) -> Artifact | cmd_args:
+    return dep.crate.dynamic or cmd_args()
+
+def _project_artifacts_args(dep: RustArtifact) -> Artifact:
+    return dep.artifact
+
+# Set of RustArtifact.
+TransitiveDeps = transitive_set(
+    args_projections = {
+        "artifacts_args": _project_artifacts_args,
+        "dynamic_name_args": _project_as_dynamic_name_args,
+    },
+    json_projections = {
+        "artifacts": _project_artifacts,
+    },
+)
+
 # Information which is keyed on link_style
 RustLinkStrategyInfo = record(
     # Path to the rlib, rmeta, dylib, etc.
     outputs = field(dict[MetadataKind, Artifact]),
+    # Same as `outputs`, but wrapped in a 1-element transitive set.
+    singleton_tset = field(dict[MetadataKind, TransitiveDeps]),
     # Transitive dependencies which are relevant to the consumer. For crate types which do not
     # propagate their deps (specifically proc macros), this set is empty
     # This does not include the proc macros, which are passed separately in `RustLinkInfo`
-    transitive_deps = field(dict[MetadataKind, dict[Artifact, CrateName]]),
-    transitive_proc_macro_deps = field(dict[RustProcMacroMarker, ()]),
+    transitive_deps = field(dict[MetadataKind, TransitiveDeps]),
+    transitive_proc_macro_deps = field(set[RustProcMacroMarker]),
 
     # Path to PDB file with Windows debug data.
     pdb = field(Artifact | None),
-    # Debug info which is referenced -- but not included -- by the linkable rlib.
-    external_debug_info = field(ArtifactTSet),
+    # Rustc-generated debug info which is referenced -- but not included -- by the
+    # linkable rlib. Does not include external debug info from non-Rust native deps.
+    rust_debug_info = field(ArtifactTSet),
 )
+
+# Set of list[(ConfiguredTargetLabel, MergedLinkInfo)]
+RustNativeLinkDeps = transitive_set()
+
+# Set of list[LinkableGraph]
+RustLinkableGraphs = transitive_set()
+
+# Set of list[Dependency]
+RustExportedLinkDeps = transitive_set()
 
 # Output of a Rust compilation
 RustLinkInfo = provider(
@@ -147,7 +204,7 @@ RustLinkInfo = provider(
         # codegen, the generated object files for a Rust library can generate symbol references to
         # any of the library's transitive Rust dependencies, as well as to the immediate C++
         # dependencies of those libraries. So to account for that, each Rust library reports direct
-        # dependencies on all of those libraries in the link graph. The `merged_link_infos` and
+        # dependencies on all of those libraries in the link graph. The `native_link_deps` and
         # `linkable_graphs` lists are the providers from all of those libraries.
         #
         # The second difference is unique to the case where `advanced_unstable_linking` is not set
@@ -173,9 +230,13 @@ RustLinkInfo = provider(
         # With `advanced_unstable_linkin`, Rust libraries essentially behave just like C++
         # libraries in the link graph, with the handling of transitive dependencies being the only
         # difference.
-        "merged_link_infos": dict[ConfiguredTargetLabel, MergedLinkInfo],
-        "linkable_graphs": list[LinkableGraph],
+        "native_link_deps": RustNativeLinkDeps,
+        # External debug info for native dependencies. For `advanced_unstable_linking` this includes
+        # both Rust and non-Rust debug info. Otherwise, it includes non-Rust only.
+        "native_debug_info": dict[LinkStrategy, ArtifactTSet],
+        "linkable_graphs": RustLinkableGraphs,
         "shared_libs": SharedLibraryInfo,
+        "third_party_build_info": ThirdPartyBuildInfo,
         # LinkGroupLibInfo intentionally omitted because the Rust -> Rust version
         # never needs to be different from the Rust -> native version
         #
@@ -187,7 +248,7 @@ RustLinkInfo = provider(
         #
         # FIXME(JakobDegen): We should not default to treating all native deps
         # as exported.
-        "exported_link_deps": list[Dependency],
+        "exported_link_deps": RustExportedLinkDeps,
     },
 )
 
@@ -218,7 +279,7 @@ RustDependency = record(
     dep = field(Dependency),
     name = field(None | str | ResolvedStringWithMacros),
     flags = field(list[str]),
-    proc_macro_marker = field([None, RustProcMacroMarker]),
+    proc_macro_marker = field(RustProcMacroMarker | None),
 )
 
 # Information about cxx link groups that rust depends on
@@ -230,9 +291,9 @@ RustCxxLinkGroupInfo = record(
     # targets to link against
     filtered_targets = field(list[TargetLabel]),
     # information about the link groups
-    link_group_info = field([LinkGroupInfo, None]),
+    link_group_info = field(LinkGroupInfo | None),
     # shared libraries created from link groups
-    link_group_libs = field(dict[str, [LinkGroupLib, None]]),
+    link_group_libs = field(dict[str, LinkGroupLib | None]),
     # mapping from target labels to the corresponding link group link_info
     labels_to_links_map = field(dict[Label, LinkGroupLinkInfo]),
     # Target to link group name where it was actually linked into
@@ -389,28 +450,38 @@ def _rust_non_proc_macro_link_infos(
         dep_ctx: DepCollectionContext) -> list[RustLinkInfo]:
     return [d.info for d in resolve_rust_deps(ctx, dep_ctx) if d.proc_macro_marker == None]
 
-def inherited_exported_link_deps(ctx: AnalysisContext, dep_ctx: DepCollectionContext) -> list[Dependency]:
-    deps = {}
-    for dep in _native_link_dependencies(ctx, dep_ctx):
-        deps[dep.label] = dep
-    for dep in resolve_rust_deps(ctx, dep_ctx):
-        if dep.proc_macro_marker != None:
-            continue
+def inherited_exported_link_deps(ctx: AnalysisContext, dep_ctx: DepCollectionContext) -> RustExportedLinkDeps:
+    return ctx.actions.tset(
+        RustExportedLinkDeps,
+        value = _native_link_dependencies(ctx, dep_ctx),
+        children = [
+            dep.info.exported_link_deps
+            for dep in resolve_rust_deps(ctx, dep_ctx)
+            if dep.proc_macro_marker == None
+        ],
+    )
 
-        for dep in dep.info.exported_link_deps:
-            deps[dep.label] = dep
-
-    return deps.values()
+def inherited_third_party_builds(ctx: AnalysisContext, dep_ctx: DepCollectionContext) -> list[ThirdPartyBuildInfo]:
+    infos = []
+    infos.extend([
+        d[ThirdPartyBuildInfo]
+        for d in _native_link_dependencies(ctx, dep_ctx)
+        if ThirdPartyBuildInfo in d
+    ])
+    for dep in _rust_non_proc_macro_link_infos(ctx, dep_ctx):
+        infos.append(dep.third_party_build_info)
+    return infos
 
 def inherited_rust_cxx_link_group_info(
         ctx: AnalysisContext,
         dep_ctx: DepCollectionContext,
-        link_strategy: LinkStrategy) -> RustCxxLinkGroupInfo | None:
+        link_strategy: LinkStrategy,
+        transformation_spec_context: TransformationSpecContext | None) -> RustCxxLinkGroupInfo | None:
     # Check minimum requirements
     if not cxx_is_gnu(ctx) or not ctx.attrs.auto_link_groups:
         return None
 
-    link_graphs = inherited_linkable_graphs(ctx, dep_ctx)
+    link_graphs = dfs_dedupe_by_label(inherited_linkable_graphs(ctx, dep_ctx))
 
     link_group = get_link_group(ctx)
 
@@ -461,6 +532,7 @@ def inherited_rust_cxx_link_group_info(
         prefer_stripped_objects = False,  # Does Rust ever use stripped objects?
         anonymous = ctx.attrs.anonymous_link_groups,
         public_nodes = public_link_group_nodes,
+        transformation_spec_context = transformation_spec_context,
     )
 
     auto_link_groups = {}
@@ -518,17 +590,46 @@ def inherited_rust_cxx_link_group_info(
         link_group_preferred_linkage = link_group_preferred_linkage,
     )
 
+def inherited_native_link_deps(
+        ctx: AnalysisContext,
+        dep_ctx: DepCollectionContext) -> RustNativeLinkDeps:
+    return ctx.actions.tset(
+        RustNativeLinkDeps,
+        value = [
+            (dep.label.configured_target(), dep[MergedLinkInfo])
+            for dep in _native_link_dependencies(ctx, dep_ctx)
+        ],
+        children = [
+            info.native_link_deps
+            for info in _rust_non_proc_macro_link_infos(ctx, dep_ctx)
+        ],
+    )
+
+def inherited_native_debug_info(
+        ctx: AnalysisContext,
+        dep_ctx: DepCollectionContext) -> dict[LinkStrategy, ArtifactTSet]:
+    """
+    External debug info for the set of dependencies in `inherited_native_link_deps`.
+    """
+    return {
+        strategy: make_artifact_tset(
+            actions = ctx.actions,
+            label = ctx.label,
+            children = filter(None, [
+                dep[MergedLinkInfo]._external_debug_info.get(strategy)
+                for dep in _native_link_dependencies(ctx, dep_ctx)
+            ]) + [
+                info.native_debug_info[strategy]
+                for info in _rust_non_proc_macro_link_infos(ctx, dep_ctx)
+            ],
+        )
+        for strategy in LinkStrategy
+    }
+
 def inherited_merged_link_infos(
         ctx: AnalysisContext,
-        dep_ctx: DepCollectionContext) -> dict[ConfiguredTargetLabel, MergedLinkInfo]:
-    infos = {}
-    for d in _native_link_dependencies(ctx, dep_ctx):
-        g = d.get(MergedLinkInfo)
-        if g:
-            infos[d.label.configured_target()] = g
-    for info in _rust_non_proc_macro_link_infos(ctx, dep_ctx):
-        infos.update(info.merged_link_infos)
-    return infos
+        dep_ctx: DepCollectionContext) -> list[MergedLinkInfo]:
+    return dfs_dedupe_by_label(inherited_native_link_deps(ctx, dep_ctx))
 
 def inherited_shared_libs(
         ctx: AnalysisContext,
@@ -538,16 +639,19 @@ def inherited_shared_libs(
     infos.extend([d.shared_libs for d in _rust_non_proc_macro_link_infos(ctx, dep_ctx)])
     return infos
 
-def inherited_linkable_graphs(ctx: AnalysisContext, dep_ctx: DepCollectionContext) -> list[LinkableGraph]:
-    deps = {}
-    for d in _native_link_dependencies(ctx, dep_ctx):
-        g = d.get(LinkableGraph)
-        if g:
-            deps[g.label] = g
-    for info in _rust_non_proc_macro_link_infos(ctx, dep_ctx):
-        for g in info.linkable_graphs:
-            deps[g.label] = g
-    return deps.values()
+def inherited_linkable_graphs(ctx: AnalysisContext, dep_ctx: DepCollectionContext) -> RustLinkableGraphs:
+    return ctx.actions.tset(
+        RustLinkableGraphs,
+        value = [
+            d[LinkableGraph]
+            for d in _native_link_dependencies(ctx, dep_ctx)
+            if LinkableGraph in d
+        ],
+        children = [
+            info.linkable_graphs
+            for info in _rust_non_proc_macro_link_infos(ctx, dep_ctx)
+        ],
+    )
 
 def inherited_link_group_lib_infos(ctx: AnalysisContext, dep_ctx: DepCollectionContext) -> list[LinkGroupLibInfo]:
     # There are no special Rust -> Rust versions of this provider
@@ -563,32 +667,57 @@ def inherited_rust_external_debug_info(
         dep_ctx: DepCollectionContext,
         link_strategy: LinkStrategy) -> list[ArtifactTSet]:
     toolchain_info = ctx.attrs._rust_toolchain[RustToolchainInfo]
-    return [strategy_info(toolchain_info, d.info, link_strategy).external_debug_info for d in resolve_rust_deps(ctx, dep_ctx)]
+    return [
+        strategy_info(toolchain_info, d.info, link_strategy).rust_debug_info
+        for d in resolve_rust_deps(ctx, dep_ctx)
+    ]
+
+def inherited_dep_external_debug_infos(
+        ctx: AnalysisContext,
+        dep_ctx: DepCollectionContext,
+        dep_link_strategy: LinkStrategy) -> list[ArtifactTSet]:
+    inherited_debug_infos = []
+    toolchain_info = ctx.attrs._rust_toolchain[RustToolchainInfo]
+
+    for d in resolve_deps(ctx, dep_ctx):
+        rust_link_info = d.dep.get(RustLinkInfo)
+        merged_link_info = d.dep.get(MergedLinkInfo)
+        if rust_link_info:
+            # Inherited Rust debug info
+            rust_link_strategy_info = strategy_info(toolchain_info, rust_link_info, dep_link_strategy)
+            inherited_debug_infos.append(rust_link_strategy_info.rust_debug_info)
+
+            # Inherited non-Rust debug info
+            native_debug_info = rust_link_info.native_debug_info.get(dep_link_strategy)
+            if native_debug_info:
+                inherited_debug_infos.append(native_debug_info)
+        elif merged_link_info:
+            native_debug_info = merged_link_info._external_debug_info.get(dep_link_strategy)
+            if native_debug_info:
+                inherited_debug_infos.append(native_debug_info)
+
+    return inherited_debug_infos
+
+def inherited_external_debug_info_from_dep_infos(
+        ctx: AnalysisContext,
+        dwo_output_directory: Artifact | None,
+        dep_infos: list[ArtifactTSet]) -> ArtifactTSet:
+    return make_artifact_tset(
+        actions = ctx.actions,
+        label = ctx.label,
+        artifacts = filter(None, [dwo_output_directory]),
+        children = dep_infos,
+    )
 
 def inherited_external_debug_info(
         ctx: AnalysisContext,
         dep_ctx: DepCollectionContext,
         dwo_output_directory: Artifact | None,
         dep_link_strategy: LinkStrategy) -> ArtifactTSet:
-    inherited_debug_infos = []
-    inherited_link_infos = []
-    toolchain_info = ctx.attrs._rust_toolchain[RustToolchainInfo]
-
-    for d in resolve_deps(ctx, dep_ctx):
-        if RustLinkInfo in d.dep:
-            inherited_debug_infos.append(strategy_info(toolchain_info, d.dep[RustLinkInfo], dep_link_strategy).external_debug_info)
-            inherited_link_infos.extend(d.dep[RustLinkInfo].merged_link_infos.values())
-        elif MergedLinkInfo in d.dep:
-            inherited_link_infos.append(d.dep[MergedLinkInfo])
-
-    link_args = get_link_args_for_strategy(ctx, inherited_link_infos, dep_link_strategy)
-    inherited_debug_infos.append(unpack_external_debug_info(ctx.actions, link_args))
-
-    return make_artifact_tset(
-        actions = ctx.actions,
-        label = ctx.label,
-        artifacts = filter(None, [dwo_output_directory]),
-        children = inherited_debug_infos,
+    return inherited_external_debug_info_from_dep_infos(
+        ctx,
+        dwo_output_directory,
+        inherited_dep_external_debug_infos(ctx, dep_ctx, dep_link_strategy),
     )
 
 def normalize_crate(label: str | ResolvedStringWithMacros) -> str | ResolvedStringWithMacros:
@@ -629,11 +758,97 @@ def attr_crate(ctx: AnalysisContext) -> CrateName:
         dynamic = dynamic,
     )
 
-def attr_soname(ctx: AnalysisContext) -> str:
+def dfs_dedupe_by_label(tset: TransitiveSet) -> list[typing.Any]:
+    entries = {}
+    for node in tset.traverse(ordering = "dfs"):
+        for item in node:
+            if isinstance(item, tuple):
+                label, value = item
+            else:
+                label, value = item.label, item
+            if label in entries and entries[label] != value:
+                fail("cannot depend on {} in multiple inconsistent ways:\n{}\n{}".format(
+                    label,
+                    entries[label],
+                    value,
+                ))
+            entries[label] = value
+    return entries.values()
+
+def run_action_shlib_symlink_tree(
+        actions: AnalysisActions,
+        internal_tools_info: RustInternalToolsInfo,
+        shared_library_info: SharedLibraryInfo,
+        shared_libs_symlink_tree_name_arg: str,
+        dwp_symlink_tree_name_arg: str) -> (Artifact, Artifact):
+    """Runs an action that creates 2 shared library symlink trees from a `SharedLibraryInfo` (i.e., a `TransitiveSet`).
+
+    Returns:
+      A pair of artifacts that it creates.  The 1st is the shared library symlink tree.  The 2nd is the dwp symlink tree.
     """
-    Get the shared library name to set for the given rust library.
+    shared_libs_symlink_tree = actions.declare_output(shared_libs_symlink_tree_name_arg)
+    dwp_symlink_tree = actions.declare_output(dwp_symlink_tree_name_arg)
+
+    shared_library_info_json = actions.write_json(
+        "shared_library_info.json",
+        shared_library_info.set.project_as_json("symlink_tree"),
+        with_inputs = True,
+    )
+
+    actions.run(
+        [
+            internal_tools_info.shared_libraries_symlink_tree,
+            cmd_args(shared_libs_symlink_tree.as_output(), format = "--shared_libs_symlink_tree={}"),
+            cmd_args(dwp_symlink_tree.as_output(), format = "--dwp_symlink_tree={}"),
+            cmd_args(shared_library_info_json, format = "--shared_libraries_info_json={}"),
+        ],
+        category = "rust_shared_library_symlinks",
+    )
+    return (shared_libs_symlink_tree, dwp_symlink_tree)
+
+def executable_shared_lib_arguments_from_shared_library_info(
+        ctx: AnalysisContext,
+        cxx_toolchain: CxxToolchainInfo,
+        internal_tools_info: RustInternalToolsInfo,
+        output: Artifact,
+        shared_library_info: SharedLibraryInfo) -> ExecutableSharedLibArguments:
+    """A version of `prelude/cxx/cxx_link_utilit.bzl#executable_shared_lib_arguments`
+    that uses the `TransitiveSet` properties of `SharedLibraryInfo` to save memory and
+    runtime costs of `TransitiveSet#traversal` calls.
     """
-    linker_info = get_cxx_toolchain_info(ctx).linker_info
-    if ctx.attrs.soname != None:
-        return get_shared_library_name_for_param(linker_info, ctx.attrs.soname)
-    return get_default_shared_library_name(linker_info, ctx.label)
+
+    def create_external_debug_info() -> list[TransitiveSetArgsProjection]:
+        if shared_library_info and shared_library_info.set:
+            external_debug_info = shared_library_info.set.project_as_args("external_debug_info")
+            return [external_debug_info]
+        else:
+            return []
+
+    def create_shared_libs_symlink_tree_windows() -> list[Artifact]:
+        shared_libs = traverse_shared_library_info(shared_library_info, transformation_provider = None)
+        return [ctx.actions.symlink_file(
+            shlib.lib.output.basename,
+            shlib.lib.output,
+        ) for shlib in shared_libs]
+
+    def create_shared_libs_symlink_trees(
+            shared_libs_symlink_tree_name_arg: str,
+            dwp_symlink_tree_name_arg: str) -> (Artifact, Artifact) | None:
+        if not shared_library_info.set:
+            return None
+
+        return run_action_shlib_symlink_tree(
+            ctx.actions,
+            internal_tools_info,
+            shared_library_info,
+            shared_libs_symlink_tree_name_arg,
+            dwp_symlink_tree_name_arg,
+        )
+
+    return executable_shared_lib_arguments_template(
+        cxx_toolchain,
+        output,
+        create_external_debug_info,
+        create_shared_libs_symlink_trees,
+        create_shared_libs_symlink_tree_windows,
+    )

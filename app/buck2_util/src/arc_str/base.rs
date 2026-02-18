@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::alloc;
@@ -117,6 +118,10 @@ impl<P: ArcStrLenStrategy> ArcStrBase<P> {
         }
     }
 
+    pub(crate) fn addr(&self) -> usize {
+        self.data.addr().get()
+    }
+
     #[inline]
     fn len(&self) -> usize {
         P::unpack_len((self.inner().allocated_payload, self.value_payload)) as usize
@@ -162,7 +167,7 @@ impl<P: ArcStrLenStrategy> StrongHash for ArcStrBase<P> {
 impl<P: ArcStrLenStrategy> PartialOrd for ArcStrBase<P> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.as_str().partial_cmp(other.as_str())
+        Some(self.cmp(other))
     }
 }
 

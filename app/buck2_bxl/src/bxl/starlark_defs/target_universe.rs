@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -67,7 +68,7 @@ impl<'v> StarlarkValue<'v> for StarlarkTargetUniverse<'v> {
 }
 
 impl<'v> AllocValue<'v> for StarlarkTargetUniverse<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex_no_freeze(self)
     }
 }
@@ -94,7 +95,7 @@ fn target_universe_methods(builder: &mut MethodsBuilder) {
     /// The target set of the nodes used to construct the target universe.
     fn target_set<'v>(
         this: &'v StarlarkTargetUniverse<'v>,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> starlark::Result<ValueTyped<'v, StarlarkTargetSet<ConfiguredTargetNode>>> {
         Ok(heap.alloc_typed(StarlarkTargetSet::from(this.target_set.clone())))
     }
@@ -118,19 +119,21 @@ fn target_universe_methods(builder: &mut MethodsBuilder) {
         targets: TargetListExprArg<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<ValueTyped<'v, StarlarkTargetSet<ConfiguredTargetNode>>> {
-        Ok(this.ctx.via_dice(|dice, ctx| {
+        let heap = eval.heap();
+        Ok(this.ctx.via_dice(eval, |dice| {
             dice.via(|dice| {
                 async move {
-                    let inputs = &*TargetListExpr::<'v, TargetNode>::unpack(targets, ctx, dice)
-                        .await?
-                        .get(dice)
-                        .await?;
+                    let inputs =
+                        &*TargetListExpr::<'v, TargetNode>::unpack(targets, &this.ctx, dice)
+                            .await?
+                            .get(dice)
+                            .await?;
 
                     let result = this
                         .target_universe
                         .get_from_targets(inputs.iter().map(|i| i.label().dupe()));
 
-                    Ok(eval.heap().alloc_typed(StarlarkTargetSet::from(result)))
+                    Ok(heap.alloc_typed(StarlarkTargetSet::from(result)))
                 }
                 .boxed_local()
             })

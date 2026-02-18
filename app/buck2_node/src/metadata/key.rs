@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Borrow;
@@ -13,6 +14,7 @@ use allocative::Allocative;
 use buck2_util::arc_str::ArcStr;
 use derive_more::Display;
 use dupe::Dupe;
+use pagable::Pagable;
 use ref_cast::RefCast;
 use serde::Serialize;
 
@@ -26,7 +28,8 @@ pub enum MetadataKeyError {
 /// A String that we validated conforms to our rules for metadata keys (whih are quite relaxed:
 /// they must contain exactly one dot).
 #[derive(
-    PartialEq, Eq, PartialOrd, Ord, Display, Debug, Clone, Dupe, Allocative, Serialize, Hash
+    PartialEq, Eq, PartialOrd, Ord, Display, Debug, Clone, Dupe, Allocative, Serialize, Hash,
+    Pagable
 )]
 #[serde(transparent)]
 pub struct MetadataKey(ArcStr);

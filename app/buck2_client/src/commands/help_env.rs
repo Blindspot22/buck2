@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::cmp;
@@ -16,7 +17,7 @@ use buck2_client_ctx::exit_result::ExitResult;
 use buck2_core::env::registry::Applicability;
 use buck2_core::env::registry::ENV_INFO;
 use buck2_core::env::registry::EnvInfoEntry;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 
 /// Print help for environment variables used by buck2.
 #[derive(Debug, clap::Parser)]
@@ -49,16 +50,16 @@ impl HelpEnvCommand {
         env_info.sort();
         env_info.dedup();
 
-        let longest_name = env_info
-            .iter()
-            .map(|e| e.name.len())
-            .max()
-            .buck_error_context("No environment variables stored defined, this is a bug")?;
+        let longest_name = env_info.iter().map(|e| e.name.len()).max().ok_or_else(|| {
+            internal_error!("No environment variables stored defined, this is a bug")
+        })?;
         let longest_ty = env_info
             .iter()
             .map(|e| e.ty_short().len())
             .max()
-            .buck_error_context("No environment variables stored defined, this is a bug")?;
+            .ok_or_else(|| {
+                internal_error!("No environment variables stored defined, this is a bug")
+            })?;
         let longest_default = env_info
             .iter()
             .filter_map(|e| e.default)
@@ -79,12 +80,6 @@ impl HelpEnvCommand {
         for (name, ty, default) in rows {
             let line = format!(
                 "{name:name_column_width$} {ty:ty_column_width$} {default:default_column_width$}",
-                name = name,
-                ty = ty,
-                default = default,
-                name_column_width = name_column_width,
-                ty_column_width = ty_column_width,
-                default_column_width = default_column_width,
             );
             buck2_client_ctx::println!("{}", line.trim_end())?;
         }

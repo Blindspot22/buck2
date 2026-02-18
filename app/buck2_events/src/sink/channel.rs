@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_core::soft_error;
@@ -38,7 +39,7 @@ impl EventSink for ChannelEventSink {
                 // TODO iguridi: this panic was here before. We probably should just ignore these errors
                 // but first, let's check how often this happens.
                 let _res = soft_error!("event_sink_send_panic", from_any_with_tag(e.clone(), buck2_error::ErrorTag::Tier0), quiet: true);
-                panic!("failed to send control event to ChannelEventSink: {}", e);
+                panic!("failed to send control event to ChannelEventSink: {e}");
             }
         }
     }
@@ -51,7 +52,6 @@ impl Dupe for ChannelEventSink {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::time::SystemTime;
 
     use buck2_data::CommandStart;
@@ -77,8 +77,7 @@ mod tests {
             SpanStartEvent {
                 data: Some(
                     CommandStart {
-                        data: None,
-                        metadata: HashMap::new(),
+                        ..Default::default()
                     }
                     .into(),
                 ),

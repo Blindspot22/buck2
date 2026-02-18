@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -22,6 +23,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use is_buck2::WhoIsAsking;
+use sysinfo::ProcessesToUpdate;
 use sysinfo::System;
 
 use crate::is_buck2::is_buck2_exe;
@@ -88,7 +90,7 @@ fn get_all_tgids_linux() -> Option<HashSet<sysinfo::Pid>> {
 /// Find all buck2 processes in the system.
 fn find_buck2_processes(who_is_asking: WhoIsAsking) -> Vec<ProcessInfo> {
     let mut system = System::new();
-    system.refresh_processes();
+    system.refresh_processes(ProcessesToUpdate::All, true);
 
     let mut current_parents = HashSet::new();
     let mut parent = Some(sysinfo::Pid::from_u32(std::process::id()));
@@ -107,7 +109,7 @@ fn find_buck2_processes(who_is_asking: WhoIsAsking) -> Vec<ProcessInfo> {
     for (pid, process) in system.processes() {
         // See comment on `get_all_tgids_linux`
         if let Some(filtered_proc_list) = filtered_proc_list.as_ref() {
-            if !filtered_proc_list.contains(&pid) {
+            if !filtered_proc_list.contains(pid) {
                 continue;
             }
         }
@@ -120,8 +122,12 @@ fn find_buck2_processes(who_is_asking: WhoIsAsking) -> Vec<ProcessInfo> {
             };
             buck2_processes.push(ProcessInfo {
                 pid,
-                name: process.name().to_owned(),
-                cmd: process.cmd().to_vec(),
+                name: process.name().to_string_lossy().into_owned(),
+                cmd: process
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect(),
             });
         }
     }
@@ -154,7 +160,7 @@ pub fn killall(who_is_asking: WhoIsAsking, write: impl Fn(String)) -> bool {
 
         fn failed_to_kill(&mut self, process: &ProcessInfo, error: buck2_error::Error) {
             let mut message = self.fmt_status(process, "Failed to kill");
-            for line in format!("{:?}", error).lines() {
+            for line in format!("{error:?}").lines() {
                 message.push_str("\n  ");
                 message.push_str(line);
             }
@@ -200,7 +206,7 @@ pub fn killall(who_is_asking: WhoIsAsking, write: impl Fn(String)) -> bool {
             Ok(false) => true,
         });
 
-        if start.elapsed() > Duration::from_secs(timeout_secs) {
+        if Instant::now() - start > Duration::from_secs(timeout_secs) {
             for process in processes_still_alive {
                 printer.failed_to_kill(
                     &process.0,

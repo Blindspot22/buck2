@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//java:java_toolchain.bzl", "JavaToolchainInfo")
 load("@prelude//java/plugins:java_plugin.bzl", "PluginParams", "create_plugin_params")
@@ -24,7 +25,7 @@ def get_nullsafe_info(
     nullsafe_extra_args = java_toolchain.nullsafe_extra_args
 
     if nullsafe_plugin:
-        nullsafe_output = ctx.actions.declare_output("reports", dir = True)
+        nullsafe_output = ctx.actions.declare_output("reports", dir = True, has_content_based_path = True)
         nullsafe_plugin_params = create_plugin_params(ctx, [nullsafe_plugin])
 
         nullsafe_args = cmd_args(

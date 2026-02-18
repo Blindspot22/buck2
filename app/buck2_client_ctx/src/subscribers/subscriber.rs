@@ -1,41 +1,22 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use buck2_events::BuckEvent;
-use dupe::Dupe;
 
 use crate::console_interaction_stream::SuperConsoleToggle;
 use crate::exit_result::ExitResult;
 use crate::subscribers::observer::ErrorObserver;
-
-/// Information about tick timing.
-#[derive(Debug, Clone, Dupe)]
-pub struct Tick {
-    /// The time that the ticker was started.
-    pub start_time: Instant,
-    /// Elapsed time since the ticker was started for this tick.
-    pub(crate) elapsed_time: Duration,
-}
-
-impl Tick {
-    pub(crate) fn now() -> Tick {
-        Self {
-            start_time: Instant::now(),
-            elapsed_time: Duration::ZERO,
-        }
-    }
-}
+use crate::ticker::Tick;
 
 /// Visitor trait.  Implement this to subscribe to the event streams.
 /// Each method will be called whenever an event occurs.
@@ -82,19 +63,13 @@ pub trait EventSubscriber: Send {
         Ok(())
     }
 
-    /// No more events. Close files, flush buffers etc.
-    async fn exit(&mut self) -> buck2_error::Result<()> {
-        Ok(())
-    }
-
     fn as_error_observer(&self) -> Option<&dyn ErrorObserver> {
         None
     }
-
+    fn handle_stream_end(&mut self) {}
     fn handle_daemon_connection_failure(&mut self) {}
     fn handle_daemon_started(&mut self, _reason: buck2_data::DaemonWasStartedReason) {}
     fn handle_should_restart(&mut self) {}
-    fn handle_instant_command_outcome(&mut self, _is_success: bool) {}
 
     fn handle_exit_result(&mut self, _result: &ExitResult) {}
 

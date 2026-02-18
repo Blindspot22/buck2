@@ -1,37 +1,37 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
 use std::path::Path;
 
 use buck2_common::invocation_roots::InvocationRoots;
-use buck2_common::invocation_roots::find_invocation_roots;
 use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
 use buck2_core::cells::CellAliasResolver;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::name::CellName;
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::cells::paths::CellRelativePathBuf;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::buck2_error;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::working_dir::AbsWorkingDir;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SanitizedPath {
     given: String,
     abs_path: AbsNormPathBuf,
     cell_name: CellName,
-    // cell_path: CellRelativePathBuf,
 }
 
 impl SanitizedPath {
@@ -39,37 +39,24 @@ impl SanitizedPath {
         &self.abs_path
     }
 
-    // pub(crate) fn canonical(&self) -> String {
-    //     format!("{}//{}", self.cell_name, self.cell_path())
-    // }
-
     pub(crate) fn cell_name(&self) -> &CellName {
         &self.cell_name
     }
-
-    // pub(crate) fn cell_path(&self) -> &CellRelativePath {
-    //     &self.cell_path
-    // }
 
     pub(crate) fn given(&self) -> &str {
         &self.given
     }
 
     pub(crate) fn is_ready_for_next_dir(&self) -> bool {
-        let is_root_dir = self.given == "";
-        let is_slash_terminated_dir = self.abs_path.is_dir() && self.given.ends_with('/');
+        let is_root_dir = self.given.is_empty();
+        let is_slash_terminated_dir = fs_util::metadata(&self.abs_path).is_ok_and(|m| m.is_dir())
+            && self.given.ends_with('/');
         is_root_dir || is_slash_terminated_dir
     }
 }
 
-impl std::fmt::Display for SanitizedPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-        write!(f, "{}", self.given)
-    }
-}
-
 pub(crate) struct PathSanitizer {
-    cell_resovler: CellResolver,
+    cell_resolver: CellResolver,
     alias_resolver: CellAliasResolver,
     cwd: AbsWorkingDir,
     cwd_roots: InvocationRoots,
@@ -79,8 +66,8 @@ impl PathSanitizer {
     pub(crate) async fn new(
         cell_configs: &BuckConfigBasedCells,
         cwd: &AbsWorkingDir,
+        cwd_roots: &InvocationRoots,
     ) -> buck2_error::Result<Self> {
-        let cwd_roots = find_invocation_roots(cwd)?;
         let cell_resolver = cell_configs.cell_resolver.clone();
         let alias_resolver = cell_configs
             .get_cell_alias_resolver_for_cwd_fast(
@@ -89,10 +76,10 @@ impl PathSanitizer {
             )
             .await?;
         Ok(Self {
-            cell_resovler: cell_resolver,
+            cell_resolver,
             alias_resolver,
             cwd: cwd.to_owned(),
-            cwd_roots,
+            cwd_roots: cwd_roots.clone(),
         })
     }
 
@@ -119,29 +106,27 @@ impl PathSanitizer {
             self.cwd.path().join_normalized(path_str)?
         };
 
-        let cwd_cell_name = self.cell_resovler.find(&self.cwd_roots.cwd)?;
+        let cwd_cell_name = self.cell_resolver.find(&self.cwd_roots.cwd);
 
         let cell_name = self.resolve_cell(&abs_path)?;
         let cell_path = self.relative_to_cell(&abs_path)?;
 
         if cell_name != cwd_cell_name || !self.is_normalized_path_and_in_cell(given, &cell_path) {
             let fixed_given = if given.ends_with('/') && cell_path.as_str() != "" {
-                format!("{}//{}/", cell_name, cell_path)
+                format!("{cell_name}//{cell_path}/")
             } else {
-                format!("{}//{}", cell_name, cell_path)
+                format!("{cell_name}//{cell_path}")
             };
             Ok(SanitizedPath {
                 given: fixed_given,
                 abs_path,
                 cell_name,
-                // cell_path,
             })
         } else {
             Ok(SanitizedPath {
                 given: given.to_owned(),
                 abs_path,
                 cell_name,
-                // cell_path,
             })
         }
     }
@@ -152,8 +137,8 @@ impl PathSanitizer {
         given_cell_str: &str,
         cell_path: &str,
     ) -> Result<SanitizedPath, buck2_error::Error> {
-        let given_cell = if given_cell_str == "" {
-            self.cell_resovler.find(&self.cwd_roots.cwd)?
+        let given_cell = if given_cell_str.is_empty() {
+            self.cell_resolver.find(&self.cwd_roots.cwd)
         } else {
             self.resolve_alias(given_cell_str)?
         };
@@ -164,7 +149,6 @@ impl PathSanitizer {
                 given: given.to_owned(),
                 abs_path,
                 cell_name: given_cell,
-                // cell_path: CellRelativePath::from_path(cell_path)?.to_owned(),
             })
         } else {
             // This is a bit ugly because it breaks expectations --
@@ -173,17 +157,16 @@ impl PathSanitizer {
             let corrected_cell_root = self.cell_abs_path(actual_cell)?;
             let corrected_cell_path = abs_path.strip_prefix(corrected_cell_root)?;
             Ok(SanitizedPath {
-                given: format!("{}//{}", actual_cell, corrected_cell_path),
+                given: format!("{actual_cell}//{corrected_cell_path}"),
                 abs_path,
                 cell_name: actual_cell,
-                // cell_path: corrected_cell_path,
             })
         }
     }
 
     fn cell_abs_path(&self, cell: CellName) -> buck2_error::Result<AbsNormPathBuf> {
         let root_to_cell = self
-            .cell_resovler
+            .cell_resolver
             .get(cell)?
             .path()
             .as_forward_relative_path();
@@ -225,13 +208,14 @@ impl PathSanitizer {
 
     fn resolve_cell(&self, path: &AbsNormPath) -> buck2_error::Result<CellName> {
         let project_relative = &self.relative_to_project(path)?;
-        self.cell_resovler
-            .find::<ProjectRelativePath>(project_relative)
+        Ok(self
+            .cell_resolver
+            .find::<ProjectRelativePath>(project_relative))
     }
 
     fn relative_to_cell(&self, dir: &AbsNormPath) -> buck2_error::Result<CellRelativePathBuf> {
         Ok(self
-            .cell_resovler
+            .cell_resolver
             .get_cell_path_from_abs_path(dir, &self.project_root())?
             .path()
             .to_owned())
@@ -247,6 +231,7 @@ impl PathSanitizer {
 
 #[cfg(test)]
 mod tests {
+    use buck2_common::invocation_roots::find_invocation_roots;
     use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
     use paste::paste;
 
@@ -317,14 +302,13 @@ mod tests {
             cell_name: $cell_name:literal,
             cell_path: $cell_path:literal,
             given: $given:literal,
-            display: $display:literal,
             to_string: $to_string:literal,
         }) => {
             paste! {
                 #[tokio::test]
                 async fn [<test_ $test_name _verify_abs_path>]() -> buck2_error::Result<()> {
                     let cwd = $in_dir;
-                    let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+                    let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
                     let actual = uut.sanitize($partial)?;
 
@@ -333,22 +317,10 @@ mod tests {
                     Ok(())
                 }
 
-                // #[tokio::test]
-                // fn [<test_ $test_name _verify_canonical>]() -> buck2_error::Result<()> {
-                //     let cwd = $in_dir;
-                //     let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
-
-                //     let actual = uut.sanitize($partial)?;
-
-                //     assert_eq!(actual.canonical(), $canonical);
-
-                //     Ok(())
-                // }
-
                 #[tokio::test]
                 async fn [<test_ $test_name _verify_cell_name>]() -> buck2_error::Result<()> {
                     let cwd = $in_dir;
-                    let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+                    let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
                     let actual = uut.sanitize($partial)?;
 
@@ -357,50 +329,14 @@ mod tests {
                     Ok(())
                 }
 
-                // #[tokio::test]
-                // async fn [<test_ $test_name _cell_path>]() -> buck2_error::Result<()> {
-                //     let cwd = $in_dir;
-                //     let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
-
-                //     let actual = uut.sanitize($partial)?;
-
-                //     assert_eq!(actual.cell_path(), &CellRelativePath::testing_new($cell_path.into()));
-
-                //     Ok(())
-                // }
-
                 #[tokio::test]
                 async fn [<test_ $test_name _verify_given>]() -> buck2_error::Result<()> {
                     let cwd = $in_dir;
-                    let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+                    let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
                     let actual = uut.sanitize($partial)?;
 
                     assert_eq!(actual.given(), $given);
-
-                    Ok(())
-                }
-
-                #[tokio::test]
-                async fn [<test_ $test_name _verify_display>]() -> buck2_error::Result<()> {
-                    let cwd = $in_dir;
-                    let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
-
-                    let actual = uut.sanitize($partial)?;
-
-                    assert_eq!(format!("{}", actual), $display);
-
-                    Ok(())
-                }
-
-                #[tokio::test]
-                async fn [<test_ $test_name _verify_to_string>]() -> buck2_error::Result<()> {
-                    let cwd = $in_dir;
-                    let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
-
-                    let actual = uut.sanitize($partial)?;
-
-                    assert_eq!(actual.to_string(), $to_string);
 
                     Ok(())
                 }
@@ -411,7 +347,8 @@ mod tests {
     #[tokio::test]
     async fn test_can_create_from_a_canonical_path() -> buck2_error::Result<()> {
         let cwd = in_root()?;
-        let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+        let uut =
+            PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
         uut.sanitize("root//baredir0/buckdir0a")?;
 
@@ -421,7 +358,8 @@ mod tests {
     #[tokio::test]
     async fn test_can_create_from_a_str_relative_path() -> buck2_error::Result<()> {
         let cwd = in_root()?;
-        let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+        let uut =
+            PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
         uut.sanitize("baredir0/buckdir0a")?;
 
@@ -434,7 +372,6 @@ mod tests {
         cell_name: "root",
         cell_path: "baredir0/buckdir0a",
         given: "root//baredir0/buckdir0a",
-        display: "root//baredir0/buckdir0a",
         to_string: "root//baredir0/buckdir0a",
     });
 
@@ -444,7 +381,6 @@ mod tests {
         cell_name: "root",
         cell_path: "",
         given: "//",
-        display: "//",
         to_string: "//",
     });
 
@@ -454,7 +390,6 @@ mod tests {
         cell_name: "cell1",
         cell_path: "buck2",
         given: "cell1//buck2",
-        display: "cell1//buck2",
         to_string: "cell1//buck2",
     });
 
@@ -464,7 +399,6 @@ mod tests {
         cell_name: "root",
         cell_path: "baredir0/buckdir0a",
         given: "baredir0/buckdir0a",
-        display: "baredir0/buckdir0a",
         to_string: "baredir0/buckdir0a",
     });
 
@@ -474,7 +408,6 @@ mod tests {
         cell_name: "cell1",
         cell_path: "buck2",
         given: "cell1//buck2", // BuckPath is documented as correcting this to cell1//buck2
-        display: "cell1//buck2",
         to_string: "cell1//buck2",
     });
 
@@ -484,14 +417,14 @@ mod tests {
         cell_name: "cell1",
         cell_path: "buck2",
         given: "cell1//buck2",
-        display: "cell1//buck2",
         to_string: "cell1//buck2",
     });
 
     #[tokio::test]
     async fn test_root_dir_as_empty_string_is_ready_for_subdirs() -> buck2_error::Result<()> {
         let cwd = in_root()?;
-        let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+        let uut =
+            PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
         let actual = uut.sanitize("")?;
 
@@ -503,7 +436,8 @@ mod tests {
     #[tokio::test]
     async fn test_slash_terminated_dir_is_ready_for_subdirs() -> buck2_error::Result<()> {
         let cwd = in_root()?;
-        let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+        let uut =
+            PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
         let actual = uut.sanitize("baredir0/")?;
 
@@ -515,7 +449,8 @@ mod tests {
     #[tokio::test]
     async fn test_partial_with_no_slash_is_not_ready_for_subdirs() -> buck2_error::Result<()> {
         let cwd = in_root()?;
-        let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+        let uut =
+            PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
         let actual = uut.sanitize("baredir0")?;
 
@@ -527,7 +462,8 @@ mod tests {
     #[tokio::test]
     async fn test_fully_qualified_cell_is_ready_for_subdirs() -> buck2_error::Result<()> {
         let cwd = in_root()?;
-        let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+        let uut =
+            PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
         let actual = uut.sanitize("cell1//")?;
 
@@ -539,7 +475,8 @@ mod tests {
     #[tokio::test]
     async fn test_bails_on_nonexistent_cell() -> buck2_error::Result<()> {
         let cwd = in_root()?;
-        let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+        let uut =
+            PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
         assert!(uut.sanitize("boguscell//").is_err());
 
@@ -552,7 +489,6 @@ mod tests {
         cell_name: "root",
         cell_path: "baredir0",
         given: "root//baredir0",
-        display: "root//baredir0",
         to_string: "root//baredir0",
     });
 
@@ -562,7 +498,6 @@ mod tests {
         cell_name: "cell1",
         cell_path: "buck2",
         given: "cell1//buck2",
-        display: "cell1//buck2",
         to_string: "cell1//buck2",
     });
 
@@ -572,14 +507,14 @@ mod tests {
         cell_name: "cell1",
         cell_path: "buck2",
         given: "cell1_alias//buck2",
-        display: "cell1_alias//buck2",
         to_string: "cell1_alias//buck2",
     });
 
     #[tokio::test]
     async fn test_creation_returns_error_on_non_local_alias() -> buck2_error::Result<()> {
         let cwd = in_dir("cell1/buck2")?;
-        let uut = PathSanitizer::new(&cell_configs(&cwd)?, &cwd).await?;
+        let uut =
+            PathSanitizer::new(&cell_configs(&cwd)?, &cwd, &find_invocation_roots(&cwd)?).await?;
 
         assert!(uut.sanitize("cell1_alias//buck2").is_err());
 

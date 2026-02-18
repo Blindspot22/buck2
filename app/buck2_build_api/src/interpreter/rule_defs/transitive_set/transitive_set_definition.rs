@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_core::bzl::ImportPath;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_interpreter::build_context::starlark_path_from_build_context;
 use buck2_interpreter::paths::path::StarlarkPath;
 use derive_more::Display;
@@ -146,7 +147,7 @@ impl<V: ValueLifetimeless> TransitiveSetOperationsGen<V> {
             .iter()
             .filter_map(|(k, spec)| {
                 if kind == spec.kind {
-                    Some(k.to_string())
+                    Some(k.to_owned())
                 } else {
                     None
                 }
@@ -164,7 +165,7 @@ impl<V: ValueLifetimeless> TransitiveSetOperationsGen<V> {
             None => {
                 return Err(TransitiveSetError::ProjectionDoesNotExist {
                     projection: proj.to_owned(),
-                    valid_projections: self.valid_projections(TransitiveSetProjectionKind::Args),
+                    valid_projections: self.valid_projections(kind),
                 }
                 .into());
             }
@@ -200,7 +201,7 @@ impl<'v> Serialize for TransitiveSetDefinition<'v> {
     where
         S: Serializer,
     {
-        s.serialize_str(&format!("{}", self))
+        s.serialize_str(&format!("{self}"))
     }
 }
 
@@ -219,7 +220,7 @@ impl<'v> TransitiveSetDefinition<'v> {
 }
 
 impl<'v> AllocValue<'v> for TransitiveSetDefinition<'v> {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_complex(self)
     }
 }
@@ -239,7 +240,7 @@ impl<'v> StarlarkValue<'v> for TransitiveSetDefinition<'v> {
                 module_id: self.module_id.clone(),
                 name: variable_name.to_owned(),
             });
-            let set_type_instance_id = TypeInstanceId::gen();
+            let set_type_instance_id = TypeInstanceId::r#gen();
             let set_ty = Ty::custom(TyUser::new(
                 variable_name.to_owned(),
                 TyStarlarkValue::new::<TransitiveSet>(),
@@ -265,11 +266,11 @@ impl<'v> StarlarkValue<'v> for TransitiveSetDefinition<'v> {
         vec!["type".to_owned()]
     }
 
-    fn has_attr(&self, attribute: &str, _heap: &'v Heap) -> bool {
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
         attribute == "type"
     }
 
-    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         if attribute == "type" {
             let typ = self
                 .exported
@@ -287,7 +288,7 @@ impl<'v> StarlarkValue<'v> for TransitiveSetDefinition<'v> {
         let exported = self
             .exported
             .get()
-            .buck_error_context("cannot hash a transitive_set_definition without id")?;
+            .ok_or_else(|| internal_error!("cannot hash a transitive_set_definition without id"))?;
         exported.id.hash(hasher);
         Ok(())
     }
@@ -320,7 +321,7 @@ impl Serialize for FrozenTransitiveSetDefinition {
     where
         S: Serializer,
     {
-        s.serialize_str(&format!("{}", self))
+        s.serialize_str(&format!("{self}"))
     }
 }
 
@@ -332,11 +333,11 @@ impl<'v> StarlarkValue<'v> for FrozenTransitiveSetDefinition {
         vec!["type".to_owned()]
     }
 
-    fn has_attr(&self, attribute: &str, _heap: &'v Heap) -> bool {
+    fn has_attr(&self, attribute: &str, _heap: Heap<'v>) -> bool {
         attribute == "type"
     }
 
-    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         if attribute == "type" {
             let typ = self.exported.id.name.as_str();
             Some(heap.alloc(typ))

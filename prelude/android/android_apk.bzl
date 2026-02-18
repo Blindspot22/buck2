@@ -1,14 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:validation_deps.bzl", "get_validation_deps_outputs")
 load("@prelude//android:android_binary.bzl", "get_binary_info")
-load("@prelude//android:android_providers.bzl", "AndroidApkInfo", "AndroidApkUnderTestInfo", "AndroidBinaryNativeLibsInfo", "AndroidBinaryResourcesInfo", "DexFilesInfo", "ExopackageInfo")
+load("@prelude//android:android_providers.bzl", "AndroidApkInfo", "AndroidApkUnderTestInfo", "AndroidBinaryNativeLibsInfo", "AndroidBinaryPrimaryPlatformInfo", "AndroidBinaryResourcesInfo", "DexFilesInfo", "ExopackageInfo")
 load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
+load("@prelude//android:util.bzl", "package_validators_decorator")
 load("@prelude//java:class_to_srcs.bzl", "merge_class_to_source_map_from_jar")
 load("@prelude//java:java_providers.bzl", "KeystoreInfo")
 load("@prelude//java:java_toolchain.bzl", "JavaToolchainInfo")
@@ -24,11 +26,17 @@ def android_apk_impl(ctx: AnalysisContext) -> list[Provider]:
     dex_files_info = android_binary_info.dex_files_info
     native_library_info = android_binary_info.native_library_info
     resources_info = android_binary_info.resources_info
-    validation_info = android_binary_info.validation_info
+    validation_outputs = android_binary_info.validation_outputs
+
+    wrapped_build_apk = package_validators_decorator(
+        ctx,
+        build_apk,
+        extension = ".apk",
+    )
 
     keystore = ctx.attrs.keystore[KeystoreInfo]
-    output_apk = build_apk(
-        label = ctx.label,
+    output_apk = wrapped_build_apk(
+        output_filename = ctx.label.name,
         actions = ctx.actions,
         android_toolchain = ctx.attrs._android_toolchain[AndroidToolchainInfo],
         keystore = keystore,
@@ -36,7 +44,7 @@ def android_apk_impl(ctx: AnalysisContext) -> list[Provider]:
         native_library_info = native_library_info,
         resources_info = resources_info,
         compress_resources_dot_arsc = ctx.attrs.resource_compression == "enabled" or ctx.attrs.resource_compression == "enabled_with_strings_as_assets",
-        validation_deps_outputs = get_validation_deps_outputs(ctx),
+        validation_deps_outputs = get_validation_deps_outputs(ctx) + validation_outputs,
         packaging_options = ctx.attrs.packaging_options,
     )
 
@@ -74,12 +82,19 @@ def android_apk_impl(ctx: AnalysisContext) -> list[Provider]:
 
     install_info = get_install_info(ctx, output_apk = output_apk, manifest = resources_info.manifest, exopackage_info = exopackage_info, definitely_has_native_libs = definitely_has_native_libs)
 
+    classpath = [dep.jar for dep in java_packaging_deps if dep.jar]
+    sub_targets["classpath"] = [DefaultInfo(default_output = ctx.actions.write("classpath.txt", classpath), other_outputs = classpath)]
+    sub_targets["classpath_targets"] = [DefaultInfo(default_output = ctx.actions.write("classpath_targets.txt", list(set([jar.owner.raw_target() for jar in classpath]))))]
+
     return [
         AndroidApkInfo(
             apk = output_apk,
             manifest = resources_info.manifest,
             materialized_artifacts = android_binary_info.materialized_artifacts,
             unstripped_shared_libraries = native_library_info.unstripped_shared_libraries,
+        ),
+        AndroidBinaryPrimaryPlatformInfo(
+            primary_platform = android_binary_info.primary_platform,
         ),
         AndroidApkUnderTestInfo(
             java_packaging_deps = set([dep.label.raw_target() for dep in java_packaging_deps]),
@@ -93,20 +108,30 @@ def android_apk_impl(ctx: AnalysisContext) -> list[Provider]:
             resource_infos = set([info.raw_target for info in resources_info.unfiltered_resource_infos]),
             r_dot_java_packages = set([info.specified_r_dot_java_package for info in resources_info.unfiltered_resource_infos if info.specified_r_dot_java_package]),
             shared_libraries = set(native_library_info.shared_libraries),
+
+            # Merge map delegate
+            native_library_merge_sequence = ctx.attrs.native_library_merge_sequence,
+            native_library_merge_code_generator = ctx.attrs.native_library_merge_code_generator,
+            native_library_merge_glue = ctx.attrs.native_library_merge_glue,
+            native_library_merge_linker_args_all = ctx.attrs.native_library_merge_linker_args_all,
+            native_library_merge_linker_args = ctx.attrs.native_library_merge_linker_args,
+            native_library_merge_map = ctx.attrs.native_library_merge_map,
+            native_library_merge_non_asset_libs = ctx.attrs.native_library_merge_non_asset_libs,
+            native_library_merge_sequence_blocklist = ctx.attrs.native_library_merge_sequence_blocklist,
         ),
         DefaultInfo(default_output = default_output, other_outputs = install_info.files.values() + android_binary_info.materialized_artifacts, sub_targets = sub_targets | class_to_srcs_subtargets),
         install_info,
         TemplatePlaceholderInfo(
             keyed_variables = {
-                "classpath": cmd_args([dep.jar for dep in java_packaging_deps if dep.jar], delimiter = get_path_separator_for_exec_os(ctx)),
+                "classpath": cmd_args(classpath, delimiter = get_path_separator_for_exec_os(ctx)),
                 "classpath_including_targets_with_no_output": cmd_args([dep.output_for_classpath_macro for dep in java_packaging_deps], delimiter = get_path_separator_for_exec_os(ctx)),
             },
         ),
         class_to_srcs,
-    ] + validation_info
+    ]
 
 def build_apk(
-        label: Label,
+        output_filename: str,
         actions: AnalysisActions,
         keystore: KeystoreInfo,
         android_toolchain: AndroidToolchainInfo,
@@ -116,7 +141,7 @@ def build_apk(
         compress_resources_dot_arsc: bool = False,
         validation_deps_outputs: [list[Artifact], None] = None,
         packaging_options: dict | None = None) -> Artifact:
-    output_apk = actions.declare_output("{}.apk".format(label.name))
+    output_apk = actions.declare_output("{}.apk".format(output_filename))
 
     apk_builder_args = cmd_args(
         android_toolchain.apk_builder[RunInfo],
@@ -166,10 +191,12 @@ def build_apk(
 
     if packaging_options:
         for key, value in packaging_options.items():
-            if key != "excluded_resources":
-                fail("Only 'excluded_resources' is supported in packaging_options right now!")
-            else:
+            if key == "excluded_resources":
                 apk_builder_args.add("--excluded-resources", actions.write("excluded_resources.txt", value))
+            elif key == "uncompressed_files":
+                apk_builder_args.add("--uncompressed-files", actions.write("uncompressed_files.txt", value))
+            else:
+                fail("Only 'excluded_resources' and 'uncompressed_files' are supported in packaging_options right now!")
 
     actions.run(apk_builder_args, category = "apk_build")
 
@@ -213,9 +240,6 @@ def get_install_info(
         files["resources_exopackage_res"] = resources_info.res
         files["resources_exopackage_res_hash"] = resources_info.res_hash
 
-    if secondary_dex_exopackage_info or native_library_exopackage_info or resources_info:
-        files["exopackage_agent_apk"] = ctx.attrs._android_toolchain[AndroidToolchainInfo].exopackage_agent_apk
-
     if definitely_has_native_libs and hasattr(ctx.attrs, "cpu_filters"):
         files["cpu_filters"] = ctx.actions.write("cpu_filters.txt", ctx.attrs.cpu_filters)
 
@@ -232,12 +256,8 @@ def get_install_config(apex_mode: bool) -> dict[str, typing.Any]:
     # TODO: read from toolchains
     install_config = {
         "adb_restart_on_failure": read_root_config("adb", "adb_restart_on_failure", "true"),
-        "agent_port_base": read_root_config("adb", "agent_port_base", "2828"),
         "apex_mode": apex_mode,
-        "is_zstd_compression_enabled": read_root_config("adb", "is_zstd_compression_enabled", "false"),
-        "max_retries": read_root_config("adb", "retries", "5"),
         "multi_install_mode": read_root_config("adb", "multi_install_mode", "false"),
-        "retry_delay_millis": read_root_config("adb", "retry_delay_millis", "500"),
         "skip_install_metadata": read_root_config("adb", "skip_install_metadata", "false"),
         "staged_install_mode": read_root_config("adb", "staged_install_mode", None),
     }

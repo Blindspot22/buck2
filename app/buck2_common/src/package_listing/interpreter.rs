@@ -1,32 +1,33 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use async_trait::async_trait;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::cell_path::CellPathRef;
 use buck2_core::cells::paths::CellRelativePath;
-use buck2_core::fs::paths::file_name::FileNameBuf;
 use buck2_core::package::PackageLabel;
 use buck2_core::package::package_relative_path::PackageRelativePath;
 use buck2_core::package::package_relative_path::PackageRelativePathBuf;
+use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_util::arc_str::ArcS;
 use dice::DiceComputations;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use itertools::Itertools;
 use starlark_map::sorted_set::SortedSet;
 use starlark_map::sorted_vec::SortedVec;
 
-use crate::dice::file_ops::DiceFileComputations;
+use crate::file_ops::dice::DiceFileComputations;
 use crate::find_buildfile::find_buildfile;
 use crate::ignores::file_ignores::FileIgnoreReason;
+use crate::io::DirectoryDoesNotExistSuggestion;
 use crate::io::ReadDirError;
 use crate::package_listing::listing::PackageListing;
 use crate::package_listing::resolver::PackageListingResolver;
@@ -56,7 +57,7 @@ impl PackageListingResolver for InterpreterPackageListingResolver<'_, '_> {
                     .await?
                     .included;
                 if find_buildfile(&buildfile_candidates, &listing).is_some() {
-                    return Ok(PackageLabel::from_cell_path(path));
+                    return PackageLabel::from_cell_path(path);
                 }
             }
         }
@@ -85,7 +86,7 @@ impl PackageListingResolver for InterpreterPackageListingResolver<'_, '_> {
                     .await?
                     .included;
                 if find_buildfile(&buildfile_candidates, &listing).is_some() {
-                    packages.push(PackageLabel::from_cell_path(path));
+                    packages.push(PackageLabel::from_cell_path(path)?);
                 }
             }
             Ok(packages)
@@ -115,7 +116,7 @@ pub enum GatherPackageListingError {
     DirectoryDoesNotExist {
         package: CellPath,
         expected_path: CellPath,
-        // TODO(cjhopman): would be nice to get the absolute path here
+        suggestion: DirectoryDoesNotExistSuggestion,
     },
     #[buck2(input)]
     DirectoryIsIgnored {
@@ -152,10 +153,11 @@ impl GatherPackageListingError {
         err: ReadDirError,
     ) -> GatherPackageListingError {
         match err {
-            ReadDirError::DirectoryDoesNotExist(expected_path) => {
+            ReadDirError::DirectoryDoesNotExist { path, suggestion } => {
                 GatherPackageListingError::DirectoryDoesNotExist {
                     package: package_path.to_owned(),
-                    expected_path,
+                    expected_path: path,
+                    suggestion,
                 }
             }
             ReadDirError::DirectoryIsIgnored(path, ignore_reason) => {
@@ -239,14 +241,23 @@ impl std::fmt::Display for GatherPackageListingError {
                 if let Some(primary_candidate) =
                     candidates.iter().find(|v| v.extension() != Some("v2"))
                 {
-                    (
-                        package,
+                    let alternatives: Vec<_> = candidates
+                        .iter()
+                        .filter(|v| *v != primary_candidate)
+                        .map(|v| format!("`{v}`"))
+                        .collect();
+
+                    let message = if alternatives.is_empty() {
+                        format!("    missing `{}` file", primary_candidate)
+                    } else {
                         format!(
                             "    missing `{}` file (also missing alternatives {})",
                             primary_candidate,
-                            candidates.iter().map(|v| format!("`{}`", v)).join(", ")
-                        ),
-                    )
+                            alternatives.join(", ")
+                        )
+                    };
+
+                    (package, message)
                 } else {
                     unreachable!()
                 }
@@ -254,14 +265,39 @@ impl std::fmt::Display for GatherPackageListingError {
             GatherPackageListingError::DirectoryDoesNotExist {
                 package,
                 expected_path,
+                suggestion,
             } => {
                 let path_as_str = expected_path.to_string();
+                let suggestion_msg = match suggestion {
+                    DirectoryDoesNotExistSuggestion::Cell(cell_suggestion) => {
+                        format!("Did you mean one of [`{}`]?", cell_suggestion.join("`, `"))
+                    }
+                    DirectoryDoesNotExistSuggestion::Typo(suggestion) => {
+                        let suggested_target = match expected_path.parent() {
+                            Some(parent) => {
+                                if parent.path().is_empty() {
+                                    format!("{}//{}", parent.cell(), suggestion)
+                                } else {
+                                    format!("{}/{}", parent, suggestion)
+                                }
+                            }
+                            None => {
+                                format!("{}//{}", expected_path.cell(), suggestion)
+                            }
+                        };
+
+                        format!("Did you mean `{}`?", suggested_target)
+                    }
+                    DirectoryDoesNotExistSuggestion::NoSuggestion => "".to_owned(),
+                };
+
                 (
                     package,
                     format!(
-                        "{}\n    dir `{}` does not exist",
+                        "{}\n    dir `{}` does not exist. {}",
                         underlined(&path_as_str),
                         path_as_str,
+                        suggestion_msg
                     ),
                 )
             }
@@ -309,7 +345,7 @@ impl std::fmt::Display for GatherPackageListingError {
                             CellPath::new(*cell_name, CellRelativePath::new(fixed).to_owned())
                                 .to_string()
                         }
-                        _ => format!("{}//", cell_name),
+                        _ => format!("{cell_name}//"),
                     }
                 };
                 (
@@ -323,7 +359,7 @@ impl std::fmt::Display for GatherPackageListingError {
             }
         };
 
-        writeln!(f, "{}{}:` does not exist", prefix, package)?;
+        writeln!(f, "{prefix}{package}:` does not exist")?;
         f.write_str(&submessage)?;
         Ok(())
     }

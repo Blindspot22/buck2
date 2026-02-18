@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use core::fmt;
@@ -13,9 +14,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use allocative::Allocative;
-use anyhow::Context as _;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
+use buck2_error::internal_error;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_test_api::data::ConfiguredTargetHandle;
 use chrono::Local;
 use dashmap::DashMap;
@@ -89,11 +90,11 @@ impl TestSession {
     }
 
     /// Retrieve the provider for a given handle.
-    pub fn get(&self, id: ConfiguredTargetHandle) -> anyhow::Result<ConfiguredProvidersLabel> {
+    pub fn get(&self, id: ConfiguredTargetHandle) -> buck2_error::Result<ConfiguredProvidersLabel> {
         let res = self
             .labels
             .get(&id)
-            .with_context(|| format!("Invalid id provided to TestSession: {:?}", id))?;
+            .ok_or_else(|| internal_error!("Invalid id provided to TestSession: {id:?}"))?;
 
         Ok(res.clone())
     }

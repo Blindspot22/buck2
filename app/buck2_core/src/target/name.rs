@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Borrow;
@@ -13,9 +14,13 @@ use std::ops::Deref;
 use allocative::Allocative;
 use buck2_util::arc_str::ThinArcStr;
 use dupe::Dupe;
+use pagable::Pagable;
+use serde::Deserialize;
+use serde::Serialize;
 use strong_hash::StrongHash;
 
 use crate::ascii_char_set::AsciiCharSet;
+use crate::soft_error;
 
 pub const EQ_SIGN_SUBST: &str = "_eqsb_";
 
@@ -31,10 +36,13 @@ pub const EQ_SIGN_SUBST: &str = "_eqsb_";
     PartialEq,
     Ord,
     PartialOrd,
-    Allocative
+    Allocative,
+    Serialize,
+    Deserialize,
+    Pagable
 )]
 // TODO intern this?
-pub struct TargetName(ThinArcStr);
+pub struct TargetName(#[pagable(flatten_serde)] ThinArcStr);
 
 #[derive(buck2_error::Error, Debug)]
 #[buck2(input)]
@@ -241,7 +249,7 @@ mod tests {
         assert!(TargetName::new("foo_eqsb_bar").is_err());
 
         if let Err(e) = TargetName::new("target[label]") {
-            let msg = format!("{:#}", e);
+            let msg = format!("{e:#}");
             assert!(msg.contains("found inner providers label when target names are expected. remove `[...]` portion of the target name from `target[label]`"), "{}", msg);
         } else {
             panic!("should have gotten an error")

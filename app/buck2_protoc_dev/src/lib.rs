@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -17,14 +18,18 @@ use std::path::Path;
 use std::path::PathBuf;
 
 fn get_env(key: &str) -> Option<OsString> {
-    println!("cargo:rerun-if-env-changed={}", key);
+    println!("cargo:rerun-if-env-changed={key}");
     env::var_os(key)
 }
 
 #[cfg(not(buck2_build))]
-fn set_var(var: &str, override_var: &str, path: Result<PathBuf, protoc_bin_vendored::Error>) {
+unsafe fn set_var(
+    var: &str,
+    override_var: &str,
+    path: Result<PathBuf, protoc_bin_vendored::Error>,
+) {
     let path = if let Some(override_var_value) = env::var_os(override_var) {
-        eprintln!("INFO: Variable ${} is overridden by ${}", var, override_var);
+        eprintln!("INFO: Variable ${var} is overridden by ${override_var}");
         PathBuf::from(override_var_value)
     } else {
         match path {
@@ -39,14 +44,14 @@ fn set_var(var: &str, override_var: &str, path: Result<PathBuf, protoc_bin_vendo
     };
 
     let path = dunce::canonicalize(path).expect("Failed to canonicalize path");
-    eprintln!("INFO: Variable ${} set to {:?}", var, path);
-    env::set_var(var, path);
+    eprintln!("INFO: Variable ${var} set to {path:?}");
+    unsafe { env::set_var(var, path) };
 }
 
 /// Set up $PROTOC to point to the in repo binary if available.
 ///
 /// Note: repo root is expected to be a relative or absolute path to the root of the repository.
-fn maybe_set_protoc() {
+unsafe fn maybe_set_protoc() {
     #[cfg(not(buck2_build))]
     {
         // `cargo build` of `buck2` does not require external `protoc` dependency
@@ -55,23 +60,27 @@ fn maybe_set_protoc() {
         // https://github.com/facebook/buck2/issues/65
         // So for NixOS builds path to `protoc` binary can be overridden with
         // `BUCK2_BUILD_PROTOC` environment variable.
-        set_var(
-            "PROTOC",
-            "BUCK2_BUILD_PROTOC",
-            protoc_bin_vendored::protoc_bin_path(),
-        );
+        unsafe {
+            set_var(
+                "PROTOC",
+                "BUCK2_BUILD_PROTOC",
+                protoc_bin_vendored::protoc_bin_path(),
+            );
+        }
     }
 }
 
 /// Set $PROTOC_INCLUDE.
-fn maybe_set_protoc_include() {
+unsafe fn maybe_set_protoc_include() {
     #[cfg(not(buck2_build))]
     {
-        set_var(
-            "PROTOC_INCLUDE",
-            "BUCK2_BUILD_PROTOC_INCLUDE",
-            protoc_bin_vendored::include_path(),
-        );
+        unsafe {
+            set_var(
+                "PROTOC_INCLUDE",
+                "BUCK2_BUILD_PROTOC_INCLUDE",
+                protoc_bin_vendored::include_path(),
+            );
+        }
     }
 }
 
@@ -112,10 +121,10 @@ impl Builder {
         }
     }
 
-    pub fn setup_protoc(self) -> Self {
+    pub unsafe fn setup_protoc(self) -> Self {
         // It would be great if there were on the config rather than an env variables...
-        maybe_set_protoc();
-        maybe_set_protoc_include();
+        unsafe { maybe_set_protoc() };
+        unsafe { maybe_set_protoc_include() };
         self
     }
 
@@ -139,6 +148,7 @@ impl Builder {
             println!("cargo:rerun-if-changed={}", proto_file.as_ref().display());
         }
 
+        #[allow(deprecated)] // The recommended replacement is not available yet
         tonic.compile(protos, includes)
     }
 }

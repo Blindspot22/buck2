@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-unsafe
 
@@ -33,6 +34,7 @@ class SubscribeClient(contextlib.AbstractAsyncContextManager):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        assert self._process.stdin is not None
         self._process.stdin.close()
         await wait_for(
             self._start._get_result_or_raise_exception(self._process), timeout=120

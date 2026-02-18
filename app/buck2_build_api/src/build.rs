@@ -1,13 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
@@ -19,13 +21,12 @@ use allocative::Allocative;
 use buck2_common::liveliness_observer::LivelinessObserver;
 use buck2_core::configuration::compatibility::IncompatiblePlatformReason;
 use buck2_core::configuration::compatibility::MaybeCompatible;
-use buck2_core::execution_types::executor_config::PathSeparatorKind;
+use buck2_core::pattern::pattern::Modifiers;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_events::dispatch::console_message;
-use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_node::nodes::configured_frontend::ConfiguredTargetNodeCalculation;
 use dice::LinearRecomputeDiceComputations;
 use dice::UserComputationData;
@@ -42,7 +43,6 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::actions::artifact::get_artifact_fs::GetArtifactFs;
 use crate::actions::calculation::BuildKey;
 use crate::actions::calculation::get_target_rule_type_name;
 use crate::analysis::calculation::RuleAnalysisCalculation;
@@ -56,10 +56,10 @@ use crate::build::graph_properties::GraphPropertiesOptions;
 use crate::build::graph_properties::GraphPropertiesValues;
 use crate::build::outputs::get_outputs_for_top_level_target;
 use crate::build_signals::HasBuildSignals;
-use crate::interpreter::rule_defs::cmd_args::AbsCommandLineContext;
-use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
-use crate::interpreter::rule_defs::provider::builtin::run_info::FrozenRunInfo;
+use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValue;
 use crate::keep_going::KeepGoing;
+use crate::materialize::HasMaterializationQueueTracker;
+use crate::materialize::HasMaterializerFastRolloutConfig;
 use crate::materialize::MaterializationAndUploadContext;
 use crate::materialize::materialize_and_upload_artifact_group;
 use crate::validation::validation_impl::VALIDATION_IMPL;
@@ -69,6 +69,7 @@ pub mod build_report;
 pub mod detailed_aggregated_metrics;
 pub mod graph_properties;
 pub mod outputs;
+pub(crate) mod sketch_impl;
 
 /// The types of provider to build on the configured providers label
 #[derive(Debug, Clone, Dupe, Copy, Allocative, PartialEq)]
@@ -82,7 +83,7 @@ pub enum BuildProviderType {
 #[derive(Clone, Debug, Allocative)]
 pub struct ConfiguredBuildTargetResultGen<T> {
     pub outputs: Vec<T>,
-    pub run_args: Option<Vec<String>>,
+    pub provider_collection: Option<FrozenProviderCollectionValue>,
     pub target_rule_type_name: Option<String>,
     pub graph_properties: Option<buck2_error::Result<MaybeCompatible<GraphPropertiesValues>>>,
     pub errors: Vec<buck2_error::Error>,
@@ -102,7 +103,9 @@ pub struct AsyncBuildTargetResultBuilder {
 }
 
 impl AsyncBuildTargetResultBuilder {
-    pub fn new() -> (Self, impl BuildEventConsumer + Clone) {
+    pub fn new(
+        mut streaming_build_result_tx: Option<UnboundedSender<BuildTargetResult>>,
+    ) -> (Self, impl BuildEventConsumer + Clone) {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         #[derive(Clone)]
         struct EventConsumer {
@@ -118,7 +121,7 @@ impl AsyncBuildTargetResultBuilder {
         (
             Self {
                 event_rx,
-                builder: BuildTargetResultBuilder::new(),
+                builder: BuildTargetResultBuilder::new(streaming_build_result_tx.take()),
             },
             EventConsumer { event_tx },
         )
@@ -168,18 +171,22 @@ pub struct BuildTargetResultBuilder {
         ConfiguredProvidersLabel,
         Option<ConfiguredBuildTargetResultGen<(usize, buck2_error::Result<ProviderArtifacts>)>>,
     >,
+    configured_to_pattern_modifiers: HashMap<ConfiguredProvidersLabel, Vec<Modifiers>>,
     other_errors: BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
     build_failed: bool,
     incompatible_targets: SmallSet<ConfiguredTargetLabel>,
+    streaming_build_result_tx: Option<UnboundedSender<BuildTargetResult>>,
 }
 
 impl BuildTargetResultBuilder {
-    pub fn new() -> Self {
+    pub fn new(mut streaming_build_result_tx: Option<UnboundedSender<BuildTargetResult>>) -> Self {
         Self {
             res: HashMap::new(),
+            configured_to_pattern_modifiers: HashMap::new(),
             other_errors: BTreeMap::new(),
             incompatible_targets: SmallSet::new(),
             build_failed: false,
+            streaming_build_result_tx: streaming_build_result_tx.take(),
         }
     }
 
@@ -196,17 +203,23 @@ impl BuildTargetResultBuilder {
         match variant {
             ConfiguredBuildEventVariant::SkippedIncompatible => {
                 self.incompatible_targets.insert(label.target().dupe());
-                self.res.entry((*label).dupe()).or_insert(None);
+                self.res.entry(label.dupe()).or_insert(None);
+            }
+            ConfiguredBuildEventVariant::MapModifiers { modifiers } => {
+                self.configured_to_pattern_modifiers
+                    .entry(label.dupe())
+                    .or_default()
+                    .push(modifiers);
             }
             ConfiguredBuildEventVariant::Prepared {
-                run_args,
+                provider_collection,
                 target_rule_type_name,
             } => {
                 self.res
-                    .entry((*label).dupe())
+                    .entry(label.dupe())
                     .or_insert(Some(ConfiguredBuildTargetResultGen {
                         outputs: Vec::new(),
-                        run_args,
+                        provider_collection,
                         target_rule_type_name: Some(target_rule_type_name),
                         graph_properties: None,
                         errors: Vec::new(),
@@ -214,10 +227,10 @@ impl BuildTargetResultBuilder {
             }
             ConfiguredBuildEventVariant::Execution(execution_variant) => {
                 let is_err = {
-                    let results = self.res.get_mut(label.as_ref())
-                        .with_internal_error(|| format!("ConfiguredBuildEventVariant::Execution before ConfiguredBuildEventVariant::Prepared for {}", label))?
+                    let results = self.res.get_mut(&label)
+                        .ok_or_else(|| internal_error!("ConfiguredBuildEventVariant::Execution before ConfiguredBuildEventVariant::Prepared for {label}"))?
                         .as_mut()
-                        .with_internal_error(|| format!("ConfiguredBuildEventVariant::Execution for a skipped target: `{}`", label))?;
+                        .ok_or_else(|| internal_error!("ConfiguredBuildEventVariant::Execution for a skipped target: `{label}`"))?;
                     match execution_variant {
                         ConfiguredBuildEventExecutionVariant::Validation { result } => {
                             if let Err(e) = result {
@@ -230,6 +243,12 @@ impl BuildTargetResultBuilder {
                         ConfiguredBuildEventExecutionVariant::BuildOutput { index, output } => {
                             let is_err = output.is_err();
                             results.outputs.push((index, output));
+                            // update the streaming build result
+                            if let Some(tx) = &self.streaming_build_result_tx.clone() {
+                                let result = self.build();
+                                let _ignored = tx.send(result);
+                            }
+
                             is_err
                         }
                     }
@@ -240,17 +259,17 @@ impl BuildTargetResultBuilder {
                 }
             }
             ConfiguredBuildEventVariant::GraphProperties { graph_properties } => {
-                self.res.get_mut(label.as_ref())
-                     .with_internal_error(|| format!("ConfiguredBuildEventVariant::GraphProperties before ConfiguredBuildEventVariant::Prepared for {}", label))?
+                self.res.get_mut(&label)
+                     .ok_or_else(|| internal_error!("ConfiguredBuildEventVariant::GraphProperties before ConfiguredBuildEventVariant::Prepared for {label}"))?
                      .as_mut()
-                     .with_internal_error(|| format!("ConfiguredBuildEventVariant::GraphProperties for a skipped target: `{}`", label))?
+                     .ok_or_else(|| internal_error!("ConfiguredBuildEventVariant::GraphProperties for a skipped target: `{label}`"))?
                      .graph_properties = Some(graph_properties);
             }
             ConfiguredBuildEventVariant::Timeout => {
-                self.res.get_mut(label.as_ref())
-                     .with_internal_error(|| format!("ConfiguredBuildEventVariant::Timeout before ConfiguredBuildEventVariant::Prepared for {}", label))?
+                self.res.get_mut(&label)
+                     .ok_or_else(|| internal_error!("ConfiguredBuildEventVariant::Timeout before ConfiguredBuildEventVariant::Prepared for {label}"))?
                      .as_mut()
-                     .with_internal_error(|| format!("ConfiguredBuildEventVariant::Timeout for a skipped target: `{}`", label))?
+                     .ok_or_else(|| internal_error!("ConfiguredBuildEventVariant::Timeout for a skipped target: `{label}`"))?
                      .errors.push(buck2_error::Error::from(BuildDeadlineExpired));
                 // TODO(cjhopman): Why don't we break here?
                 self.build_failed = true;
@@ -258,10 +277,10 @@ impl BuildTargetResultBuilder {
             ConfiguredBuildEventVariant::Error { err } => {
                 self.build_failed = true;
                 self.res
-                    .entry((*label).dupe())
+                    .entry(label.dupe())
                     .or_insert(Some(ConfiguredBuildTargetResultGen {
                         outputs: Vec::new(),
-                        run_args: None,
+                        provider_collection: None,
                         target_rule_type_name: None,
                         graph_properties: None,
                         errors: Vec::new(),
@@ -276,68 +295,81 @@ impl BuildTargetResultBuilder {
         Ok(FailFastState::Continue)
     }
 
-    pub fn build(self) -> BuildTargetResult {
-        let Self {
-            res,
-            other_errors,
-            build_failed,
-            incompatible_targets,
-        } = self;
-        if !incompatible_targets.is_empty() {
+    pub fn build(&self) -> BuildTargetResult {
+        // This function can be called several times during a build in order to produce
+        // intermediary/streaming build reports as well as the final build report.
+        // It intentionally does not consume self and copies the arrays in the return object.
+
+        if !self.incompatible_targets.is_empty() {
             // TODO(cjhopman): Probably better to return this in the result and let the caller decide what to do with it.
             console_message(IncompatiblePlatformReason::skipping_message_for_multiple(
-                &incompatible_targets,
+                &self.incompatible_targets,
             ));
         }
 
         // Sort our outputs within each individual BuildTargetResult, then return those.
         // Also, turn our HashMap into a BTreeMap.
-        let res = res
-            .into_iter()
+        let res = self
+            .res
+            .iter()
             .map(|(label, result)| {
-                let result = result.map(|result| {
+                let result = result.as_ref().map(|result| {
                     let ConfiguredBuildTargetResultGen {
-                        mut outputs,
-                        run_args,
+                        outputs,
+                        provider_collection,
                         target_rule_type_name,
                         graph_properties,
                         errors,
                     } = result;
 
                     // No need for a stable sort: the indices are unique (see below).
-                    outputs.sort_unstable_by_key(|(index, _outputs)| *index);
+                    let mut cloned_outputs = outputs.clone();
+                    cloned_outputs.sort_unstable_by_key(|(index, _outputs)| *index);
 
                     // TODO: This whole building thing needs quite a bit of refactoring. We might
                     // request the same targets multiple times here, but since we know that
                     // ConfiguredTargetLabel -> Output is going to be deterministic, we just dedupe
                     // them using the index.
                     ConfiguredBuildTargetResult {
-                        outputs: outputs
+                        outputs: cloned_outputs
                             .into_iter()
                             .unique_by(|(index, _outputs)| *index)
                             .map(|(_index, outputs)| outputs)
                             .collect(),
-                        run_args,
-                        target_rule_type_name,
-                        graph_properties,
-                        errors,
+                        provider_collection: provider_collection.clone(),
+                        target_rule_type_name: target_rule_type_name.clone(),
+                        graph_properties: graph_properties.clone(),
+                        errors: errors.clone(),
                     }
                 });
 
-                (label, result)
+                (label.clone(), result)
+            })
+            .collect();
+
+        let configured_to_pattern_modifiers = self
+            .configured_to_pattern_modifiers
+            .iter()
+            .map(|(label, modifiers)| {
+                (
+                    label.clone(),
+                    BTreeSet::from_iter(modifiers.iter().cloned()),
+                )
             })
             .collect();
 
         BuildTargetResult {
             configured: res,
-            other_errors,
-            build_failed,
+            configured_to_pattern_modifiers,
+            other_errors: self.other_errors.clone(),
+            build_failed: self.build_failed,
         }
     }
 }
 
 pub struct BuildTargetResult {
     pub configured: BTreeMap<ConfiguredProvidersLabel, Option<ConfiguredBuildTargetResult>>,
+    pub configured_to_pattern_modifiers: HashMap<ConfiguredProvidersLabel, BTreeSet<Modifiers>>,
     /// Errors that could not be associated with a specific configured target. These errors may be
     /// associated with a providers label, or might not be associated with any target at all.
     pub other_errors: BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
@@ -348,6 +380,7 @@ impl BuildTargetResult {
     pub fn new() -> Self {
         Self {
             configured: BTreeMap::new(),
+            configured_to_pattern_modifiers: HashMap::new(),
             other_errors: BTreeMap::new(),
             build_failed: false,
         }
@@ -356,6 +389,13 @@ impl BuildTargetResult {
     pub fn extend(&mut self, other: BuildTargetResult) {
         self.configured.extend(other.configured);
         self.other_errors.extend(other.other_errors);
+
+        for (label, modifiers_set) in other.configured_to_pattern_modifiers {
+            self.configured_to_pattern_modifiers
+                .entry(label)
+                .or_default()
+                .extend(modifiers_set);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -376,8 +416,11 @@ pub enum ConfiguredBuildEventExecutionVariant {
 
 pub enum ConfiguredBuildEventVariant {
     SkippedIncompatible,
+    MapModifiers {
+        modifiers: Modifiers,
+    },
     Prepared {
-        run_args: Option<Vec<String>>,
+        provider_collection: Option<FrozenProviderCollectionValue>,
         target_rule_type_name: String,
     },
     Execution(ConfiguredBuildEventExecutionVariant),
@@ -394,7 +437,7 @@ pub enum ConfiguredBuildEventVariant {
 
 /// Events to be accumulated using BuildTargetResult::collect_stream.
 pub struct ConfiguredBuildEvent {
-    label: Arc<ConfiguredProvidersLabel>,
+    label: ConfiguredProvidersLabel,
     variant: ConfiguredBuildEventVariant,
 }
 
@@ -412,10 +455,7 @@ impl BuildEvent {
         label: ConfiguredProvidersLabel,
         variant: ConfiguredBuildEventVariant,
     ) -> Self {
-        Self::Configured(ConfiguredBuildEvent {
-            label: Arc::new(label),
-            variant,
-        })
+        Self::Configured(ConfiguredBuildEvent { label, variant })
     }
 }
 
@@ -440,13 +480,12 @@ pub struct BuildConfiguredLabelOptions {
 pub async fn build_configured_label(
     event_consumer: &dyn BuildEventConsumer,
     ctx: &LinearRecomputeDiceComputations<'_>,
-    materialization_and_upload: &MaterializationAndUploadContext,
+    materialization_and_upload: MaterializationAndUploadContext,
     providers_label: ConfiguredProvidersLabel,
     providers_to_build: &ProvidersToBuild,
     opts: BuildConfiguredLabelOptions,
     timeout_observer: Option<&Arc<dyn LivelinessObserver>>,
 ) {
-    let providers_label = Arc::new(providers_label);
     if let Err(e) = build_configured_label_inner(
         event_consumer,
         ctx,
@@ -460,7 +499,7 @@ pub async fn build_configured_label(
     {
         event_consumer.consume_configured(ConfiguredBuildEvent {
             label: providers_label,
-            variant: ConfiguredBuildEventVariant::Error { err: e.into() },
+            variant: ConfiguredBuildEventVariant::Error { err: e },
         });
     }
 }
@@ -468,14 +507,12 @@ pub async fn build_configured_label(
 async fn build_configured_label_inner<'a>(
     event_consumer: &dyn BuildEventConsumer,
     ctx: &'a LinearRecomputeDiceComputations<'_>,
-    materialization_and_upload: &'a MaterializationAndUploadContext,
-    providers_label: Arc<ConfiguredProvidersLabel>,
+    materialization_and_upload: MaterializationAndUploadContext,
+    providers_label: ConfiguredProvidersLabel,
     providers_to_build: &ProvidersToBuild,
     opts: BuildConfiguredLabelOptions,
     timeout_observer: Option<&'a Arc<dyn LivelinessObserver>>,
 ) -> buck2_error::Result<()> {
-    let artifact_fs = ctx.get().get_artifact_fs().await?;
-
     let outputs = match get_outputs_for_top_level_target(
         &mut ctx.get(),
         &providers_label,
@@ -492,7 +529,7 @@ async fn build_configured_label_inner<'a>(
                 });
                 return Ok(());
             } else {
-                return Err(reason.to_err().into());
+                return Err(reason.to_err());
             };
         }
         MaybeCompatible::Compatible(v) => v,
@@ -513,31 +550,13 @@ async fn build_configured_label_inner<'a>(
     let target_rule_type_name =
         get_target_rule_type_name(&mut ctx.get(), providers_label.target()).await?;
 
-    let run_args = if providers_to_build.run {
+    let provider_collection = if providers_to_build.run {
         let providers = ctx
             .get()
-            .get_providers(providers_label.as_ref())
+            .get_providers(&providers_label)
             .await?
             .require_compatible()?;
-
-        if let Some(runinfo) = providers
-            .provider_collection()
-            .builtin_provider::<FrozenRunInfo>()
-        {
-            // Produce arguments to run on a local machine.
-            let path_separator = if cfg!(windows) {
-                PathSeparatorKind::Windows
-            } else {
-                PathSeparatorKind::Unix
-            };
-            let executor_fs = ExecutorFs::new(&artifact_fs, path_separator);
-            let mut cli = Vec::<String>::new();
-            let mut ctx = AbsCommandLineContext::new(&executor_fs);
-            runinfo.add_to_command_line(&mut cli, &mut ctx)?;
-            Some(cli)
-        } else {
-            None
-        }
+        Some(providers)
     } else {
         None
     };
@@ -583,30 +602,60 @@ async fn build_configured_label_inner<'a>(
         ));
     }
 
+    let queue_tracker = ctx
+        .get()
+        .per_transaction_data()
+        .get_materialization_queue_tracker();
+
+    let materializer_fast_config = ctx
+        .get()
+        .per_transaction_data()
+        .get_materializer_fast_rollout_config();
+
     let mut outputs: Vec<_> = outputs
         .iter()
         .duped()
         .enumerate()
-        .map({
-            |(index, (output, provider_type))| {
-                let materialization_and_upload = materialization_and_upload.dupe();
-                Either::Left(async move {
-                    let res = match materialize_and_upload_artifact_group(
+        .map(|(index, (output, provider_type))| {
+            let queue_tracker = queue_tracker.dupe();
+
+            let fut = if materializer_fast_config.spawn {
+                ctx.spawned(move |ctx, _cancellations| {
+                    async move {
+                        materialize_and_upload_artifact_group(
+                            ctx,
+                            &output,
+                            materialization_and_upload,
+                            &queue_tracker,
+                        )
+                        .await
+                    }
+                    .boxed()
+                })
+                .left_future()
+            } else {
+                async move {
+                    materialize_and_upload_artifact_group(
                         &mut ctx.get(),
                         &output,
-                        &materialization_and_upload,
+                        materialization_and_upload,
+                        &queue_tracker,
                     )
                     .await
-                    {
-                        Ok(values) => Ok(ProviderArtifacts {
-                            values,
-                            provider_type,
-                        }),
-                        Err(e) => Err(buck2_error::Error::from(e)),
-                    };
-                    ConfiguredBuildEventExecutionVariant::BuildOutput { index, output: res }
-                })
-            }
+                }
+                .right_future()
+            };
+
+            Either::Left(fut.map(move |v| {
+                let res = match v {
+                    Ok(values) => Ok(ProviderArtifacts {
+                        values,
+                        provider_type,
+                    }),
+                    Err(e) => Err(e),
+                };
+                ConfiguredBuildEventExecutionVariant::BuildOutput { index, output: res }
+            }))
         })
         .collect();
 
@@ -627,7 +676,7 @@ async fn build_configured_label_inner<'a>(
     event_consumer.consume_configured(ConfiguredBuildEvent {
         label: providers_label.dupe(),
         variant: ConfiguredBuildEventVariant::Prepared {
-            run_args,
+            provider_collection,
             target_rule_type_name,
         },
     });
@@ -652,7 +701,11 @@ async fn build_configured_label_inner<'a>(
         })
         .collect();
 
-    while let Some(variant) = outputs.next().await {
+    while let Some(variant) = if materializer_fast_config.unconstrained {
+        tokio::task::unconstrained(outputs.next()).await
+    } else {
+        outputs.next().await
+    } {
         event_consumer.consume_configured(ConfiguredBuildEvent {
             label: providers_label.dupe(),
             variant,
@@ -660,13 +713,14 @@ async fn build_configured_label_inner<'a>(
     }
 
     if !opts.graph_properties.is_empty() {
-        let graph_properties = graph_properties::get_configured_graph_properties(
+        let graph_properties = graph_properties::get_graph_properties(
             &mut ctx.get(),
             providers_label.target(),
-            opts.graph_properties,
+            opts.graph_properties
+                .should_compute_configured_graph_sketch(),
+            opts.graph_properties.retained_analysis_memory_sketch,
         )
-        .await
-        .map_err(|e| e.into());
+        .await;
 
         event_consumer.consume_configured(ConfiguredBuildEvent {
             label: providers_label,

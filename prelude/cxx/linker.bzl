@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_toolchain_types.bzl", "LinkerInfo", "LinkerType")
 load("@prelude//utils:arglike.bzl", "ArgLike")
@@ -13,6 +14,8 @@ load("@prelude//utils:expect.bzl", "expect")
 # in v1 (https://fburl.com/diffusion/kqd2ylcy).
 # TODO(T110378136): It might make more sense to pass these in via the toolchain.
 Linker = record(
+    # Given the soname for the shared library, how to format the install name argument
+    shared_library_install_name_format = str,
     # The extension to use for the shared library if not set in the toolchain.
     default_shared_library_extension = str,
     # The format to use for the versioned shared library extension if not set in the toolchain.
@@ -33,20 +36,25 @@ SharedLibraryFlagOverrides = record(
     shared_library_flags = list[ArgLike],
 )
 
+DARWIN_SHARED_LIBRARY_INSTALL_NAME_FORMAT_STRING = "@rpath/{}"
+
 LINKERS = {
     LinkerType("darwin"): Linker(
+        shared_library_install_name_format = DARWIN_SHARED_LIBRARY_INSTALL_NAME_FORMAT_STRING,
         default_shared_library_extension = "dylib",
         default_shared_library_versioned_extension_format = "{}.dylib",
-        shared_library_name_linker_flags_format = ["-install_name", "@rpath/{}"],
+        shared_library_name_linker_flags_format = ["-install_name", DARWIN_SHARED_LIBRARY_INSTALL_NAME_FORMAT_STRING],
         shared_library_flags = ["-shared"],
     ),
     LinkerType("gnu"): Linker(
+        shared_library_install_name_format = "{}",
         default_shared_library_extension = "so",
         default_shared_library_versioned_extension_format = "so.{}",
         shared_library_name_linker_flags_format = ["-Wl,-soname,{}"],
         shared_library_flags = ["-shared"],
     ),
     LinkerType("wasm"): Linker(
+        shared_library_install_name_format = "{}",
         default_shared_library_extension = "wasm",
         default_shared_library_versioned_extension_format = "{}.wasm",
         shared_library_name_linker_flags_format = [],
@@ -55,6 +63,7 @@ LINKERS = {
         shared_library_flags = ["-shared"],
     ),
     LinkerType("windows"): Linker(
+        shared_library_install_name_format = "{}",
         default_shared_library_extension = "dll",
         default_shared_library_versioned_extension_format = "dll",
         # NOTE(agallagher): I *think* windows doesn't support a flag to set the
@@ -64,6 +73,7 @@ LINKERS = {
     ),
 }
 
+IMPORT_LIBRARY_SUB_TARGET = "implib"
 PDB_SUB_TARGET = "pdb"
 
 def _sanitize(s: str) -> str:
@@ -152,6 +162,9 @@ def get_shared_library_name_linker_flags(linker_type: LinkerType, soname: str, f
         for f in shared_library_name_linker_flags_format
     ]
 
+def get_shared_library_install_name(linker_type: LinkerType, soname: str) -> str:
+    return LINKERS[linker_type].shared_library_install_name_format.format(soname)
+
 def get_shared_library_flags(linker_type: LinkerType, flag_overrides: [SharedLibraryFlagOverrides, None] = None) -> list[ArgLike]:
     """
     Arguments to pass to the linker to link a shared library.
@@ -180,8 +193,11 @@ def get_link_whole_args(linker_type: LinkerType, inputs: list[Artifact]) -> list
             args.append(inp)
     elif linker_type == LinkerType("windows"):
         for inp in inputs:
-            args.append(inp)
-            args.append("/WHOLEARCHIVE:" + inp.basename)
+            args.append(cmd_args(inp, format = "/WHOLEARCHIVE:{}"))
+    elif linker_type == LinkerType("wasm"):
+        args.append("--whole-archive")
+        args.extend(inputs)
+        args.append("--no-whole-archive")
     else:
         fail("Linker type {} not supported".format(linker_type))
 
@@ -198,7 +214,7 @@ def get_objects_as_library_args(linker_type: LinkerType, objects: list[Artifact]
         args.append("-Wl,--start-lib")
         args.extend(objects)
         args.append("-Wl,--end-lib")
-    elif linker_type == LinkerType("darwin") or linker_type == LinkerType("windows"):
+    elif linker_type == LinkerType("darwin") or linker_type == LinkerType("windows") or linker_type == LinkerType("wasm"):
         args.extend(objects)
     else:
         fail("Linker type {} not supported".format(linker_type))
@@ -272,7 +288,7 @@ def get_rpath_origin(
     runtime.
     """
 
-    if linker_type == LinkerType("gnu"):
+    if linker_type in (LinkerType("gnu"), LinkerType("wasm")):
         return "$ORIGIN"
     if linker_type == LinkerType("darwin"):
         return "@loader_path"
@@ -320,3 +336,21 @@ def get_dumpbin_providers(
             default_output = dumpbin_headers_out,
         )],
     })]
+
+def sandbox_exported_linker_flags(
+        linker_info: LinkerInfo,
+        flags: list[typing.Any],
+        post_flags: list[typing.Any]) -> (list[typing.Any], list[typing.Any]):
+    """
+    Helper to wrap exported pre/post linker flags with sandboxing flags (e.g.
+    `--push-state`/`--pop-state`) only if flags are actually non-empty.
+    """
+
+    # If we're exporting flags, wrap in push/pop state flags to provide some
+    # level of sandboxing.
+    if linker_info.push_pop_state_flags != None and (flags or post_flags):
+        push_state_flags, pop_state_flags = linker_info.push_pop_state_flags
+        flags = push_state_flags + flags
+        post_flags = post_flags + pop_state_flags
+
+    return (flags, post_flags)

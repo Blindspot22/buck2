@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
@@ -66,8 +67,8 @@ impl StarlarkFilePath {
 impl std::fmt::Display for StarlarkFilePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StarlarkFilePath::Bzl(import_path) => write!(f, "{}", import_path),
-            StarlarkFilePath::Bxl(bxl_file_path) => write!(f, "{}", bxl_file_path),
+            StarlarkFilePath::Bzl(import_path) => write!(f, "{import_path}"),
+            StarlarkFilePath::Bxl(bxl_file_path) => write!(f, "{bxl_file_path}"),
         }
     }
 }
@@ -110,7 +111,7 @@ pub(crate) async fn docs_starlark(
 ) -> buck2_error::Result<DocsResponse> {
     let cell_resolver = dice_ctx.get_cell_resolver().await?;
     let cwd = server_ctx.working_dir();
-    let current_cell_path = cell_resolver.get_cell_path(cwd)?;
+    let current_cell_path = cell_resolver.get_cell_path(cwd);
     let cell_alias_resolver = dice_ctx
         .get_cell_alias_resolver(current_cell_path.cell())
         .await?;
@@ -138,12 +139,16 @@ pub(crate) async fn docs_starlark(
     let json_output = match &request.format {
         DocsOutputFormat::Json => Some(json::to_json(docs)?),
         DocsOutputFormat::Markdown(output_dir) => {
+            let mut render_signature_at_bottom = false;
             let module_infos = docs
                 .iter()
                 .map(|(path, doc)| {
                     let path = PathBuf::from(path.cell().as_str())
                         .join(path.path().path().as_forward_relative_path().as_path());
                     let path = path.to_str().map(|s| s.to_owned()).unwrap_or("".to_owned());
+                    if path.contains("rules.bzl") {
+                        render_signature_at_bottom = true;
+                    }
 
                     DocModuleInfo {
                         module: doc,
@@ -153,7 +158,12 @@ pub(crate) async fn docs_starlark(
                 })
                 .collect();
 
-            write_docs_to_subdir(module_infos, output_dir.to_str()?, None)?;
+            write_docs_to_subdir(
+                module_infos,
+                output_dir.to_str()?,
+                None,
+                render_signature_at_bottom,
+            )?;
             None
         }
     };

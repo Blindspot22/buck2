@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//python:compute_providers.bzl", "ExecutableType")
@@ -34,7 +35,7 @@ def _write_test_modules_list(
     contents += "]\n"
     return name, ctx.actions.write(name, contents)
 
-def python_test_executable(ctx: AnalysisContext) -> list[Provider]:
+def python_test_executable(ctx: AnalysisContext) -> list[Provider] | Promise:
     main_module = value_or(ctx.attrs.main_module, "__test_main__")
 
     srcs = qualify_srcs(ctx.label, ctx.attrs.base_module, from_named_set(ctx.attrs.srcs))
@@ -63,5 +64,5 @@ def python_test_executable(ctx: AnalysisContext) -> list[Provider]:
         executable_type = ExecutableType("test"),
     )
 
-def python_test_impl(ctx: AnalysisContext) -> list[Provider]:
+def python_test_impl(ctx: AnalysisContext) -> list[Provider] | Promise:
     return python_test_executable(ctx)

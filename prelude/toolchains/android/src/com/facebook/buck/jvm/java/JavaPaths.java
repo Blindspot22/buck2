@@ -1,18 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
 
 import com.facebook.buck.core.filesystems.AbsPath;
 import com.facebook.buck.core.filesystems.RelPath;
-import com.facebook.buck.util.unarchive.ArchiveFormat;
-import com.facebook.buck.util.unarchive.ExistingFileMode;
+import com.facebook.buck.util.unarchive.Unzip;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import java.io.IOException;
@@ -45,13 +45,10 @@ public class JavaPaths {
       } else if (pathString.endsWith(SRC_ZIP) || pathString.endsWith(SRC_JAR)) {
         // For a Zip of .java files, create a JavaFileObject for each .java entry.
         ImmutableList<Path> zipPaths =
-            ArchiveFormat.ZIP
-                .getUnarchiver()
-                .extractArchive(
-                    ruleCellPathRoot,
-                    ruleCellPathRoot.resolve(path).getPath(),
-                    ruleCellPathRoot.resolve(workingDirectory).getPath(),
-                    ExistingFileMode.OVERWRITE);
+            Unzip.extractArchive(
+                ruleCellPathRoot,
+                ruleCellPathRoot.resolve(path).getPath(),
+                ruleCellPathRoot.resolve(workingDirectory).getPath());
         sources.addAll(
             zipPaths.stream()
                 .filter(input -> input.toString().endsWith(".java"))

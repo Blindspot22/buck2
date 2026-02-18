@@ -1,21 +1,25 @@
-load("@fbcode//buck2:proto_defs.bzl", "rust_protobuf_library")
+load("@fbcode//buck2:proto_defs.bzl", "proto_srcs", "rust_protobuf_library_prost_0134")
 load("@fbcode_macros//build_defs/lib:oss.bzl", "translate_target")
 
 oncall("build_infra")
 
-rust_protobuf_library(
+rust_protobuf_library_prost_0134(
     name = "buck2_test_proto",
     srcs = glob(["src/**/*.rs"]),
-    build_env = {
-        "BUCK_HACK_DATA_PROTOC_INCLUDE": "$(location {})".format(
-            translate_target("//buck2/app/buck2_data:data_proto"),
-        ),
-    },
     build_script = "build.rs",
-    protos = ["test.proto"],
+    proto_srcs = ":buck2_test_proto.proto",
     deps = [
-        "fbsource//third-party/rust:prost-types",
-        "fbsource//third-party/rust:tonic",
+        "fbsource//third-party/rust:prost-types-0-13-4",
         "//buck2/app/buck2_data:buck2_data",
+        "//buck2/app/buck2_host_sharing_proto:buck2_host_sharing_proto",
+    ],
+)
+
+proto_srcs(
+    name = "buck2_test_proto.proto",
+    srcs = ["test.proto"],
+    visibility = ["PUBLIC"],
+    deps = [
+        translate_target("//buck2/app/buck2_data:data_proto"),
     ],
 )

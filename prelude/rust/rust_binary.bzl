@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifact_tset.bzl",
@@ -11,6 +12,7 @@ load(
 )
 load(
     "@prelude//:resources.bzl",
+    "create_relocatable_resources_info",
     "create_resource_db",
     "gather_resources",
 )
@@ -30,6 +32,7 @@ load(
     "get_link_group_map_json",
 )
 load("@prelude//cxx:linker.bzl", "DUMPBIN_SUB_TARGET", "PDB_SUB_TARGET", "get_dumpbin_providers", "get_pdb_providers")
+load("@prelude//cxx:transformation_spec.bzl", "build_transformation_spec_context")
 load(
     "@prelude//dist:dist_info.bzl",
     "DistInfo",
@@ -44,6 +47,7 @@ load(
     "merge_shared_libraries",
     "traverse_shared_library_info",
 )
+load("@prelude//linking:stamp_build_info.bzl", "cxx_stamp_build_info", "stamp_build_info")
 load("@prelude//os_lookup:defs.bzl", "OsLookup")
 load("@prelude//rust/rust-analyzer:provider.bzl", "rust_analyzer_provider")
 load("@prelude//test:inject_test_run_info.bzl", "inject_test_run_info")
@@ -51,10 +55,13 @@ load(
     "@prelude//tests:re_utils.bzl",
     "get_re_executors_from_props",
 )
+load(
+    "@prelude//utils:build_graph_pattern.bzl",
+    "new_build_graph_info",
+)
 load("@prelude//utils:utils.bzl", "flatten_dict")
 load(
     ":build.bzl",
-    "compile_context",
     "generate_rustdoc",
     "rust_compile",
 )
@@ -66,9 +73,13 @@ load(
     "ProfileMode",  # @unused Used as a type
     "RuleType",
     "build_params",
+)
+load(
+    ":context.bzl",
+    "CompileContext",
+    "compile_context",
     "output_filename",
 )
-load(":context.bzl", "CompileContext")
 load(
     ":link_info.bzl",
     "DEFAULT_STATIC_LINK_STRATEGY",
@@ -114,10 +125,11 @@ def _rust_binary_common(
     link_strategy = LinkStrategy(ctx.attrs.link_style) if ctx.attrs.link_style else DEFAULT_STATIC_LINK_STRATEGY
     link_strategy = process_link_strategy_for_pic_behavior(link_strategy, compile_ctx.cxx_toolchain_info.pic_behavior)
 
+    cxx_deps = cxx_attr_deps(ctx)
     resources = flatten_dict(gather_resources(
         label = ctx.label,
         resources = rust_attr_resources(ctx),
-        deps = cxx_attr_deps(ctx),
+        deps = cxx_deps,
     ).values())
 
     extra_flags = toolchain_info.rustc_binary_flags + (extra_flags or [])
@@ -125,13 +137,27 @@ def _rust_binary_common(
     strategy_param = _strategy_params(ctx, compile_ctx)
 
     params = strategy_param[link_strategy]
-    name = output_filename(simple_crate, Emit("link"), params)
-    output = ctx.actions.declare_output(name)
+    name = output_filename(compile_ctx, simple_crate, Emit("link"), params)
+
+    enable_late_build_info_stamping = cxx_stamp_build_info(ctx)
+    if enable_late_build_info_stamping:
+        allow_cache_upload = True
+        unstamped_name = output_filename(compile_ctx, simple_crate, Emit("link"), params, "-unstamped")
+        predeclared_output = ctx.actions.declare_output(unstamped_name)
+        final_output = ctx.actions.declare_output(name)
+    else:
+        # If not using late build info stamping, then the output will be stamped eagerly in rust_compile
+        predeclared_output = ctx.actions.declare_output(name)
+        final_output = predeclared_output
+
+    build_graph_info = new_build_graph_info(ctx, cxx_deps)
+    transformation_spec_context = build_transformation_spec_context(ctx, build_graph_info)
 
     rust_cxx_link_group_info = inherited_rust_cxx_link_group_info(
         ctx,
         compile_ctx.dep_ctx,
         link_strategy = link_strategy,
+        transformation_spec_context = transformation_spec_context,
     )
     if rust_cxx_link_group_info != None:
         link_group_mappings = rust_cxx_link_group_info.link_group_info.mappings
@@ -167,7 +193,7 @@ def _rust_binary_common(
         use_link_groups = rust_cxx_link_group_info != None,
         link_group_ctx = link_group_ctx,
         link_strategy = link_strategy,
-        shared_libraries = traverse_shared_library_info(shlib_info),
+        shared_libraries = traverse_shared_library_info(shlib_info, transformation_provider = transformation_spec_context),
         extra_shared_libraries = [],
     )
 
@@ -176,7 +202,7 @@ def _rust_binary_common(
     executable_args = executable_shared_lib_arguments(
         ctx,
         compile_ctx.cxx_toolchain_info,
-        output,
+        final_output,
         shared_libs,
     )
 
@@ -188,33 +214,39 @@ def _rust_binary_common(
         params = params,
         default_roots = default_roots,
         extra_link_args = executable_args.extra_link_args,
-        predeclared_output = output,
+        predeclared_output = predeclared_output,
         extra_flags = extra_flags,
         allow_cache_upload = allow_cache_upload,
         rust_cxx_link_group_info = rust_cxx_link_group_info,
+        transformation_spec_context = transformation_spec_context,
         incremental_enabled = ctx.attrs.incremental_enabled,
     )
 
-    args = cmd_args(link.output, hidden = executable_args.runtime_files)
+    if enable_late_build_info_stamping:
+        stamp_build_info(ctx, link.output, final_output)
+
+    args = cmd_args(final_output, hidden = executable_args.runtime_files)
     external_debug_info = project_artifacts(
         actions = ctx.actions,
-        tsets = [inherited_external_debug_info(
+        tsets = inherited_external_debug_info(
             ctx,
             compile_ctx.dep_ctx,
             link.dwo_output_directory,
             link_strategy,
-        )],
+        ),
     )
 
     # If we have some resources, write it to the resources JSON file and add
     # it and all resources to "runtime_files" so that we make to materialize
     # them with the final binary.
     runtime_files = list(executable_args.runtime_files)
+    relocatable_resources_json = None
+    relocatable_resources_contents = None
     if resources:
         resources_hidden = [create_resource_db(
             ctx = ctx,
             name = name + ".resources.json",
-            binary = output,
+            binary = final_output,
             resources = resources,
         )]
         for resource in resources.values():
@@ -222,6 +254,11 @@ def _rust_binary_common(
             resources_hidden.extend(resource.other_outputs)
         args.add(cmd_args(hidden = resources_hidden))
         runtime_files.extend(resources_hidden)
+        relocatable_resources_json, relocatable_resources_contents = create_relocatable_resources_info(
+            ctx = ctx,
+            name = name,
+            resources = resources,
+        )
 
     # A simple dict of sub-target key to artifact, which we'll convert to
     # DefaultInfo providers at the end
@@ -304,6 +341,7 @@ def _rust_binary_common(
             extra_flags = extra_flags,
             infallible_diagnostics = True,
             incremental_enabled = incr,
+            transformation_spec_context = transformation_spec_context,
         )
         clippy_artifacts[incr] = rust_compile(
             ctx = ctx,
@@ -314,6 +352,7 @@ def _rust_binary_common(
             extra_flags = extra_flags,
             infallible_diagnostics = True,
             incremental_enabled = incr,
+            transformation_spec_context = transformation_spec_context,
         )
 
     providers = [RustcExtraOutputsInfo(
@@ -321,10 +360,29 @@ def _rust_binary_common(
         metadata_incr = diag_artifacts[True],
         clippy = clippy_artifacts[False],
         clippy_incr = clippy_artifacts[True],
+        remarks = None,  # Exposed via subtargets, not this provider
     )]
 
     incr_enabled = ctx.attrs.incremental_enabled
     extra_compiled_targets.update(output_as_diag_subtargets(diag_artifacts[incr_enabled], clippy_artifacts[incr_enabled]))
+
+    # Add remarks subtargets (lazy - only built when subtarget requested)
+    # Uses `params` to match the actual binary's link strategy
+    remarks = rust_compile(
+        ctx = ctx,
+        compile_ctx = compile_ctx,
+        emit = Emit("link"),
+        params = params,
+        default_roots = default_roots,
+        extra_flags = extra_flags,
+        incremental_enabled = False,
+        profile_mode = ProfileMode("remarks"),
+        transformation_spec_context = transformation_spec_context,
+    )
+    if remarks.remarks_txt:
+        extra_compiled_targets["remarks.txt"] = remarks.remarks_txt
+    if remarks.remarks_json:
+        extra_compiled_targets["remarks.json"] = remarks.remarks_json
 
     extra_compiled_targets["expand"] = rust_compile(
         ctx = ctx,
@@ -378,15 +436,16 @@ def _rust_binary_common(
     )
     sub_targets["profile"] = profiles
 
-    extra_compiled_targets["llvm_ir"] = rust_compile(
-        ctx = ctx,
-        compile_ctx = compile_ctx,
-        emit = Emit("llvm-ir"),
-        params = params,
-        default_roots = default_roots,
-        extra_flags = extra_flags,
-        incremental_enabled = ctx.attrs.incremental_enabled,
-    ).output
+    for emit_type in ["asm", "llvm-ir", "mir"]:
+        extra_compiled_targets[emit_type] = rust_compile(
+            ctx = ctx,
+            compile_ctx = compile_ctx,
+            emit = Emit(emit_type),
+            params = params,
+            default_roots = default_roots,
+            extra_flags = extra_flags,
+            incremental_enabled = ctx.attrs.incremental_enabled,
+        ).output
 
     doc_output = generate_rustdoc(
         ctx = ctx,
@@ -414,11 +473,11 @@ def _rust_binary_common(
         ]
 
     if link.pdb:
-        sub_targets[PDB_SUB_TARGET] = get_pdb_providers(pdb = link.pdb, binary = link.output)
+        sub_targets[PDB_SUB_TARGET] = get_pdb_providers(pdb = link.pdb, binary = final_output)
 
     dupmbin_toolchain = compile_ctx.cxx_toolchain_info.dumpbin_toolchain_path
     if dupmbin_toolchain:
-        sub_targets[DUMPBIN_SUB_TARGET] = get_dumpbin_providers(ctx, link.output, dupmbin_toolchain)
+        sub_targets[DUMPBIN_SUB_TARGET] = get_dumpbin_providers(ctx, final_output, dupmbin_toolchain)
 
     sub_targets.update({
         k: [DefaultInfo(default_output = v)]
@@ -427,13 +486,15 @@ def _rust_binary_common(
 
     providers += [
         DefaultInfo(
-            default_output = link.output,
+            default_output = final_output,
             other_outputs = runtime_files + executable_args.external_debug_info + external_debug_info,
             sub_targets = sub_targets,
         ),
         DistInfo(
             shared_libs = shlib_info.set,
             nondebug_runtime_files = runtime_files,
+            relocatable_resources_contents = relocatable_resources_contents,
+            relocatable_resources_json = relocatable_resources_json,
         ),
     ]
     providers.append(rust_analyzer_provider(

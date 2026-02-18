@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -15,7 +16,6 @@ use std::sync::atomic::Ordering;
 use allocative::Allocative;
 use dupe::Dupe;
 use either::Either;
-use starlark::StarlarkResultExt;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::StarlarkHasher;
 use starlark::environment::GlobalsBuilder;
@@ -23,7 +23,6 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
 use starlark::values::Freeze;
-use starlark::values::FreezeResult;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
@@ -100,42 +99,63 @@ impl<'v> StarlarkValue<'v> for ArtifactTag {
     }
 }
 
+/// An `ArtifactTag` is used to associate inputs and outputs in an action.
+/// Tags are typically used with dependency files (dep files) to track which inputs are actually used
+/// during action execution, enabling more accurate incremental builds.
+///
+/// For complete documentation including examples and the full workflow, see
+/// [`ctx.actions.artifact_tag()`](../AnalysisActions#analysisactionsartifact_tag).
 #[starlark_module]
 fn artifact_tag_methods(_: &mut MethodsBuilder) {
+    /// Tag both input and output artifacts with this tag.
+    ///
+    /// When artifacts are tagged, artifact visitors (like those used during action execution)
+    /// can identify which artifacts belong to which category. This is commonly used with the
+    /// `dep_files` parameter in `ctx.actions.run()` to associate inputs with their dependency files.
+    ///
+    /// Args:
+    ///     inner: The artifact(s) or command line arguments. Can be a single artifact,
+    ///            a list of artifacts, or cmd_args containing artifacts.
+    ///
+    /// Returns:
+    ///     The tagged value. If `inner` is command-line-like, returns a tagged command line;
+    ///     otherwise returns a tagged value.
     fn tag_artifacts<'v>(
         this: &ArtifactTag,
         inner: Value<'v>,
     ) -> starlark::Result<Either<StarlarkTaggedValue<'v>, StarlarkTaggedCommandLine<'v>>> {
         let value = StarlarkTaggedValue::new(inner, this.dupe());
 
-        Ok(
-            if ValueAsCommandLineLike::unpack_value(inner)
-                .into_anyhow_result()?
-                .is_some()
-            {
-                Either::Right(StarlarkTaggedCommandLine::new(value))
-            } else {
-                Either::Left(value)
-            },
-        )
+        Ok(if ValueAsCommandLineLike::unpack_value(inner)?.is_some() {
+            Either::Right(StarlarkTaggedCommandLine::new(value))
+        } else {
+            Either::Left(value)
+        })
     }
 
+    /// Tag only input artifacts with this tag (outputs are not tagged).
+    ///
+    /// This is similar to `tag_artifacts()`, but only applies the tag to input artifacts.
+    /// This is useful when you want to track inputs separately from outputs.
+    ///
+    /// Args:
+    ///     inner: The artifact(s) or command line arguments. Can be a single artifact,
+    ///            a list of artifacts, or cmd_args containing artifacts.
+    ///
+    /// Returns:
+    ///     The tagged value with tags applied only to inputs. If `inner` is command-line-like,
+    ///     returns a tagged command line; otherwise returns a tagged value.
     fn tag_inputs<'v>(
         this: &ArtifactTag,
         inner: Value<'v>,
     ) -> starlark::Result<Either<StarlarkTaggedValue<'v>, StarlarkTaggedCommandLine<'v>>> {
         let value = StarlarkTaggedValue::inputs_only(inner, this.dupe());
 
-        Ok(
-            if ValueAsCommandLineLike::unpack_value(inner)
-                .into_anyhow_result()?
-                .is_some()
-            {
-                Either::Right(StarlarkTaggedCommandLine::new(value))
-            } else {
-                Either::Left(value)
-            },
-        )
+        Ok(if ValueAsCommandLineLike::unpack_value(inner)?.is_some() {
+            Either::Right(StarlarkTaggedCommandLine::new(value))
+        } else {
+            Either::Left(value)
+        })
     }
 }
 

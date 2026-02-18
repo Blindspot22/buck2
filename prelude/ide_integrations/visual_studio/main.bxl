@@ -1,16 +1,20 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
+load("@prelude//bxl:lazy.bxl", "batch_apply_lazy_catch_each")
+load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load("gen_filters.bxl", "gen_filters")
 load("gen_sln.bxl", "gen_sln")
 load("gen_vcxproj.bxl", "gen_vcxproj")
-load("get_attrs.bxl", "get_attrs")
+load("get_attrs.bxl", "get_attrs", "get_cxx_toolchain")
+load("get_compiler_settings.bxl", "materialize_compiler_settings_file")
 load("get_deps.bxl", "get_deps")
-load("get_vs_settings.bxl", "get_basic_vs_settings", "get_vs_settings")
+load("get_vs_settings.bxl", "get_basic_vs_settings", "get_vs_settings", "get_vs_settings_for_toolchain")
 load("utils.bxl", "basename", "get_project_file_path", "log_debug")
 
 def _match_recursive_target_types(target: bxl.ConfiguredTargetNode, recursive_target_types: list[str], bxl_ctx) -> bool:
@@ -65,7 +69,7 @@ def _main(bxl_ctx):
     https://buck2.build/docs/developers/dynamic_output/#dynamic-output
     """
     actions = bxl_ctx.bxl_actions().actions
-    targets = []  # list[TargetLabel]. Target list from command line after target pattern expansion.
+    targets = []  # list[ConfiguredTargetNode]. Configured target list from command line after target pattern expansion.
     explicit_targets = {}  # dict[TargetLabel, True]. Explicit target list from command line, i.e., not from target pattern expansion.
     for ulabel in bxl_ctx.cli_args.target:
         # Add explicit cell name when it's omitted as otherwise BXL will use cell name of BXL script, i.e., prelude.
@@ -75,23 +79,41 @@ def _main(bxl_ctx):
             elif ulabel.startswith("//"):
                 ulabel = "fbsource" + ulabel
 
+        # Target label or alias.
+        is_explicit_target = ((":" in ulabel) and (not ulabel.endswith(":"))) or ((":" not in ulabel) and ("/" not in ulabel))
+
+        # Using bxl_ctx.configured_targets on a wildcard target label will cause all targets to fail
+        # if one of the targets is incompatible. We are using unconfigured_target_nodes_keep_going
+        # to filter out the incompatible targets first.
+        success_targets, error_map = bxl_ctx.lazy.unconfigured_target_nodes_keep_going(ulabel).resolve()
+
+        # Handle errors
+        for package_path, _ in error_map.items():
+            log_debug("Failed to configure target {}, skipping", package_path, bxl_ctx = bxl_ctx)
+
         # Pass along modifiers as required by API to get same configuration as buck2 build.
         # bxl_ctx.modifiers includes modifiers from both command line and mode file.
-        ctargets = bxl_ctx.configured_targets(ulabel, modifiers = bxl_ctx.modifiers)
-        if ctargets == None:
-            pass
-        elif isinstance(ctargets, bxl.ConfiguredTargetSet):
-            targets += [node.label.raw_target() for node in ctargets]
-        else:
-            targets.append(ctargets.label.raw_target())
-            if ":" in ulabel:
-                explicit_targets[ctargets.label.raw_target()] = True
+        def configured_target_with_modifiers(target: bxl.UnconfiguredTargetNode) -> bxl.Lazy:
+            return bxl_ctx.lazy.configured_target_node(target, modifiers = bxl_ctx.modifiers)
 
+        utargets = list(success_targets)
+
+        results = batch_apply_lazy_catch_each(bxl_ctx, configured_target_with_modifiers, utargets)
+        for unode, res in zip(utargets, results):
+            if res.is_ok():
+                cnode = res.unwrap()
+                targets.append(cnode)
+                if is_explicit_target:
+                    explicit_targets[cnode.label.raw_target()] = True
+            else:
+                log_debug("Failed to configure target {}, skipping", unode, bxl_ctx = bxl_ctx)
+
+    target_set = bxl.ctarget_set(targets)
     missing_mode_hashes = [m for m in bxl_ctx.cli_args.mode_files if m not in (bxl_ctx.cli_args.mode_hashes or {})]
     if len(bxl_ctx.cli_args.mode_files) > 1 and missing_mode_hashes:
         warning("Missing mode hashes for following mode files: " + str(missing_mode_hashes))
 
-    deps = get_deps(bxl_ctx, targets)  # list[bxl.ConfiguredTargetNode]
+    deps = get_deps(bxl_ctx, target_set)  # list[bxl.ConfiguredTargetNode]
     # print(deps)
 
     target_exclude_patterns = [_normalize_include_exclude_pattern(p) for p in bxl_ctx.cli_args.target_exclude_pattern]
@@ -115,9 +137,32 @@ def _main(bxl_ctx):
     attrs_artifact_dict = {}  # target label => attrs artifact
     vcxproj_artifact_dict = {}  # target label => vcxproj artifact
     filters_artifact_dict = {}  # target label => filters artifact
+    toolchain_dep_dict = {}
     for dep in deps:
         # Write the attrs to a json file so that all macros get resolved
         attrs = get_attrs(dep, bxl_ctx)
+
+        # Populate the compiler settings file for this target's cxx toolchain attribute.  Normally this is just toolchains//:cxx, and we need its settings file
+        # in order to parse the flags that were specified directly to its CxxCompilerInfo provider and get include directories and defines at the toolchain
+        # level.  However, it's not enough to simply parse `toolchains//:cxx`, because this can be overridden via a number of different methods (for example,
+        # via `cxx_toolchain_override` or by passing the `_cxx_toolchain` attribute to the cxx_library rule invocation).
+        cxx_toolchain = get_cxx_toolchain(dep, bxl_ctx)
+
+        # The target may not be a cxx library or related rule, in which case there will be no cxx toolchain.
+        if cxx_toolchain:
+            cxx_toolchain_label = cxx_toolchain.label
+            cxx_toolchain_artifact = attrs_artifact_dict.get(cxx_toolchain_label, None)
+
+            # Do this lazily.  Many targets can reference the same toolchain, but don't bother trying to run analysis or create the entry for the toolchain
+            # more than once.
+            if not cxx_toolchain_artifact:
+                cxx_toolchain_target_label = cxx_toolchain.label.configured_target()
+                cxx_toolchain_target_node = bxl_ctx.configured_targets(cxx_toolchain_target_label)
+                cxx_toolchain_info = bxl_ctx.analysis(cxx_toolchain_target_node).providers().get(CxxToolchainInfo)
+                settings_file_artifact = materialize_compiler_settings_file(cxx_toolchain_target_node, actions, cxx_toolchain_info, bxl_ctx)
+                attrs_artifact_dict[cxx_toolchain_label] = settings_file_artifact
+
+                toolchain_dep_dict[cxx_toolchain_label] = (cxx_toolchain, cxx_toolchain_target_node)
 
         attrs_outfile = actions.write_json(get_project_file_path(dep.label, ".attrs.json"), attrs, pretty = True)
         attrs_artifact_dict[dep.label] = attrs_outfile
@@ -133,6 +178,8 @@ def _main(bxl_ctx):
         # This is just for generating sln file since vs_settings_list is not available inside the lambda function
         # Sln file doesn't need any attr that involves macro so we're good here
         basic_vs_settings_list.append(get_basic_vs_settings(dep, bxl_ctx.cli_args))
+
+    toolchain_deps = toolchain_dep_dict.values()
 
     # This lambda function gets executed after attrs are written into the json files and then loads them back to get resolved macro values.
     # Params:
@@ -152,10 +199,20 @@ def _main(bxl_ctx):
             for dep in deps
         }
 
+        for dep, _ in toolchain_deps:
+            content = artifacts[attrs_artifact_dict[dep.label]].read_json()
+            attrs_content_dict[dep.label] = content
+
         vs_settings_dict = {}  # target label => vs_settings.
+        for dep, node in toolchain_deps:
+            attrs = attrs_content_dict[dep.label]
+            vs_settings = get_vs_settings_for_toolchain(node, attrs, cli_args)
+            vs_settings_dict[dep.label] = vs_settings
+
         for dep in deps:
             attrs = attrs_content_dict[dep.label]
-            vs_settings = get_vs_settings(dep, attrs, vs_settings_dict, cli_args, buck_root, ctx)
+            toolchain = get_cxx_toolchain(dep, ctx)
+            vs_settings = get_vs_settings(dep, toolchain, attrs, vs_settings_dict, cli_args, buck_root, ctx)
             vs_settings_dict[dep.label] = vs_settings
 
             if dep.label.raw_target() in deps_with_vcxproj:
@@ -182,11 +239,15 @@ def _main(bxl_ctx):
     for (idx, dep) in enumerate(deps):
         if dep.label.raw_target() in deps_with_vcxproj:
             deps_with_vcxproj_indices[idx] = True
+    if explicit_targets:
+        startup_target_fallback = explicit_targets.keys()[0]
+    else:
+        startup_target_fallback = targets[0].label.raw_target()
     sln_content = gen_sln(
         [dep for (idx, dep) in enumerate(deps) if idx in deps_with_vcxproj_indices],
         [s for (idx, s) in enumerate(basic_vs_settings_list) if idx in deps_with_vcxproj_indices],
-        targets,
-        bxl_ctx.cli_args.startup_target or targets[0],
+        explicit_targets,
+        bxl_ctx.cli_args.startup_target or startup_target_fallback,
         bxl_ctx,
     )
     sln_artifact = actions.declare_output(sln_path)

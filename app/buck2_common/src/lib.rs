@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -16,7 +17,7 @@
 #![feature(never_type)]
 #![feature(try_trait_v2)]
 #![feature(used_with_arg)]
-#![feature(let_chains)]
+#![feature(try_blocks)]
 
 pub mod argv;
 pub mod buckd_connection;
@@ -28,7 +29,6 @@ pub mod client_utils;
 pub mod convert;
 pub mod daemon_dir;
 pub mod dice;
-pub mod directory_metadata;
 pub mod events;
 pub mod external_cells;
 pub mod external_symlink;
@@ -49,13 +49,13 @@ pub mod liveliness_observer;
 pub mod local_resource_state;
 pub mod manifold;
 pub mod memory;
-pub mod memory_tracker;
 pub mod package_boundary;
 pub mod package_listing;
 pub mod pattern;
+pub mod rlimits;
 pub mod scope;
+pub mod self_test_timeout;
 pub mod sqlite;
 pub mod starlark_profiler;
-pub mod systemd;
 pub mod target_aliases;
 pub mod temp_path;

@@ -46,7 +46,7 @@ use crate::values::layout::aligned_size::AlignedSize;
 use crate::values::layout::avalue::AValue;
 use crate::values::layout::avalue::AValueImpl;
 use crate::values::layout::avalue::BlackHole;
-use crate::values::layout::avalue::starlark_str;
+use crate::values::layout::avalues::str_::starlark_str;
 use crate::values::layout::heap::allocator::api::ArenaAllocator;
 use crate::values::layout::heap::allocator::api::ChunkAllocationDirection;
 use crate::values::layout::heap::call_enter_exit::CallEnter;
@@ -287,8 +287,6 @@ impl<A: ArenaAllocator> Arena<A> {
     }
 
     /// Allocate a type `T` plus `extra` bytes.
-    ///
-    /// The type `T` will never be dropped, so had better not do any memory allocation.
     pub(crate) fn alloc_extra<'v, T: AValue<'v>>(
         &self,
         x: AValueImpl<'v, T>,
@@ -461,7 +459,7 @@ impl<A: ArenaAllocator> Arena<A> {
                 .entry(x.dupe())
                 .or_insert_with(|| (v.vtable().type_name, AllocCounts::default()));
             e.1.count += 1;
-            e.1.bytes += v.total_memory()
+            e.1.bytes += v.total_memory_for_profile()
         };
         self.for_each_unordered(f);
 
@@ -533,7 +531,7 @@ impl<A: ArenaAllocator> Allocative for Arena<A> {
 mod tests {
     use super::*;
     use crate::values::any::StarlarkAny;
-    use crate::values::layout::avalue::simple;
+    use crate::values::layout::avalues::simple::simple;
 
     fn to_repr(x: &AValueHeader) -> String {
         let mut s = String::new();

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.installer;
@@ -19,8 +20,6 @@ import com.facebook.buck.install.model.InstallResponse;
 import com.facebook.buck.install.model.InstallerGrpc;
 import com.facebook.buck.install.model.ShutdownRequest;
 import com.facebook.buck.install.model.ShutdownResponse;
-import com.facebook.buck.util.concurrent.MostExecutors;
-import com.facebook.buck.util.types.Unit;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.FutureCallback;
@@ -29,6 +28,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import io.grpc.stub.StreamObserver;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -68,7 +68,7 @@ import java.util.stream.Collectors;
 public class InstallerService extends InstallerGrpc.InstallerImplBase {
 
   // TODO: make configurable or pass from buck2 w/ install info data.
-  private static final long INSTALL_MAX_WAIT_TIME = 4;
+  private static final long INSTALL_MAX_WAIT_TIME = 10;
   private static final TimeUnit INSTALL_TIMEOUT_UNIT = TimeUnit.MINUTES;
 
   private static final ThreadPoolExecutor THREAD_POOL =
@@ -78,17 +78,17 @@ public class InstallerService extends InstallerGrpc.InstallerImplBase {
           1,
           TimeUnit.SECONDS,
           new SynchronousQueue<>(),
-          new MostExecutors.NamedThreadFactory("Installer"));
+          new ThreadFactoryBuilder().setNameFormat("Installer").build());
 
   private static final ListeningExecutorService LISTENING_EXECUTOR_SERVICE =
       MoreExecutors.listeningDecorator(THREAD_POOL);
 
   private static final Logger LOG = Logger.getLogger(InstallerService.class.getName());
   private final InstallCommand installer;
-  private final SettableFuture<Unit> installFinished;
+  private final SettableFuture<Void> installFinished;
   private final Map<InstallId, Map<String, Optional<Path>>> installIdToFilesMap = new HashMap<>();
 
-  public InstallerService(InstallCommand installer, SettableFuture<Unit> installFinished) {
+  public InstallerService(InstallCommand installer, SettableFuture<Void> installFinished) {
     this.installer = installer;
     this.installFinished = installFinished;
   }
@@ -313,7 +313,7 @@ public class InstallerService extends InstallerGrpc.InstallerImplBase {
     LOG.info("Received shutting down request");
     responseObserver.onNext(ShutdownResponse.getDefaultInstance());
     responseObserver.onCompleted();
-    installFinished.set(Unit.UNIT);
+    installFinished.set(null);
   }
 
   private void handleException(StreamObserver<?> responseObserver, Exception e) {

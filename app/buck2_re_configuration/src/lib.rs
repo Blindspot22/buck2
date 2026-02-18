@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -48,6 +49,7 @@ pub enum CASdMode {
     LocalWithSync,
     LocalWithoutSync,
     Remote,
+    RemoteToDest,
 }
 
 impl FromStr for CASdMode {
@@ -58,6 +60,7 @@ impl FromStr for CASdMode {
             "local_with_sync" => Ok(CASdMode::LocalWithSync),
             "local_without_sync" => Ok(CASdMode::LocalWithoutSync),
             "remote" => Ok(CASdMode::Remote),
+            "remote_to_dest" => Ok(CASdMode::RemoteToDest),
             _ => Err(buck2_error::buck2_error!(
                 buck2_error::ErrorTag::Input,
                 "Invalid CASd mode: {}",
@@ -71,6 +74,7 @@ impl FromStr for CASdMode {
 pub enum CopyPolicy {
     Copy,
     Reflink,
+    Hybrid,
 }
 
 impl FromStr for CopyPolicy {
@@ -78,6 +82,7 @@ impl FromStr for CopyPolicy {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "hybrid" => Ok(CopyPolicy::Hybrid),
             "reflink" => Ok(CopyPolicy::Reflink),
             _ => Ok(CopyPolicy::Copy),
         }
@@ -107,6 +112,7 @@ mod fbcode {
         pub shared_casd_copy_policy: Option<CopyPolicy>,
         pub shared_casd_address: Option<CASdAddress>,
         pub shared_casd_use_tls: Option<bool>,
+        pub cas_client_label: Option<String>,
         pub action_cache_address: Option<String>,
         pub action_cache_connection_count: i32,
         pub engine_address: Option<String>,
@@ -127,6 +133,7 @@ mod fbcode {
         pub force_enable_deduplicate_find_missing: Option<bool>,
 
         pub features_config_path: Option<String>,
+        pub client_config_path: Option<String>,
 
         // curl reactor
         pub curl_reactor_max_number_of_retries: Option<i32>,
@@ -149,6 +156,8 @@ mod fbcode {
         pub engine_host: Option<String>,
         pub engine_port: Option<i32>,
         // End Thrift settings
+        /// When set to True, allows for cancellation of RE downloads when futures are dropped
+        pub enable_download_cancellation: bool,
     }
 
     impl RemoteExecutionStaticMetadataImpl for RemoteExecutionStaticMetadata {
@@ -174,33 +183,33 @@ mod fbcode {
                 })?,
                 shared_casd_mode_small_files: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
-                    property: "cas_shared_cache_mode_small_files",
+                    property: "cas_shared_cache_mode_small_files_v2",
                 })?,
                 shared_casd_mode_large_files: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
-                    property: "cas_shared_cache_mode_large_files",
+                    property: "cas_shared_cache_mode_large_files_v2",
                 })?,
                 shared_casd_cache_sync_wal_files_count: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
-                    property: "cas_shared_cache_sync_wal_files_count",
+                    property: "cas_shared_cache_sync_wal_files_count_v2",
                 })?,
                 shared_casd_cache_sync_wal_file_max_size: legacy_config.parse(
                     BuckconfigKeyRef {
                         section: BUCK2_RE_CLIENT_CFG_SECTION,
-                        property: "cas_shared_cache_sync_wal_file_max_size",
+                        property: "cas_shared_cache_sync_wal_file_max_size_v2",
                     },
                 )?,
                 shared_casd_cache_sync_max_batch_size: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
-                    property: "cas_shared_cache_sync_max_batch_size",
+                    property: "cas_shared_cache_sync_max_batch_size_v2",
                 })?,
                 shared_casd_cache_sync_max_delay_ms: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
-                    property: "cas_shared_cache_sync_max_delay_ms",
+                    property: "cas_shared_cache_sync_max_delay_ms_v2",
                 })?,
                 shared_casd_copy_policy: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
-                    property: "cas_shared_cache_copy_policy",
+                    property: "cas_shared_cache_copy_policy_v2",
                 })?,
                 shared_casd_address: {
                     let port_result = legacy_config.parse(BuckconfigKeyRef {
@@ -211,13 +220,17 @@ mod fbcode {
                         Ok(Some(port)) => Some(port),
                         _ => legacy_config.parse(BuckconfigKeyRef {
                             section: BUCK2_RE_CLIENT_CFG_SECTION,
-                            property: "cas_shared_cache_address",
+                            property: "cas_shared_cache_address_v2",
                         })?,
                     }
                 },
                 shared_casd_use_tls: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
                     property: "cas_shared_cache_tls",
+                })?,
+                cas_client_label: legacy_config.parse(BuckconfigKeyRef {
+                    section: BUCK2_RE_CLIENT_CFG_SECTION,
+                    property: "cas_client_label_v2",
                 })?,
                 action_cache_address: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
@@ -295,6 +308,10 @@ mod fbcode {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
                     property: "features_config_path",
                 })?,
+                client_config_path: legacy_config.parse(BuckconfigKeyRef {
+                    section: BUCK2_RE_CLIENT_CFG_SECTION,
+                    property: "client_config_path",
+                })?,
                 curl_reactor_max_number_of_retries: legacy_config.parse(BuckconfigKeyRef {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
                     property: "curl_reactor_max_number_of_retries",
@@ -353,6 +370,12 @@ mod fbcode {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
                     property: "engine_port",
                 })?,
+                enable_download_cancellation: legacy_config
+                    .parse(BuckconfigKeyRef {
+                        section: BUCK2_RE_CLIENT_CFG_SECTION,
+                        property: "enable_download_cancellation",
+                    })?
+                    .unwrap_or(false),
             })
         }
 
@@ -426,6 +449,14 @@ pub struct Buck2OssReConfiguration {
     pub max_total_batch_size: Option<usize>,
     /// Maximum number of concurrent upload requests for each action.
     pub max_concurrent_uploads_per_action: Option<usize>,
+    /// Time that digests are assumed to live in CAS after being touched.
+    pub cas_ttl_secs: Option<i64>,
+    /// Interval in seconds for HTTP/2 ping frames to detect stale connections.
+    pub grpc_keepalive_time_secs: Option<u64>,
+    /// Timeout in seconds for receiving HTTP/2 ping acknowledgement.
+    pub grpc_keepalive_timeout_secs: Option<u64>,
+    /// Whether to send HTTP/2 pings when connection is idle.
+    pub grpc_keepalive_while_idle: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Allocative)]
@@ -514,7 +545,7 @@ impl Buck2OssReConfiguration {
                     section: BUCK2_RE_CLIENT_CFG_SECTION,
                     property: "use_fbcode_metadata",
                 })?
-                .unwrap_or(true),
+                .unwrap_or(false),
             max_decoding_message_size: legacy_config.parse(BuckconfigKeyRef {
                 section: BUCK2_RE_CLIENT_CFG_SECTION,
                 property: "max_decoding_message_size",
@@ -526,6 +557,22 @@ impl Buck2OssReConfiguration {
             max_concurrent_uploads_per_action: legacy_config.parse(BuckconfigKeyRef {
                 section: BUCK2_RE_CLIENT_CFG_SECTION,
                 property: "max_concurrent_uploads_per_action",
+            })?,
+            cas_ttl_secs: legacy_config.parse(BuckconfigKeyRef {
+                section: BUCK2_RE_CLIENT_CFG_SECTION,
+                property: "cas_ttl_secs",
+            })?,
+            grpc_keepalive_time_secs: legacy_config.parse(BuckconfigKeyRef {
+                section: BUCK2_RE_CLIENT_CFG_SECTION,
+                property: "grpc_keepalive_time_secs",
+            })?,
+            grpc_keepalive_timeout_secs: legacy_config.parse(BuckconfigKeyRef {
+                section: BUCK2_RE_CLIENT_CFG_SECTION,
+                property: "grpc_keepalive_timeout_secs",
+            })?,
+            grpc_keepalive_while_idle: legacy_config.parse(BuckconfigKeyRef {
+                section: BUCK2_RE_CLIENT_CFG_SECTION,
+                property: "grpc_keepalive_while_idle",
             })?,
         })
     }

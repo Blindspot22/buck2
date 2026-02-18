@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
@@ -42,8 +43,7 @@ public abstract class BaseCompileToJarStepFactory<T extends CompileToJarStepFact
       ImmutableMap<RelPath, RelPath> resourcesMap,
       ResolvedJavac resolvedJavac,
       @Nullable ActionMetadata actionMetadata,
-      T extraParams,
-      @Nullable RelPath kotlinClassesDir) {
+      T extraParams) {
     Preconditions.checkArgument(libraryJarParameters != null || abiJarParameters == null);
 
     steps.addAll(
@@ -74,8 +74,7 @@ public abstract class BaseCompileToJarStepFactory<T extends CompileToJarStepFact
           steps,
           resolvedJavac,
           actionMetadata,
-          extraParams,
-          kotlinClassesDir);
+          extraParams);
     }
 
     if (jarParameters != null) {
@@ -95,7 +94,6 @@ public abstract class BaseCompileToJarStepFactory<T extends CompileToJarStepFact
 
     steps.addAll(MakeCleanDirectoryIsolatedStep.of(outputPaths.getClassesDir()));
     steps.addAll(MakeCleanDirectoryIsolatedStep.of(outputPaths.getAnnotationPath()));
-    steps.addAll(MakeCleanDirectoryIsolatedStep.of(outputPaths.getOutputJarDirPath()));
 
     // If there are resources, then link them to the appropriate place in the classes directory.
     steps.addAll(CopyResourcesStep.of(resourcesMap));
@@ -133,8 +131,7 @@ public abstract class BaseCompileToJarStepFactory<T extends CompileToJarStepFact
       Builder<IsolatedStep> steps,
       ResolvedJavac resolvedJavac,
       @Nullable ActionMetadata actionMetadata,
-      T extraParams,
-      @Nullable RelPath kotlinClassesDir) {
+      T extraParams) {
     Preconditions.checkArgument(abiJarParameters == null);
     Preconditions.checkArgument(
         libraryJarParameters != null
@@ -152,7 +149,8 @@ public abstract class BaseCompileToJarStepFactory<T extends CompileToJarStepFact
         resolvedJavac,
         actionMetadata,
         extraParams,
-        kotlinClassesDir);
+        null,
+        false);
 
     steps.add(new JarDirectoryStep(libraryJarParameters));
   }
@@ -176,7 +174,8 @@ public abstract class BaseCompileToJarStepFactory<T extends CompileToJarStepFact
       ResolvedJavac resolvedJavac,
       @Nullable ActionMetadata actionMetadata,
       T extraParams,
-      @Nullable RelPath kotlinClassesDir);
+      JarParameters abiJarParameters,
+      boolean mixedCompilationMode);
 
   public boolean supportsCompilationDaemon() {
     return false;

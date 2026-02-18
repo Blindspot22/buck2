@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 ROOT_SYMBOL = "//"
 _TARGET_SYMBOL = ":"
@@ -11,7 +12,8 @@ _RECURSIVE_SYMBOL = "..."
 _PATH_SYMBOL = "/"
 
 # https://www.internalfb.com/intern/staticdocs/buck2/docs/concepts/build_target/
-_NAME_REGEX_PATTERN = "[A-Za-z0-9_/.=,@~+-]+"
+# Anchors are needed here to ensure every character in "name" is valid
+_NAME_REGEX_PATTERN = "^[A-Za-z0-9_/.=,@~+-]+$"
 _NAME_REGEX = regex(_NAME_REGEX_PATTERN)
 
 _BuildTargetPatternKind = enum(

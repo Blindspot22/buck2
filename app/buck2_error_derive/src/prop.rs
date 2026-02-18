@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 // This code is adapted from https://github.com/dtolnay/thiserror licensed under Apache-2.0 or MIT.
@@ -17,7 +18,7 @@ use crate::ast::Struct;
 use crate::ast::Variant;
 
 impl Struct<'_> {
-    pub(crate) fn source_field(&self) -> Option<&Field> {
+    pub(crate) fn source_field(&self) -> Option<&Field<'_>> {
         source_field(&self.fields)
     }
 }
@@ -38,7 +39,7 @@ impl Enum<'_> {
 }
 
 impl Variant<'_> {
-    pub(crate) fn source_field(&self) -> Option<&Field> {
+    pub(crate) fn source_field(&self) -> Option<&Field<'_>> {
         source_field(&self.fields)
     }
 }

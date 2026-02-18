@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -278,6 +279,7 @@ mod tests {
 
     use assert_matches::assert_matches;
     use buck2_events::Event;
+    use buck2_events::daemon_id::DaemonId;
     use buck2_events::source::ChannelEventSource;
 
     use super::*;
@@ -417,7 +419,8 @@ mod tests {
         let (daemon_dispatcher_events, daemon_dispatcher_sink) =
             buck2_events::create_source_sink_pair();
         let trace_id = TraceId::new();
-        let dispatcher = EventDispatcher::new(trace_id.dupe(), daemon_dispatcher_sink);
+        let dispatcher =
+            EventDispatcher::new(trace_id.dupe(), DaemonId::new(), daemon_dispatcher_sink);
 
         (dispatcher, daemon_dispatcher_events, trace_id)
     }

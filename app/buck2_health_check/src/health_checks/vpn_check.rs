@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![allow(dead_code)] // The code here will be used in future diffs.
@@ -14,8 +15,10 @@ use regex::Regex;
 
 use crate::interface::HealthCheck;
 use crate::interface::HealthCheckContext;
+use crate::interface::HealthCheckSnapshotData;
 use crate::report::DisplayReport;
 use crate::report::HealthIssue;
+use crate::report::Message;
 use crate::report::Remediation;
 use crate::report::Report;
 use crate::report::Severity;
@@ -77,7 +80,6 @@ impl VpnCheck {
                         optin_target_regex,
                         e
                     )
-                    .into()
                 );
                 Some(false)
             }
@@ -94,7 +96,9 @@ impl VpnCheck {
     fn generate_warning(&self, is_vpn_enabled: bool) -> Option<HealthIssue> {
         is_vpn_enabled.then(|| HealthIssue {
             severity: Severity::Warning,
-            message: "For optimal build speed, consider disconnecting from VPN".to_owned(),
+            message: Message::Simple(
+                "For optimal build speed, consider disconnecting from VPN".to_owned(),
+            ),
             remediation: Some(Remediation::Link(REMEDIATION_LINK.to_owned())),
         })
     }
@@ -125,7 +129,10 @@ impl VpnCheck {
 
 #[async_trait::async_trait]
 impl HealthCheck for VpnCheck {
-    fn run_check(&self) -> buck2_error::Result<Option<Report>> {
+    fn run_check(
+        &mut self,
+        _snapshot: HealthCheckSnapshotData,
+    ) -> buck2_error::Result<Option<Report>> {
         Ok(self.run())
     }
 

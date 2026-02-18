@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.cd.command.kotlin
@@ -19,6 +20,7 @@ import java.util.Optional
 
 data class KotlinExtraParams(
     val extraClassPaths: ImmutableList<AbsPath>,
+    val extraClassPathSnapshots: ImmutableList<AbsPath>,
     val standardLibraryClassPath: AbsPath,
     val annotationProcessingClassPath: AbsPath,
     val annotationProcessingTool: AnnotationProcessingTool,
@@ -34,16 +36,22 @@ data class KotlinExtraParams(
     val jvmAbiGenPlugin: Optional<AbsPath>,
     val shouldVerifySourceOnlyAbiConstraints: Boolean,
     val depTrackerPlugin: Optional<AbsPath>,
-    val shouldKotlincRunViaBuildToolsApi: Boolean,
     val shouldKotlincRunIncrementally: Boolean,
-    val shouldIncrementalKotlicRunQe: Boolean,
-    val shouldUseStandaloneKosabi: Boolean,
     val incrementalStateDir: Optional<AbsPath>,
-    private val languageVersionString: String
+    val shouldKsp2RunIncrementally: Boolean,
+    private val languageVersionString: String,
+    val shouldKosabiJvmAbiGenUseK2: Boolean,
+    val kotlinClassesDir: AbsPath,
 ) : CompileToJarStepFactory.ExtraParams {
+
+  val shouldActionRunIncrementally: Boolean =
+      shouldKotlincRunIncrementally || shouldKsp2RunIncrementally
 
   val kotlincWorkingDir: Optional<AbsPath> =
       incrementalStateDir.map { dir: AbsPath -> dir.resolve(KOTLINC_WORKING_DIR) }
+
+  val ksp2CachesDir: Optional<AbsPath> =
+      incrementalStateDir.map { dir: AbsPath -> dir.resolve(KSP2_CACHES_DIR) }
 
   val jvmAbiGenWorkingDir: Optional<AbsPath> =
       incrementalStateDir.map { dir: AbsPath -> dir.resolve(KOTLINC_JVM_ABI_GEN_WORKING_DIR) }
@@ -52,6 +60,7 @@ data class KotlinExtraParams(
 
   companion object {
     private val KOTLINC_WORKING_DIR: String = "kotlinc_working_dir"
+    private val KSP2_CACHES_DIR: String = "ksp2_caches_dir"
     private val KOTLINC_JVM_ABI_GEN_WORKING_DIR: String = "jvm_abi_gen_working_dir"
   }
 }

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -12,9 +13,11 @@ use async_trait::async_trait;
 use buck2_artifact::actions::key::ActionKey;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_build_api::actions::calculation::ActionCalculation;
-use buck2_core::fs::async_fs_util;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::materialize::materializer::HasMaterializer;
+use buck2_fs::async_fs_util;
+use buck2_fs::error::IoResultExt;
 use derive_more::Display;
 use dice::CancellationContext;
 use dice::DiceComputations;
@@ -49,22 +52,30 @@ impl Key for SingleValidationKey {
         ctx: &mut DiceComputations,
         _cancellation: &CancellationContext,
     ) -> Self::Value {
-        let gen_path = {
-            let build_result = ActionCalculation::build_action(ctx, &self.0).await?;
+        let build_result = ActionCalculation::build_action(ctx, &self.0).await?;
+        let (gen_path, artifact_value) = {
             if build_result.iter().count() != 1 {
                 return Err(buck2_error::Error::from(
                     ParseValidationResultError::WrongNumberOfArtifacts,
                 ));
             }
-            let (gen_path, ..) = build_result
+            let (gen_path, artifact_value) = build_result
                 .iter()
                 .next()
-                .internal_error("Just checked single element")?;
-            gen_path.dupe()
+                .ok_or_else(|| internal_error!("Just checked single element"))?;
+            (gen_path.dupe(), artifact_value)
         };
 
         let fs = ctx.get_artifact_fs().await?;
-        let project_relative_path = fs.buck_out_path_resolver().resolve_gen(&gen_path)?;
+        let project_relative_path = fs.buck_out_path_resolver().resolve_gen(
+            &gen_path,
+            if gen_path.is_content_based_path() {
+                Some(artifact_value.content_based_path_hash())
+            } else {
+                None
+            }
+            .as_ref(),
+        )?;
 
         let validation_result_path = fs.fs().resolve(&project_relative_path);
 
@@ -76,6 +87,7 @@ impl Key for SingleValidationKey {
 
         let content = async_fs_util::read_to_string(&validation_result_path)
             .await
+            .categorize_internal()
             .buck_error_context("Reading validation result")?;
 
         match parse_validation_result(&content) {
@@ -84,7 +96,7 @@ impl Key for SingleValidationKey {
                 self.0.owner().dupe(),
                 validation_result_path,
             )),
-            Err(e) => Err(buck2_error::Error::from(e)),
+            Err(e) => Err(e),
         }
     }
 

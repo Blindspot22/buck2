@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt::Display;
@@ -15,7 +16,9 @@ use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::provider::label::ProvidersLabelMaybeConfigured;
 use dupe::Dupe;
+use pagable::Pagable;
 use static_assertions::assert_eq_size;
+use strong_hash::StrongHash;
 
 use crate::attrs::attr_type::attr_like::AttrLike;
 use crate::attrs::configuration_context::AttrConfigurationContext;
@@ -26,14 +29,7 @@ use crate::provider_id_set::ProviderIdSet;
 
 /// How configuration is changed when configuring a dep.
 #[derive(
-    Debug,
-    Eq,
-    PartialEq,
-    Hash,
-    Clone,
-    Dupe,
-    Allocative,
-    strong_hash::StrongHash
+    Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative, Pagable, StrongHash
 )]
 pub enum DepAttrTransition {
     /// No transition.
@@ -48,14 +44,7 @@ pub enum DepAttrTransition {
 
 /// A dep attribute accepts a target label and will resolve to the provider collection from that label's analysis.
 #[derive(
-    Debug,
-    Eq,
-    PartialEq,
-    Hash,
-    Clone,
-    Dupe,
-    Allocative,
-    strong_hash::StrongHash
+    Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative, Pagable, StrongHash
 )]
 pub struct DepAttrType {
     /// The set of providers that are required to be available, during attr resolution we'll verify that these
@@ -66,7 +55,7 @@ pub struct DepAttrType {
 
 assert_eq_size!(DepAttrType, [usize; 3]);
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Allocative, strong_hash::StrongHash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Allocative, Pagable, StrongHash)]
 pub struct DepAttr<T: ProvidersLabelMaybeConfigured + AttrLike> {
     // FIXME(JakobDegen): Storing this on every dep - and then having to box this value as a result
     // - is a pretty sad waste of memory

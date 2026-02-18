@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! # Allocative
@@ -43,8 +44,12 @@
 
 #![cfg_attr(rust_nightly, feature(const_type_name))]
 #![cfg_attr(rust_nightly, feature(never_type))]
+// Used so that we can have `rustc_trivial_field_reads`. If it in any way becomes a problem for a
+// rustc upgrade, just delete it
+#![cfg_attr(rust_nightly, allow(internal_features))]
+#![cfg_attr(rust_nightly, feature(rustc_attrs))]
 #![deny(rustdoc::broken_intra_doc_links)]
-#![allow(clippy::empty_enum)]
+#![allow(clippy::empty_enums)]
 
 mod allocative_trait;
 mod flamegraph;

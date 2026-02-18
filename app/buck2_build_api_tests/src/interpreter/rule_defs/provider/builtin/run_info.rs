@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_build_api::interpreter::rule_defs::provider::collection::tester::collection_creator;
@@ -102,7 +103,7 @@ fn run_info_validates_types_1() {
     let mut tester = run_info_tester();
     tester.run_starlark_bzl_test_expecting_error(
         content_bad_args1,
-        "Expected type `CellPath | CellRoot | Label",
+        "Expected type `Artifact | CellPath | CellRoot",
     );
 }
 
@@ -117,7 +118,7 @@ fn run_info_validates_types_2() {
     let mut tester = run_info_tester();
     tester.run_starlark_bzl_test_expecting_error(
         content_bad_args2,
-        "Expected type `CellPath | CellRoot | Label",
+        "Expected type `Artifact | CellPath | CellRoot",
     );
 }
 

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java;
@@ -24,19 +25,13 @@ import com.facebook.buck.step.StepExecutionResult;
 import com.facebook.buck.step.StepExecutionResults;
 import com.facebook.buck.step.TestExecutionContext;
 import com.facebook.buck.testutil.TemporaryPaths;
-import com.facebook.buck.testutil.TestConsole;
-import com.facebook.buck.util.FakeProcess;
-import com.facebook.buck.util.FakeProcessExecutor;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedSet;
 import java.io.File;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Optional;
-import javax.annotation.Nullable;
 import org.hamcrest.Matchers;
 import org.junit.Before;
 import org.junit.Rule;
@@ -51,7 +46,6 @@ public class JavacStepTest {
   private String target;
   private BuildTargetValue buildTargetValue;
   private RelPath configuredBuckOut;
-  private FakeJavac fakeJavac;
   private CompilerParameters compilerParameters;
 
   @Before
@@ -59,12 +53,11 @@ public class JavacStepTest {
     target = "//foo:bar";
     buildTargetValue = new BuildTargetValue(Type.LIBRARY, target);
     configuredBuckOut = RelPath.get("buck-out/v2");
-    fakeJavac = new FakeJavac();
     compilerParameters =
         new CompilerParameters(
             ImmutableSortedSet.of(),
             ImmutableList.of(),
-            ImmutableMap.of(),
+            ImmutableList.of(),
             getCompilerOutputPaths(),
             AbiGenerationMode.CLASS,
             AbiGenerationMode.CLASS,
@@ -78,21 +71,18 @@ public class JavacStepTest {
 
     JavacStep step =
         new JavacStep(
-            fakeJavac,
+            new FakeJavac(0, "javac stderr\n"),
             javacOptions,
             buildTargetValue,
             configuredBuckOut,
             getCompilerOutputPathsValue(),
             compilerParameters,
             null,
-            null);
-
-    FakeProcess fakeJavacProcess = new FakeProcess(0, "javac stdout\n", "javac stderr\n");
+            null,
+            false);
 
     AbsPath rootPath = tmp.getRoot();
-    IsolatedExecutionContext executionContext =
-        TestExecutionContext.newInstance(
-            rootPath, new FakeProcessExecutor(p -> fakeJavacProcess, new TestConsole()));
+    IsolatedExecutionContext executionContext = TestExecutionContext.newInstance(rootPath);
     StepExecutionResult result = step.executeIsolatedStep(executionContext);
 
     // Note that we don't include stderr in the step result on success.
@@ -105,21 +95,18 @@ public class JavacStepTest {
 
     JavacStep step =
         new JavacStep(
-            fakeJavac,
+            new FakeJavac(3, "javac stderr\n"),
             javacOptions,
             buildTargetValue,
             configuredBuckOut,
             getCompilerOutputPathsValue(),
             compilerParameters,
             null,
-            null);
-
-    FakeProcess fakeJavacProcess = new FakeProcess(1, "javac stdout\n", "javac stderr\n");
+            null,
+            false);
 
     AbsPath rootPath = tmp.getRoot();
-    IsolatedExecutionContext executionContext =
-        TestExecutionContext.newInstance(
-            rootPath, new FakeProcessExecutor(p -> fakeJavacProcess, new TestConsole()));
+    IsolatedExecutionContext executionContext = TestExecutionContext.newInstance(rootPath);
     StepExecutionResult result = step.executeIsolatedStep(executionContext);
 
     // JavacStep itself writes stdout to the console on error; we expect the Build class to write
@@ -133,30 +120,23 @@ public class JavacStepTest {
 
   @Test
   public void existingBootclasspathDirSucceeds() throws Exception {
-    ResolvedJavacOptions javacOptions = getResolvedJavacOptions("/this-totally-exists");
-
-    ClasspathChecker classpathChecker =
-        new ClasspathChecker(
-            "/", ":", Paths::get, dir -> true, file -> false, (path, glob) -> ImmutableSet.of());
+    ResolvedJavacOptions javacOptions =
+        getResolvedJavacOptions(ImmutableList.of(RelPath.get("this-totally-exists")));
 
     JavacStep step =
         new JavacStep(
-            fakeJavac,
+            new FakeJavac(0, "javac stderr\n"),
             javacOptions,
             buildTargetValue,
             configuredBuckOut,
             getCompilerOutputPathsValue(),
-            classpathChecker,
             compilerParameters,
             null,
-            null);
-
-    FakeProcess fakeJavacProcess = new FakeProcess(0, "javac stdout\n", "javac stderr\n");
+            null,
+            false);
 
     AbsPath rootPath = tmp.getRoot();
-    IsolatedExecutionContext executionContext =
-        TestExecutionContext.newInstance(
-            rootPath, new FakeProcessExecutor(p -> fakeJavacProcess, new TestConsole()));
+    IsolatedExecutionContext executionContext = TestExecutionContext.newInstance(rootPath);
     StepExecutionResult result = step.executeIsolatedStep(executionContext);
 
     assertThat(result, equalTo(StepExecutionResults.SUCCESS));
@@ -165,25 +145,22 @@ public class JavacStepTest {
   @Test
   public void bootclasspathResolvedToAbsolutePath() {
     ResolvedJavacOptions javacOptions =
-        getResolvedJavacOptions("/this-totally-exists:relative-path");
+        getResolvedJavacOptions(ImmutableList.of(RelPath.get("this-totally-exists:relative-path")));
 
     JavacStep step =
         new JavacStep(
-            fakeJavac,
+            new FakeJavac(0, "javac stderr\n"),
             javacOptions,
             buildTargetValue,
             configuredBuckOut,
             getCompilerOutputPathsValue(),
             compilerParameters,
             null,
-            null);
-
-    FakeProcess fakeJavacProcess = new FakeProcess(0, "javac stdout\n", "javac stderr\n");
+            null,
+            false);
 
     AbsPath rootPath = tmp.getRoot();
-    IsolatedExecutionContext executionContext =
-        TestExecutionContext.newInstance(
-            rootPath, new FakeProcessExecutor(p -> fakeJavacProcess, new TestConsole()));
+    IsolatedExecutionContext executionContext = TestExecutionContext.newInstance(rootPath);
 
     String description = step.getIsolatedStepDescription(executionContext);
     List<String> options =
@@ -199,44 +176,21 @@ public class JavacStepTest {
     }
   }
 
-  @Test
-  public void missingBootclasspathDirFailsWithError() throws Exception {
-    ResolvedJavacOptions javacOptions = getResolvedJavacOptions("/no-such-dir");
-
-    JavacStep step =
-        new JavacStep(
-            fakeJavac,
-            javacOptions,
-            buildTargetValue,
-            configuredBuckOut,
-            getCompilerOutputPathsValue(),
-            compilerParameters,
-            null,
-            null);
-
-    FakeProcess fakeJavacProcess = new FakeProcess(1, "javac stdout\n", "javac stderr\n");
-
-    IsolatedExecutionContext executionContext =
-        TestExecutionContext.newInstance(
-            tmp.getRoot(), new FakeProcessExecutor(p -> fakeJavacProcess, new TestConsole()));
-    thrown.expectMessage("Bootstrap classpath /no-such-dir contains no valid entries");
-    step.executeIsolatedStep(executionContext);
-  }
-
   private static ResolvedJavacOptions getResolvedJavacOptions() {
-    return getResolvedJavacOptions(null);
+    return getResolvedJavacOptions(ImmutableList.of());
   }
 
-  private static ResolvedJavacOptions getResolvedJavacOptions(@Nullable String classpath) {
+  private static ResolvedJavacOptions getResolvedJavacOptions(
+      ImmutableList<RelPath> bootclasspathList) {
     return new ResolvedJavacOptions(
-        Optional.ofNullable(classpath),
-        ImmutableList.of() /* bootclasspathList */,
+        bootclasspathList,
         JavacLanguageLevelOptions.DEFAULT,
         false /* debug */,
         false /* verbose */,
         JavacPluginParams.EMPTY /* javaAnnotationProcessorParams */,
         JavacPluginParams.EMPTY /* standardJavacPluginParams */,
-        ImmutableList.of() /* extraArguments */);
+        ImmutableList.of() /* extraArguments */,
+        null /* systemImage */);
   }
 
   private CompilerOutputPathsValue getCompilerOutputPathsValue() {

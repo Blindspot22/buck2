@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use buck2_artifact::artifact::source_artifact::SourceArtifact;
@@ -60,7 +61,7 @@ enum ResolveMacroError {
 pub trait ConfiguredStringWithMacrosExt {
     fn resolve<'v>(
         &self,
-        ctx: &dyn AttrResolutionContext<'v>,
+        ctx: &mut dyn AttrResolutionContext<'v>,
         pkg: PackageLabel,
     ) -> buck2_error::Result<Value<'v>>;
 }
@@ -68,14 +69,14 @@ pub trait ConfiguredStringWithMacrosExt {
 impl ConfiguredStringWithMacrosExt for ConfiguredStringWithMacros {
     fn resolve<'v>(
         &self,
-        ctx: &dyn AttrResolutionContext<'v>,
+        ctx: &mut dyn AttrResolutionContext<'v>,
         pkg: PackageLabel,
     ) -> buck2_error::Result<Value<'v>> {
         let resolved_parts = match &self.string_with_macros {
             StringWithMacros::StringPart(s) => {
                 vec![ResolvedStringWithMacrosPart::String(s.dupe())]
             }
-            StringWithMacros::ManyParts(ref parts) => {
+            StringWithMacros::ManyParts(parts) => {
                 let mut resolved_parts = Vec::with_capacity(parts.len());
                 for part in parts.iter() {
                     match part {
@@ -86,7 +87,7 @@ impl ConfiguredStringWithMacrosExt for ConfiguredStringWithMacros {
                             resolved_parts.push(ResolvedStringWithMacrosPart::Macro(
                                 *write_to_file,
                                 resolve_configured_macro(m, ctx, pkg).with_buck_error_context(
-                                    || format!("Error resolving `{}`.", part),
+                                    || format!("Error resolving `{part}`."),
                                 )?,
                             ));
                         }
@@ -123,7 +124,7 @@ impl ConfiguredStringWithMacrosExt for ConfiguredStringWithMacros {
 
 fn resolve_configured_macro<'v>(
     configured_macro: &ConfiguredMacro,
-    ctx: &dyn AttrResolutionContext<'v>,
+    ctx: &mut dyn AttrResolutionContext<'v>,
     pkg: PackageLabel,
 ) -> buck2_error::Result<ResolvedMacro<'v>> {
     match configured_macro {

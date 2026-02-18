@@ -1,25 +1,27 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use buck2_common::argv::SanitizedArgv;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::abs_path::AbsPathBuf;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_event_log::write::WriteEventLog;
 use buck2_events::BuckEvent;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_fs::working_dir::AbsWorkingDir;
 
 use crate::subscribers::subscriber::EventSubscriber;
-use crate::subscribers::subscriber::Tick;
+use crate::ticker::Tick;
 
 /// This EventLog lets us to events emitted by Buck and log them to a file. The events are
 /// serialized as JSON and logged one per line.
@@ -35,7 +37,9 @@ impl EventLog {
         extra_user_event_log_path: Option<AbsPathBuf>,
         sanitized_argv: SanitizedArgv,
         command_name: String,
+        start_time: SystemTime,
         log_size_counter_bytes: Option<Arc<AtomicU64>>,
+        retained_event_logs: usize,
     ) -> EventLog {
         Self {
             writer: WriteEventLog::new(
@@ -45,7 +49,9 @@ impl EventLog {
                 extra_user_event_log_path,
                 sanitized_argv,
                 command_name,
+                start_time,
                 log_size_counter_bytes,
+                retained_event_logs,
             ),
         }
     }
@@ -86,11 +92,6 @@ impl EventSubscriber for EventLog {
     /// we hit an error.
     async fn tick(&mut self, _tick: &Tick) -> buck2_error::Result<()> {
         Ok(self.writer.flush_files().await?)
-    }
-
-    async fn exit(&mut self) -> buck2_error::Result<()> {
-        self.writer.exit().await;
-        Ok(())
     }
 
     async fn finalize(&mut self) -> buck2_error::Result<()> {

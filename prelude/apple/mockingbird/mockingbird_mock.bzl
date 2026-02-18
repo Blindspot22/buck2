@@ -1,15 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//apple:apple_platforms.bzl", "APPLE_PLATFORMS_KEY")
-load("@prelude//user:rule_spec.bzl", "RuleRegistrationSpec")
-load(":mockingbird_types.bzl", "MockingbirdLibraryInfo", "MockingbirdLibraryRecord", "MockingbirdSourcesInfo")
+load(
+    ":mockingbird_types.bzl",
+    "MockingbirdLibraryInfo",
+    "MockingbirdLibraryRecord",
+    "MockingbirdSourcesInfo",
+    "MockingbirdToolchainInfo",
+)
 
-def _impl(ctx: AnalysisContext) -> list[Provider]:
+def mockingbird_mock_impl(ctx: AnalysisContext) -> list[Provider]:
     if not MockingbirdLibraryInfo in ctx.attrs.module:
         fail("This module does not contain any swift files. Mockingbird only creates generated mock files for swift code.")
 
@@ -37,7 +43,7 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
     )
 
     params = [
-        ctx.attrs._mockingbird_bin[RunInfo],
+        ctx.attrs._mockingbird_toolchain[MockingbirdToolchainInfo].bin,
         "generate",
         "--target",
         mockingbird_info.name,
@@ -46,7 +52,7 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
         "--output",
         mockingbird_source.as_output(),
         "--support",
-        ctx.attrs._mockingbird_support[DefaultInfo].default_outputs,
+        ctx.attrs._mockingbird_toolchain[MockingbirdToolchainInfo].support,
         "--verbose",
         "--disable-cache",
     ]
@@ -60,7 +66,6 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
         cmd,
         category = "mockingbird",
         local_only = True,  # Mockingbird creates sockets for interprocess communication, which is deliberately blocked on RE.
-        weight_percentage = 100,
         allow_cache_upload = True,
     )
 
@@ -69,7 +74,7 @@ def _impl(ctx: AnalysisContext) -> list[Provider]:
         MockingbirdSourcesInfo(srcs = [mockingbird_source]),
     ]
 
-def _attrs():
+def mockingbird_mock_attrs():
     attribs = {
         ## If the superclass for an object being mocked is in another module add it as a dep so mockingbird can find the implementation.
         "deps": attrs.list(attrs.dep(), default = []),
@@ -81,17 +86,10 @@ def _attrs():
         "only_protocols": attrs.bool(default = False),
         ## A list of source files to include. Only the name of the file, excluding the path, should be set. By default all source files are included and this doesn't need to be specified.
         "srcs": attrs.set(attrs.source(), sorted = True, default = []),
-        "_mockingbird_bin": attrs.exec_dep(providers = [RunInfo], default = "fbsource//fbobjc/VendorLib/Mockingbird:mockingbird-binary"),
-        "_mockingbird_support": attrs.dep(providers = [DefaultInfo], default = "fbsource//fbobjc/VendorLib/Mockingbird:MockingbirdSupport"),
+        "_mockingbird_toolchain": attrs.toolchain_dep(providers = [MockingbirdToolchainInfo], default = "toolchains//:mockingbird"),
         APPLE_PLATFORMS_KEY: attrs.dict(key = attrs.string(), value = attrs.dep(), sorted = False, default = {}),
     }
     return attribs
-
-registration_spec = RuleRegistrationSpec(
-    name = "mockingbird_mock",
-    impl = _impl,
-    attrs = _attrs(),
-)
 
 # Produce JSON project description for Mockingbird codegen
 # https://mockingbirdswift.com/json-project-description

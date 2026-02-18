@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//os_lookup:defs.bzl", "Os", "OsLookup")
 load("@prelude//utils:expect.bzl", "expect")
@@ -123,8 +124,20 @@ def unarchive(
         strip_prefix,
         exec_deps: HttpArchiveExecDeps,
         prefer_local: bool,
-        sub_targets: list[str] | dict[str, list[str]]):
+        sub_targets: list[str] | dict[str, list[str]],
+        has_content_based_path: bool = False):
     exec_is_windows = exec_deps.exec_os_type[OsLookup].os == Os("windows")
+
+    if exec_is_windows:
+        ext = "bat"
+        mkdir = "md {}"
+        interpreter = []
+        first_param = "%1"
+    else:
+        ext = "sh"
+        mkdir = "mkdir -p {}"
+        interpreter = ["/bin/sh"]
+        first_param = '"$1"'
 
     # Unpack archive to output directory.
     exclude_flags = []
@@ -137,41 +150,53 @@ def unarchive(
         # apply our regexes onto the file listing and produce an exclusion list
         # that just has strings.
         exclusions = ctx.actions.declare_output(output_name + "_exclusions")
-        create_exclusion_list = [
-            exec_deps.create_exclusion_list[RunInfo],
-            "--tar-archive",
-            archive,
-            cmd_args(tar_flags, format = "--tar-flag={}"),
-            "--out",
-            exclusions.as_output(),
-        ]
-        for exclusion in excludes:
-            create_exclusion_list.append(cmd_args(exclusion, format = "--exclude={}"))
+        contents = ctx.actions.declare_output(output_name + "_contents")
+        tar_script, _ = ctx.actions.write(
+            "{}_listing.{}".format(output_name, ext),
+            [cmd_args(
+                archive,
+                format = "tar --list " + " ".join(tar_flags) + " -f {} > " + first_param,
+            )],
+            is_executable = True,
+            allow_args = True,
+        )
+        ctx.actions.run(
+            cmd_args(interpreter + [tar_script, contents.as_output()], hidden = [archive]),
+            category = "process_exclusions",
+        )
 
-        ctx.actions.run(create_exclusion_list, category = "process_exclusions", prefer_local = prefer_local)
+        def create_exclusion_list(ctx: AnalysisContext, artifacts, outputs):
+            files = artifacts[contents].read_string().splitlines()
+            exclusion_list = []
+            exclude_regexen = [regex(e) for e in excludes]
+            for f in files:
+                for exclusion in exclude_regexen:
+                    if exclusion.match(f):
+                        exclusion_list.append(f)
+                        break
+            ctx.actions.write(outputs[exclusions], "\n".join(exclusion_list))
+
+        ctx.actions.dynamic_output(
+            dynamic = [contents],
+            inputs = [],
+            outputs = [exclusions.as_output()],
+            f = create_exclusion_list,
+        )
+
         exclude_flags.append(cmd_args(exclusions, format = "--exclude-from={}"))
         exclude_hidden.append(exclusions)
 
-    if exec_is_windows:
-        ext = "bat"
-        mkdir = "md {}"
-        interpreter = []
-    else:
-        ext = "sh"
-        mkdir = "mkdir -p {}"
-        interpreter = ["/bin/sh"]
-
     unarchive_cmd, needs_strip_prefix = _unarchive_cmd(ext_type, exec_is_windows, archive, strip_prefix)
 
-    output = ctx.actions.declare_output(output_name, dir = True)
+    output = ctx.actions.declare_output(output_name, dir = True, has_content_based_path = has_content_based_path)
     script_output = ctx.actions.declare_output(output_name + "_tmp", dir = True) if needs_strip_prefix else output
 
     script, _ = ctx.actions.write(
         "{}_unpack.{}".format(output_name, ext),
         [
-            cmd_args(script_output, format = mkdir),
-            cmd_args(script_output, format = "cd {}"),
-            cmd_args([unarchive_cmd] + exclude_flags, delimiter = " ", relative_to = script_output),
+            cmd_args(script_output.as_output(), format = mkdir),
+            cmd_args(script_output.as_output(), format = "cd {}"),
+            cmd_args([unarchive_cmd] + exclude_flags, delimiter = " ", relative_to = script_output.as_output()),
         ],
         is_executable = True,
         allow_args = True,
@@ -188,7 +213,7 @@ def unarchive(
     )
 
     if needs_strip_prefix:
-        ctx.actions.copy_dir(output.as_output(), script_output.project(strip_prefix))
+        ctx.actions.copy_dir(output.as_output(), script_output.project(strip_prefix), has_content_based_path = has_content_based_path)
 
     if type(sub_targets) == type([]):
         sub_targets = {

@@ -1,15 +1,18 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use buck2_artifact::artifact::artifact_type::Artifact;
+use buck2_artifact::artifact::artifact_type::ArtifactErrors;
 use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
@@ -26,15 +29,17 @@ use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::run_info::RunInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::worker_run_info::WorkerRunInfo;
 use buck2_core::category::CategoryRef;
+use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
+use buck2_core::execution_types::executor_config::ReGangWorker;
 use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use dupe::Dupe;
 use either::Either;
-use gazebo::prelude::SliceClonedExt;
 use host_sharing::WeightClass;
 use host_sharing::WeightPercentage;
+use starlark::collections::SmallSet;
 use starlark::environment::MethodsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -42,6 +47,7 @@ use starlark::values::StringValue;
 use starlark::values::UnpackAndDiscard;
 use starlark::values::Value;
 use starlark::values::ValueOf;
+use starlark::values::ValueTyped;
 use starlark::values::dict::DictRef;
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::list::UnpackList;
@@ -69,8 +75,13 @@ pub(crate) enum RunActionError {
     DuplicateWeightsSpecified,
     #[error("`dep_files` value with key `{}` has an invalid count of associated outputs. Expected 1, got {}.", .key, .count)]
     InvalidDepFileOutputs { key: String, count: usize },
-    #[error("`dep_files` with keys `{}` and {} are using the same tag", .first, .second)]
+    #[error("`dep_files` with keys `{}` and `{}` are using the same tag", .first, .second)]
     ConflictingDepFiles { first: String, second: String },
+    #[error("Dep-files input `{}` is tagged with multiple tags relevant for dep-files: `{}` and `{}`", .input, .tags[0], .tags[1])]
+    ConflictingDepFileInputTags {
+        input: ArtifactGroup,
+        tags: Vec<String>,
+    },
     #[error(
         "missing `metadata_path` parameter which is required when `metadata_env_var` parameter is present"
     )]
@@ -84,9 +95,25 @@ pub(crate) enum RunActionError {
     )]
     ArtifactVisitRecursionLimitExceeded,
     #[error(
-        "`{}` was marked to be materialized on failure but is not declared as an output of the action.", .path 
+        "`{}` was marked to be materialized on failure but is not declared as an output of the action.", .path
     )]
     FailedActionArtifactNotDeclared { path: String },
+    #[error(
+        "Action is marked with `incremental_remote_outputs` but output `{}` is content-based, which is not allowed.", .path
+    )]
+    IncrementalRemoteOutputsWithContentBasedOutputs { path: String },
+    #[error(
+        "Action is marked with `incremental_remote_outputs` but not `no_outputs_cleanup`, which is not allowed."
+    )]
+    IncrementalRemoteOutputsWithoutNoOutputsCleanup,
+    #[error(
+        "Action is marked with `expect_eligible_for_dedupe` but output `{}` is not content-based", .path
+    )]
+    ExpectEligibleForDedupeWithNonContentBasedOutput { path: String },
+    #[error(
+        "Action is marked with `expect_eligible_for_dedupe` but input `{}` is not eligible for dedupe", .input
+    )]
+    ExpectEligibleForDedupeWithIneligibleInput { input: ArtifactGroup },
 }
 
 #[starlark_module]
@@ -115,6 +142,27 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
     ///     * Both `metadata_env_var` and `metadata_path` are useful when making actions behave in
     ///       an incremental manner (for details, see [Incremental
     ///       Actions](https://buck2.build/docs/rule_authors/incremental_actions/))
+    /// * `dep_files`: a dictionary mapping labels to `ArtifactTag` instances for tracking actual
+    ///   dependencies via dependency files (depfiles). This enables precise incremental builds by
+    ///   allowing the build tool to report which inputs it actually used.
+    ///     * Each entry maps a string label (e.g., `"headers"`) to an `ArtifactTag` created via
+    ///       `ctx.actions.artifact_tag()`
+    ///     * The tag should be used to mark both the potential inputs (via `tag.tag_artifacts()`)
+    ///       and the depfile output that will list the actual inputs used
+    ///     * After execution, Buck2 reads the depfile and only tracks changes to inputs listed in it,
+    ///       rather than all tagged inputs
+    ///     * Depfiles must use Makefile syntax: `output: input1 input2 input3`
+    ///     * For complete documentation and examples, see [`ctx.actions.artifact_tag()`](../AnalysisActions#analysisactionsartifact_tag)
+    /// * `allow_offline_output_cache`: enables caching of this action's outputs for offline builds (default: `false`)
+    ///     * When `true`, action outputs are cached during trace builds (via `buck2 debug trace-io`)
+    ///       and restored during offline builds without re-executing the action
+    ///     * Intended for actions that read from the network (e.g., downloads, remote artifact fetches)
+    ///       which cannot execute in offline build environments where network access is restricted
+    ///     * During trace builds: outputs are copied to `buck-out/offline-cache/` after successful execution
+    ///     * During offline builds: if all outputs exist in offline cache, they are restored without
+    ///       running the action; otherwise the action executes normally (graceful fallback)
+    ///     * Requires `buck2.use_network_action_output_cache=true` config to take effect
+    ///     * Example use case: caching network downloads in containerized offline build environments
     /// * The `prefer_local`, `prefer_remote` and `local_only` options allow selecting where the
     /// action should run if the executor selected for this target is a hybrid executor.
     ///     * All those options disable concurrent execution: the action will run on the preferred
@@ -142,8 +190,14 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
     ///     from the host.
     ///  * `meta_internal_extra_params`: a dictionary to pass extra parameters to RE, can add more keys in the future:
     ///     * `remote_execution_policy`: refer to TExecutionPolicy.
-    ///  * `outputs_for_error_handler`: Output files to be provided by action error handler the event of failure
+    ///  * `error_handler`: an optional function that analyzes action failures and produces structured error information.
+    ///     * Type signature: `def error_handler(ctx: ActionErrorCtx) -> list[ActionSubError]`
+    ///     * The function receives an [`ActionErrorCtx`](../ActionErrorCtx) parameter and should return a list of [`ActionSubError`](../ActionSubError) objects
+    ///     * Error handlers enable better error diagnostics and language-specific error categorization
+    ///  * `outputs_for_error_handler`: Output files to be provided to the action error handler and read by
+    /// [error handler](https://buck2.build/docs/api/build/ActionErrorCtx/#actionerrorctxoutput_artifacts) in the event of a failure..
     ///     * The output must also be declared as an output of the action
+    ///     * The output artifact must be created if the action fails
     ///     * Nothing will be provided if left empty (Which is the default)
     ///
     /// When actions execute, they'll do so from the root of the repository. As they execute,
@@ -193,10 +247,14 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         #[starlark(require = named)] dep_files: Option<SmallMap<&'v str, &'v ArtifactTag>>,
         #[starlark(require = named)] metadata_env_var: Option<String>,
         #[starlark(require = named)] metadata_path: Option<String>,
+        #[starlark(require = named, default = UnpackListOrTuple::default())]
+        incremental_metadata_ignore_tags: UnpackListOrTuple<&'v ArtifactTag>,
         // TODO(scottcao): Refactor `no_outputs_cleanup` to `outputs_cleanup`
         #[starlark(require = named, default = false)] no_outputs_cleanup: bool,
-        #[starlark(require = named, default = false)] allow_cache_upload: bool,
+        #[starlark(require = named, default = false)] incremental_remote_outputs: bool,
+        #[starlark(require = named, default = NoneOr::None)] allow_cache_upload: NoneOr<bool>,
         #[starlark(require = named, default = false)] allow_dep_file_cache_upload: bool,
+        #[starlark(require = named, default = false)] allow_offline_output_cache: bool,
         #[starlark(require = named, default = false)] force_full_hybrid_if_capable: bool,
         #[starlark(require = named)] exe: Option<
             Either<ValueOf<'v, &'v WorkerRunInfo<'v>>, ValueOf<'v, &'v RunInfo<'v>>>,
@@ -208,46 +266,99 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
         #[starlark(require = named, default=UnpackList::default())]
         remote_execution_dependencies: UnpackList<SmallMap<&'v str, &'v str>>,
+        #[starlark(require = named, default=UnpackList::default())] re_gang_workers: UnpackList<
+            SmallMap<&'v str, &'v str>,
+        >,
         #[starlark(default = NoneType, require = named)] remote_execution_dynamic_image: Value<'v>,
         #[starlark(require = named, default = NoneOr::None)] meta_internal_extra_params: NoneOr<
             DictRef<'v>,
         >,
+        // Note: Intentionally don't support frozen output artifacts
         #[starlark(require = named, default = UnpackListOrTuple::default())]
-        outputs_for_error_handler: UnpackListOrTuple<&'v StarlarkOutputArtifact<'v>>,
+        outputs_for_error_handler: UnpackListOrTuple<
+            ValueTyped<'v, StarlarkOutputArtifact<'v>>,
+        >,
+        #[starlark(require = named, default = NoneOr::None)] expect_eligible_for_dedupe: NoneOr<
+            bool,
+        >,
     ) -> starlark::Result<NoneType> {
-        struct RunCommandArtifactVisitor {
-            inner: SimpleCommandLineArtifactVisitor,
-            tagged_outputs: HashMap<ArtifactTag, Vec<OutputArtifact>>,
-            depth: u64,
+        if incremental_remote_outputs && !no_outputs_cleanup {
+            // Precaution to make sure content-based paths are not involved.
+            return Err(buck2_error::Error::from(
+                RunActionError::IncrementalRemoteOutputsWithoutNoOutputsCleanup,
+            )
+            .into());
         }
 
-        impl RunCommandArtifactVisitor {
-            fn new() -> Self {
+        struct RunCommandArtifactVisitor<'v> {
+            inner: SimpleCommandLineArtifactVisitor<'v>,
+            tagged_outputs: HashMap<ArtifactTag, Vec<OutputArtifact<'v>>>,
+            depth: u64,
+            dep_file_artifact_tags: Option<SmallSet<&'v ArtifactTag>>,
+            inputs_with_multiple_tags_for_dep_files: Vec<(ArtifactGroup, Vec<ArtifactTag>)>,
+        }
+
+        impl<'v> RunCommandArtifactVisitor<'v> {
+            fn new(dep_files: &Option<SmallMap<&'v str, &'v ArtifactTag>>) -> Self {
+                let dep_file_artifact_tags = if let Some(dep_files) = dep_files {
+                    let mut tags = SmallSet::with_capacity(dep_files.len());
+                    for (_key, tag) in dep_files {
+                        tags.insert(tag.dupe());
+                    }
+                    Some(tags)
+                } else {
+                    None
+                };
                 Self {
                     inner: SimpleCommandLineArtifactVisitor::new(),
                     tagged_outputs: HashMap::new(),
                     depth: 0,
+                    dep_file_artifact_tags,
+                    inputs_with_multiple_tags_for_dep_files: Vec::new(),
                 }
             }
         }
 
-        impl CommandLineArtifactVisitor for RunCommandArtifactVisitor {
-            fn visit_input(&mut self, input: ArtifactGroup, tag: Option<&ArtifactTag>) {
-                self.inner.visit_input(input, tag);
-            }
-
-            fn visit_output(&mut self, artifact: OutputArtifact, tag: Option<&ArtifactTag>) {
-                match tag {
-                    None => {}
-                    Some(tag) => {
-                        self.tagged_outputs
-                            .entry(tag.dupe())
-                            .or_default()
-                            .push(artifact.dupe());
+        impl<'v> CommandLineArtifactVisitor<'v> for RunCommandArtifactVisitor<'v> {
+            fn visit_input(&mut self, input: ArtifactGroup, tags: Vec<&ArtifactTag>) {
+                if let Some(ref dep_file_artifact_tags) = self.dep_file_artifact_tags {
+                    let dep_file_tags: Vec<&ArtifactTag> = tags
+                        .iter()
+                        .filter_map(|t| {
+                            if dep_file_artifact_tags.contains(*t) {
+                                Some(*t)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if dep_file_tags.len() > 1 {
+                        self.inputs_with_multiple_tags_for_dep_files.push((
+                            input.dupe(),
+                            dep_file_tags.into_iter().map(|t| t.dupe()).collect(),
+                        ));
                     }
                 }
+                self.inner.visit_input(input, tags);
+            }
 
-                self.inner.visit_output(artifact, tag);
+            fn visit_declared_output(
+                &mut self,
+                artifact: OutputArtifact<'v>,
+                tags: Vec<&ArtifactTag>,
+            ) {
+                for tag in tags.iter() {
+                    self.tagged_outputs
+                        .entry((*tag).dupe())
+                        .or_default()
+                        .push(artifact.dupe());
+                }
+
+                self.inner.visit_declared_output(artifact, tags);
+            }
+
+            fn visit_frozen_output(&mut self, artifact: Artifact, tags: Vec<&ArtifactTag>) {
+                self.inner.visit_frozen_output(artifact, tags)
             }
 
             fn push_frame(&mut self) -> buck2_error::Result<()> {
@@ -265,7 +376,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
 
         let executor_preference = new_executor_preference(local_only, prefer_local, prefer_remote)?;
 
-        let mut artifact_visitor = RunCommandArtifactVisitor::new();
+        let mut artifact_visitor = RunCommandArtifactVisitor::new(&dep_files);
 
         let starlark_args = StarlarkCmdArgs::try_from_value_typed(arguments)?;
         starlark_args.visit_artifacts(&mut artifact_visitor)?;
@@ -323,8 +434,13 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         let RunCommandArtifactVisitor {
             inner: artifacts,
             tagged_outputs,
-            depth: _,
+            inputs_with_multiple_tags_for_dep_files,
+            ..
         } = artifact_visitor;
+
+        if let Some(frozen) = { artifacts.frozen_outputs }.pop() {
+            return Err(buck2_error::Error::from(ArtifactErrors::DuplicateBind(frozen)).into());
+        }
 
         let mut dep_files_configuration = RunActionDepFiles::new();
 
@@ -360,25 +476,45 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             }
         }
 
+        if let Some((input, conflicting_tags)) = inputs_with_multiple_tags_for_dep_files.first() {
+            return Err(
+                buck2_error::Error::from(RunActionError::ConflictingDepFileInputTags {
+                    input: input.dupe(),
+                    tags: conflicting_tags
+                        .iter()
+                        .map(|t| (**dep_files_configuration.labels.get(t).unwrap()).to_owned())
+                        .collect(),
+                })
+                .into(),
+            );
+        }
+
         let metadata_param = match (metadata_env_var, metadata_path) {
             (Some(env_var), Some(path)) => {
                 let path: ForwardRelativePathBuf = path.try_into()?;
                 this.state()?.claim_output_path(eval, &path)?;
-                buck2_error::Ok(Some(MetadataParameter { env_var, path }))
+                buck2_error::Ok(Some(MetadataParameter {
+                    env_var,
+                    path,
+                    ignore_tags: incremental_metadata_ignore_tags
+                        .into_iter()
+                        .map(|x| x.dupe())
+                        .collect(),
+                }))
             }
             (Some(_), None) => Err(RunActionError::MetadataPathMissing.into()),
             (None, Some(_)) => Err(RunActionError::MetadataEnvVarMissing.into()),
             (None, None) => Ok(None),
         }?;
 
-        if artifacts.outputs.is_empty() {
+        if artifacts.declared_outputs.is_empty() {
             return Err(buck2_error::Error::from(RunActionError::NoOutputsSpecified).into());
         }
         let heap = eval.heap();
 
         for o in outputs_for_error_handler.items.iter() {
-            let to_materialize = o.artifact()?.as_output();
-            if !artifacts.outputs.contains(&to_materialize) {
+            let to_materialize = o.artifact();
+            if !artifacts.declared_outputs.contains(&to_materialize) {
                 return Err(buck2_error::Error::from(
                     RunActionError::FailedActionArtifactNotDeclared {
                         path: o.to_string(),
@@ -387,8 +523,6 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
                 .into());
             }
         }
-
-        let outputs_for_error_handler = outputs_for_error_handler.items.cloned();
 
         let starlark_values = heap.alloc_complex(StarlarkRunActionValues {
             exe: heap.alloc_typed(starlark_exe),
@@ -401,13 +535,18 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
                 category
             },
             identifier: identifier.into_option(),
-            outputs_for_error_handler,
+            outputs_for_error_handler: outputs_for_error_handler.items,
         });
 
         let re_dependencies = remote_execution_dependencies
             .into_iter()
             .map(RemoteExecutorDependency::parse)
             .collect::<buck2_error::Result<Vec<RemoteExecutorDependency>>>()?;
+
+        let re_gang_workers = re_gang_workers
+            .into_iter()
+            .map(ReGangWorker::parse)
+            .collect::<buck2_error::Result<Vec<ReGangWorker>>>()?;
 
         let re_custom_image = parse_custom_re_image(
             "remote_execution_dynamic_image",
@@ -417,6 +556,19 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         let extra_params =
             parse_meta_internal_extra_params(meta_internal_extra_params.into_option())?;
 
+        if incremental_remote_outputs {
+            for o in artifacts.declared_outputs.iter() {
+                if o.has_content_based_path() {
+                    return Err(buck2_error::Error::from(
+                        RunActionError::IncrementalRemoteOutputsWithContentBasedOutputs {
+                            path: o.get_path().to_string(),
+                        },
+                    )
+                    .into());
+                }
+            }
+        }
+
         let action = UnregisteredRunAction {
             executor_preference,
             always_print_stderr,
@@ -425,17 +577,53 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             dep_files: dep_files_configuration,
             metadata_param,
             no_outputs_cleanup,
-            allow_cache_upload,
+            incremental_remote_outputs,
+            allow_cache_upload: allow_cache_upload.into_option(),
             allow_dep_file_cache_upload,
+            allow_offline_output_cache,
             force_full_hybrid_if_capable,
             unique_input_inodes,
             remote_execution_dependencies: re_dependencies,
+            re_gang_workers,
             remote_execution_custom_image: re_custom_image,
             meta_internal_extra_params: extra_params,
+            expected_eligible_for_dedupe: expect_eligible_for_dedupe.into_option(),
         };
+
+        if expect_eligible_for_dedupe.into_option().unwrap_or(false) {
+            for o in artifacts.declared_outputs.iter() {
+                if !o.has_content_based_path() {
+                    return Err(buck2_error::Error::from(
+                        RunActionError::ExpectEligibleForDedupeWithNonContentBasedOutput {
+                            path: o.get_path().to_string(),
+                        },
+                    )
+                    .into());
+                }
+            }
+            let deferred_holder_key = &this.state()?.analysis_value_storage.self_key;
+            let target_platform = if let BaseDeferredKey::TargetLabel(configured_label) =
+                deferred_holder_key.owner()
+            {
+                Some(configured_label.cfg())
+            } else {
+                None
+            };
+
+            for i in artifacts.inputs.iter() {
+                if !i.is_eligible_for_dedupe(target_platform) {
+                    return Err(buck2_error::Error::from(
+                        RunActionError::ExpectEligibleForDedupeWithIneligibleInput {
+                            input: i.dupe(),
+                        },
+                    )
+                    .into());
+                }
+            }
+        }
+
         this.state()?.register_action(
-            artifacts.inputs,
-            artifacts.outputs,
+            artifacts.declared_outputs,
             action,
             Some(starlark_values),
             error_handler.into_option(),

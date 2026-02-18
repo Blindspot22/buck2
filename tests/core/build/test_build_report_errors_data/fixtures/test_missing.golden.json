@@ -1,8 +1,9 @@
 # This file is @generated, regenerate by re-running test with `-- --env BUCK2_UPDATE_GOLDEN=1` appended to the test command
 
 {
+  "error_category": "USER",
   "failures": {
-    "root//missing:missing": "Unknown target `missing` from package `root//missing`.\nDid you mean one of the 1 targets in root//missing:TARGETS.fixture?"
+    "root//missing:missing": "Unknown target `missing` from package `root//missing`.\nDid you mean one of the 1 targets in root//missing:TARGETS.fixture?\nAvailable targets:\n  root//missing:available"
   },
   "results": {
     "root//missing:missing": {
@@ -24,7 +25,7 @@
     }
   },
   "strings": {
-    "<STRING_HASH>": "Unknown target `missing` from package `root//missing`.\nDid you mean one of the 1 targets in root//missing:TARGETS.fixture?"
+    "<STRING_HASH>": "Unknown target `missing` from package `root//missing`.\nDid you mean one of the 1 targets in root//missing:TARGETS.fixture?\nAvailable targets:\n  root//missing:available"
   },
   "success": false,
   "truncated": false

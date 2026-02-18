@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::OnceLock;
@@ -21,13 +22,14 @@ use buck2_core::cells::CellAliasResolver;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::cell_path::CellPathRef;
 use buck2_core::cells::cell_root_path::CellRootPathBuf;
-use buck2_core::fs::fs_util;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPath;
-use buck2_core::fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_core::fs::paths::abs_path::AbsPath;
 use buck2_core::fs::project::ProjectRoot;
-use buck2_core::fs::working_dir::AbsWorkingDir;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_fs::paths::abs_path::AbsPath;
+use buck2_fs::working_dir::AbsWorkingDir;
 use prost::Message;
 
 /// Limited view of the root config. This does not follow includes.
@@ -216,8 +218,10 @@ fn is_paranoid_enabled(path: &AbsPath) -> buck2_error::Result<bool> {
         .buck_error_context("Invalid data ")?;
 
     let now = SystemTime::now();
-    let expires_at =
-        SystemTime::try_from(info.expires_at.buck_error_context("Missing expires_at")?)
-            .buck_error_context("Invalid expires_at")?;
+    let expires_at = SystemTime::try_from(
+        info.expires_at
+            .ok_or_else(|| internal_error!("Missing expires_at"))?,
+    )
+    .buck_error_context("Invalid expires_at")?;
     Ok(now < expires_at)
 }

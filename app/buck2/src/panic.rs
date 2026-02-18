@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! The panic hook, shared by the buck2 CLI and daemon.
@@ -19,7 +20,7 @@ use buck2_error::BuckErrorContext;
 use fbinit::FacebookInit;
 
 /// Initializes the panic hook.
-pub fn initialize() -> anyhow::Result<()> {
+pub fn initialize() -> buck2_error::Result<()> {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let fb = buck2_common::fbinit::get_or_init_fbcode_globals();
@@ -40,7 +41,7 @@ pub fn initialize() -> anyhow::Result<()> {
             options,
         );
     }))
-    .buck_error_context_anyhow("Error initializing soft errors")?;
+    .buck_error_context("Error initializing soft errors")?;
     Ok(())
 }
 
@@ -61,6 +62,7 @@ mod imp {
     use buck2_core::error::StructuredErrorOptions;
     use buck2_data::Location;
     use buck2_events::BuckEvent;
+    use buck2_events::daemon_id::get_daemon_id_for_panics;
     use buck2_events::metadata;
     use buck2_events::sink::remote::ScribeConfig;
     use buck2_events::sink::remote::new_remote_event_sink_if_enabled;
@@ -126,7 +128,7 @@ mod imp {
     /// Collects metadata from the current environment for use in LogView.
     fn get_metadata_for_panic(options: &StructuredErrorOptions) -> HashMap<String, String> {
         #[cfg_attr(client_only, allow(unused_mut))]
-        let mut map = metadata::collect();
+        let mut map = metadata::collect(&get_daemon_id_for_panics());
         #[cfg(not(client_only))]
         if let Some(commands) = buck2_server::active_commands::try_active_commands() {
             let commands = commands.keys().map(|id| id.to_string()).collect::<Vec<_>>();
@@ -167,7 +169,7 @@ mod imp {
     ) {
         let event = panic_payload(
             Some(location),
-            format!("Soft Error: {}: {:#}", category, err),
+            format!("Soft Error: {category}: {err:#}"),
             Vec::new(),
             &options,
             Some(buck2_data::SoftError {
@@ -185,7 +187,7 @@ mod imp {
             }
             None => {
                 #[cfg(client_only)]
-                let warn = true;
+                let warn = !options.quiet;
                 #[cfg(not(client_only))]
                 let warn = !buck2_server::active_commands::broadcast_instant_event(&event)
                     && !options.quiet;

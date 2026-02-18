@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![feature(error_generic_member_access)]
@@ -20,6 +21,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use buck2_analysis::analysis::calculation::AnalysisKey;
 use buck2_analysis::analysis::calculation::AnalysisKeyActivationData;
+use buck2_analysis::analysis::calculation::AnalysisWithExtraData;
+use buck2_artifact::actions::key::ActionKey;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_build_api::actions::RegisteredAction;
 use buck2_build_api::actions::calculation::ActionExtraData;
@@ -35,15 +38,17 @@ use buck2_build_api::build_signals::CREATE_BUILD_SIGNALS;
 use buck2_build_signals::env::BuildSignalsContext;
 use buck2_build_signals::env::CriticalPathBackendName;
 use buck2_build_signals::env::DeferredBuildSignals;
+use buck2_build_signals::env::EarlyCommandTiming;
 use buck2_build_signals::env::FinishBuildSignals;
 use buck2_build_signals::env::NodeDuration;
+use buck2_build_signals::env::WaitingData;
+use buck2_build_signals::error::CriticalPathError;
 use buck2_build_signals::node_key::BuildSignalsNodeKey;
 use buck2_common::package_listing::dice::PackageListingKey;
 use buck2_common::package_listing::dice::PackageListingKeyActivationData;
 use buck2_core::package::PackageLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_data::ToProtoMessage;
-use buck2_error::BuckErrorContext;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_events::dispatch::instant_event;
 use buck2_events::dispatch::with_dispatcher_async;
@@ -51,11 +56,13 @@ use buck2_events::span::SpanId;
 use buck2_interpreter_for_build::interpreter::calculation::InterpreterResultsKey;
 use buck2_interpreter_for_build::interpreter::calculation::InterpreterResultsKeyActivationData;
 use buck2_node::nodes::eval_result::EvaluationResult;
+use buck2_util::time_span::TimeSpan;
 use dice::ActivationData;
 use dice::ActivationTracker;
 use dice::DynKey;
 use dupe::Dupe;
 use gazebo::prelude::SliceExt;
+use gazebo::variants::VariantName;
 use itertools::Itertools;
 use smallvec::SmallVec;
 use static_assertions::assert_eq_size;
@@ -68,11 +75,19 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::backend::backend::BuildListenerBackend;
 use crate::backend::logging::LoggingBackend;
 use crate::backend::longest_path_graph::LongestPathGraphBackend;
+use crate::enhancement::CriticalPathProtoEnhancer;
+use crate::test_signals::TestExecutionBuildSignalKey;
+use crate::test_signals::TestExecutionSignal;
+use crate::test_signals::TestListingBuildSignalKey;
+use crate::test_signals::TestListingSignal;
 
 mod backend;
+mod enhancement;
+mod error;
+mod test_signals;
 
 /// A node in our critical path graph.
-#[derive(Hash, Eq, PartialEq, Clone, Dupe, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Dupe, Debug, VariantName)]
 enum NodeKey {
     // Those are DICE keys.
     BuildKey(BuildKey),
@@ -84,6 +99,10 @@ enum NodeKey {
 
     // This one is not a DICE key.
     FinalMaterialization(BuildArtifact),
+
+    // Keys for test not on DICE.
+    TestExecution(TestExecutionBuildSignalKey),
+    TestListing(TestListingBuildSignalKey),
 
     // Dynamically-typed.
     Dyn(&'static str, BuildSignalsNodeKey),
@@ -123,20 +142,116 @@ impl NodeKey {
 
         Some(key)
     }
+
+    fn into_critical_path_entry_data(
+        self,
+        extra_data: &NodeExtraData,
+    ) -> buck2_data::critical_path_entry2::Entry {
+        match self {
+            NodeKey::BuildKey(ref key) => {
+                let owner = key.0.owner().to_proto().into();
+
+                // If we have a NodeKey that's an ActionKey we'd expect to have `action`
+                // extra data (unless we didn't actually run it because of e.g. early
+                // cutoff, in which case omitting it is what we want).
+                match extra_data {
+                    NodeExtraData::Action(ActionNodeData {
+                        action,
+                        execution_kind,
+                        target_rule_type_name,
+                        action_digest,
+                        invalidation_info,
+                    }) => buck2_data::critical_path_entry2::ActionExecution {
+                        owner: Some(owner),
+                        name: Some(buck2_data::ActionName {
+                            category: action.category().as_str().to_owned(),
+                            identifier: action.identifier().unwrap_or("").to_owned(),
+                        }),
+                        execution_kind: (*execution_kind).into(),
+                        target_rule_type_name: target_rule_type_name.to_owned(),
+                        action_digest: action_digest.to_owned(),
+                        invalidation_info: invalidation_info.to_owned(),
+                    }
+                    .into(),
+                    _ => self.into_generic_entry(),
+                }
+            }
+            NodeKey::AnalysisKey(key) => buck2_data::critical_path_entry2::Analysis {
+                target: Some(key.0.as_proto().into()),
+                target_rule_type_name: match &extra_data {
+                    NodeExtraData::Analysis(node_data) => node_data.target_rule_type_name.clone(),
+                    _ => None,
+                },
+            }
+            .into(),
+
+            NodeKey::FinalMaterialization(key) => {
+                let owner = key.key().owner().to_proto().into();
+
+                buck2_data::critical_path_entry2::FinalMaterialization {
+                    owner: Some(owner),
+                    path: key.get_path().path().to_string(),
+                }
+                .into()
+            }
+            NodeKey::InterpreterResultsKey(key) => buck2_data::critical_path_entry2::Load {
+                package: key.0.to_string(),
+            }
+            .into(),
+
+            NodeKey::PackageListingKey(key) => buck2_data::critical_path_entry2::Listing {
+                package: key.0.to_string(),
+            }
+            .into(),
+
+            NodeKey::EnsureProjectedArtifactKey(..) => self.into_generic_entry(),
+            NodeKey::EnsureTransitiveSetProjectionKey(..) => self.into_generic_entry(),
+            NodeKey::Dyn(_, ref d) => match d.critical_path_entry_proto() {
+                Some(entry) => entry,
+                None => self.into_generic_entry(),
+            },
+            NodeKey::TestExecution(t) => buck2_data::critical_path_entry2::TestExecution {
+                target_label: Some(t.target.as_proto()),
+                suite: t.suite.to_string(),
+                testcases: t.testcases.to_vec(),
+                variant: t.variant.map(|v| v.to_string()),
+            }
+            .into(),
+
+            NodeKey::TestListing(t) => buck2_data::critical_path_entry2::TestListing {
+                target_label: Some(t.target.as_proto()),
+                suite: t.suite.to_string(),
+            }
+            .into(),
+        }
+    }
+
+    fn into_generic_entry(self) -> buck2_data::critical_path_entry2::Entry {
+        buck2_data::critical_path_entry2::GenericEntry {
+            kind: match self {
+                NodeKey::Dyn(_, d) => d.kind(),
+                _ => self.variant_name_lowercase(),
+            }
+            .to_owned(),
+        }
+        .into()
+    }
 }
 
 impl fmt::Display for NodeKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BuildKey(k) => write!(f, "BuildKey({})", k),
-            Self::AnalysisKey(k) => write!(f, "AnalysisKey({})", k),
-            Self::EnsureProjectedArtifactKey(k) => write!(f, "EnsureProjectedArtifactKey({})", k),
+            Self::BuildKey(k) => write!(f, "BuildKey({k})"),
+            Self::AnalysisKey(k) => write!(f, "AnalysisKey({k})"),
+            Self::EnsureProjectedArtifactKey(k) => write!(f, "EnsureProjectedArtifactKey({k})"),
             Self::EnsureTransitiveSetProjectionKey(k) => {
-                write!(f, "EnsureTransitiveSetProjectionKey({})", k)
+                write!(f, "EnsureTransitiveSetProjectionKey({k})")
             }
-            Self::InterpreterResultsKey(k) => write!(f, "InterpreterResultsKey({})", k),
-            Self::PackageListingKey(k) => write!(f, "PackageListingKey({})", k),
-            Self::FinalMaterialization(k) => write!(f, "FinalMaterialization({})", k),
+            Self::InterpreterResultsKey(k) => write!(f, "InterpreterResultsKey({k})"),
+            Self::PackageListingKey(k) => write!(f, "PackageListingKey({k})"),
+            Self::FinalMaterialization(k) => write!(f, "FinalMaterialization({k})"),
+            Self::TestExecution(k) => write!(f, "TestExecution({k:?})"),
+            Self::TestListing(k) => write!(f, "TestListing({k:?})"),
             Self::Dyn(name, k) => write!(f, "{name}({k})"),
         }
     }
@@ -151,6 +266,7 @@ struct FinalMaterializationSignal {
     pub(crate) artifact: BuildArtifact,
     pub(crate) duration: NodeDuration,
     pub(crate) span_id: Option<SpanId>,
+    pub(crate) waiting_data: WaitingData,
 }
 
 /* These signals are distinct from the main Buck event bus because some
@@ -162,6 +278,8 @@ enum BuildSignal {
     Evaluation(Evaluation),
     TopLevelTarget(TopLevelTargetSignal),
     FinalMaterialization(FinalMaterializationSignal),
+    TestExecution(TestExecutionSignal),
+    TestListing(TestListingSignal),
     BuildFinished,
 }
 
@@ -176,15 +294,11 @@ pub(crate) struct Evaluation {
     /// Spans that correspond to this key. We use this when producing a chrome trace.
     spans: SmallVec<[SpanId; 1]>,
 
-    // NOTE: The fields below aren't usually going to be both set, but it doesn't really hurt (for
-    // now) to have them not tied to the right variant.
-    /// The RegisteredAction that corresponds to this Evaluation (this will only be present for
-    /// NodeKey::BuildKey).
-    action_with_extra_data: Option<ActionWithExtraData>,
+    /// Data about time spent waiting (not on critical path) during this evaluation.
+    waiting_data: WaitingData,
 
-    /// The Load result that corresponds to this Evaluation (this will only be present for
-    /// InterpreterResultsKey).
-    load_result: Option<Arc<EvaluationResult>>,
+    /// Node-type-specific extra data (action data for BuildKey, load result for InterpreterResultsKey, etc.).
+    extra_data: NodeExtraData,
 }
 
 #[derive(Clone)]
@@ -211,14 +325,54 @@ impl BuildSignals for BuildSignalSender {
         artifact: BuildArtifact,
         duration: NodeDuration,
         span_id: Option<SpanId>,
+        waiting_data: WaitingData,
     ) {
         let _ignored = self.sender.send(BuildSignal::FinalMaterialization(
             FinalMaterializationSignal {
                 artifact,
                 duration,
                 span_id,
+                waiting_data,
             },
         ));
+    }
+
+    fn test_listing(
+        &self,
+        target: ConfiguredTargetLabel,
+        suite: String,
+        duration: NodeDuration,
+        deps: &[ActionKey],
+    ) {
+        let _ignored = self
+            .sender
+            .send(BuildSignal::TestListing(TestListingSignal {
+                target,
+                suite,
+                deps: deps.to_vec(),
+                duration,
+            }));
+    }
+
+    fn test_execution(
+        &self,
+        target: ConfiguredTargetLabel,
+        suite: String,
+        testcases: &[String],
+        variant: Option<String>,
+        duration: NodeDuration,
+        deps: &[ActionKey],
+    ) {
+        let _ignored = self
+            .sender
+            .send(BuildSignal::TestExecution(TestExecutionSignal {
+                target,
+                suite,
+                testcases: testcases.to_vec(),
+                variant,
+                deps: deps.to_vec(),
+                duration,
+            }));
     }
 }
 
@@ -239,11 +393,11 @@ impl ActivationTracker for BuildSignalSender {
 
         let mut signal = Evaluation {
             key,
-            action_with_extra_data: None,
+            extra_data: NodeExtraData::None,
             duration: NodeDuration::zero(),
             dep_keys: deps.into_iter().filter_map(NodeKey::from_dyn_key).collect(),
             spans: Default::default(),
-            load_result: None,
+            waiting_data: WaitingData::new(),
         };
 
         /// Given an Option containing an Any, take it if and only if it contains a T.
@@ -263,40 +417,51 @@ impl ActivationTracker for BuildSignalSender {
                 action_with_extra_data,
                 duration,
                 spans,
+                waiting_data,
             }) = downcast_and_take(&mut activation_data)
             {
-                signal.action_with_extra_data = Some(action_with_extra_data);
+                signal.extra_data =
+                    NodeExtraData::Action(ActionNodeData::from_extra_data(action_with_extra_data));
                 signal.duration = duration;
                 signal.spans = spans;
-            } else if let Some(AnalysisKeyActivationData { duration, spans }) =
-                downcast_and_take(&mut activation_data)
+                signal.waiting_data = waiting_data;
+            } else if let Some(AnalysisKeyActivationData {
+                time_span,
+                spans,
+                analysis_with_extra_data,
+                waiting_data,
+            }) = downcast_and_take(&mut activation_data)
             {
                 signal.duration = NodeDuration {
-                    user: duration,
-                    total: duration,
+                    user: time_span.duration(),
+                    total: time_span,
                     queue: None,
                 };
                 signal.spans = spans;
+                signal.extra_data = NodeExtraData::Analysis(AnalysisNodeData::from_extra_data(
+                    analysis_with_extra_data,
+                ));
+                signal.waiting_data = waiting_data;
             } else if let Some(InterpreterResultsKeyActivationData {
-                duration,
+                time_span,
                 result,
                 spans,
             }) = downcast_and_take(&mut activation_data)
             {
                 signal.duration = NodeDuration {
-                    user: duration,
-                    total: duration,
+                    user: time_span.duration(),
+                    total: time_span,
                     queue: None,
                 };
 
-                signal.load_result = result.ok();
+                signal.extra_data = NodeExtraData::Load(result.ok());
                 signal.spans = spans;
-            } else if let Some(PackageListingKeyActivationData { duration, spans }) =
+            } else if let Some(PackageListingKeyActivationData { time_span, spans }) =
                 downcast_and_take(&mut activation_data)
             {
                 signal.duration = NodeDuration {
-                    user: duration,
-                    total: duration,
+                    user: time_span.duration(),
+                    total: time_span,
                     queue: None,
                 };
                 signal.spans = spans;
@@ -340,17 +505,15 @@ impl DeferredBuildSignals for DeferredBuildSignalsImpl {
 
 pub(crate) struct FinishBuildSignalsImpl {
     sender: Arc<BuildSignalSender>,
-    handle: JoinHandle<buck2_error::Result<()>>,
+    handle: JoinHandle<Result<(), CriticalPathError>>,
 }
 
 #[async_trait]
 impl FinishBuildSignals for FinishBuildSignalsImpl {
-    async fn finish(self: Box<Self>) -> buck2_error::Result<()> {
+    async fn finish(self: Box<Self>) -> Result<(), CriticalPathError> {
         let _ignored = self.sender.sender.send(BuildSignal::BuildFinished);
 
-        self.handle
-            .await
-            .buck_error_context("Error joining critical path task")?
+        self.handle.await.expect("Error joining critical path task")
     }
 }
 
@@ -359,7 +522,7 @@ fn start_backend(
     receiver: UnboundedReceiver<BuildSignal>,
     backend: impl BuildListenerBackend + Send + 'static,
     ctx: BuildSignalsContext,
-) -> JoinHandle<buck2_error::Result<()>> {
+) -> JoinHandle<Result<(), CriticalPathError>> {
     let listener = BuildSignalReceiver::new(receiver, backend);
     tokio::spawn(with_dispatcher_async(events.dupe(), async move {
         listener.run_and_log(ctx).await
@@ -373,6 +536,10 @@ struct BuildSignalReceiver<T> {
     // is how we discovered its existence.
     first_edge_to_load: HashMap<PackageLabel, PackageLabel>,
     backend: T,
+
+    // TODO(rajneeshl): When Test listing and execution are on DICE, we can remove this and use
+    // DICE keys instead.
+    test_listing_keys: HashMap<String, NodeKey>,
 }
 
 impl<T> BuildSignalReceiver<T>
@@ -384,19 +551,25 @@ where
             receiver: UnboundedReceiverStream::new(receiver),
             backend,
             first_edge_to_load: HashMap::new(),
+            test_listing_keys: HashMap::new(),
         }
     }
 
-    pub(crate) async fn run_and_log(mut self, ctx: BuildSignalsContext) -> buck2_error::Result<()> {
+    pub(crate) async fn run_and_log(
+        mut self,
+        ctx: BuildSignalsContext,
+    ) -> Result<(), CriticalPathError> {
         while let Some(event) = self.receiver.next().await {
             match event {
                 BuildSignal::Evaluation(eval) => self.process_evaluation(eval),
-                BuildSignal::TopLevelTarget(top_level) => {
-                    self.process_top_level_target(top_level)?
-                }
+                BuildSignal::TopLevelTarget(top_level) => self.process_top_level_target(top_level),
                 BuildSignal::FinalMaterialization(final_materialization) => {
-                    self.process_final_materialization(final_materialization)?
+                    self.process_final_materialization(final_materialization)
                 }
+                BuildSignal::TestExecution(test_execution) => {
+                    self.process_test_execution(test_execution)
+                }
+                BuildSignal::TestListing(test_listing) => self.process_test_listing(test_listing),
                 BuildSignal::BuildFinished => break,
             }
         }
@@ -405,146 +578,28 @@ where
 
         let BuildInfo {
             critical_path,
+            slowest_path,
             num_nodes,
             num_edges,
             top_level_targets,
         } = self.backend.finish()?;
 
-        let elapsed_compute_critical_path = now.elapsed();
+        let critical_path2 = critical_path.into_critical_path_proto(&ctx.early_command_timing, now);
 
-        let meta_entry_data = NodeData {
-            action_node_data: None,
-            duration: NodeDuration {
-                user: Duration::ZERO,
-                total: elapsed_compute_critical_path,
-                queue: None,
-            },
-            span_ids: Default::default(),
-        };
+        let slowest_path = slowest_path.into_critical_path_proto(&ctx.early_command_timing, now);
 
-        let compute_critical_path_entry = (
-            buck2_data::critical_path_entry2::ComputeCriticalPath {}.into(),
-            meta_entry_data,
-            Some(elapsed_compute_critical_path),
-        );
-
-        let early_command_entries = ctx.early_command_entries.iter().map(|entry| {
-            let generic_entry_data = NodeData {
-                action_node_data: None,
-                duration: NodeDuration {
-                    user: Duration::ZERO,
-                    total: entry.duration,
-                    queue: None,
-                },
-                span_ids: Default::default(),
-            };
-            (
-                buck2_data::critical_path_entry2::GenericEntry {
-                    kind: entry.kind.clone(),
-                }
-                .into(),
-                generic_entry_data,
-                Some(entry.duration),
-            )
-        });
-
-        let critical_path_iter =
-            critical_path
-                .into_iter()
-                .filter_map(|(key, data, potential_improvement)| {
-                    let entry: buck2_data::critical_path_entry2::Entry = match key {
-                        NodeKey::BuildKey(key) => {
-                            let owner = key.0.owner().to_proto().into();
-
-                            // If we have a NodeKey that's an ActionKey we'd expect to have an `action`
-                            // in our data (unless we didn't actually run it because of e.g. early
-                            // cutoff, in which case omitting it is what we want).
-                            let ActionNodeData {
-                                action,
-                                execution_kind,
-                                target_rule_type_name,
-                                action_digest,
-                                invalidation_info,
-                            } = data.action_node_data.as_ref()?;
-
-                            buck2_data::critical_path_entry2::ActionExecution {
-                                owner: Some(owner),
-                                name: Some(buck2_data::ActionName {
-                                    category: action.category().as_str().to_owned(),
-                                    identifier: action.identifier().unwrap_or("").to_owned(),
-                                }),
-                                execution_kind: (*execution_kind).into(),
-                                target_rule_type_name: target_rule_type_name.to_owned(),
-                                action_digest: action_digest.to_owned(),
-                                invalidation_info: invalidation_info.to_owned(),
-                            }
-                            .into()
-                        }
-                        NodeKey::AnalysisKey(key) => buck2_data::critical_path_entry2::Analysis {
-                            target: Some(key.0.as_proto().into()),
-                        }
-                        .into(),
-                        NodeKey::FinalMaterialization(key) => {
-                            let owner = key.key().owner().to_proto().into();
-
-                            buck2_data::critical_path_entry2::FinalMaterialization {
-                                owner: Some(owner),
-                                path: key.get_path().path().to_string(),
-                            }
-                            .into()
-                        }
-                        NodeKey::InterpreterResultsKey(key) => {
-                            buck2_data::critical_path_entry2::Load {
-                                package: key.0.to_string(),
-                            }
-                            .into()
-                        }
-                        NodeKey::PackageListingKey(key) => {
-                            buck2_data::critical_path_entry2::Listing {
-                                package: key.0.to_string(),
-                            }
-                            .into()
-                        }
-                        NodeKey::EnsureProjectedArtifactKey(..) => return None,
-                        NodeKey::EnsureTransitiveSetProjectionKey(..) => return None,
-                        NodeKey::Dyn(_, d) => d.critical_path_entry_proto()?,
-                    };
-
-                    Some((entry, data, potential_improvement))
-                });
-
-        let critical_path2 = early_command_entries
-            .chain(critical_path_iter)
-            .chain(std::iter::once(compute_critical_path_entry))
-            .map(|(entry, data, potential_improvement)| {
-                buck2_error::Ok(buck2_data::CriticalPathEntry2 {
-                    span_ids: data
-                        .span_ids
-                        .iter()
-                        .map(|span_id| (*span_id).into())
-                        .collect(),
-                    duration: Some(data.duration.critical_path_duration().try_into()?),
-                    user_duration: Some(data.duration.user.try_into()?),
-                    queue_duration: data.duration.queue.map(|d| d.try_into()).transpose()?,
-                    total_duration: Some(data.duration.total.try_into()?),
-                    potential_improvement_duration: potential_improvement
-                        .map(|p| p.try_into())
-                        .transpose()?,
-                    entry: Some(entry),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let top_level_targets = top_level_targets.try_map(|(key, duration)| {
-            buck2_error::Ok(buck2_data::TopLevelTargetCriticalPath {
+        let top_level_targets =
+            top_level_targets.map(|(key, duration)| buck2_data::TopLevelTargetCriticalPath {
                 target: Some(key.as_proto()),
-                duration: Some((*duration).try_into()?),
-            })
-        })?;
+                duration: Some((*duration).try_into().unwrap_or(prost_types::Duration {
+                    seconds: i64::MAX,
+                    nanos: 0,
+                })),
+            });
 
         instant_event(buck2_data::BuildGraphExecutionInfo {
-            critical_path: Vec::new(),
             critical_path2,
+            slowest_path,
             metadata: ctx.metadata,
             command_name: Some(ctx.command_name),
             isolation_dir: Some(ctx.isolation_prefix.into_inner().into()),
@@ -563,10 +618,11 @@ where
 
         self.backend.process_node(
             evaluation.key,
-            evaluation.action_with_extra_data,
+            evaluation.extra_data,
             evaluation.duration,
-            evaluation.dep_keys.into_iter(),
+            evaluation.dep_keys,
             evaluation.spans,
+            evaluation.waiting_data,
         );
     }
 
@@ -579,7 +635,7 @@ where
             _ => return,
         };
 
-        if let Some(load_result) = &evaluation.load_result {
+        if let NodeExtraData::Load(Some(load_result)) = &evaluation.extra_data {
             let deps_pkg = load_result
                 .targets()
                 .values()
@@ -610,10 +666,7 @@ where
     }
 
     // TODO: We would need something similar with anon targets.
-    fn process_top_level_target(
-        &mut self,
-        top_level: TopLevelTargetSignal,
-    ) -> buck2_error::Result<()> {
+    fn process_top_level_target(&mut self, top_level: TopLevelTargetSignal) {
         self.backend.process_top_level_target(
             top_level.label,
             top_level.artifacts.map(|k| match k {
@@ -623,44 +676,201 @@ where
                 }
             }),
         );
-
-        Ok(())
     }
 
-    fn process_final_materialization(
-        &mut self,
-        materialization: FinalMaterializationSignal,
-    ) -> buck2_error::Result<()> {
+    fn process_final_materialization(&mut self, materialization: FinalMaterializationSignal) {
         let dep = NodeKey::BuildKey(BuildKey(materialization.artifact.key().dupe()));
 
         self.backend.process_node(
             NodeKey::FinalMaterialization(materialization.artifact),
-            None,
+            NodeExtraData::None,
             materialization.duration,
             std::iter::once(dep),
             materialization.span_id.into_iter().collect(),
+            materialization.waiting_data,
         );
+    }
 
-        Ok(())
+    fn process_test_execution(&mut self, signal: TestExecutionSignal) {
+        let key = TestExecutionBuildSignalKey {
+            target: signal.target.dupe(),
+            suite: Arc::new(signal.suite.to_owned()),
+            testcases: Arc::new(signal.testcases),
+            variant: signal.variant.map(Arc::new),
+        };
+
+        let deps = signal
+            .deps
+            .into_iter()
+            .map(|d| NodeKey::BuildKey(BuildKey(d)));
+
+        let listing_key = self
+            .test_listing_keys
+            .get(&signal.suite)
+            .map(|k| k.dupe())
+            .into_iter();
+
+        self.backend.process_node(
+            NodeKey::TestExecution(key),
+            NodeExtraData::None,
+            signal.duration,
+            deps.chain(listing_key),
+            Default::default(),
+            WaitingData::new(),
+        );
+    }
+
+    fn process_test_listing(&mut self, signal: TestListingSignal) {
+        let key = TestListingBuildSignalKey {
+            target: signal.target,
+            suite: Arc::new(signal.suite.to_owned()),
+        };
+
+        let node_key = NodeKey::TestListing(key);
+
+        // Since the TestListing and TestExecution keys are only created here, use this hashmap to
+        // create dependencies between them.
+        self.test_listing_keys.insert(signal.suite, node_key.dupe());
+
+        let deps = signal
+            .deps
+            .into_iter()
+            .map(|d| NodeKey::BuildKey(BuildKey(d)));
+
+        self.backend.process_node(
+            node_key,
+            NodeExtraData::None,
+            signal.duration,
+            deps,
+            Default::default(),
+            WaitingData::new(),
+        );
     }
 }
 
 pub(crate) struct BuildInfo {
-    // Node, its data, and its potential for improvement
-    critical_path: Vec<(NodeKey, NodeData, Option<Duration>)>,
+    /// Node, its data, and its potential for improvement
+    critical_path: DetailedCriticalPath,
+    /// Path where each node's predecessor is the dependency that finished last.
+    /// Unlike critical path, waiting time is directly attributable to the immediate predecessor.
+    slowest_path: DetailedCriticalPath,
     num_nodes: u64,
     num_edges: u64,
     /// Critical path for top level targets
     top_level_targets: Vec<(ConfiguredTargetLabel, Duration)>,
 }
 
+/// Entry in a detailed critical path, including metadata about timing and dependencies.
+pub(crate) struct DetailedCriticalPathEntry {
+    pub(crate) key: NodeKey,
+    pub(crate) data: NodeData,
+    /// The potential improvement if this node's duration was reduced to zero.
+    pub(crate) potential_improvement: Option<Duration>,
+    /// The time when all dependencies finished executing (if known).
+    pub(crate) deps_finished_time: Option<Instant>,
+}
+
+pub(crate) struct DetailedCriticalPath {
+    entries: Vec<DetailedCriticalPathEntry>,
+}
+
+impl DetailedCriticalPath {
+    fn empty() -> DetailedCriticalPath {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn new(entries: Vec<DetailedCriticalPathEntry>) -> Self {
+        Self { entries }
+    }
+
+    fn create_proto_entries_for_early_timings(
+        enhancer: &mut CriticalPathProtoEnhancer,
+        early_command_timing: &EarlyCommandTiming,
+    ) {
+        let generic_entry = |kind: &str| -> buck2_data::critical_path_entry2::Entry {
+            buck2_data::critical_path_entry2::GenericEntry {
+                kind: kind.to_owned(),
+            }
+            .into()
+        };
+
+        let mut current_kind = "buckd_command_init";
+        let mut current_start = early_command_timing.command_start;
+        for (span_start, kind) in &early_command_timing.early_spans {
+            let span_start = span_start.max(&current_start);
+
+            enhancer.add_simple_entry(
+                None,
+                generic_entry(current_kind),
+                TimeSpan::new_saturating(current_start, *span_start),
+                true,
+            );
+            current_kind = kind;
+            current_start = *span_start;
+        }
+        enhancer.add_simple_entry(
+            None,
+            generic_entry(current_kind),
+            TimeSpan::new_saturating(current_start, early_command_timing.early_command_end),
+            true,
+        );
+    }
+
+    fn into_critical_path_proto(
+        self,
+        early_command_timing: &EarlyCommandTiming,
+        critical_path_compute_start: Instant,
+    ) -> Vec<buck2_data::CriticalPathEntry2> {
+        let mut enhancer = CriticalPathProtoEnhancer::new(
+            early_command_timing.command_start,
+            1 + early_command_timing.early_spans.len() + self.entries.len() + 1,
+        );
+
+        Self::create_proto_entries_for_early_timings(&mut enhancer, early_command_timing);
+
+        for entry in self.entries {
+            enhancer.add_entry(entry);
+        }
+
+        enhancer.add_simple_entry(
+            Some("unknown_final_work"),
+            buck2_data::critical_path_entry2::ComputeCriticalPath {}.into(),
+            TimeSpan::new_saturating(critical_path_compute_start, Instant::now()),
+            true,
+        );
+        enhancer.into_entries()
+    }
+}
+
+/// Struct to hold data about a build graph node for critical path analysis.
 #[derive(Clone)]
 struct NodeData {
-    action_node_data: Option<ActionNodeData>,
+    /// Node-type-specific extra data (action data, load result, or none).
+    extra_data: NodeExtraData,
     duration: NodeDuration,
+    /// Data about time spent waiting (not on critical path) during this node's execution.
+    waiting_data: WaitingData,
     span_ids: SmallVec<[SpanId; 1]>,
 }
 
+/// Type-safe enum for extra data associated with different node types in the build graph.
+#[derive(Clone)]
+enum NodeExtraData {
+    /// The data that corresponds to a `NodeKey::BuildKey` Evaluation.
+    Action(ActionNodeData),
+    Analysis(AnalysisNodeData),
+    /// The Load result that corresponds to a `NodeKey::InterpreterResultsKey` Evaluation if evaluation was successful.
+    Load(Option<Arc<EvaluationResult>>),
+    /// No extra data (used for other node types or when data is not available).
+    None,
+}
+
+/// Extra data specific to action nodes.
+///
+/// Contains action execution metadata including the registered action, execution kind,
+/// rule type, digest, and invalidation information.
 #[derive(Clone)]
 struct ActionNodeData {
     action: Arc<RegisteredAction>,
@@ -693,7 +903,20 @@ impl ActionNodeData {
     }
 }
 
-assert_eq_size!(NodeData, [usize; 17]);
+#[derive(Clone)]
+struct AnalysisNodeData {
+    target_rule_type_name: Option<String>,
+}
+
+impl AnalysisNodeData {
+    fn from_extra_data(data: AnalysisWithExtraData) -> Self {
+        Self {
+            target_rule_type_name: data.target_rule_type_name,
+        }
+    }
+}
+
+assert_eq_size!(NodeData, [usize; 20]);
 
 fn create_build_signals() -> (BuildSignalsInstaller, Box<dyn DeferredBuildSignals>) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -711,4 +934,11 @@ fn create_build_signals() -> (BuildSignalsInstaller, Box<dyn DeferredBuildSignal
 
 pub fn init_late_bindings() {
     CREATE_BUILD_SIGNALS.init(create_build_signals)
+}
+
+pub(crate) fn duration_to_proto_saturating(duration: Duration) -> prost_types::Duration {
+    duration.try_into().unwrap_or(prost_types::Duration {
+        seconds: i64::MAX,
+        nanos: i32::MAX,
+    })
 }

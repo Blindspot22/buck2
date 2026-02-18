@@ -1,16 +1,16 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.kotlin.ksp
 
 import com.facebook.buck.core.build.execution.context.IsolatedExecutionContext
-import com.facebook.buck.core.exceptions.HumanReadableException
 import com.facebook.buck.core.filesystems.AbsPath
 import com.facebook.buck.core.filesystems.RelPath
 import com.facebook.buck.io.file.GlobPatternMatcher
@@ -19,7 +19,7 @@ import com.facebook.buck.jvm.core.BuildTargetValue
 import com.facebook.buck.jvm.java.CompilerOutputPaths
 import com.facebook.buck.jvm.kotlin.cd.analytics.KotlinCDAnalytics
 import com.facebook.buck.jvm.kotlin.cd.analytics.KotlinCDLoggingContext
-import com.facebook.buck.jvm.kotlin.cd.analytics.StepParam
+import com.facebook.buck.jvm.kotlin.ksp.incremental.Ksp2Mode
 import com.facebook.buck.jvm.kotlin.util.getExpandedSourcePaths
 import com.facebook.buck.step.StepExecutionResult
 import com.facebook.buck.step.StepExecutionResults
@@ -48,7 +48,6 @@ class Ksp2Step(
     private val shouldTrackClassUsage: Boolean,
     private val allClasspaths: ImmutableList<AbsPath>,
     private val kotlinPluginGeneratedOutFullPath: String,
-    private val projectBaseDir: RelPath,
     private val annotationProcessorParams: ImmutableSortedSet<String>,
     private val sourceFilePaths: ImmutableSortedSet<RelPath>,
     private val kspDepFilePath: RelPath,
@@ -57,12 +56,12 @@ class Ksp2Step(
     private val kspClassesOutput: RelPath,
     private val kspKotlinOutput: RelPath,
     private val kspJavaOutput: RelPath,
-    private val kspCachesOutput: RelPath,
-    private val kspOutput: RelPath,
+    private val kspOutputBaseDir: RelPath,
     private val jvmTarget: Optional<String>,
     private val languageVersion: LanguageVersion,
     private val jvmDefaultMode: String,
-    private val kotlinCDAnalytics: KotlinCDAnalytics
+    private val kotlinCDAnalytics: KotlinCDAnalytics,
+    private val ksp2Mode: Ksp2Mode,
 ) : IsolatedStep {
 
   @Throws(IOException::class, InterruptedException::class)
@@ -70,24 +69,29 @@ class Ksp2Step(
     CapturingPrintStream().use { stderr ->
       try {
         val exitCode: KotlinSymbolProcessing.ExitCode = executeKsp2(stderr, context)
-        kotlinCDAnalytics.log(KotlinCDLoggingContext(StepParam.KSP2, languageVersion, null))
+        kotlinCDAnalytics.log(KotlinCDLoggingContext(languageVersion, ksp2Mode))
         return when (exitCode) {
           KotlinSymbolProcessing.ExitCode.OK -> StepExecutionResults.SUCCESS
           KotlinSymbolProcessing.ExitCode.PROCESSING_ERROR ->
               StepExecutionResult(
                   StepExecutionResults.ERROR_EXIT_CODE,
-                  Optional.of(stderr.getContentsAsString(StandardCharsets.UTF_8)))
+                  Optional.of(stderr.getContentsAsString(StandardCharsets.UTF_8)),
+              )
         }
       } catch (e: LinkageError) {
         return StepExecutionResult(
             StepExecutionResults.ERROR_EXIT_CODE,
             Optional.of(
-                "${stderr.getContentsAsString(StandardCharsets.UTF_8)}\n${e.stackTraceToString()}For URLClassLoader LinkError similar to P1626402598, try adding affected class to FilteringClassLoader's allowlist. See D63143327"))
+                "${stderr.getContentsAsString(StandardCharsets.UTF_8)}\n${e.stackTraceToString()}For URLClassLoader LinkError similar to P1626402598, try adding affected class to FilteringClassLoader's allowlist. See D63143327"
+            ),
+        )
       } catch (e: Throwable) {
         return StepExecutionResult(
             StepExecutionResults.ERROR_EXIT_CODE,
             Optional.of(
-                "${stderr.getContentsAsString(StandardCharsets.UTF_8)}\n${e.stackTraceToString()}"))
+                "${stderr.getContentsAsString(StandardCharsets.UTF_8)}\n${e.stackTraceToString()}"
+            ),
+        )
       }
     }
   }
@@ -102,12 +106,15 @@ class Ksp2Step(
     val processorClassloader: ClassLoader =
         URLClassLoader(
             kspProcessorsClasspathList.map { File(it).toURI().toURL() }.toTypedArray(),
-            filteringClassLoader)
+            filteringClassLoader,
+        )
     val processorProviders =
         ServiceLoader.load(
                 processorClassloader.loadClass(
-                    "com.google.devtools.ksp.processing.SymbolProcessorProvider"),
-                processorClassloader)
+                    "com.google.devtools.ksp.processing.SymbolProcessorProvider"
+                ),
+                processorClassloader,
+            )
             .toList() as List<SymbolProcessorProvider>
 
     // Build processor options
@@ -133,13 +140,12 @@ class Ksp2Step(
         KSPJvmConfig.Builder()
             .apply {
               // All configurations happen here. See [KSPConfig] for all available options.
-              projectBaseDir = rootPath.resolve(this@Ksp2Step.projectBaseDir).toFile()
+              projectBaseDir = rootPath.toFile()
               classOutputDir = rootPath.resolve(kspClassesOutput).toFile()
               kotlinOutputDir = rootPath.resolve(kspKotlinOutput).toFile()
               javaOutputDir = rootPath.resolve(kspJavaOutput).toFile()
               resourceOutputDir = rootPath.resolve(kspClassesOutput).toFile()
-              cachesDir = rootPath.resolve(kspCachesOutput).toFile()
-              outputBaseDir = rootPath.resolve(kspOutput).toFile()
+              outputBaseDir = rootPath.resolve(kspOutputBaseDir).toFile()
               processorOptions = apOptions
               moduleName = this@Ksp2Step.moduleName
               jvmTarget = this@Ksp2Step.jvmTarget.orElse("1.8")
@@ -149,6 +155,20 @@ class Ksp2Step(
               apiVersion = this@Ksp2Step.languageVersion.value
               libraries = allClasspaths.map { it.toFile() }
               jvmDefaultMode = this@Ksp2Step.jvmDefaultMode
+
+              when (ksp2Mode) {
+                is Ksp2Mode.NonIncremental -> {
+                  cachesDir = rootPath.resolve(ksp2Mode.kspCachesOutput).toFile()
+                }
+                is Ksp2Mode.Incremental -> {
+                  incremental = true
+                  cachesDir = ksp2Mode.cachesDir.toFile()
+                  incrementalLog = ksp2Mode.incrementalLog
+                  modifiedSources = ksp2Mode.modifiedSources.map { it.toFile() }
+                  removedSources = ksp2Mode.removedSources.map { it.toFile() }
+                  changedClasses = ksp2Mode.changedClasses
+                }
+              }
             }
             .build()
 
@@ -173,8 +193,14 @@ class Ksp2Step(
               |  apiVersion = ${kspConfig.apiVersion}
               |  libraries = ${kspConfig.libraries}
               |  jvmDefaultMode = ${kspConfig.jvmDefaultMode}
+              |  incremental = ${kspConfig.incremental}
+              |  incrementalLog = ${kspConfig.incrementalLog}
+              |  modifiedSources = ${kspConfig.modifiedSources.joinToString()}
+              |  removedSources = ${kspConfig.removedSources.joinToString()}
+              |  changedClasses = ${kspConfig.changedClasses.joinToString()}
               |]"""
-            .trimMargin())
+            .trimMargin()
+    )
     // Run!
     val kotlinSymbolProcessing = KotlinSymbolProcessing(kspConfig, processorProviders, logger)
     return kotlinSymbolProcessing.execute()
@@ -221,7 +247,7 @@ class Ksp2Step(
       ignoredPathMatcher: GlobPatternMatcher?,
       workingDirectory: Optional<Path>,
       invokingRule: BuildTargetValue,
-      logger: BuckKsp2Logger
+      logger: BuckKsp2Logger,
   ) =
       try {
         getExpandedSourcePaths(ruleCellRoot, kotlinSourceFilePaths, workingDirectory).filterNot {
@@ -230,8 +256,9 @@ class Ksp2Step(
         }
       } catch (exception: IOException) {
         logger.exception(exception)
-        throw HumanReadableException(
-            "Unable to expand sources for ${invokingRule.fullyQualifiedName} into $workingDirectory")
+        throw RuntimeException(
+            "Unable to expand sources for ${invokingRule.fullyQualifiedName} into $workingDirectory"
+        )
       }
 
   companion object {
@@ -241,6 +268,7 @@ class Ksp2Step(
             ClassLoader.getPlatformClassLoader(),
             "com.google.devtools.ksp.",
             "kotlin.",
-            "ksp.")
+            "ksp.",
+        )
   }
 }

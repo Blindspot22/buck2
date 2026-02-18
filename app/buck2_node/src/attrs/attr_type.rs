@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -17,6 +18,7 @@ use buck2_core::plugins::PluginKind;
 use buck2_core::plugins::PluginKindSet;
 use dupe::Dupe;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
 
 use crate::attrs::attr_type::any::AnyAttrType;
 use crate::attrs::attr_type::arg::ArgAttrType;
@@ -75,10 +77,10 @@ pub mod tuple;
 pub mod visibility;
 pub mod within_view;
 
-#[derive(Clone, Dupe, Debug, Hash, Eq, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Debug, Hash, Pagable, Eq, PartialEq, Allocative)]
 pub struct AttrType(pub Arc<AttrTypeInner2>);
 
-#[derive(Debug, Hash, Eq, PartialEq, Allocative)]
+#[derive(Debug, Hash, Pagable, Eq, PartialEq, Allocative)]
 pub struct AttrTypeInner2 {
     pub inner: AttrTypeInner,
     /// Attribute may have queries.
@@ -90,7 +92,7 @@ pub struct AttrTypeInner2 {
     pub may_have_queries: bool,
 }
 
-#[derive(Debug, Hash, Eq, PartialEq, Allocative)]
+#[derive(Debug, Hash, Pagable, Eq, PartialEq, Allocative)]
 pub enum AttrTypeInner {
     Any(AnyAttrType),
     Arg(ArgAttrType),
@@ -125,12 +127,12 @@ impl AttrType {
         default: Option<&str>,
     ) -> fmt::Result {
         let mut attr = |s| match default {
-            None => write!(f, "attrs.{}()", s),
-            Some(default) => write!(f, "attrs.{}(default={})", s, default),
+            None => write!(f, "attrs.{s}()"),
+            Some(default) => write!(f, "attrs.{s}(default={default})"),
         };
         let arg = || match default {
             None => String::new(),
-            Some(x) => format!(", default={}", x),
+            Some(x) => format!(", default={x}"),
         };
 
         match &self.0.inner {

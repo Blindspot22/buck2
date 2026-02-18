@@ -1,20 +1,21 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BinaryHeap;
 
-use buck2_error::BuckErrorContext;
 use crossbeam::thread;
 
 use crate::critical_path_accessor::CriticalPathAccessor;
 use crate::graph::Graph;
 use crate::graph::PathCost;
+use crate::graph::TopoSortError;
 use crate::types::CriticalPathIndex;
 use crate::types::CriticalPathVertexData;
 use crate::types::OptionalCriticalPathIndex;
@@ -26,16 +27,19 @@ use crate::types::VertexId;
 /// - Its cost.
 /// - For each of the vertices in the critical path, the new critical path cost
 ///   if that were vertex's runtime was 0.
-/// - An accessor to obtain critical path for arbitary vertices.
+/// - An accessor to obtain critical path for arbitrary vertices.
 pub fn compute_critical_path_potentials(
     deps: &Graph,
     weights: &VertexData<u64>,
-) -> buck2_error::Result<(
-    CriticalPathVertexData<VertexId>,
-    PathCost,
-    CriticalPathVertexData<PathCost>,
-    CriticalPathAccessor,
-)> {
+) -> Result<
+    (
+        CriticalPathVertexData<VertexId>,
+        PathCost,
+        CriticalPathVertexData<PathCost>,
+        CriticalPathAccessor,
+    ),
+    TopoSortError,
+> {
     let mut rdeps = None;
     let mut topo_order = None;
 
@@ -47,8 +51,7 @@ pub fn compute_critical_path_potentials(
             topo_order = Some(deps.topo_sort());
         });
     })
-    .ok()
-    .buck_error_context("Threads panicked")?;
+    .expect("Threads panicked");
 
     let rdeps = rdeps.unwrap();
     let topo_order = topo_order.unwrap()?;
@@ -68,8 +71,7 @@ pub fn compute_critical_path_potentials(
             predecessors = Some(pred);
         });
     })
-    .ok()
-    .buck_error_context("Threads panicked")?;
+    .expect("Threads panicked");
 
     let cost_to_sink = cost_to_sink.unwrap();
     let cost_from_source = cost_from_source.unwrap();
@@ -159,8 +161,7 @@ pub fn compute_critical_path_potentials(
             }
         });
     })
-    .ok()
-    .buck_error_context("Threads panicked")?;
+    .expect("Threads panicked");
 
     // Compute the cost of the longest path through each vertex. We do this here instead of inline
     // later to avoid jumping around 3 arrays later (whereas here we can do so linearly).
@@ -355,20 +356,20 @@ mod tests {
             assert!(critical_path_cost >= replacement_costs[cp_idx]);
         }
 
-        let fast = fast.elapsed();
+        let fast = Instant::now() - fast;
 
         let naive = naive_critical_path_cost(dag, None);
         assert_eq!(naive, critical_path_cost);
 
         eprintln!();
-        eprintln!("critical path = {:?}", naive);
+        eprintln!("critical path = {naive:?}");
 
         let slow = Instant::now();
         for (idx, replacement) in critical_path.values().zip(replacement_costs.values()) {
             let naive = naive_critical_path_cost(dag, Some((*idx, 0)));
             assert_eq!(naive, *replacement, "replacing node {idx:?} fails");
         }
-        let slow = slow.elapsed();
+        let slow = Instant::now() - slow;
 
         eprintln!("fast: {} us", fast.as_micros());
         eprintln!("slow: {} us", slow.as_micros());

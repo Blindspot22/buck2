@@ -1,19 +1,20 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashSet;
 
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::package::PackageLabel;
-use buck2_futures::drop::DropTogether;
-use buck2_futures::spawn::spawn_dropcancel;
 use dice::DiceTransaction;
+use dice_futures::drop::DropTogether;
+use dice_futures::spawn::spawn_dropcancel;
 use dupe::Dupe;
 use futures::Stream;
 use futures::StreamExt;
@@ -24,8 +25,8 @@ use gazebo::prelude::*;
 use once_cell::sync::Lazy;
 use tokio::sync::Semaphore;
 
-use crate::dice::file_ops::DiceFileOps;
-use crate::file_ops::FileOps;
+use crate::file_ops::trait_::DiceFileOps;
+use crate::file_ops::trait_::FileOps;
 use crate::find_buildfile::find_buildfile;
 
 /// Resolves a list of CellPath to a stream of Package representing all the
@@ -108,7 +109,7 @@ pub async fn collect_package_roots<E>(
                 }
             }
             Err(e) => collector(Err(
-                e.context(format!("Error resolving recursive spec `{}/...`", path))
+                e.context(format!("Error resolving recursive spec `{path}/...`"))
             ))?,
         }
     }
@@ -124,17 +125,16 @@ pub async fn collect_package_roots<E>(
             match r {
                 Ok(r) => r,
                 Err(e) => {
-                    collector(Err(e.context(format!(
-                        "Error resolving recursive spec `{}/...`",
-                        path
-                    ))))?;
+                    collector(Err(
+                        e.context(format!("Error resolving recursive spec `{path}/...`"))
+                    ))?;
                     continue;
                 }
             }
         };
 
         if find_buildfile(&buildfile_candidates, &listing).is_some() {
-            collector(Ok(PackageLabel::from_cell_path(path.as_ref())))?;
+            collector(PackageLabel::from_cell_path(path.as_ref()))?;
         }
 
         // The rev() call isn't necessary, it ends up causing us to slightly prefer running

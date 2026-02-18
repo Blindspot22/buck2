@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use buck2_core::configuration::transition::id::TransitionId;
 use buck2_core::plugins::PluginKindSet;
 use buck2_core::target::label::interner::ConcurrentTargetLabelInterner;
 use buck2_error::BuckErrorContext;
-use buck2_interpreter::coerce::COERCE_TARGET_LABEL_FOR_BZL;
+use buck2_interpreter::coerce::COERCE_PROVIDERS_LABEL_FOR_BZL;
 use buck2_interpreter::types::provider::callable::ValueAsProviderCallableLike;
 use buck2_interpreter::types::transition::transition_id_from_value;
 use buck2_node::attrs::attr::Attribute;
@@ -37,7 +38,6 @@ use starlark::values::ValueOf;
 use starlark::values::ValueTypedComplex;
 use starlark::values::list_or_tuple::UnpackListOrTuple;
 use starlark::values::tuple::UnpackTuple;
-use tracing::error;
 
 use crate::attrs::coerce::attr_type::AttrTypeExt;
 use crate::attrs::coerce::ctx::BuildAttrCoercionContext;
@@ -112,9 +112,9 @@ pub(crate) fn attr_coercion_context_for_bzl<'v>(
     ))
 }
 
-pub(crate) fn init_coerce_target_label_for_bzl() {
-    COERCE_TARGET_LABEL_FOR_BZL
-        .init(|eval, value| attr_coercion_context_for_bzl(eval)?.coerce_target_label(value))
+pub(crate) fn init_coerce_providers_label_for_bzl() {
+    COERCE_PROVIDERS_LABEL_FOR_BZL
+        .init(|eval, value| attr_coercion_context_for_bzl(eval)?.coerce_providers_label(value))
 }
 
 /// Common code to handle `providers` argument of dep-like attrs.
@@ -282,6 +282,13 @@ fn attr_module(registry: &mut GlobalsBuilder) {
         )))
     }
 
+    /// Takes a target label from the user and registers it as a plugin dependency.
+    ///
+    /// Plugin dependencies are propagated as unconfigured target labels up the build graph,
+    /// then configured as exec deps when used by a rule with `uses_plugins`. This is useful
+    /// for dependencies like Rust proc macros that need to be accessible to transitive dependents.
+    ///
+    /// See the [`plugins`](../plugins) namespace documentation for a full explanation and examples.
     fn plugin_dep<'v>(
         #[starlark(require = named)] kind: PluginKindArg,
         #[starlark(require = named)] default: Option<Value<'v>>,
@@ -302,6 +309,9 @@ fn attr_module(registry: &mut GlobalsBuilder) {
     ///
     /// If supplied the `providers` argument ensures that specific providers will be present
     /// on the dependency.
+    ///
+    /// The `pulls_plugins` and `pulls_and_pushes_plugins` parameters control plugin propagation.
+    /// See the [`plugins`](../plugins) namespace documentation for a full explanation.
     fn dep<'v>(
         #[starlark(require = named, default = UnpackListOrTuple::default())]
         providers: UnpackListOrTuple<Value<'v>>,

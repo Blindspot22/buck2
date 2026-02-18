@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 pub mod parser;
@@ -19,7 +20,9 @@ use buck2_util::arc_str::ArcStr;
 use derive_more::Display;
 use dupe::Dupe;
 use gazebo::prelude::SliceExt;
+use pagable::Pagable;
 use static_assertions::assert_eq_size;
+use strong_hash::StrongHash;
 
 use crate::attrs::attr_type::query::QueryMacroBase;
 use crate::attrs::coerced_path::CoercedPath;
@@ -27,7 +30,20 @@ use crate::attrs::configuration_context::AttrConfigurationContext;
 use crate::attrs::configured_traversal::ConfiguredAttrTraversal;
 use crate::attrs::traversal::CoercedAttrTraversal;
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, Dupe, Allocative)]
+/// The kind of dependency for a macro like `$(location ...)` or `$(exe ...)`.
+#[derive(
+    Debug, Eq, PartialEq, Hash, Clone, Copy, Dupe, Allocative, Pagable, StrongHash
+)]
+pub enum MacroDepKind {
+    /// Regular target dependency (configured with target configuration).
+    Regular,
+    /// Execution dependency (configured with exec configuration).
+    Exec,
+    /// Toolchain dependency (configured with toolchain configuration).
+    Toolchain,
+}
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, Dupe, Allocative, Pagable)]
 pub struct ArgAttrType {
     pub anon_target_compatible: bool,
 }
@@ -36,7 +52,7 @@ pub struct ArgAttrType {
 /// forms). The parsed arg string is held as a sequence of parts (each part either a literal string or a macro). When
 /// being added to a command line, these parts will be concattenated together and added as a single arg.
 /// Each variant takes in a boolean which determines if the resolved form should be compatible with anon targets.
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, Pagable, StrongHash)]
 pub enum StringWithMacros<P: ProvidersLabelMaybeConfigured> {
     /// Semantically, StringWithMacros::StringPart(s) is equivalent to
     /// StringWithMacros::ManyParts(vec![StringWithMacrosPart::String(s)]). We special-case this
@@ -80,7 +96,7 @@ impl StringWithMacros<ConfiguredProvidersLabel> {
     ) -> buck2_error::Result<()> {
         match self {
             Self::StringPart(..) => {}
-            Self::ManyParts(ref parts) => {
+            Self::ManyParts(parts) => {
                 for part in parts.iter() {
                     match part {
                         StringWithMacrosPart::String(_) => {}
@@ -122,7 +138,7 @@ impl StringWithMacros<ProvidersLabel> {
     ) -> buck2_error::Result<()> {
         match self {
             Self::StringPart(..) => {}
-            Self::ManyParts(ref parts) => {
+            Self::ManyParts(parts) => {
                 for part in parts.iter() {
                     match part {
                         StringWithMacrosPart::String(_) => {}
@@ -138,7 +154,7 @@ impl StringWithMacros<ProvidersLabel> {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, Pagable, StrongHash)]
 pub enum StringWithMacrosPart<P: ProvidersLabelMaybeConfigured> {
     String(ArcStr),
     Macro(/* write_to_file */ bool, MacroBase<P>),
@@ -147,17 +163,17 @@ pub enum StringWithMacrosPart<P: ProvidersLabelMaybeConfigured> {
 assert_eq_size!(MacroBase<ProvidersLabel>, [usize; 3]);
 assert_eq_size!(StringWithMacrosPart<ProvidersLabel>, [usize; 4]);
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, Pagable, StrongHash)]
 pub struct UnrecognizedMacro {
     pub macro_type: Box<str>,
     pub args: Box<[String]>,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, Pagable, StrongHash)]
 pub enum MacroBase<P: ProvidersLabelMaybeConfigured> {
     Location {
         label: P,
-        exec_dep: bool,
+        dep_kind: MacroDepKind,
     },
     /// Represents both $(exe) and $(exe_target) usages.
     Exe {
@@ -190,11 +206,15 @@ impl MacroBase<ConfiguredProvidersLabel> {
             MacroBase::UserKeyedPlaceholder(box (_, l, _)) => traversal.dep(l),
             MacroBase::Location {
                 label,
-                exec_dep: true,
+                dep_kind: MacroDepKind::Exec,
             } => traversal.exec_dep(label),
             MacroBase::Location {
                 label,
-                exec_dep: false,
+                dep_kind: MacroDepKind::Toolchain,
+            } => traversal.toolchain_dep(label),
+            MacroBase::Location {
+                label,
+                dep_kind: MacroDepKind::Regular,
             } => traversal.dep(label),
             MacroBase::Exe {
                 label,
@@ -222,13 +242,13 @@ impl MacroBase<ProvidersLabel> {
         ctx: &dyn AttrConfigurationContext,
     ) -> buck2_error::Result<ConfiguredMacro> {
         Ok(match self {
-            UnconfiguredMacro::Location { label, exec_dep } => ConfiguredMacro::Location {
-                label: if *exec_dep {
-                    ctx.configure_exec_target(label)?
-                } else {
-                    ctx.configure_target(label)
+            UnconfiguredMacro::Location { label, dep_kind } => ConfiguredMacro::Location {
+                label: match dep_kind {
+                    MacroDepKind::Exec => ctx.configure_exec_target(label)?,
+                    MacroDepKind::Toolchain => ctx.configure_toolchain_target(label),
+                    MacroDepKind::Regular => ctx.configure_target(label),
                 },
-                exec_dep: *exec_dep,
+                dep_kind: *dep_kind,
             },
             UnconfiguredMacro::Exe { label, exec_dep } => ConfiguredMacro::Exe {
                 label: if *exec_dep {
@@ -267,11 +287,15 @@ impl MacroBase<ProvidersLabel> {
             MacroBase::UserKeyedPlaceholder(box (_, l, _)) => traversal.dep(l),
             MacroBase::Location {
                 label,
-                exec_dep: true,
+                dep_kind: MacroDepKind::Exec,
             } => traversal.exec_dep(label),
             MacroBase::Location {
                 label,
-                exec_dep: false,
+                dep_kind: MacroDepKind::Toolchain,
+            } => traversal.toolchain_dep(label),
+            MacroBase::Location {
+                label,
+                dep_kind: MacroDepKind::Regular,
             } => traversal.dep(label),
             MacroBase::Exe {
                 label,
@@ -303,16 +327,7 @@ pub type ConfiguredStringWithMacrosPart = StringWithMacrosPart<ConfiguredProvide
 
 pub type UnconfiguredStringWithMacros = StringWithMacros<ProvidersLabel>;
 
-#[derive(
-    Debug,
-    Eq,
-    PartialEq,
-    Hash,
-    Clone,
-    Allocative,
-    Display,
-    strong_hash::StrongHash
-)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, Display, StrongHash)]
 #[display("{}", string_with_macros)]
 pub struct ConfiguredStringWithMacros {
     pub string_with_macros: StringWithMacros<ConfiguredProvidersLabel>,
@@ -325,14 +340,14 @@ impl<P: ProvidersLabelMaybeConfigured> Display for MacroBase<P> {
         // TODO: this should re-escape values in the args that need to be escaped to have returned that arg (it's not possible
         // to tell where there were unnecessary escapes and it's not worth tracking that).
         match self {
-            MacroBase::Location { label, exec_dep } => {
+            MacroBase::Location { label, dep_kind } => {
                 write!(
                     f,
                     "{} {}",
-                    if *exec_dep {
-                        "location_exec"
-                    } else {
-                        "location"
+                    match dep_kind {
+                        MacroDepKind::Exec => "location_exec",
+                        MacroDepKind::Toolchain => "location_toolchain",
+                        MacroDepKind::Regular => "location",
                     },
                     label
                 )
@@ -347,14 +362,14 @@ impl<P: ProvidersLabelMaybeConfigured> Display for MacroBase<P> {
             }
             MacroBase::Query(query) => Display::fmt(query, f),
             MacroBase::Source(path) => write!(f, "src {}", path.path()),
-            MacroBase::UserUnkeyedPlaceholder(var) => write!(f, "{}", var),
+            MacroBase::UserUnkeyedPlaceholder(var) => write!(f, "{var}"),
             MacroBase::UserKeyedPlaceholder(box (macro_type, target, arg)) => write!(
                 f,
                 "{} {}{}",
                 macro_type,
                 target,
                 if let Some(arg) = arg {
-                    format!(" {}", arg)
+                    format!(" {arg}")
                 } else {
                     "".to_owned()
                 }
@@ -369,7 +384,7 @@ impl<P: ProvidersLabelMaybeConfigured> Display for MacroBase<P> {
 impl<P: ProvidersLabelMaybeConfigured> Display for StringWithMacrosPart<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StringWithMacrosPart::String(s) => write!(f, "{}", s),
+            StringWithMacrosPart::String(s) => write!(f, "{s}"),
             StringWithMacrosPart::Macro(write_to_file, m) => {
                 write!(f, "$({}{})", if *write_to_file { "@" } else { "" }, m)
             }
@@ -397,11 +412,11 @@ impl<P: ProvidersLabelMaybeConfigured> Display for StringWithMacros<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::StringPart(part) => {
-                write!(f, "{}", part)?;
+                write!(f, "{part}")?;
             }
-            Self::ManyParts(ref parts) => {
+            Self::ManyParts(parts) => {
                 for part in parts.iter() {
-                    write!(f, "{}", part)?;
+                    write!(f, "{part}")?;
                 }
             }
         }
@@ -411,7 +426,7 @@ impl<P: ProvidersLabelMaybeConfigured> Display for StringWithMacros<P> {
 }
 
 /// Represents the type of a query placeholder (e.g. query_outputs, query_targets, query_targets_and_outputs).
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, strong_hash::StrongHash)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, Pagable, StrongHash)]
 pub enum QueryExpansion {
     Output,
     Target,
@@ -425,7 +440,7 @@ impl Display for QueryExpansion {
             QueryExpansion::Output => f.write_str("query_outputs ")?,
             QueryExpansion::Target => f.write_str("query_targets ")?,
             QueryExpansion::TargetAndOutput(Some(separator)) => {
-                write!(f, "query_targets_and_outputs '{}' ", separator)?;
+                write!(f, "query_targets_and_outputs '{separator}' ")?;
             }
             QueryExpansion::TargetAndOutput(None) => f.write_str("query_targets_and_outputs ")?,
         };

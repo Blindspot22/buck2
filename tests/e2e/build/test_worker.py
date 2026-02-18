@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -13,7 +14,6 @@ import json
 from typing import Any, Dict, List
 
 from buck2.tests.e2e_util.api.buck import Buck
-
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test
 from buck2.tests.e2e_util.helper.utils import read_what_ran
@@ -157,19 +157,18 @@ async def test_worker_exit_handled(buck: Buck) -> None:
     )
 
 
-# Disabled as it doesn't seem like the fallback is working.
-# @buck_test(inplace=True, skip_for_os=["darwin", "windows"])
-# async def test_hybrid_execution(buck: Buck) -> None:
-#     # 1. Check that building `:gen_slow_worker_fast_fallback` first (as dependency) causes remote to succeed and worker to be cancelled.
-#     # 2. Check that `:gen_fast_worker_slow_fallback` worker execution succeeds, using same worker initialized by 1.
-#     hybrid_args = [
-#         "-c",
-#         "build.use_persistent_workers=True",
-#         "-c",
-#         "build.use_limited_hybrid=False",
-#     ]
-#     await buck.build(*hybrid_args, package + ":gen_fast_worker_slow_fallback")
-#     assert len(await _read_what_ran_for_executor(buck, "WorkerInit")) == 1
+@buck_test(inplace=True, skip_for_os=["darwin", "windows"])
+async def test_hybrid_execution(buck: Buck) -> None:
+    # 1. Check that building `:gen_slow_worker_fast_fallback` first (as dependency) causes remote to succeed and worker to be cancelled.
+    # 2. Check that `:gen_fast_worker_slow_fallback` worker execution succeeds, using same worker initialized by 1.
+    hybrid_args = [
+        "-c",
+        "build.use_persistent_workers=True",
+        "-c",
+        "build.use_limited_hybrid=False",
+    ]
+    await buck.build(*hybrid_args, package + ":gen_fast_worker_slow_fallback")
+    assert len(await _read_what_ran_for_executor(buck, "WorkerInit")) == 1
 
 
 @buck_test(inplace=True, skip_for_os=["darwin", "windows"])

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 package com.facebook.buck.jvm.java
@@ -20,9 +21,24 @@ data class CompilerOutputPaths(
     val annotationPath: RelPath,
     val pathToSourcesList: RelPath,
     val workingDirectory: RelPath,
-    val outputJarPath: Optional<RelPath>
+    val outputJarPath: Optional<RelPath>,
 ) {
   companion object {
+    /**
+     * Returns a path to a file that contains dependencies used in the compilation to be consumed by
+     * buck2
+     */
+    @JvmStatic
+    fun getDepFilePath(outputJarDirPath: RelPath): RelPath {
+      return outputJarDirPath.resolveRel("dep-file.txt")
+    }
+
+    /** Returns a path to a file that contains the .jars used in the compilation */
+    @JvmStatic
+    fun getUsedJarsFilePath(outputJarDirPath: RelPath): RelPath {
+      return outputJarDirPath.resolveRel("used-jars.json")
+    }
+
     /** Returns a path to a file that contains dependencies used in the compilation */
     @JvmStatic
     fun getJavaDepFilePath(outputJarDirPath: RelPath): RelPath {

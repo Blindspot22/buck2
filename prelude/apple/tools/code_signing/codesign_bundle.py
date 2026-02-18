@@ -1,18 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
 import asyncio
 import importlib.resources
+import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from contextlib import ExitStack
@@ -23,11 +26,16 @@ from typing import Any, cast, Dict, List, Optional, Union
 
 from apple.tools.plistlib_utils import detect_format_and_load
 
+# @oss-disable[end= ]: from ..meta_only.entitlements_mismatch.check_entitlements import (
+    # @oss-disable[end= ]: verify_entitlements,
+# @oss-disable[end= ]: )
 from .apple_platform import ApplePlatform
 from .codesign_command_factory import (
     DefaultCodesignCommandFactory,
     DryRunCodesignCommandFactory,
+    generate_codesign_manifest,
     ICodesignCommandFactory,
+    ManifestCodesignCommandFactory,
 )
 from .fast_adhoc import is_fast_adhoc_codesign_allowed, should_skip_adhoc_signing_path
 from .identity import CodeSigningIdentity
@@ -79,6 +87,18 @@ class CodesignedPath:
     """
 
 
+def _verify_entitlements(
+    entitlements_path: Optional[Path],
+    profile_path: Path,
+) -> None:
+    result = verify_entitlements(
+        entitlements_path,
+        profile_path,
+    )
+    if result == 1:
+        sys.exit(1)
+
+
 def _log_codesign_identities(
     list_codesign_identities: IListCodesignIdentities,
     identities: List[CodeSigningIdentity],
@@ -105,6 +125,7 @@ def _select_provisioning_profile(
     should_use_fast_provisioning_profile_parsing: bool,
     strict_provisioning_profile_search: bool,
     provisioning_profile_filter: Optional[str],
+    no_check_certificates: bool = False,
     log_file_path: Optional[Path] = None,
 ) -> SelectedProvisioningProfileInfo:
     read_provisioning_profile_command_factory = (
@@ -146,6 +167,7 @@ def _select_provisioning_profile(
         platform,
         strict_provisioning_profile_search,
         provisioning_profile_filter,
+        no_check_certificates,
     )
     if selected_profile_info is None:
         if not mismatches:
@@ -197,6 +219,8 @@ def signing_context_with_profile_selection(
     should_use_fast_provisioning_profile_parsing: bool = False,
     strict_provisioning_profile_search: bool = False,
     provisioning_profile_filter: Optional[str] = None,
+    no_check_certificates: bool = False,
+    should_verify_entitlements: bool = False,
 ) -> SigningContextWithProfileSelection:
     with open(info_plist_source, mode="rb") as info_plist_file:
         info_plist_metadata = InfoPlistMetadata.from_file(info_plist_file)
@@ -210,7 +234,12 @@ def signing_context_with_profile_selection(
         should_use_fast_provisioning_profile_parsing=should_use_fast_provisioning_profile_parsing,
         strict_provisioning_profile_search=strict_provisioning_profile_search,
         provisioning_profile_filter=provisioning_profile_filter,
+        no_check_certificates=no_check_certificates,
     )
+
+    profile_path = selected_profile_info.profile.file_path
+    # @oss-disable[end= ]: if should_verify_entitlements:
+        # @oss-disable[end= ]: _verify_entitlements(entitlements_path, profile_path)
 
     return SigningContextWithProfileSelection(
         info_plist_source,
@@ -223,7 +252,33 @@ def signing_context_with_profile_selection(
 # IMPORTANT: This enum is a part of incremental API, amend carefully.
 class CodesignConfiguration(str, Enum):
     fastAdhoc = "fast-adhoc"
+    executionBypass = "execution-bypass"
     dryRun = "dry-run"
+
+
+def write_empty_codesign_manifest(codesign_manifest_path: Path, bundle_path: Path):
+    with open(codesign_manifest_path, "w") as codesign_manifest_file:
+        codesign_manifest = generate_codesign_manifest(
+            bundle_path, codesign_invocations=[]
+        )
+        json.dump(codesign_manifest, codesign_manifest_file, indent=4)
+
+
+def selection_profile_context_from_signing_context(
+    signing_context: Optional[
+        Union[AdhocSigningContext, SigningContextWithProfileSelection]
+    ],
+) -> Optional[SigningContextWithProfileSelection]:
+    if signing_context:
+        if isinstance(signing_context, SigningContextWithProfileSelection):
+            selection_profile_context = signing_context
+        elif isinstance(signing_context, AdhocSigningContext):
+            selection_profile_context = signing_context.profile_selection_context
+        else:
+            raise RuntimeError(
+                f"Unexpected type of signing context `{type(signing_context)}`"
+            )
+        return selection_profile_context
 
 
 def codesign_bundle(
@@ -233,6 +288,7 @@ def codesign_bundle(
     codesign_on_copy_paths: List[CodesignedPath],
     codesign_tool: Optional[Path] = None,
     codesign_configuration: Optional[CodesignConfiguration] = None,
+    codesign_manifest_path: Optional[Path] = None,
 ) -> None:
     codesign_on_copy_paths = sorted(
         codesign_on_copy_paths,
@@ -242,15 +298,9 @@ def codesign_bundle(
     )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        if isinstance(signing_context, SigningContextWithProfileSelection):
-            selection_profile_context = signing_context
-        elif isinstance(signing_context, AdhocSigningContext):
-            selection_profile_context = signing_context.profile_selection_context
-        else:
-            raise RuntimeError(
-                f"Unexpected type of signing context `{type(signing_context)}`"
-            )
-
+        selection_profile_context = selection_profile_context_from_signing_context(
+            signing_context
+        )
         if selection_profile_context:
             bundle_path_with_prepared_entitlements = (
                 _prepare_entitlements_and_info_plist(
@@ -280,12 +330,15 @@ def codesign_bundle(
                 raise RuntimeError(
                     "Expected codesign tool not to be the default one when dry run codesigning is requested."
                 )
+            manifest_codesign_factory = ManifestCodesignCommandFactory(
+                DryRunCodesignCommandFactory(codesign_tool)
+            )
             _dry_codesign_everything(
                 root=bundle_path_with_prepared_entitlements,
                 codesign_on_copy_paths=codesign_on_copy_paths,
                 identity_fingerprint=selected_identity_fingerprint,
                 tmp_dir=tmp_dir,
-                codesign_tool=codesign_tool,
+                codesign_command_factory=manifest_codesign_factory,
                 platform=platform,
             )
         else:
@@ -293,16 +346,35 @@ def codesign_bundle(
                 codesign_configuration is CodesignConfiguration.fastAdhoc
                 and is_fast_adhoc_codesign_allowed()
             )
-            _LOGGER.info(f"Fast adhoc signing enabled: {fast_adhoc_signing_enabled}")
+            codesign_execution_bypass_enabled = (
+                codesign_configuration is CodesignConfiguration.executionBypass
+            )
+            underlying_codesign_factory = (
+                DefaultCodesignCommandFactory(codesign_tool)
+                if (not codesign_execution_bypass_enabled)
+                else None
+            )
+            manifest_codesign_factory = ManifestCodesignCommandFactory(
+                underlying_codesign_factory
+            )
             _codesign_everything(
                 root=bundle_path_with_prepared_entitlements,
                 codesign_on_copy_paths=codesign_on_copy_paths,
                 identity_fingerprint=selected_identity_fingerprint,
                 tmp_dir=tmp_dir,
-                codesign_command_factory=DefaultCodesignCommandFactory(codesign_tool),
+                codesign_command_factory=manifest_codesign_factory,
                 platform=platform,
                 fast_adhoc_signing=fast_adhoc_signing_enabled,
             )
+
+        if codesign_manifest_path:
+            with open(codesign_manifest_path, "w") as codesign_manifest_file:
+                codesign_manifest = (
+                    manifest_codesign_factory.generate_codesign_manifest(
+                        bundle_path.path
+                    )
+                )
+                json.dump(codesign_manifest, codesign_manifest_file, indent=4)
 
 
 def _prepare_entitlements_and_info_plist(
@@ -445,11 +517,9 @@ def _dry_codesign_everything(
     codesign_on_copy_paths: List[CodesignedPath],
     identity_fingerprint: str,
     tmp_dir: str,
-    codesign_tool: Path,
+    codesign_command_factory: ICodesignCommandFactory,
     platform: ApplePlatform,
 ) -> None:
-    codesign_command_factory = DryRunCodesignCommandFactory(codesign_tool)
-
     codesign_on_copy_directory_paths = [
         p for p in codesign_on_copy_paths if p.path.is_dir()
     ]
@@ -548,6 +618,7 @@ class ParallelProcess:
         if self.process.returncode == 0:
             return
         with ExitStack() as stack:
+            command = f"\ncommand:\n{self.process.args}\n"
             stderr = stack.enter_context(open(self.stderr_path, encoding="utf8"))
             stderr_string = f"\nstderr:\n{stderr.read()}\n"
             stdout = (
@@ -556,7 +627,7 @@ class ParallelProcess:
                 else None
             )
             stdout_string = f"\nstdout:\n{stdout.read()}\n" if stdout else ""
-            raise RuntimeError(f"{stdout_string}{stderr_string}")
+            raise RuntimeError(f"{command}{stdout_string}{stderr_string}")
 
 
 def _spawn_process(
@@ -665,7 +736,7 @@ def _can_codesign_paths_in_parallel(codesigned_paths: List[CodesignedPath]) -> b
             continue
         previous_path = paths[index - 1]
         if previous_path.startswith(current_path):
-            _LOGGER.warn(
+            _LOGGER.warning(
                 f"Found overlapping codesigned paths: {previous_path}, {current_path}"
             )
             return False
@@ -718,9 +789,12 @@ def obtain_keychain_permissions(
     tmp_dir: str,
     codesign_command_factory: ICodesignCommandFactory,
 ) -> None:
-    with ExitStack() as stack, importlib.resources.path(
-        __package__, "dummy_binary_for_signing"
-    ) as dummy_binary_path:
+    with (
+        ExitStack() as stack,
+        importlib.resources.path(
+            __package__, "dummy_binary_for_signing"
+        ) as dummy_binary_path,
+    ):
         # Copy the binary to avoid races vs other bundling actions
         dummy_binary_copied = os.path.join(tmp_dir, "dummy_binary_for_signing")
         shutil.copyfile(dummy_binary_path, dummy_binary_copied, follow_symlinks=True)

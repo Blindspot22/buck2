@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::HashMap;
@@ -69,14 +70,14 @@ impl Deferred for FakeDeferred {
         &self,
         _ctx: &mut dyn DeferredCtx,
         _dice: &mut DiceComputations<'_>,
-    ) -> anyhow::Result<DeferredValue<Self::Output>> {
+    ) -> buck2_error::Result<DeferredValue<Self::Output>> {
         self.2.store(true, Ordering::SeqCst);
         Ok(DeferredValue::Ready(UsizeOutput(self.0)))
     }
 }
 
 #[tokio::test]
-async fn lookup_deferred_from_analysis() -> anyhow::Result<()> {
+async fn lookup_deferred_from_analysis() -> buck2_error::Result<()> {
     let target =
         TargetLabel::testing_parse("cell//pkg:foo").configure(ConfigurationData::testing_new());
     let analysis_key = AnalysisKey(target.dupe());
@@ -136,26 +137,26 @@ async fn lookup_deferred_from_analysis() -> anyhow::Result<()> {
     let mut dice = dice.build(dice_data)?.commit().await;
     let deferred_result = dice.compute_deferred_data(&data0).await?;
     assert_eq!(deferred_result.0, 1);
-    assert_eq!(executed0.load(Ordering::SeqCst), true);
+    assert!(executed0.load(Ordering::SeqCst));
     // we should cache deferred execution
     executed0.store(false, Ordering::SeqCst);
     let deferred_result = dice.compute_deferred_data(&data0).await?;
     assert_eq!(deferred_result.0, 1);
-    assert_eq!(executed0.load(Ordering::SeqCst), false);
+    assert!(!executed0.load(Ordering::SeqCst));
 
     let deferred_result = dice.compute_deferred_data(&data1).await?;
     assert_eq!(deferred_result.0, 5);
-    assert_eq!(executed1.load(Ordering::SeqCst), true);
+    assert!(executed1.load(Ordering::SeqCst));
     // we should cache deferred execution
     executed1.store(false, Ordering::SeqCst);
     assert_eq!(deferred_result.0, 5);
-    assert_eq!(executed1.load(Ordering::SeqCst), false);
+    assert!(!executed1.load(Ordering::SeqCst));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn lookup_deferred_that_has_deferreds() -> anyhow::Result<()> {
+async fn lookup_deferred_that_has_deferreds() -> buck2_error::Result<()> {
     #[derive(Debug, Allocative)]
     struct TestDeferringDeferred(usize, IndexSet<DeferredInput>, Arc<AtomicBool>);
 
@@ -174,7 +175,7 @@ async fn lookup_deferred_that_has_deferreds() -> anyhow::Result<()> {
             &self,
             ctx: &mut dyn DeferredCtx,
             _dice: &mut DiceComputations<'_>,
-        ) -> anyhow::Result<DeferredValue<Self::Output>> {
+        ) -> buck2_error::Result<DeferredValue<Self::Output>> {
             let data = ctx
                 .registry()
                 .defer(FakeDeferred(self.0, self.1.clone(), self.2.dupe()));
@@ -239,12 +240,12 @@ async fn lookup_deferred_that_has_deferreds() -> anyhow::Result<()> {
     let mut dice = dice.build(dice_data)?.commit().await;
     let deferred_result = dice.compute_deferred_data(&data).await?;
     assert_eq!(deferred_result.0, 8);
-    assert_eq!(executed.load(Ordering::SeqCst), true);
+    assert!(executed.load(Ordering::SeqCst));
     // we should cache deferred execution
     executed.store(false, Ordering::SeqCst);
     let deferred_result = dice.compute_deferred_data(&data).await?;
     assert_eq!(deferred_result.0, 8);
-    assert_eq!(executed.load(Ordering::SeqCst), false);
+    assert!(!executed.load(Ordering::SeqCst));
 
     Ok(())
 }

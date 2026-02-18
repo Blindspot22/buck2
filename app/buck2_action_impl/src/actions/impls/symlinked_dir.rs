@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -22,15 +23,18 @@ use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::interpreter::rule_defs::artifact::associated::AssociatedArtifacts;
-use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsArtifactLike;
+use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
+use buck2_build_signals::env::WaitingData;
 use buck2_core::category::CategoryRef;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::artifact_utils::ArtifactValueBuilder;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::CopiedArtifact;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use dupe::Dupe;
 use gazebo::prelude::*;
 use indexmap::IndexSet;
@@ -39,6 +43,8 @@ use starlark::values::OwnedFrozenValue;
 use starlark::values::ValueError;
 use starlark::values::dict::UnpackDictEntries;
 use starlark_map::small_set::SmallSet;
+
+use crate::actions::impls::copy::CopyMode;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
@@ -53,7 +59,7 @@ enum SymlinkedDirError {
 
 #[derive(Allocative)]
 pub(crate) struct UnregisteredSymlinkedDirAction {
-    copy: bool,
+    copy: CopyMode,
     args: Vec<(ArtifactGroup, Box<ForwardRelativePath>)>,
     // All associated artifacts of inputs unioned together
     unioned_associated_artifacts: AssociatedArtifacts,
@@ -94,7 +100,7 @@ impl UnregisteredSymlinkedDirAction {
     // Map each artifact into an optional tuple of (artifact, path) and associated_artifacts, then collect
     // them into an optional tuple of vector and an index set respectively
     fn unpack_args<'v>(
-        srcs: UnpackDictEntries<&'v str, ValueAsArtifactLike<'v>>,
+        srcs: UnpackDictEntries<&'v str, ValueAsInputArtifactLike<'v>>,
     ) -> buck2_error::Result<(
         Vec<(ArtifactGroup, Box<ForwardRelativePath>)>,
         SmallSet<ArtifactGroup>,
@@ -129,8 +135,8 @@ impl UnregisteredSymlinkedDirAction {
     }
 
     pub(crate) fn new<'v>(
-        copy: bool,
-        srcs: UnpackDictEntries<&'v str, ValueAsArtifactLike<'v>>,
+        copy: CopyMode,
+        srcs: UnpackDictEntries<&'v str, ValueAsInputArtifactLike<'v>>,
     ) -> buck2_error::Result<Self> {
         let (mut args, unioned_associated_artifacts) = Self::unpack_args(srcs)
             // FIXME: This warning is talking about the Starlark-level argument name `srcs`.
@@ -140,18 +146,15 @@ impl UnregisteredSymlinkedDirAction {
             )?;
         // Overlapping check make sense for non-copy mode only.
         // When directories are copied into the same destination, the ordering defines how files are overwritten.
-        if !copy {
-            Self::validate_args(&mut args)?;
-        }
+        match copy {
+            CopyMode::Symlink => Self::validate_args(&mut args)?,
+            CopyMode::Copy { .. } => (),
+        };
         Ok(Self {
             copy,
             args,
             unioned_associated_artifacts: AssociatedArtifacts::from(unioned_associated_artifacts),
         })
-    }
-
-    pub(crate) fn inputs(&self) -> IndexSet<ArtifactGroup> {
-        self.args.iter().map(|x| x.0.dupe()).collect()
     }
 
     pub(crate) fn unioned_associated_artifacts(&self) -> AssociatedArtifacts {
@@ -162,7 +165,6 @@ impl UnregisteredSymlinkedDirAction {
 impl UnregisteredAction for UnregisteredSymlinkedDirAction {
     fn register(
         self: Box<Self>,
-        inputs: IndexSet<ArtifactGroup>,
         outputs: IndexSet<BuildArtifact>,
         _starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
@@ -170,7 +172,6 @@ impl UnregisteredAction for UnregisteredSymlinkedDirAction {
         Ok(Box::new(SymlinkedDirAction {
             copy: self.copy,
             args: self.args,
-            inputs: BoxSliceSet::from(inputs),
             outputs: BoxSliceSet::from(outputs),
         }))
     }
@@ -178,9 +179,8 @@ impl UnregisteredAction for UnregisteredSymlinkedDirAction {
 
 #[derive(Debug, Allocative)]
 struct SymlinkedDirAction {
-    copy: bool,
+    copy: CopyMode,
     args: Vec<(ArtifactGroup, Box<ForwardRelativePath>)>,
-    inputs: BoxSliceSet<ArtifactGroup>,
     outputs: BoxSliceSet<BuildArtifact>,
 }
 
@@ -200,7 +200,7 @@ impl Action for SymlinkedDirAction {
     }
 
     fn inputs(&self) -> buck2_error::Result<Cow<'_, [ArtifactGroup]>> {
-        Ok(Cow::Borrowed(self.inputs.as_slice()))
+        Ok(Cow::Owned(self.args.iter().map(|x| x.0.dupe()).collect()))
     }
 
     fn outputs(&self) -> Cow<'_, [BuildArtifact]> {
@@ -211,7 +211,7 @@ impl Action for SymlinkedDirAction {
         self.output()
     }
 
-    fn category(&self) -> CategoryRef {
+    fn category(&self) -> CategoryRef<'_> {
         CategoryRef::unchecked_new("symlinked_dir")
     }
 
@@ -222,37 +222,83 @@ impl Action for SymlinkedDirAction {
     async fn execute(
         &self,
         ctx: &mut dyn ActionExecutionCtx,
+        waiting_data: WaitingData,
     ) -> Result<(ActionOutputs, ActionExecutionMetadata), ExecuteError> {
         let fs = ctx.fs().fs();
-        let output = ctx.fs().resolve_build(self.output().get_path())?;
+        let temp_output = ctx.fs().resolve_build(
+            self.output().get_path(),
+            Some(&ContentBasedPathHash::for_output_artifact()),
+        )?;
         let mut builder = ArtifactValueBuilder::new(fs, ctx.digest_config());
         let mut srcs = Vec::new();
 
-        for (group, dest) in &self.args {
+        for (group, relative_dest) in &self.args {
             let (src_artifact, value) = ctx
                 .artifact_values(group)
                 .iter()
                 .into_singleton()
-                .buck_error_context("Input did not dereference to exactly one artifact")?;
+                .ok_or_else(|| {
+                    internal_error!("Input did not dereference to exactly one artifact")
+                })?;
 
-            let src = src_artifact.resolve_path(ctx.fs())?;
-            let dest = output.join(dest);
+            let src = src_artifact.resolve_path(
+                ctx.fs(),
+                if src_artifact.path_resolution_requires_artifact_value() {
+                    Some(value.content_based_path_hash())
+                } else {
+                    None
+                }
+                .as_ref(),
+            )?;
+            let temp_dest = temp_output.join(relative_dest);
 
-            if self.copy {
-                let dest_entry = builder.add_copied(value, src.as_ref(), dest.as_ref())?;
-                srcs.push(CopiedArtifact::new(
-                    src,
-                    dest,
-                    dest_entry.map_dir(|d| d.as_immutable()),
-                ));
-            } else {
-                builder.add_symlinked(value, src.as_ref(), dest.as_ref())?;
-            }
+            match self.copy {
+                CopyMode::Copy {
+                    executable_bit_override,
+                } => {
+                    let dest_entry = builder.add_copied(
+                        value,
+                        src.as_ref(),
+                        temp_dest.as_ref(),
+                        executable_bit_override,
+                    )?;
+                    srcs.push((src, relative_dest, dest_entry.map_dir(|d| d.as_immutable())));
+                }
+                CopyMode::Symlink => {
+                    builder.add_symlinked(value, src, temp_dest.as_ref())?;
+                }
+            };
         }
 
-        let value = builder.build(output.as_ref())?;
+        let value = builder.build(temp_output.as_ref())?;
+        let actual_output = ctx.fs().resolve_build(
+            self.output().get_path(),
+            if self.output().get_path().is_content_based_path() {
+                Some(value.content_based_path_hash())
+            } else {
+                None
+            }
+            .as_ref(),
+        )?;
+        let srcs = srcs
+            .into_iter()
+            .map(|(src, relative_dest, dest_entry)| {
+                CopiedArtifact::new(
+                    src,
+                    actual_output.join(relative_dest),
+                    dest_entry,
+                    match self.copy {
+                        CopyMode::Copy {
+                            executable_bit_override,
+                        } => executable_bit_override,
+                        CopyMode::Symlink => None,
+                    },
+                )
+            })
+            .collect_vec();
+
         ctx.materializer()
-            .declare_copy(output, value.dupe(), srcs, ctx.cancellation_context())
+            .declare_copy(actual_output, value.dupe(), srcs)
             .await?;
         Ok((
             ActionOutputs::from_single(self.output().get_path().dupe(), value),
@@ -260,6 +306,7 @@ impl Action for SymlinkedDirAction {
                 execution_kind: ActionExecutionKind::Simple,
                 timing: ActionExecutionTimingData::default(),
                 input_files_bytes: None,
+                waiting_data,
             },
         ))
     }

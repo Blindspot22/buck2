@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -32,6 +33,11 @@ from buck2.tests.core.common.io.file_watcher_scm_tests import (
     run_rebase_with_mergebase_test,
     run_restack_with_mergebase_test,
     setup_file_watcher_scm_test,
+)
+from buck2.tests.core.common.io.file_watcher_symlink_tests import (
+    run_change_symlink_target_test,
+    run_create_symlink_test,
+    run_replace_file_with_symlink_test,
 )
 from buck2.tests.core.common.io.file_watcher_tests import (
     FileSystemType,
@@ -235,3 +241,45 @@ async def test_watchman_files_report_on_fresh_instance(buck: Buck) -> None:
     is_fresh_instance, results = await get_file_watcher_events(buck)
     assert is_fresh_instance
     verify_results(results, required)
+
+
+@buck_test(setup_eden=True)
+async def test_watchman_create_symlink_test_eden(buck: Buck) -> None:
+    await run_create_symlink_test(
+        buck, FileSystemType.EDEN_FS, FileWatcherProvider.WATCHMAN
+    )
+
+
+@buck_test(setup_eden=False)
+async def test_watchman_create_symlink_test_no_eden(buck: Buck) -> None:
+    await run_create_symlink_test(
+        buck, FileSystemType.NATIVE, FileWatcherProvider.WATCHMAN
+    )
+
+
+@buck_test(setup_eden=True)
+async def test_watchman_replace_file_with_symlink_eden(buck: Buck) -> None:
+    await run_replace_file_with_symlink_test(
+        buck, FileSystemType.EDEN_FS, FileWatcherProvider.WATCHMAN
+    )
+
+
+@buck_test(setup_eden=False)
+async def test_watchman_replace_file_with_symlink_no_eden(buck: Buck) -> None:
+    await run_replace_file_with_symlink_test(
+        buck, FileSystemType.NATIVE, FileWatcherProvider.WATCHMAN
+    )
+
+
+@buck_test(setup_eden=True)
+async def test_watchman_change_symlink_target_test_eden(buck: Buck) -> None:
+    await run_change_symlink_target_test(
+        buck, FileSystemType.EDEN_FS, FileWatcherProvider.WATCHMAN
+    )
+
+
+@buck_test(setup_eden=False)
+async def test_watchman_change_symlink_target_test_no_eden(buck: Buck) -> None:
+    await run_change_symlink_target_test(
+        buck, FileSystemType.NATIVE, FileWatcherProvider.WATCHMAN
+    )

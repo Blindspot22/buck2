@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 #![cfg(feature = "hashbrown")]
@@ -61,7 +62,9 @@ mod tests {
     fn test_hash_table() {
         let mut table = HashTable::with_capacity(100);
         for i in 0..100 {
-            table.insert_unique(hash(&i.to_string()), i.to_string(), hash);
+            let mut s = i.to_string();
+            s.shrink_to_fit(); // Make the string deterministically sized
+            table.insert_unique(hash(&s), s, hash);
         }
 
         golden_test!(&table);

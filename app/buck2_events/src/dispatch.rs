@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! Mechanism for dispatching events. Where the rubber meets the road, for producers of events.
@@ -38,6 +39,7 @@ use smallvec::SmallVec;
 use crate::BuckEvent;
 use crate::Event;
 use crate::EventSink;
+use crate::daemon_id::DaemonId;
 use crate::sink::null::NullEventSink;
 use crate::span::SpanId;
 
@@ -47,6 +49,7 @@ use crate::span::SpanId;
 pub struct EventDispatcher {
     /// The Trace ID of the current trace.
     trace_id: TraceId,
+    daemon_id: DaemonId,
     /// The sink to log events to.
     #[allocative(skip)] // TODO(nga): do not skip.
     sink: Arc<dyn EventSink>,
@@ -54,9 +57,14 @@ pub struct EventDispatcher {
 
 impl EventDispatcher {
     /// Creates a new Event Dispatcher using the given TraceId and logging events to the given sink.
-    pub fn new<T: EventSink + 'static>(trace_id: TraceId, sink: T) -> EventDispatcher {
+    pub fn new<T: EventSink + 'static>(
+        trace_id: TraceId,
+        daemon_id: DaemonId,
+        sink: T,
+    ) -> EventDispatcher {
         EventDispatcher {
             trace_id,
+            daemon_id,
             sink: Arc::new(sink),
         }
     }
@@ -69,14 +77,7 @@ impl EventDispatcher {
     pub fn null() -> EventDispatcher {
         EventDispatcher {
             trace_id: TraceId::null(),
-            sink: Arc::new(NullEventSink::new()),
-        }
-    }
-
-    /// Creates a new null Event Dispatcher with trace ID that accepts events but does not write them anywhere.
-    pub fn null_sink_with_trace(trace_id: TraceId) -> EventDispatcher {
-        EventDispatcher {
-            trace_id,
+            daemon_id: DaemonId::null(),
             sink: Arc::new(NullEventSink::new()),
         }
     }
@@ -100,6 +101,10 @@ impl EventDispatcher {
 
     pub fn console_warning(&self, message: String) {
         self.instant_event(buck2_data::ConsoleWarning { message })
+    }
+
+    pub fn streaming_output(&self, message: String) {
+        self.instant_event(buck2_data::StdoutStreamingOutput { message })
     }
 
     fn event_with_span_id<E: Into<buck_event::Data>>(
@@ -141,7 +146,11 @@ impl EventDispatcher {
     /// the future itself is suspended and resumed, respectively.
     ///
     /// TODO(swgillespie) actually implement suspend/resume
-    pub fn span_async<Start, End, Fut, R>(&self, start: Start, fut: Fut) -> impl Future<Output = R>
+    pub fn span_async<Start, End, Fut, R>(
+        &self,
+        start: Start,
+        fut: Fut,
+    ) -> impl Future<Output = R> + use<Start, End, Fut, R>
     where
         Start: Into<span_start_event::Data>,
         End: Into<span_end_event::Data>,
@@ -162,6 +171,10 @@ impl EventDispatcher {
     /// Returns the traceid for this event dispatcher.
     pub fn trace_id(&self) -> &TraceId {
         &self.trace_id
+    }
+
+    pub fn daemon_id(&self) -> &DaemonId {
+        &self.daemon_id
     }
 }
 
@@ -324,7 +337,7 @@ impl Span {
             })
         });
 
-        let elapsed = now.elapsed();
+        let elapsed = Instant::now() - now;
         self.stats.max_poll_time = std::cmp::max(elapsed, self.stats.max_poll_time);
         self.stats.total_poll_time += elapsed;
 
@@ -336,7 +349,7 @@ impl Span {
 
         self.dispatcher.event_with_span_id(
             SpanEndEvent {
-                duration: self.start_instant.elapsed().try_into().ok(),
+                duration: (Instant::now() - self.start_instant).try_into().ok(),
                 data: Some(data),
                 stats: Some(buck2_data::SpanStats {
                     max_poll_time_us: self.stats.max_poll_time.as_micros() as u64,
@@ -615,15 +628,14 @@ mod tests {
 
         let sink = ChannelEventSink::new(send);
         let trace_id = TraceId::new();
-        let dispatcher = EventDispatcher::new(trace_id.dupe(), sink);
+        let dispatcher = EventDispatcher::new(trace_id.dupe(), DaemonId::new(), sink);
 
         (dispatcher, source, trace_id)
     }
 
     fn create_start_end_events() -> (CommandStart, CommandEnd) {
         let start = CommandStart {
-            data: Default::default(),
-            metadata: Default::default(),
+            ..Default::default()
         };
         let end = CommandEnd {
             ..Default::default()

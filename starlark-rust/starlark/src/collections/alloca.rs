@@ -131,7 +131,7 @@ impl Alloca {
 
     #[inline(always)]
     fn len_in_to_to_len_in_words<T>(len: usize) -> usize {
-        if mem::size_of::<T>() % ALIGN == 0 {
+        if mem::size_of::<T>().is_multiple_of(ALIGN) {
             // Special case to make common case fast:
             // https://rust.godbolt.org/z/adh3nzdzs
             len * (mem::size_of::<T>() / ALIGN)
@@ -171,7 +171,7 @@ impl Alloca {
         // If the pointer changed, it means a callback called alloca again,
         // which allocated a new buffer. So we are abandoning the current allocation here,
         // and new allocations will use the new buffer even if the current buffer has space.
-        if likely(self.alloc.get() == stop) {
+        if likely(std::ptr::eq(self.alloc.get(), stop)) {
             self.alloc.set(old);
         }
 

@@ -1,16 +1,17 @@
 #!/usr/bin/env fbpython
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 import argparse
 import itertools
 import json
 import os
-from typing import Dict, List, Tuple, TypedDict
+from typing import TypedDict
 
 # Example VFS overlay in JSON format
 # ----------------------------------
@@ -31,7 +32,7 @@ from typing import Dict, List, Tuple, TypedDict
 class OverlayRoot(TypedDict):
     name: str
     type: str
-    contents: List[Dict[str, str]]
+    contents: list[dict[str, str]]
 
 
 def main() -> None:
@@ -48,7 +49,7 @@ def main() -> None:
         parser.error("mappings must be dest-source pairs")
 
     # Group the mappings by containing directory
-    mappings: Dict[str, List[Tuple[str, str]]] = {}
+    mappings: dict[str, list[tuple[str, str]]] = {}
     for src, dst in itertools.zip_longest(*([iter(args.mappings)] * 2)):
         folder, basename = os.path.split(src)
         mappings.setdefault(folder, []).append((basename, dst))
@@ -67,7 +68,7 @@ def main() -> None:
         f.flush()
 
 
-def _get_roots(mappings: Dict[str, List[Tuple[str, str]]]) -> List[OverlayRoot]:
+def _get_roots(mappings: dict[str, list[tuple[str, str]]]) -> list[OverlayRoot]:
     roots = []
     for folder, file_maps in mappings.items():
         contents = []

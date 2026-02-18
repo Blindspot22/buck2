@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -18,6 +19,7 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_util::arc_str::ThinArcSlice;
 use dupe::Dupe;
 use gazebo::prelude::SliceExt;
+use pagable::Pagable;
 
 use crate::attrs::attr_type::any_matches::AnyMatches;
 
@@ -30,7 +32,16 @@ pub enum VisibilityError {
     NotVisibleTo(TargetLabel, TargetLabel),
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Allocative, derive_more::Display)]
+#[derive(
+    Debug,
+    Eq,
+    PartialEq,
+    Hash,
+    Clone,
+    Allocative,
+    derive_more::Display,
+    Pagable
+)]
 pub struct VisibilityPattern(pub ParsedPattern<TargetPatternExtra>);
 
 impl VisibilityPattern {
@@ -45,7 +56,7 @@ impl VisibilityPattern {
 #[display("\"{}\"", _0)]
 struct VisibilityPatternQuoted<'a>(&'a VisibilityPattern);
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative, Pagable)]
 pub enum VisibilityPatternList {
     Public,
     List(ThinArcSlice<VisibilityPattern>),
@@ -145,7 +156,7 @@ impl AnyMatches for VisibilityPatternList {
 
 /// Represents the visibility spec of a target. Note that targets in the same package will ignore the
 /// visibility spec of each other.
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative, Pagable)]
 pub struct VisibilitySpecification(pub VisibilityPatternList);
 
 impl Default for VisibilitySpecification {
@@ -154,7 +165,7 @@ impl Default for VisibilitySpecification {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Dupe, Allocative, Pagable)]
 pub struct WithinViewSpecification(pub VisibilityPatternList);
 
 impl Default for WithinViewSpecification {

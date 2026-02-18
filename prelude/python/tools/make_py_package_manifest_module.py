@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -24,11 +25,10 @@ def parse_args() -> argparse.Namespace:
         fromfile_prefix_chars="@",
     )
     parser.add_argument(
-        "--module-manifest",
-        help="A path to a JSON file with modules contained in the PEX.",
-        action="append",
-        dest="module_manifests",
-        default=[],
+        "--module-manifests",
+        help="A path to a list of JSON file with modules contained in the PEX.",
+        type=Path,
+        default=None,
     )
     parser.add_argument(
         "--manifest-entries",
@@ -60,20 +60,25 @@ def main() -> None:
         )
 
     modules: Dict[str, str] = {}
-    for module_manifest_file in args.module_manifests:
-        with open(module_manifest_file) as f:
-            for pkg_path, _, origin_desc in json.load(f):
-                module = path_to_module(pkg_path)
-                if module:
-                    modules[module] = origin_desc
-                # Add artificial __init__.py files like in make_py_package_modules.py
-                for parent in Path(pkg_path).parents:
-                    if parent == Path("") or parent == Path("."):
-                        continue
-                    path = str(parent / "__init__.py")
-                    module = path_to_module(path)
-                    if module and module not in modules:
+
+    with open(args.module_manifests) as me:
+        module_manifests = me.read().splitlines()
+        for module_manifest_file in module_manifests:
+            with open(module_manifest_file) as f:
+                for pkg_path, _, origin_desc in json.load(f):
+                    module = path_to_module(pkg_path)
+                    if module:
                         modules[module] = origin_desc
+                    # Add artificial __init__.py files like in make_py_package_modules.py
+                    for parent in Path(pkg_path).parents:
+                        if parent == Path("") or parent == Path("."):
+                            continue
+                        path = str(parent / "__init__.py")
+                        parent_module = path_to_module(path)
+                        if parent_module and parent_module not in modules:
+                            modules[parent_module] = origin_desc
+                        elif parent_module != module:
+                            break
 
     entries = {}
     if args.manifest_entries:

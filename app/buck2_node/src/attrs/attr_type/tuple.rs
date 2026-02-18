@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::fmt;
@@ -16,8 +17,10 @@ use allocative::Allocative;
 use buck2_util::arc_str::ArcSlice;
 use display_container::fmt_container;
 use gazebo::prelude::SliceExt;
+use pagable::Pagable;
 use serde_json::Value;
 use serde_json::to_value;
+use strong_hash::StrongHash;
 
 use crate::attrs::attr_type::AttrType;
 use crate::attrs::attr_type::any_matches::AnyMatches;
@@ -26,7 +29,7 @@ use crate::attrs::display::AttrDisplayWithContextExt;
 use crate::attrs::fmt_context::AttrFmtContext;
 use crate::attrs::json::ToJsonWithContext;
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Allocative)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Pagable, Allocative)]
 pub struct TupleAttrType {
     pub xs: Vec<AttrType>,
 }
@@ -44,19 +47,12 @@ impl TupleAttrType {
             }
             write!(f, "{x}")?;
         }
-        write!(f, "{})", arg)
+        write!(f, "{arg})")
     }
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Eq,
-    PartialEq,
-    Hash,
-    Allocative,
-    Default,
-    strong_hash::StrongHash
+    Debug, Clone, Eq, PartialEq, Hash, Allocative, Default, Pagable, StrongHash
 )]
 pub struct TupleLiteral<C: Eq>(pub ArcSlice<C>);
 

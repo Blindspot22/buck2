@@ -1,0 +1,173 @@
+# This file is @generated, regenerate by re-running test with `-- --env BUCK2_UPDATE_GOLDEN=1` appended to the test command
+
+root//:os (<unbound>):
+  Providers([
+    DefaultInfo(
+      sub_targets={},
+      default_outputs=[],
+      other_outputs=[]
+    ),
+    ConstraintSettingInfo(
+      label=root//:os,
+      default=None
+    )
+  ])
+root//:linux (<unbound>):
+  Providers([
+    DefaultInfo(
+      sub_targets={},
+      default_outputs=[],
+      other_outputs=[]
+    ),
+    ConstraintValueInfo(
+      setting=ConstraintSettingInfo(
+        label=root//:os,
+        default=None
+      ),
+      label=root//:linux
+    ),
+    ConfigurationInfo(
+      constraints={ root//:os: ConstraintValueInfo(
+        setting=ConstraintSettingInfo(
+          label=root//:os,
+          default=None
+        ),
+        label=root//:linux
+      ) },
+      values={}
+    ),
+    ConditionalModifierInfo(
+      inner=ConstraintValueInfo(
+        setting=ConstraintSettingInfo(
+          label=root//:os,
+          default=None
+        ),
+        label=root//:linux
+      ),
+      key=root//:os
+    )
+  ])
+root//:macos (<unbound>):
+  Providers([
+    DefaultInfo(
+      sub_targets={},
+      default_outputs=[],
+      other_outputs=[]
+    ),
+    ConstraintValueInfo(
+      setting=ConstraintSettingInfo(
+        label=root//:os,
+        default=None
+      ),
+      label=root//:macos
+    ),
+    ConfigurationInfo(
+      constraints={ root//:os: ConstraintValueInfo(
+        setting=ConstraintSettingInfo(
+          label=root//:os,
+          default=None
+        ),
+        label=root//:macos
+      ) },
+      values={}
+    ),
+    ConditionalModifierInfo(
+      inner=ConstraintValueInfo(
+        setting=ConstraintSettingInfo(
+          label=root//:os,
+          default=None
+        ),
+        label=root//:macos
+      ),
+      key=root//:os
+    )
+  ])
+root//:cpu (<unbound>):
+  Providers([
+    DefaultInfo(
+      sub_targets={},
+      default_outputs=[],
+      other_outputs=[]
+    ),
+    ConstraintSettingInfo(
+      label=root//:cpu,
+      default=None
+    )
+  ])
+root//:arm (<unbound>):
+  Providers([
+    DefaultInfo(
+      sub_targets={},
+      default_outputs=[],
+      other_outputs=[]
+    ),
+    ConstraintValueInfo(
+      setting=ConstraintSettingInfo(
+        label=root//:cpu,
+        default=None
+      ),
+      label=root//:arm
+    ),
+    ConfigurationInfo(
+      constraints={ root//:cpu: ConstraintValueInfo(
+        setting=ConstraintSettingInfo(
+          label=root//:cpu,
+          default=None
+        ),
+        label=root//:arm
+      ) },
+      values={}
+    ),
+    ConditionalModifierInfo(
+      inner=ConstraintValueInfo(
+        setting=ConstraintSettingInfo(
+          label=root//:cpu,
+          default=None
+        ),
+        label=root//:arm
+      ),
+      key=root//:cpu
+    )
+  ])
+root//:dummy (cfg:<empty>#<HASH>):
+  Providers([
+    DefaultInfo(
+      sub_targets={},
+      default_outputs=[],
+      other_outputs=[]
+    ),
+    Provider1( os="macos" ),
+    Provider2( cpu="default" )
+  ])
+root//:dummy2 (cfg:<empty>#<HASH>):
+  Providers([
+    DefaultInfo(
+      sub_targets={},
+      default_outputs=[],
+      other_outputs=[]
+    ),
+    Provider1( os="macos" ),
+    Provider2( cpu="default" )
+  ])
+root//:dummy_with_subtarget (cfg:<empty>#<HASH>):
+  Providers([ DefaultInfo(
+    sub_targets={ "sub": Providers([
+      DefaultInfo(
+        sub_targets={},
+        default_outputs=[],
+        other_outputs=[]
+      ),
+      Provider1( os="macos" )
+    ]) },
+    default_outputs=[],
+    other_outputs=[]
+  ) ])
+root//recursive:recursive (cfg:<empty>#<HASH>):
+  Providers([
+    DefaultInfo(
+      sub_targets={},
+      default_outputs=[],
+      other_outputs=[]
+    ),
+    RecursiveProvider( os="macos" )
+  ])

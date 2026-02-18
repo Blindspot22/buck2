@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxPlatformInfo", "CxxToolchainInfo")
 
@@ -11,6 +12,8 @@ AppleToolchainInfo = provider(
     # @unsorted-dict-items
     fields = {
         "actool": provider_field(RunInfo),
+        "app_intents_metadata_processor": provider_field(RunInfo | None, default = None),
+        "app_intents_nl_training_processor": provider_field(RunInfo | None, default = None),
         "architecture": provider_field(str),
         "codesign_allocate": provider_field(RunInfo),
         "codesign_identities_command": provider_field(RunInfo | None, default = None),
@@ -24,10 +27,13 @@ AppleToolchainInfo = provider(
         "extra_linker_outputs": provider_field(list[str]),
         "ibtool": provider_field(RunInfo),
         "installer": provider_field(Label),
+        "installer_tool": provider_field(RunInfo),
         "libtool": provider_field(RunInfo),
         "lipo": provider_field(RunInfo),
         "mapc": provider_field(RunInfo | None, default = None),
         "merge_index_store": provider_field(RunInfo),
+        "metal": provider_field(RunInfo | None, default = None),
+        "metallib": provider_field(RunInfo | None, default = None),
         "momc": provider_field(RunInfo),
         "objdump": provider_field(RunInfo | None, default = None),
         "platform_path": provider_field(str | Artifact),
@@ -47,9 +53,12 @@ AppleToolsInfo = provider(
     # @unsorted-dict-items
     fields = {
         "assemble_bundle": provider_field(RunInfo),
+        "signing_context": provider_field(RunInfo),
         "split_arch_combine_dsym_bundles_tool": provider_field(RunInfo),
         "dry_codesign_tool": provider_field(RunInfo),
         "adhoc_codesign_tool": provider_field(RunInfo),
+        "codesign_manifest_tree_postprocessor": provider_field(RunInfo),
+        "signing_context_tree_postprocessor": provider_field(RunInfo),
         "selective_debugging_scrubber": provider_field(RunInfo),
         "info_plist_processor": provider_field(RunInfo),
         "ipa_package_maker": provider_field(RunInfo),

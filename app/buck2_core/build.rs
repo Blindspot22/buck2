@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::env;
@@ -13,6 +14,7 @@ use std::fs;
 /// Returns the version of the rustc compiler.
 fn rustc_version() -> String {
     let rustc = env::var("RUSTC").unwrap();
+    // @patternlint-disable-next-line buck2-no-command-new
     let version = std::process::Command::new(rustc)
         .arg("--version")
         .output()
@@ -33,7 +35,7 @@ fn expected_version() -> String {
             return version.to_owned();
         }
     }
-    panic!("could not find rust-toolchain version in `{}`", path);
+    panic!("could not find rust-toolchain version in `{path}`");
 }
 
 fn check_rustc_version() {
@@ -41,9 +43,9 @@ fn check_rustc_version() {
     let actual = rustc_version();
     if actual != expected {
         panic!(
-            "buck2 only works with version `{}` of rustc, but you are using `{}`. \
-            Correct version is installed automatically when `rustup` is used",
-            expected, actual
+            "buck2 only works with version `{expected}` of rustc, but you are \
+            using `{actual}`. Correct version is installed automatically when \
+            `rustup` is used",
         );
     }
 }

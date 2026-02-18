@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::collections::BTreeMap;
@@ -21,33 +22,16 @@ use crate::impls::core::graph::storage::VersionedGraph;
 use crate::impls::key::DiceKey;
 use crate::introspection::graph::AnyKey;
 use crate::introspection::graph::CellHistory;
-use crate::introspection::graph::EngineForIntrospection;
 use crate::introspection::graph::GraphNodeKind;
 use crate::introspection::graph::KeyID;
-use crate::introspection::graph::NodeID;
 use crate::introspection::graph::SerializedGraphNode;
-use crate::introspection::graph::SerializedGraphNodesForKey;
+use crate::introspection::graph::SerializedGraphNodeForKey;
 use crate::introspection::graph::VersionNumber;
 use crate::legacy::dice_futures::dice_task::DiceTaskStateForDebugging;
 
 pub struct VersionedGraphIntrospectable {
-    nodes: HashMap<DiceKey, SerializedGraphNode>,
-    edges: HashMap<DiceKey, Arc<Vec<DiceKey>>>,
-}
-
-impl VersionedGraphIntrospectable {
-    pub(crate) fn keys(&self) -> impl Iterator<Item = &DiceKey> + '_ {
-        self.nodes.keys()
-    }
-    pub(crate) fn edges(&self) -> impl Iterator<Item = (&DiceKey, &Arc<Vec<DiceKey>>)> + '_ {
-        self.edges.iter()
-    }
-    pub(crate) fn nodes(&self) -> impl Iterator<Item = (&DiceKey, &SerializedGraphNode)> + '_ {
-        self.nodes.iter()
-    }
-    pub(crate) fn len_for_introspection(&self) -> usize {
-        self.nodes.len()
-    }
+    pub nodes: HashMap<DiceKey, SerializedGraphNode>,
+    pub edges: HashMap<DiceKey, Arc<Vec<DiceKey>>>,
 }
 
 impl VersionedGraph {

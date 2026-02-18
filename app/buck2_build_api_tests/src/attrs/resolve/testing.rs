@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use buck2_build_api::interpreter::rule_defs::provider::registration::register_bu
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
-use buck2_error::BuckErrorContext;
+use buck2_error::internal_error;
 use buck2_interpreter::types::provider::callable::ValueAsProviderCallableLike;
 use buck2_interpreter_for_build::attrs::coerce;
 use buck2_interpreter_for_build::attrs::coerce::testing;
@@ -40,21 +41,21 @@ use starlark_map::smallmap;
 
 use crate::interpreter::rule_defs::artifact::testing::artifactory;
 
-pub(crate) fn resolution_ctx(module: &Module) -> impl AttrResolutionContext<'_> {
+pub(crate) fn resolution_ctx<'v>(module: &Module<'v>) -> impl AttrResolutionContext<'v> {
     resolution_ctx_with_providers(module).0
 }
 
-pub(crate) fn resolution_ctx_with_providers(
-    module: &Module,
-) -> (impl AttrResolutionContext<'_>, ProviderIdSet) {
-    struct Ctx<'v> {
-        module: &'v Module,
+pub(crate) fn resolution_ctx_with_providers<'v>(
+    module: &Module<'v>,
+) -> (impl AttrResolutionContext<'v>, ProviderIdSet) {
+    struct Ctx<'a, 'v> {
+        module: &'a Module<'v>,
         // This module needs to be kept alive in order for the FrozenValues to stick around
         _deps_env: FrozenModule,
         deps: SmallMap<ConfiguredProvidersLabel, FrozenProviderCollectionValue>,
     }
 
-    impl Ctx<'_> {
+    impl Ctx<'_, '_> {
         fn eval(env: &Module, globals: &Globals) {
             testing::to_value(
                 env,
@@ -121,29 +122,30 @@ pub(crate) fn resolution_ctx_with_providers(
                 .build();
 
             // Add some providers into the environment
-            let provider_env = Module::new();
-            let provider_content = indoc!(
-                r#"
+            let frozen_provider_env = Module::with_temp_heap(|provider_env| {
+                let provider_content = indoc!(
+                    r#"
                  FooInfo = provider(fields=["foo"])
                  BarInfo = provider(fields=["bar"])
                  None
                  "#
-            );
-            testing::to_value(&provider_env, &globals, provider_content);
-            let frozen_provider_env = provider_env
-                .freeze()
-                .expect("provider should freeze successfully");
+                );
+                testing::to_value(&provider_env, &globals, provider_content);
+                provider_env.freeze()
+            })
+            .expect("provider should freeze successfully");
             let foo_info = frozen_provider_env.get("FooInfo").unwrap();
             let bar_info = frozen_provider_env.get("BarInfo").unwrap();
 
-            let env = Module::new();
-            env.frozen_heap()
-                .add_reference(frozen_provider_env.frozen_heap());
-            env.set("FooInfo", foo_info.value());
-            env.set("BarInfo", bar_info.value());
-            Self::eval(&env, &globals);
-
-            let frozen = env.freeze().expect("should freeze successfully");
+            let frozen = Module::with_temp_heap(|env| {
+                env.frozen_heap()
+                    .add_reference(frozen_provider_env.frozen_heap());
+                env.set("FooInfo", env.heap().access_owned_frozen_value(&foo_info));
+                env.set("BarInfo", env.heap().access_owned_frozen_value(&bar_info));
+                Self::eval(&env, &globals);
+                env.freeze()
+            })
+            .expect("should freeze successfully");
             let label_and_result = |label, var_name| {
                 let configured_label = coerce::testing::coercion_ctx()
                     .coerce_providers_label(label)
@@ -209,25 +211,25 @@ pub(crate) fn resolution_ctx_with_providers(
         }
     }
 
-    impl<'v> AttrResolutionContext<'v> for Ctx<'v> {
-        fn starlark_module(&self) -> &'v Module {
+    impl<'v> AttrResolutionContext<'v> for Ctx<'_, 'v> {
+        fn starlark_module(&self) -> &Module<'v> {
             self.module
         }
 
         fn get_dep(
-            &self,
+            &mut self,
             target: &ConfiguredProvidersLabel,
         ) -> buck2_error::Result<FrozenValueTyped<'v, FrozenProviderCollection>> {
             Ok(self
                 .deps
                 .get(target)
                 .duped()
-                .buck_error_context("missing dep")?
-                .add_heap_ref(self.module.frozen_heap()))
+                .ok_or_else(|| internal_error!("missing dep"))?
+                .add_heap_ref(self.module.heap()))
         }
 
         fn resolve_unkeyed_placeholder(
-            &self,
+            &mut self,
             name: &str,
         ) -> buck2_error::Result<Option<FrozenCommandLineArg>> {
             for providers in self.deps.values() {
@@ -243,7 +245,7 @@ pub(crate) fn resolution_ctx_with_providers(
             Ok(None)
         }
 
-        fn resolve_query(&self, _query: &str) -> buck2_error::Result<Arc<AnalysisQueryResult>> {
+        fn resolve_query(&mut self, _query: &str) -> buck2_error::Result<Arc<AnalysisQueryResult>> {
             unimplemented!("This test resolution context doesn't handle queries")
         }
 

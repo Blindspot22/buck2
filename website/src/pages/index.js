@@ -1,10 +1,11 @@
 /**
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 import React from 'react';
@@ -24,7 +25,7 @@ function HomepageHeader() {
         <h1 className="hero__title">{siteConfig.title}</h1>
         <p className="hero__subtitle">
           A large-scale build tool. The successor to Buck.<br/>
-            Ready for users ∈ &#123;C++, Python, Rust, Erlang, OCaml<FbInternalOnly>, Go</FbInternalOnly>&#125;
+            Ready for users ∈ &#123;C++, Python, Rust, Haskell, Erlang, OCaml, Java, Kotlin, Go&#125;
         </p>
         <FbInternalOnly>
           <div className={styles.buttons}>
@@ -49,7 +50,7 @@ function HomepageHeader() {
             </Link>
             <Link
               className="button button--secondary button--lg"
-              to="/docs/about/getting_started">
+              to="/docs/getting_started">
               Getting started
             </Link>
           </div>

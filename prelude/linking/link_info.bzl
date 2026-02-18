@@ -1,15 +1,17 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 load(
     "@prelude//:artifact_tset.bzl",
     "ArtifactTSet",
     "make_artifact_tset",
 )
+load("@prelude//cxx:cxx_context.bzl", "get_cxx_toolchain_info")
 load(
     "@prelude//cxx:cxx_toolchain_types.bzl",
     "LinkerType",
@@ -20,6 +22,11 @@ load(
     "get_link_whole_args",
     "get_no_as_needed_shared_libs_flags",
     "get_objects_as_library_args",
+)
+load(
+    "@prelude//cxx:transformation_spec.bzl",
+    "TransformationKind",
+    "TransformationSpecContext",  # @unused Used as a type
 )
 load("@prelude//linking:types.bzl", "Linkage")
 load("@prelude//utils:arglike.bzl", "ArgLike")
@@ -121,26 +128,25 @@ ObjectsLinkable = record(
 
 # Framework + library information for Apple/Cxx targets.
 FrameworksLinkable = record(
-    # A list of trimmed framework paths, example: ["Foundation", "UIKit"]
-    # Used to construct `-framework` args.
-    framework_names = field(list[str], []),
-    # A list of unresolved framework paths (i.e., containing $SDKROOT, etc).
-    # Used to construct `-F` args for compilation and linking.
+    # An untrimmed list of framework paths, used to construct `-framework` args.
+    frameworks = field(typing.Iterable, []),
+    # A untrimmed list of library names, used to construct `-l` args.
+    libraries = field(typing.Iterable, []),
     #
-    # Framework path resolution _must_ happen at the target site because
-    # different targets might use different toolchains. For example,
-    # an `apple_library()` might get _compiled_ using one toolchain
-    # and then linked by as part of an `apple_binary()` using another
-    # compatible toolchain. The resolved framework directories passed
-    # using `-F` would be different for the compilation and the linking.
-    unresolved_framework_paths = field(list[str], []),
-    # A list of library names, used to construct `-l` args.
-    library_names = field(list[str], []),
+    ## WHY ITERABLES? ##
+    #
+    # For leaf nodes we just insert the attrs.frameworks + attrs.libraries
+    # interned strings/lists.
+    # They get dedupped into sets as they propagate.
 )
+
+FrameworksLinkableEmpty = FrameworksLinkable()
 
 SwiftmoduleLinkable = record(
     swiftmodules = field(ArtifactTSet, ArtifactTSet()),
 )
+
+SwiftmoduleLinkableEmpty = SwiftmoduleLinkable()
 
 LinkableTypes = [
     ArchiveLinkable,
@@ -267,8 +273,9 @@ def append_linkable_args(args: cmd_args, linkable: LinkableTypes):
             args.add(cmd_args(hidden = linkable.archive.external_objects))
     elif isinstance(linkable, SharedLibLinkable):
         if linkable.link_without_soname:
+            linkable_name = linkable.lib.basename.removeprefix("lib").split(".")[0]
             args.add(cmd_args(linkable.lib, format = "-L{}", parent = 1))
-            args.add("-l" + linkable.lib.basename.removeprefix("lib").removesuffix(linkable.lib.extension))
+            args.add("-l" + linkable_name)
         else:
             args.add(linkable.lib)
     elif isinstance(linkable, ObjectsLinkable):
@@ -318,33 +325,67 @@ def link_info_to_args(value: LinkInfo, argument_type_filter: LinkInfoArgumentFil
 
     return result
 
+def _link_info_to_tbd_creation_args(value: LinkInfo) -> cmd_args:
+    result = cmd_args()
+    for linkable in value.linkables:
+        if isinstance(linkable, ArchiveLinkable) and linkable.archive.external_objects:
+            for object in linkable.archive.external_objects:
+                result.add(object)
+        elif isinstance(linkable, ArchiveLinkable):
+            result.add(linkable.archive.artifact)
+        if isinstance(linkable, ObjectsLinkable):
+            for object in linkable.objects:
+                result.add(object)
+
+    return result
+
+LinkableFlavor = enum(
+    # Provides compile outputs
+    "default",
+    # Provides compile outputs
+    # using optimization flags from toolchain
+    "optimized",
+    # Provides compile outputs
+    # using debug flags from toolchain
+    "debug",
+    # Provides compile outputs
+    # stripped of debug symbols
+    "stripped",
+)
+
 # Encapsulate all `LinkInfo`s provided by a given rule's link style.
 #
 # We provide both the "default" and (optionally) a pre-"stripped" LinkInfo. For a consumer that doesn't care
 # about debug info (for example, who is going to produce stripped output anyway), it can be significantly
 # cheaper to consume the pre-stripped LinkInfo.
 LinkInfos = record(
+    label = field(Label | None, None),
     # Link info to use by default.
     default = field(LinkInfo),
     # Link info for objects compiler with extra optimizations (EXPERIMENTAL)
     optimized = field([LinkInfo, None], None),
+    # Link info for objects compiler with debug optimizations (-g2 + -O0)
+    debuggable = field([LinkInfo, None], None),
     # Link info stripped of debug symbols.
     stripped = field([LinkInfo, None], None),
 )
 
-def _link_info_default_args(infos: LinkInfos):
+def _link_info_default_args(infos: LinkInfos) -> cmd_args:
     info = infos.default
     return link_info_to_args(info, argument_type_filter = LinkInfoArgumentFilter("all"))
 
-def _link_info_stripped_link_args(infos: LinkInfos):
+def _link_info_stripped_link_args(infos: LinkInfos) -> cmd_args:
     info = infos.stripped or infos.default
     return link_info_to_args(info, argument_type_filter = LinkInfoArgumentFilter("all"))
 
-def _link_info_object_files_and_lazy_archives_only_args(infos: LinkInfos):
+def _link_info_object_files_and_lazy_archives_only_args(infos: LinkInfos) -> cmd_args:
     return link_info_to_args(infos.default, argument_type_filter = LinkInfoArgumentFilter("object_files_and_lazy_archives_only"))
 
-def _link_info_excluding_object_files_and_lazy_archives_args(infos: LinkInfos):
+def _link_info_excluding_object_files_and_lazy_archives_args(infos: LinkInfos) -> cmd_args:
     return link_info_to_args(infos.default, argument_type_filter = LinkInfoArgumentFilter("exclude_object_files_and_lazy_archives"))
+
+def _link_info_tbd_creation_args(infos: LinkInfos) -> cmd_args:
+    return _link_info_to_tbd_creation_args(infos.default)
 
 def link_info_to_metadata_args(info: LinkInfo, args: cmd_args | None = None) -> ArgLike:
     if args == None:
@@ -365,6 +406,7 @@ LinkInfosTSet = transitive_set(
         "metadata": _link_info_metadata_args,
         "object_files_and_lazy_archives_only": _link_info_object_files_and_lazy_archives_only_args,
         "stripped": _link_info_stripped_link_args,
+        "tbd_creation_args": _link_info_tbd_creation_args,
     },
 )
 
@@ -416,11 +458,6 @@ LinkedObject = record(
     linker_command = field([cmd_args, None], None),
     # This sub-target is only available for distributed thinLTO builds.
     index_argsfile = field(Artifact | None, None),
-    # This sub-target is only available for distributed thinLTO builds.
-    dist_thin_lto_codegen_argsfile = field([Artifact, None], None),
-    # This sub-target is only available for distributed thinLTO builds. This is similar to
-    # index_argsfile, but only includes flags that can be determined at analysis time, no input files.
-    dist_thin_lto_index_argsfile = field([Artifact, None], None),
     # Import library for linking with DLL on Windows.
     # If not on Windows it's always None.
     import_library = field(Artifact | None, None),
@@ -437,16 +474,16 @@ LinkedObject = record(
 # This doesn't contain the information about things needed to package the linked result
 # (i.e. this doesn't contain the information needed to know what shared libs needed at runtime
 # for the final result).
-MergedLinkInfo = provider(fields = [
-    "_infos",  # dict[LinkStrategy, LinkInfosTSet]
-    "_external_debug_info",  # dict[LinkStrategy, ArtifactTSet]
+MergedLinkInfo = provider(fields = {
     # Apple framework linker args must be deduped to avoid overflow in our argsfiles.
     #
     # To save on repeated computation of transitive LinkInfos, we store a dedupped
     # structure, based on the link-style.
-    "frameworks",  # dict[LinkStrategy, FrameworksLinkable | None]
-    "swiftmodules",  # dict[LinkStrategy, SwiftmoduleLinkable | None]
-])
+    "frameworks": provider_field(dict[LinkStrategy, FrameworksLinkable | None]),
+    "swiftmodules": provider_field(dict[LinkStrategy, SwiftmoduleLinkable | None]),
+    "_external_debug_info": provider_field(dict[LinkStrategy, ArtifactTSet]),
+    "_infos": provider_field(dict[LinkStrategy, LinkInfosTSet]),
+})
 
 # A map of linkages to all possible output styles it supports.
 _LIB_OUTPUT_STYLES_FOR_LINKAGE = {
@@ -544,7 +581,7 @@ def create_merged_link_info(
             if value:
                 external_debug_info_children.append(value)
 
-        frameworks[link_strategy] = merge_framework_linkables(framework_linkables)
+        frameworks[link_strategy] = _merge_framework_linkables(framework_linkables)
         swiftmodules[link_strategy] = merge_swiftmodule_linkables(ctx, swiftmodule_linkables)
 
         if actual_output_style in link_infos:
@@ -595,7 +632,7 @@ def create_merged_link_info_for_propagation(
             label = ctx.label,
             children = filter(None, [x._external_debug_info.get(link_strategy) for x in xs]),
         )
-        frameworks[link_strategy] = merge_framework_linkables([x.frameworks[link_strategy] for x in xs])
+        frameworks[link_strategy] = _merge_framework_linkables([x.frameworks[link_strategy] for x in xs])
         swiftmodules[link_strategy] = merge_swiftmodule_linkables(ctx, [x.swiftmodules[link_strategy] for x in xs])
 
     return MergedLinkInfo(
@@ -715,6 +752,24 @@ def unpack_link_args_object_files_and_lazy_archives_only(args: LinkArgs) -> [Arg
 
     fail("Unpacked invalid empty link args")
 
+def unpack_link_args_for_tbd_creation(args: LinkArgs) -> ArgLike:
+    if args.tset != None:
+        if args.tset.prefer_stripped:
+            fail("Preferring stripped link infos is not supported by this function.")
+
+        return args.tset.infos.project_as_args("tbd_creation_args")
+
+    if args.infos != None:
+        result_args = cmd_args()
+        for info in args.infos:
+            result_args.add(_link_info_to_tbd_creation_args(info))
+        return result_args
+
+    if args.flags != None:
+        return None
+
+    fail("Unpacked invalid empty link args")
+
 def unpack_external_debug_info(actions: AnalysisActions, args: LinkArgs) -> ArtifactTSet:
     if args.tset != None:
         if args.tset.prefer_stripped:
@@ -761,7 +816,8 @@ def get_link_args_for_strategy(
         ctx: AnalysisContext,
         deps_merged_link_infos: list[MergedLinkInfo],
         link_strategy: LinkStrategy,
-        prefer_stripped: bool = False,
+        prefer_stripped: bool,
+        transformation_spec_context: TransformationSpecContext | None,
         additional_link_info: [LinkInfo, None] = None) -> LinkArgs:
     """
     Derive the `LinkArgs` for a strategy and strip preference from a list of dependency's MergedLinkInfo.
@@ -775,6 +831,7 @@ def get_link_args_for_strategy(
         children = filter(None, [x._infos.get(link_strategy) for x in deps_merged_link_infos]),
         **infos_kwargs
     )
+
     external_debug_info = make_artifact_tset(
         actions = ctx.actions,
         label = ctx.label,
@@ -784,6 +841,21 @@ def get_link_args_for_strategy(
         ),
     )
 
+    if transformation_spec_context and not transformation_spec_context.provider.is_empty:
+        link_ordering = get_cxx_toolchain_info(ctx).linker_info.link_ordering or "preorder"
+        flattened_results = []
+        for link_infos in infos.traverse(ordering = link_ordering):
+            link_info = get_link_info_for_transformation(
+                transformation_spec_context,
+                link_infos,
+                link_infos.label,
+                prefer_stripped,
+            )
+            flattened_results.append(link_info)
+        return LinkArgs(
+            infos = flattened_results,
+        )
+
     return LinkArgs(
         tset = LinkArgsTSet(
             infos = infos,
@@ -791,6 +863,24 @@ def get_link_args_for_strategy(
             prefer_stripped = prefer_stripped,
         ),
     )
+
+def _get_non_transformed_info(link_infos: LinkInfos, prefer_stripped: bool) -> LinkInfo:
+    if prefer_stripped:
+        return link_infos.stripped or link_infos.default
+    return link_infos.default
+
+def get_link_info_for_transformation(transformation_spec_context: TransformationSpecContext, link_infos: LinkInfos, label: Label | None, prefer_stripped: bool) -> LinkInfo:
+    info = None
+
+    if label:
+        transformation_kind = transformation_spec_context.provider.determine_transformation(label, transformation_spec_context.graph_info)
+        if transformation_kind:
+            if transformation_kind == TransformationKind("debug"):
+                info = link_infos.debuggable
+            elif transformation_kind == TransformationKind("optimized"):
+                info = link_infos.optimized
+
+    return info or _get_non_transformed_info(link_infos, prefer_stripped)
 
 def get_lib_output_style(
         requested_link_strategy: LinkStrategy,
@@ -882,38 +972,45 @@ def legacy_output_style_to_link_style(output_style: LibOutputStyle) -> LinkStyle
         return LinkStyle("static_pic")
     fail("unrecognized output_style {}".format(output_style))
 
-def merge_framework_linkables(linkables: list[[FrameworksLinkable, None]]) -> FrameworksLinkable:
-    unique_framework_names = {}
-    unique_framework_paths = {}
-    unique_library_names = {}
+def has_framework_linkable(linkables: list[[FrameworksLinkable, None]]) -> bool:
+    for linkable in linkables:
+        if linkable:
+            return True
+
+    return False
+
+def _merge_framework_linkables(linkables: list[[FrameworksLinkable, None]]) -> FrameworksLinkable:
+    if not has_framework_linkable(linkables):
+        return FrameworksLinkableEmpty
+
+    unique_frameworks = set()
+    unique_libraries = set()
     for linkable in linkables:
         if not linkable:
             continue
 
-        # Avoid building a huge list and then de-duplicating, instead we
-        # use a set to track each used entry, order does not matter.
-        for framework in linkable.framework_names:
-            unique_framework_names[framework] = True
-        for framework_path in linkable.unresolved_framework_paths:
-            unique_framework_paths[framework_path] = True
-        for library_name in linkable.library_names:
-            unique_library_names[library_name] = True
+        unique_frameworks.update(linkable.frameworks)
+        unique_libraries.update(linkable.libraries)
 
     return FrameworksLinkable(
-        framework_names = unique_framework_names.keys(),
-        unresolved_framework_paths = unique_framework_paths.keys(),
-        library_names = unique_library_names.keys(),
+        frameworks = unique_frameworks,
+        libraries = unique_libraries,
     )
 
 def merge_swiftmodule_linkables(ctx: AnalysisContext, linkables: list[[SwiftmoduleLinkable, None]]) -> SwiftmoduleLinkable:
+    children = [
+        linkable.swiftmodules
+        for linkable in linkables
+        if linkable != None
+    ]
+
+    if not children:
+        return SwiftmoduleLinkableEmpty
+
     return SwiftmoduleLinkable(swiftmodules = make_artifact_tset(
         actions = ctx.actions,
         label = ctx.label,
-        children = [
-            linkable.swiftmodules
-            for linkable in linkables
-            if linkable != None
-        ],
+        children = children,
     ))
 
 def wrap_with_no_as_needed_shared_libs_flags(linker_type: LinkerType, link_info: LinkInfo) -> LinkInfo:
@@ -944,8 +1041,6 @@ LinkCommandDebugOutput = record(
     filename = str,
     command = ArgLike,
     argsfile = Artifact,
-    dist_thin_lto_codegen_argsfile = Artifact | None,
-    dist_thin_lto_index_argsfile = Artifact | None,
 )
 
 # NB: Debug output is _not_ transitive over deps, so tsets are not used here.
@@ -960,54 +1055,34 @@ UnstrippedLinkOutputInfo = provider(fields = {
 })
 
 def make_link_command_debug_output(linked_object: LinkedObject) -> [LinkCommandDebugOutput, None]:
-    local_link_debug_info_present = linked_object.output and linked_object.linker_command and linked_object.linker_argsfile
-    distributed_link_debug_info_present = linked_object.dist_thin_lto_index_argsfile and linked_object.dist_thin_lto_codegen_argsfile
-    if not local_link_debug_info_present and not distributed_link_debug_info_present:
+    if not linked_object.output or not linked_object.linker_command or not linked_object.linker_argsfile:
         return None
     return LinkCommandDebugOutput(
         filename = linked_object.output.short_path,
         command = linked_object.linker_command,
         argsfile = linked_object.linker_argsfile,
-        dist_thin_lto_index_argsfile = linked_object.dist_thin_lto_index_argsfile,
-        dist_thin_lto_codegen_argsfile = linked_object.dist_thin_lto_codegen_argsfile,
     )
 
 # Given a list of `LinkCommandDebugOutput`, it will produce a JSON info file.
 # The JSON info file will contain entries for each link command. In addition,
 # it will _not_ materialize any inputs to the link command except:
-#
-# For local thin-LTO:
 # - linker argfile
-#
-# For distributed thin-LTO:
-# - thin-link argsfile (without inputs just flags)
-# - codegen argsfile (without inputs just flags)
-def make_link_command_debug_output_json_info(ctx: AnalysisContext, debug_outputs: list[LinkCommandDebugOutput]) -> Artifact:
+def make_link_command_debug_output_json_info(actions: AnalysisActions, debug_outputs: list[LinkCommandDebugOutput]) -> Artifact:
     json_info = []
     associated_artifacts = []
     for debug_output in debug_outputs:
-        is_distributed_link = debug_output.dist_thin_lto_index_argsfile and debug_output.dist_thin_lto_codegen_argsfile
-        if is_distributed_link:
-            json_info.append({
-                "dist_thin_lto_codegen_argsfile": debug_output.dist_thin_lto_codegen_argsfile,
-                "dist_thin_lto_index_argsfile": debug_output.dist_thin_lto_index_argsfile,
-                "filename": debug_output.filename,
-            })
+        json_info.append({
+            "argsfile": debug_output.argsfile,
+            "command": debug_output.command,
+            "filename": debug_output.filename,
+        })
 
-            associated_artifacts.extend([debug_output.dist_thin_lto_codegen_argsfile, debug_output.dist_thin_lto_index_argsfile])
-        else:
-            json_info.append({
-                "argsfile": debug_output.argsfile,
-                "command": debug_output.command,
-                "filename": debug_output.filename,
-            })
-
-            # Ensure all argsfile get materialized, as those are needed for debugging
-            associated_artifacts.extend(filter(None, [debug_output.argsfile]))
+        # Ensure all argsfile get materialized, as those are needed for debugging
+        associated_artifacts.extend(filter(None, [debug_output.argsfile]))
 
     # Explicitly drop all inputs by using `with_inputs = False`, we don't want
     # to materialize all inputs to the link actions (which includes all object files
     # and possibly other shared libraries).
-    json_output = ctx.actions.write_json("linker.command", json_info, with_inputs = False)
+    json_output = actions.write_json("linker.command", json_info, with_inputs = False)
     json_output_with_artifacts = json_output.with_associated_artifacts(associated_artifacts)
     return json_output_with_artifacts

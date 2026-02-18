@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # buildifier: keep sorted
 CLIPPY_ALLOW = [
@@ -45,6 +46,7 @@ CLIPPY_ALLOW = [
     "clippy::too_long_first_doc_paragraph",  # FIXME new in Rust 1.82.0
     "clippy::too_many_arguments",  # This is an arbitrary limit set on number of arguments and not always useful
     "clippy::type_complexity",  # This is an arbitrary limit set on number of type parameterizations and not always useful
+    "clippy::uninlined_format_args",  # Flaky?
     "clippy::unnecessary_wraps",  # Sometimes unnecessary wraps provide the right API
     "clippy::unwrap_or_default",  # Defaults aren't always more clear as it removes the type information when reading code
     "clippy::useless_conversion",  # Removed all obvious but there are some reports I'm unclear how to fix
@@ -58,7 +60,7 @@ CLIPPY_DENY = [
     "clippy::await_holding_refcell_ref",
     "clippy::dbg_macro",
     "clippy::debug_assert_with_mut_call",
-    "clippy::empty_enum",
+    "clippy::empty_enums",
     "clippy::filter_map_next",
     "clippy::flat_map_option",
     "clippy::large_stack_arrays",
@@ -75,7 +77,6 @@ CLIPPY_DENY = [
     "clippy::rest_pat_in_fully_bound_structs",
     "clippy::same_functions_in_if_condition",
     "clippy::str_to_string",
-    "clippy::string_to_string",
     "clippy::todo",
     "clippy::trivially_copy_pass_by_ref",
     "clippy::tuple_array_conversions",

@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use std::borrow::Cow;
@@ -18,16 +19,18 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_artifact::actions::key::ActionKey;
+use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_core::build_file_path::BuildFilePath;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::cell_path::CellPath;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
-use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
 use buck2_core::package::PackageLabel;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_execute::artifact::fs::ExecutorFs;
+use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_node::attrs::configured_attr::ConfiguredAttr;
 use buck2_query::query::environment::QueryTarget;
 use buck2_query::query::graph::node::LabeledNode;
@@ -48,6 +51,7 @@ use starlark::values::Value;
 use crate::actions::RegisteredAction;
 use crate::analysis::AnalysisResult;
 use crate::artifact_groups::TransitiveSetProjectionKey;
+use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValue;
 
 #[derive(Debug, derive_more::Display, RefCast, Serialize, Allocative)]
@@ -152,8 +156,6 @@ impl ActionQueryNode {
     }
 
     pub fn new_analysis(target: ConfiguredProvidersLabel, analysis: AnalysisResult) -> Self {
-        let target = Arc::new(target);
-
         Self {
             key: ActionQueryNodeRef::Analysis(target.dupe()),
             data: ActionQueryNodeData::Analysis(AnalysisData { target, analysis }),
@@ -194,7 +196,7 @@ impl LabeledNode for ActionQueryNode {
 #[derive(Derivative, Clone, Dupe)]
 #[derivative(Debug)]
 pub struct AnalysisData {
-    target: Arc<ConfiguredProvidersLabel>,
+    target: ConfiguredProvidersLabel,
     #[derivative(Debug = "ignore")]
     analysis: AnalysisResult,
 }
@@ -208,8 +210,18 @@ impl AnalysisData {
         &self.analysis
     }
 
-    pub fn target(&self) -> &Arc<ConfiguredProvidersLabel> {
+    pub fn target(&self) -> &ConfiguredProvidersLabel {
         &self.target
+    }
+}
+
+pub struct AqueryArtifactPathMapper {
+    aquery_placeholder: ContentBasedPathHash,
+}
+
+impl ArtifactPathMapper for AqueryArtifactPathMapper {
+    fn get(&self, _artifact: &Artifact) -> Option<&ContentBasedPathHash> {
+        Some(&self.aquery_placeholder)
     }
 }
 
@@ -224,14 +236,42 @@ pub struct ActionData {
 
 impl ActionData {
     fn attrs(&self) -> IndexMap<String, String> {
-        let mut attrs = self.action.action().aquery_attributes(&ExecutorFs::new(
-            &self.fs,
-            self.action.execution_config().options.path_separator,
-        ));
+        let mut attrs = self.action.action().aquery_attributes(
+            &ExecutorFs::new(
+                &self.fs,
+                self.action.execution_config().options.path_separator,
+            ),
+            &AqueryArtifactPathMapper {
+                aquery_placeholder: ContentBasedPathHash::AqueryPlaceholder,
+            },
+        );
         attrs.insert(
-            "executor_configuration".to_owned(),
+            "buck.executor_configuration".to_owned(),
             self.action.execution_config().executor.to_string(),
         );
+        attrs.insert(
+            "buck.all_outputs_are_content_based".to_owned(),
+            self.action
+                .action()
+                .all_outputs_are_content_based()
+                .to_string(),
+        );
+        attrs.insert(
+            "buck.all_inputs_are_eligible_for_dedupe".to_owned(),
+            self.action
+                .action()
+                .all_inputs_are_eligible_for_dedupe()
+                .to_string(),
+        );
+
+        let all_ineligible = self.action.action().all_ineligible_for_dedup_inputs();
+        if !all_ineligible.is_empty() {
+            attrs.insert(
+                "buck.all_ineligible_for_dedup_inputs".to_owned(),
+                all_ineligible.join(", "),
+            );
+        }
+
         attrs
     }
 }
@@ -247,7 +287,7 @@ impl ActionData {
     Allocative
 )]
 pub enum ActionQueryNodeRef {
-    Analysis(Arc<ConfiguredProvidersLabel>),
+    Analysis(ConfiguredProvidersLabel),
     Action(ActionKey),
 }
 
@@ -275,7 +315,7 @@ impl ActionQueryNodeRef {
 impl QueryTarget for ActionQueryNode {
     type Attr<'a> = ActionAttr;
 
-    fn rule_type(&self) -> Cow<str> {
+    fn rule_type(&self) -> Cow<'_, str> {
         match &self.data {
             ActionQueryNodeData::Analysis(..) => Cow::Borrowed("analysis"),
             ActionQueryNodeData::Action(a) => {
@@ -284,7 +324,7 @@ impl QueryTarget for ActionQueryNode {
         }
     }
 
-    fn name(&self) -> Cow<str> {
+    fn name(&self) -> Cow<'_, str> {
         Cow::Owned(self.node_key().to_string())
     }
 
@@ -459,14 +499,14 @@ pub static FIND_MATCHING_ACTION: LateBinding<
         // target cfg info (target platform, cli modifiers)
         &'c GlobalCfgOptions,
         &'c AnalysisResult,
-        // path_after_target_name
+        // short_path
         ForwardRelativePathBuf,
     ) -> Pin<
         Box<dyn Future<Output = buck2_error::Result<Option<ActionQueryNode>>> + Send + 'c>,
     >,
 > = LateBinding::new("FIND_MATCHING_ACTION");
 
-/// Hook to link printer in `buck2_server_commands` from `buck2_audit_server`.
+/// Hook to link printer in `buck2_server_commands` from `buck2_cmd_audit_server`.
 pub static PRINT_ACTION_NODE: LateBinding<
     for<'a> fn(
         stdout: &'a mut (dyn Write + Send),
@@ -482,6 +522,6 @@ pub static CONFIGURED_ATTR_TO_VALUE: LateBinding<
     for<'v> fn(
         this: &ConfiguredAttr,
         pkg: PackageLabelOption,
-        heap: &'v Heap,
+        heap: Heap<'v>,
     ) -> buck2_error::Result<Value<'v>>,
 > = LateBinding::new("CONFIGURED_ATTR_TO_VALUE");

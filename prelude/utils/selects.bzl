@@ -1,26 +1,18 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
-_SELECT_TYPE = type(select({"DEFAULT": []}))
-
-def _is_select(thing):
-    return type(thing) == _SELECT_TYPE
+load("@prelude//utils:type_defs.bzl", "type_utils")
 
 def _apply(obj, function):
     """
-    If the object is a select, runs `select_map` with `function`.
-    Otherwise, if the object is not a select, invokes `function` on `obj` directly.
+    Runs select_map(obj, function, recurse=True)
     """
-    if not _is_select(obj):
-        return function(obj)
-    return select_map(
-        obj,
-        lambda obj: _apply(obj, function),
-    )
+    return select_map(obj, function, recurse = True)
 
 def _tie_n_impl_inner(objs, pvals, val):
     return _tie_n_impl(objs[1:], pvals + [val])
@@ -29,9 +21,10 @@ def _tie_n_impl(objs, pvals):
     if not objs:
         return tuple(pvals)
 
-    return _apply(
+    return select_map(
         objs[0],
         partial(_tie_n_impl_inner, objs, pvals),
+        recurse = True,
     )
 
 def _tie_n(*objs):
@@ -54,13 +47,15 @@ def _apply_n(objs, func):
     Return a new `select` formed by applying the given function to all possible
     combinations of the given select objects.
     """
-    return _apply(
+    return select_map(
         _tie_n(*objs),
         # Unpack n-tuple and call user-supplied function.
         partial(_apply_n_inner, func),
+        recurse = True,
     )
 
 selects = struct(
     apply = _apply,
     apply_n = _apply_n,
+    is_select = type_utils.is_select,
 )

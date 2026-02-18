@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 use allocative::Allocative;
@@ -12,7 +13,8 @@ use buck2_core::cells::build_file_cell::BuildFileCell;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::cell_path::CellPathRef;
 use buck2_core::cells::name::CellName;
-use buck2_core::fs::paths::file_name::FileName;
+use buck2_fs::paths::file_name::FileName;
+use pagable::Pagable;
 
 /// Represents the path to a PACKAGE file.
 ///
@@ -23,7 +25,16 @@ use buck2_core::fs::paths::file_name::FileName;
 /// Example of a valid PACKAGE file path: `fbsource//path/to/PACKAGE`
 ///
 /// Find more details in the [Buck2 documentation](https://buck2.build/docs/rule_authors/package_files/).
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Allocative, derive_more::Display)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Hash,
+    Allocative,
+    derive_more::Display,
+    Pagable
+)]
 #[display("{}", path)]
 pub struct PackageFilePath {
     /// Including `/PACKAGE`.
@@ -40,7 +51,7 @@ impl PackageFilePath {
     }
 
     /// Files which could be `PACKAGE` files.
-    pub fn for_dir(path: CellPathRef) -> impl Iterator<Item = PackageFilePath> + '_ {
+    pub fn for_dir(path: CellPathRef<'_>) -> impl Iterator<Item = PackageFilePath> + '_ {
         Self::package_file_names().map(move |name| PackageFilePath {
             path: path.join(name),
         })
@@ -72,7 +83,7 @@ impl PackageFilePath {
     }
 
     /// Directory containing this `PACKAGE` file.
-    pub fn dir(&self) -> CellPathRef {
+    pub fn dir(&self) -> CellPathRef<'_> {
         self.path
             .parent()
             .expect("constructor verifies that path is not root")

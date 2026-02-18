@@ -1,10 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This source code is licensed under both the MIT license found in the
- * LICENSE-MIT file in the root directory of this source tree and the Apache
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
  * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
- * of this source tree.
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
  */
 
 //! The target platform detector spec is used to define a mapping of `package-prefix` to `target platform target`.
@@ -168,10 +169,7 @@ mod tests {
             )
             .is_ok()
             {
-                panic!(
-                    "Expected spec `{}` to fail parsing, but it succeeded.",
-                    spec
-                )
+                panic!("Expected spec `{spec}` to fail parsing, but it succeeded.")
             }
         };
 
@@ -182,7 +180,7 @@ mod tests {
                 &cell_resolver,
                 &cell_alias_resolver,
             )
-            .unwrap_or_else(|_| panic!("Expected parsing `{}` to succeed.", spec))
+            .unwrap_or_else(|_| panic!("Expected parsing `{spec}` to succeed."))
         };
 
         check_good("target://...->//:tgt");

@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# This source code is licensed under both the MIT license found in the
-# LICENSE-MIT file in the root directory of this source tree and the Apache
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
-# of this source tree.
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
 
 # pyre-strict
 
@@ -15,7 +16,6 @@ from typing import List
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test
-from buck2.tests.e2e_util.helper.utils import read_invocation_record
 
 
 @buck_test()
@@ -35,37 +35,32 @@ async def test_emit_shell(buck: Buck) -> None:
     assert out.strip() == "hello"
 
 
-@buck_test()
-async def test_run_non_executable_fails(buck: Buck, tmp_path: Path) -> None:
-    record_path = tmp_path / "record.json"
-
-    await expect_failure(
+@buck_test(write_invocation_record=True)
+async def test_run_non_executable_fails(buck: Buck) -> None:
+    res = await expect_failure(
         buck.run(
             "root//:no_run_info",
-            "--unstable-write-invocation-record",
-            str(record_path),
         ),
         stderr_regex=r"Target `[^`]+` is not a binary rule \(only binary rules can be `run`\)",
     )
 
-    record = read_invocation_record(record_path)
+    record = res.invocation_record()
     [error] = record["errors"]
 
     assert error["category_key"] == "RunCommandError::NonBinaryRule"
     assert error["category"] == "USER"
 
 
-@buck_test()
-async def test_run_exit_result(buck: Buck, tmp_path: Path) -> None:
-    record_path = tmp_path / "record.json"
-    await buck.run(
-        "root//:print_hello", "--unstable-write-invocation-record", str(record_path)
+@buck_test(write_invocation_record=True)
+async def test_run_exit_result(buck: Buck) -> None:
+    res = await buck.run(
+        "root//:print_hello",
     )
-    record = read_invocation_record(record_path)
+    record = res.invocation_record()
     assert record["exit_result_name"] == "EXEC"
 
 
-@buck_test()
+@buck_test(allow_soft_errors=True)
 async def test_passing_arguments(buck: Buck) -> None:
     async def f(args1: List[str], args2: List[str]) -> None:
         result = await buck.run("root//:echo_args", *args1, *args2)
@@ -73,7 +68,10 @@ async def test_passing_arguments(buck: Buck) -> None:
 
     await f(["--"], ["val", "--long", "-s", "spa  ces"])
     await f(["--"], ["val", "--", "test"])
-    await f([], ["val", "--long"])  # Would fail in Buck1 (--long not found)
+    # Without --, a deprecation warning is emitted but command still succeeds
+    result = await buck.run("root//:echo_args", "val", "--long")
+    assert result.stdout.strip() == "val --long"
+    assert "will require" in result.stderr
     await f([], ["val", "--", "x"])  # Would work differently in Buck1 (no -- to user)
     await expect_failure(
         buck.run("root//:echo_args", "--not-a-flag"),
@@ -87,6 +85,13 @@ async def test_executable_fail_to_build(buck: Buck) -> None:
         buck.run("root//:build_fail"),
         stderr_regex=r"Failed to build",
     )
+
+
+@buck_test(allow_soft_errors=True)
+async def test_run_args_without_separator_warning(buck: Buck) -> None:
+    result = await buck.run("root//:echo_args", "my_arg")
+    assert result.stdout.strip() == "my_arg"
+    assert "will require" in result.stderr
 
 
 @buck_test()
