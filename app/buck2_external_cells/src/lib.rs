@@ -8,8 +8,9 @@
  * above-listed licenses.
  */
 
-#![feature(assert_matches)]
-#![feature(error_generic_member_access)]
+// Internal stable rustc still treats `assert_matches` as unstable; OSS nightly has stabilized it
+// and denies the now-redundant feature gate.
+#![allow(stable_features)]
 #![feature(once_cell_try)]
 
 use std::sync::Arc;
@@ -72,7 +73,7 @@ impl buck2_common::external_cells::ExternalCellsImpl for ConcreteExternalCellsIm
         match io.read_path_metadata_if_exists(dest_path.clone()).await? {
             None => (),
             Some(RawPathMetadata::Directory) => {
-                let data = io.read_dir(dest_path.clone()).await?;
+                let data = io.read_dir(dest_path.clone()).await?.into_entries();
                 if !data.is_empty() {
                     return Err(ExternalCellsError::ExpandDataAlreadyPresent(dest_path).into());
                 }

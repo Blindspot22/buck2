@@ -377,6 +377,10 @@ where
             HybridExecutionLevel::Fallback { .. } | HybridExecutionLevel::Full { .. } => true,
         }
     }
+
+    fn is_full_hybrid_enabled(&self) -> bool {
+        matches!(self.level, HybridExecutionLevel::Full { .. })
+    }
 }
 
 struct ReClaimManager {

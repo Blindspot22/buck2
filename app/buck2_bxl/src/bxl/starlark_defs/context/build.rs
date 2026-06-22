@@ -60,7 +60,8 @@ use crate::bxl::value_as_starlark_target_label::ValueAsStarlarkTargetLabel;
     Display,
     ProvidesStaticType,
     NoSerialize,
-    Allocative
+    Allocative,
+    starlark::StarlarkPagable
 )]
 #[repr(C)]
 pub(crate) struct StarlarkProvidersArtifactIterableGen<V: ValueLifetimeless>(pub(crate) V);
@@ -81,7 +82,7 @@ where
             .1
             .outputs
             .iter()
-            .filter_map(|built| built.as_ref().ok())
+            .filter_map(|built| built.inner.as_ref().ok())
             .flat_map(|built| built.values.iter().map(|(artifact, _)| artifact))
     }
 }
@@ -122,7 +123,8 @@ where
     Display,
     ProvidesStaticType,
     NoSerialize,
-    Allocative
+    Allocative,
+    starlark::StarlarkPagablePanic // okay("bxl")
 )]
 #[repr(C)]
 pub(crate) struct StarlarkFailedArtifactIterableGen<V: ValueLifetimeless>(pub(crate) V);
@@ -143,7 +145,7 @@ where
             .1
             .outputs
             .iter()
-            .filter_map(|built| built.as_ref().err())
+            .filter_map(|built| built.inner.as_ref().err())
     }
 }
 
@@ -197,7 +199,8 @@ pub(crate) fn build<'v>(
                 )
                 .await?;
 
-                let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new(None);
+                let (result_builder, consumer) =
+                    AsyncBuildTargetResultBuilder::new(None, std::time::Instant::now());
                 result_builder
                     .wait_for(
                         // TODO (torozco): support --fail-fast in BXL.
@@ -243,7 +246,7 @@ pub(crate) fn build<'v>(
         .configured
         .values()
         .flatten()
-        .flat_map(|r| &r.errors)
+        .flat_map(|r| r.errors.iter().map(|t| &t.inner))
         .chain(build_result.other_errors.values().flatten())
         .next()
     {

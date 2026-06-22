@@ -24,38 +24,37 @@ ErlangAppCommonFields = [
 
 # target type to break circular dependencies
 ErlangAppIncludeInfo = provider(
-    fields = ErlangAppCommonFields + [
+    fields = ErlangAppCommonFields
+    + [
         # original inclues, used for validating _include_only app against the original
         "_original_includes",
     ],
 )
 
 ErlangAppInfo = provider(
-    fields =
-        ErlangAppCommonFields + [
-            # version
-            "version",
-
-            # mapping from module name to beam artifact
-            "beams",
-
-            # for tests we need to preserve the private includes
-            "private_includes",
-            "private_include_dir",
-            # mapping from name to dependency for all Erlang dependencies
-            "dependencies",
-            # Transitive Set for calculating the start order
-            "start_dependencies",
-            # additional targets that the application depends on, the
-            # default output will end up in priv/
-            "resources",
-            # applications that are in path but not build by buck2 are virtual
-            # the use-case for virtual apps are OTP applications that are shipeped
-            # with the Erlang distribution
-            "virtual",
-            # app_folder
-            "app_folder",
-        ],
+    fields = ErlangAppCommonFields
+    + [
+        # version
+        "version",
+        # mapping from module name to beam artifact
+        "beams",
+        # for tests we need to preserve the private includes
+        "private_includes",
+        "private_include_dir",
+        # mapping from name to dependency for all Erlang dependencies
+        "dependencies",
+        # Transitive Set for calculating the start order
+        "start_dependencies",
+        # additional targets that the application depends on, the
+        # default output will end up in priv/
+        "resources",
+        # applications that are in path but not build by buck2 are virtual
+        # the use-case for virtual apps are OTP applications that are shipeped
+        # with the Erlang distribution
+        "virtual",
+        # app_folder
+        "app_folder",
+    ],
 )
 
 # mapping
@@ -113,11 +112,9 @@ ErlangOTPBinariesInfo = provider(
 )
 
 Tools = record(
-    name = field(str),
     erl = field(Tool),
     erlc = field(Tool),
     escript = field(Tool),
-    _tools_binaries = field(ErlangOTPBinariesInfo),
 )
 
 ErtsToolchainApplicationInfo = provider(
@@ -131,6 +128,9 @@ ErtsToolchainInfo = provider(
     fields = {
         "applications": provider_field(list[ErtsToolchainApplicationInfo]),
         "erts_version": provider_field(str),
+        "headers": provider_field(Artifact),
+        "otp_no_dot_erlang_boot": provider_field(Artifact),
+        "otp_start_boot": provider_field(Artifact),
         "output": provider_field(Artifact),
     },
 )
@@ -155,6 +155,8 @@ ErlangToolchainInfo = provider(
         # utility scripts
         # building .app file
         "app_src_script": provider_field(Tool),
+        # building .appup file
+        "appup_src_script": provider_field(Tool),
         # building escripts
         "escript_builder": provider_field(Tool),
         # analyzing .(h|e)rl dependencies
@@ -206,13 +208,12 @@ ErlangParseTransformInfo = provider(
 
 ErlangTestInfo = provider(
     # @unsorted-dict-items
-    fields =
-        {
-            # The name of the suite
-            "name": provider_field(str),
-            # mapping from name to dependency for all Erlang dependencies
-            "dependencies": provider_field(dict[str, Dependency]),
-            # anchor to the output_dir
-            "output_dir": provider_field(Artifact),
-        },
+    fields = {
+        # mapping from name to dependency for all Erlang dependencies
+        "dependencies": provider_field(dict[str, Dependency]),
+        # The name of the suite
+        "name": provider_field(str),
+        # anchor to the output_dir
+        "output_dir": provider_field(Artifact),
+    },
 )

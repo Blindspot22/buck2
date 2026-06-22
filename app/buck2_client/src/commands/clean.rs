@@ -80,6 +80,27 @@ the specified duration, without killing the daemon",
     #[clap(long = "tracked-only", requires = "stale")]
     tracked_only: bool,
 
+    /// Enable adaptive low-disk promotion: after the regular stale scan,
+    /// promote retained, non-active artifacts (oldest-access first) to stale
+    /// until projected free disk % rises above this threshold (0.0 - 100.0).
+    #[clap(
+        long = "adaptive-low-disk-threshold",
+        value_name = "PERCENT",
+        requires = "stale"
+    )]
+    adaptive_low_disk_threshold: Option<f64>,
+
+    /// Minimum TTL floor for adaptive low-disk promotion: retained artifacts
+    /// accessed within this duration of now are never promoted, even under
+    /// disk pressure. Ignored unless `--adaptive-low-disk-threshold` is set.
+    #[clap(
+        long = "adaptive-min-ttl",
+        value_name = "DURATION",
+        requires = "adaptive_low_disk_threshold",
+        default_value = "12h"
+    )]
+    adaptive_min_ttl: humantime::Duration,
+
     #[clap(
         long = "background",
         help = "Run the clean operation in the background"
@@ -102,11 +123,20 @@ impl CleanCommand {
         events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         if let Some(keep_since_arg) = parse_clean_stale_args(self.stale, self.keep_since_time)? {
+            if let Some(t) = self.adaptive_low_disk_threshold {
+                if !(0.0..=100.0).contains(&t) || t.is_nan() {
+                    return ExitResult::bail(format!(
+                        "`--adaptive-low-disk-threshold` must be between 0.0 and 100.0, got `{t}`"
+                    ));
+                }
+            }
             let cmd = CleanStaleCommand {
                 common_opts: self.common_opts,
                 keep_since_arg,
                 dry_run: self.dry_run,
                 tracked_only: self.tracked_only,
+                adaptive_low_disk_threshold: self.adaptive_low_disk_threshold,
+                adaptive_min_ttl: Some(self.adaptive_min_ttl.into()),
             };
             ctx.exec(cmd, matches, events_ctx)
         } else {
@@ -204,7 +234,7 @@ async fn clean(
     lifecycle_lock: Option<&BuckdLifecycleLock>,
     background: bool,
 ) -> buck2_error::Result<()> {
-    if background {
+    let paths_to_clean = if background {
         let trash_uuid = Uuid::new_v4();
         let trash_target = trash_dir.as_abs_path().join(trash_uuid.to_string());
 
@@ -251,9 +281,7 @@ async fn clean(
             .await?
             .buck_error_context("Failed to spawn clean")?;
         }
-        for path in paths_to_clean {
-            console.print_stderr(&path)?;
-        }
+        paths_to_clean
     } else {
         let mut paths_to_clean = Vec::new();
 
@@ -276,9 +304,14 @@ async fn clean(
             }
         }
 
-        for path in paths_to_clean {
-            console.print_stderr(&path)?;
-        }
+        paths_to_clean
+    };
+
+    if paths_to_clean.is_empty() {
+        console.print_stderr("Nothing to clean.")?;
+    }
+    for path in paths_to_clean {
+        console.print_stderr(&path)?;
     }
 
     Ok(())
@@ -287,6 +320,9 @@ async fn clean(
 fn collect_paths_to_clean(
     buck_out_path: &AbsNormPathBuf,
 ) -> buck2_error::Result<Vec<AbsNormPathBuf>> {
+    if !buck_out_path.exists() {
+        return Ok(vec![]);
+    }
     let mut paths_to_clean = vec![];
     let dir = fs_util::read_dir(buck_out_path).categorize_internal()?;
     for entry in dir {

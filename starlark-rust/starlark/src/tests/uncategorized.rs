@@ -21,6 +21,7 @@ use std::fmt::Write;
 use allocative::Allocative;
 use anyhow::Context;
 use derive_more::Display;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_module;
 use starlark_derive::starlark_value;
 use starlark_syntax::golden_test_template::golden_test_template;
@@ -47,6 +48,7 @@ use crate::values::StarlarkValue;
 use crate::values::Trace;
 use crate::values::UnpackValue;
 use crate::values::Value;
+use crate::values::layout::heap::heap_type::StarlarkTestHeapName;
 use crate::values::list_or_tuple::UnpackListOrTuple;
 use crate::values::none::NoneType;
 
@@ -287,7 +289,15 @@ xs[1] += 1
 fn test_radd() {
     // We want select append to always produce a select, much like the
     // Bazel/Buck `select` function.
-    #[derive(Debug, Display, Clone, ProvidesStaticType, NoSerialize, Allocative)]
+    #[derive(
+        Debug,
+        Display,
+        Clone,
+        ProvidesStaticType,
+        NoSerialize,
+        Allocative,
+        StarlarkPagable
+    )]
     #[display("${:?}", _0)]
     struct Select(Vec<i32>);
     starlark_simple_value!(Select);
@@ -551,7 +561,7 @@ fn test_module_visibility_preserved_by_evaluator() -> crate::Result<()> {
             // This mutates the original module named `import`
             let _: Value = eval.eval_module(ast, &globals)?;
         }
-        let frozen_import = import.freeze()?;
+        let frozen_import = import.freeze_named(StarlarkTestHeapName::frozen_heap_name())?;
 
         Module::with_temp_heap(|m_uses_public| {
             m_uses_public.import_public_symbols(&frozen_import);
@@ -768,7 +778,14 @@ fn test_label_assign() {
         }
     }
 
-    #[derive(Debug, ProvidesStaticType, Display, NoSerialize, Allocative)]
+    #[derive(
+        Debug,
+        ProvidesStaticType,
+        Display,
+        NoSerialize,
+        Allocative,
+        StarlarkPagable
+    )]
     #[display("FrozenWrapper")]
     struct FrozenWrapper;
 

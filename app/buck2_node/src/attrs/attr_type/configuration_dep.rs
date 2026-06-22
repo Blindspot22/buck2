@@ -17,12 +17,14 @@ use crate::attrs::configuration_context::AttrConfigurationContext;
 use crate::attrs::configured_attr::ConfiguredAttr;
 
 /// Describes where a configuration dep appears
+#[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Pagable, Allocative, Dupe)]
 pub enum ConfigurationDepKind {
     SelectKey,
     CompatibilityAttribute,
     ConfiguredDepPlatform,
     Transition,
+    DefaultTargetPlatform,
 }
 
 /// A configuration dep attribute accepts a target as a value. This is different from

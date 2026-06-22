@@ -43,7 +43,9 @@ def _transition_opt_by_default_impl(platform: PlatformInfo, refs: struct, attrs:
 
     no_san_label = refs._opt_by_default__no_san[ConstraintValueInfo].setting.label
     sanitizer_constraint = constraints[no_san_label].label if no_san_label in constraints else None
-    is_default_dev_sanitizer = sanitizer_constraint == refs._opt_by_default__dev_san[ConstraintValueInfo].label  # this bad boy only shows up in default dev mode 🙏
+    is_default_dev_sanitizer = (
+        sanitizer_constraint == refs._opt_by_default__dev_san[ConstraintValueInfo].label
+    )  # this bad boy only shows up in default dev mode 🙏
     is_no_san = sanitizer_constraint == refs._opt_by_default__no_san[ConstraintValueInfo].label
 
     if is_dev and not (is_default_dev_sanitizer or is_no_san):
@@ -98,7 +100,7 @@ def _refs():
         "_opt_by_default__no_san": "@config//build_mode:sanitizer_type[no-san]",
         "_opt_by_default__opt": "@config//build_mode/constraints:opt",
         "_opt_by_default__opt_cxx_enabled": "@config//build_mode/default_opt_cxx:enabled",
-        "_opt_by_default__split_dwarf_single": "@config//build_mode/constraints:split-dwarf-single",
+        "_opt_by_default__split_dwarf_single": "@config//build_mode/constraints:debug_style[split-dwarf-single]",
         "_opt_by_default__static": "@config//build_mode/constraints:static",
         "_opt_by_default_native_debug_enabled": "@config//build_mode/constraints:native-debugging-supported",
     }

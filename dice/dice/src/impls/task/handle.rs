@@ -13,16 +13,14 @@
 use dice_error::result::CancellableResult;
 use dice_error::result::CancellationReason;
 use dice_futures::cancellation::CancellationContext;
-use dupe::Dupe;
 
-use crate::arc::Arc;
-use crate::impls::task::dice::DiceTaskInternal;
+use crate::impls::task::dice::DiceTask;
 use crate::impls::value::DiceComputedValue;
 
 /// The handle to the 'DiceTask' owned by the spawned thread that is responsible for completing
 /// the task.
 pub(crate) struct DiceTaskHandle<'a> {
-    pub(super) internal: Arc<DiceTaskInternal>,
+    pub(super) task: DiceTask,
     pub(super) cancellations: &'a CancellationContext,
     // holds the result while `DiceTaskHandle` is not dropped, then upon drop, stores it into
     // `DiceTaskInternal` so that the result is always reported consistently at the very end of the task.
@@ -39,27 +37,12 @@ pub(crate) enum TaskState {
 }
 
 impl<'a> DiceTaskHandle<'a> {
-    pub(super) fn new(
-        internal: Arc<DiceTaskInternal>,
-        cancellations: &'a CancellationContext,
-    ) -> Self {
+    pub(super) fn new(task: DiceTask, cancellations: &'a CancellationContext) -> Self {
         Self {
-            internal: internal.dupe(),
+            task,
             cancellations,
             result: None,
         }
-    }
-
-    pub(crate) fn report_initial_lookup(&self) -> TaskState {
-        self.internal.state.report_initial_lookup()
-    }
-
-    pub(crate) fn checking_deps(&self) -> TaskState {
-        self.internal.state.report_checking_deps()
-    }
-
-    pub(crate) fn computing(&self) -> TaskState {
-        self.internal.state.report_computing()
     }
 
     pub(crate) fn cancellation_ctx(&self) -> &'a CancellationContext {
@@ -81,19 +64,19 @@ impl Drop for DiceTaskHandle<'_> {
     fn drop(&mut self) {
         match self.result.take() {
             Some(Ok(v)) => {
-                debug!("{:?} finished. Notifying result", self.internal.key);
-                let _ignore = self.internal.set_value(v);
+                debug!("{:?} finished. Notifying result", self.task.key());
+                let _ignore = self.task.set_value(v);
             }
             Some(Err(reason)) => {
-                debug!("{:?} cancelled. Notifying cancellation", self.internal.key);
-                self.internal.report_terminated(reason);
+                debug!("{:?} cancelled. Notifying cancellation", self.task.key());
+                self.task.report_terminated(reason);
             }
             None => {
                 debug!(
                     "{:?} dropped without result. Notifying cancellation",
-                    self.internal.key
+                    self.task.key()
                 );
-                self.internal
+                self.task
                     .report_terminated(CancellationReason::HandleDropped);
             }
         }

@@ -7,7 +7,7 @@
 # above-listed licenses.
 
 def _write_file(ctx):
-    f = ctx.actions.write("write_file.txt", "test test test")
+    f = ctx.actions.write("write_file.txt", "test test test", has_content_based_path = False)
     return [DefaultInfo(default_output = f)]
 
 write_file = rule(
@@ -18,13 +18,18 @@ write_file = rule(
 def _test_rule(ctx):
     arg = ctx.attrs.arg
 
-    f = ctx.actions.declare_output("out.txt")
-    f, _ = ctx.actions.write(f, [
-        cmd_args(arg, hidden = arg),
-        cmd_args(arg, relative_to = f),
-        cmd_args(cmd_args(arg, relative_to = f)),
-        cmd_args(cmd_args(arg), relative_to = f),
-    ], allow_args = True, with_inputs = True)
+    f = ctx.actions.declare_output("out.txt", has_content_based_path = False)
+    f, _ = ctx.actions.write(
+        f,
+        [
+            cmd_args(arg, hidden = arg),
+            cmd_args(arg, relative_to = f),
+            cmd_args(cmd_args(arg, relative_to = f)),
+            cmd_args(cmd_args(arg), relative_to = f),
+        ],
+        allow_args = True,
+        with_inputs = True,
+    )
 
     return [DefaultInfo(default_output = f)]
 

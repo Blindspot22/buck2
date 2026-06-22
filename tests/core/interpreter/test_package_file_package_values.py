@@ -34,6 +34,21 @@ async def test_audit_package_values(buck: Buck) -> None:
 
 
 @buck_test()
+async def test_audit_package_values_select(buck: Buck) -> None:
+    stdout = (await buck.audit("package-values", "//")).stdout
+    result = json.loads(stdout)
+    pkg = result["root//"]
+    # Verify select value has expected JSON structure
+    assert pkg["sel.ector"] == {
+        "__type": "selector",
+        "entries": {"//config:a": "val_a", "DEFAULT": "default_val"},
+    }
+    # Verify concat (select + select) has expected JSON structure
+    assert pkg["sel.concat"]["__type"] == "concat"
+    assert len(pkg["sel.concat"]["items"]) == 2
+
+
+@buck_test()
 async def test_targets_package_values(buck: Buck) -> None:
     stdout = (await buck.targets("--package-values", "//...")).stdout
     golden(
@@ -44,11 +59,14 @@ async def test_targets_package_values(buck: Buck) -> None:
 
 @buck_test()
 async def test_targets_package_values_regex(buck: Buck) -> None:
-    # Empty string as regex.
+    # Empty string as regex matches all keys.
     out = (await buck.targets("--package-values-regex", "", "//...")).stdout
     json_result = json.loads(out)[0]
-    expected = {"aaa.bbb": "ccc", "xxx.yyy": "zzz"}
-    assert json_result["buck.package_values"] == expected
+    pv = json_result["buck.package_values"]
+    assert pv["aaa.bbb"] == "ccc"
+    assert pv["xxx.yyy"] == "zzz"
+    assert pv["sel.ector"]["__type"] == "selector"
+    assert pv["sel.concat"]["__type"] == "concat"
 
     out = (await buck.targets("--package-values-regex", "aaa.bbb", "//...")).stdout
     json_result = json.loads(out)[0]
@@ -72,6 +90,14 @@ async def test_targets_package_values_regex(buck: Buck) -> None:
     json_result = json.loads(out)[0]
     expected = {"aaa.bbb": "ccc", "xxx.yyy": "zzz"}
     assert json_result["buck.package_values"] == expected
+
+    # Regex matching select keys.
+    out = (await buck.targets("--package-values-regex", "sel", "//...")).stdout
+    json_result = json.loads(out)[0]
+    pv = json_result["buck.package_values"]
+    assert len(pv) == 2
+    assert pv["sel.ector"]["__type"] == "selector"
+    assert pv["sel.concat"]["__type"] == "concat"
 
     out = (await buck.targets("--package-values-regex", "non_existent", "//...")).stdout
     json_result = json.loads(out)[0]

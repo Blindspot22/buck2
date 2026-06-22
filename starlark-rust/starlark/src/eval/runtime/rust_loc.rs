@@ -15,23 +15,33 @@
  * limitations under the License.
  */
 
-/// Initialize `$loc` to `FrozenRef<FrameSpan>` with rust file and line number.
+/// Initialize to `&'static FrameSpan` with rust file and line number.
 macro_rules! rust_loc {
     () => {{
+        use std::sync::LazyLock;
+
         use crate::codemap::CodeMap;
         use crate::codemap::NativeCodeMap;
         use crate::eval::runtime::frame_span::FrameSpan;
         use crate::eval::runtime::frozen_file_span::FrozenFileSpan;
-        use crate::values::FrozenRef;
 
         static NATIVE_CODEMAP: NativeCodeMap = NativeCodeMap::new(file!(), line!(), column!());
-        static CODEMAP: CodeMap = NATIVE_CODEMAP.to_codemap();
-        static FROZEN_FILE_SPAN: FrameSpan = FrameSpan::new(FrozenFileSpan::new_unchecked(
-            FrozenRef::new(&CODEMAP),
-            NativeCodeMap::FULL_SPAN,
-        ));
-        static LOC: FrozenRef<'static, FrameSpan> = FrozenRef::new(&FROZEN_FILE_SPAN);
-        LOC
+        pagable::static_value!(
+            NATIVE_CODEMAP_STATIC: NativeCodeMap = &NATIVE_CODEMAP,
+            starlark_syntax::codemap::NativeCodeMapStaticEntry
+        );
+        // @no_impl: StaticValueRegistered for StarlarkAny<CodeMap> is already
+        // implemented by the static_starlark_any! invocation in frozen_file_span.rs.
+        crate::static_starlark_any!(
+            @no_impl CODEMAP: CodeMap = NativeCodeMap::to_codemap(NATIVE_CODEMAP_STATIC)
+        );
+        static FRAME_SPAN: LazyLock<FrameSpan> = LazyLock::new(|| {
+            FrameSpan::new(FrozenFileSpan::new_unchecked(
+                CODEMAP.unpack_any(),
+                NativeCodeMap::FULL_SPAN,
+            ))
+        });
+        &*FRAME_SPAN
     }};
 }
 

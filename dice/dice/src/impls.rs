@@ -19,6 +19,7 @@ mod hash;
 pub(crate) mod key;
 mod key_index;
 pub(crate) mod opaque;
+pub(crate) mod storage;
 pub(crate) mod task;
 #[cfg(test)]
 mod tests;

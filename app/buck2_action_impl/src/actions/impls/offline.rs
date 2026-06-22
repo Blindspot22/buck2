@@ -17,8 +17,8 @@ use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::directory::INTERNER;
 use buck2_execute::entry::build_entry_from_disk;
 use buck2_execute::materialize::materializer::CopiedArtifact;
+use buck2_hash::BuckIndexMap;
 use dupe::Dupe;
-use indexmap::IndexMap;
 
 /// Declares a copy materialization to copy the output BuildArtifact to the
 /// offline cache for use in an offline build. Returns the project-relative path
@@ -34,7 +34,7 @@ pub(crate) async fn declare_copy_to_offline_output_cache(
     let offline_cache_path = ctx
         .fs()
         .resolve_offline_output_cache_path(output.get_path())?;
-    declare_copy_materialization(ctx, build_path, offline_cache_path.clone(), value).await?;
+    declare_copy_materialization(ctx, build_path, offline_cache_path.clone(), value, None).await?;
 
     Ok(offline_cache_path)
 }
@@ -49,7 +49,7 @@ pub(crate) async fn declare_copy_from_offline_cache(
     ctx: &mut dyn ActionExecutionCtx,
     outputs: &[&BuildArtifact],
 ) -> buck2_error::Result<ActionOutputs> {
-    let mut restored_outputs = IndexMap::new();
+    let mut restored_outputs = BuckIndexMap::default();
 
     // Restore all outputs - any cache miss = total failure
     for output in outputs {
@@ -82,7 +82,17 @@ pub(crate) async fn declare_copy_from_offline_cache(
         let build_path = ctx
             .fs()
             .resolve_build(output.get_path(), Some(&value.content_based_path_hash()))?;
-        declare_copy_materialization(ctx, offline_cache_path, build_path, value.dupe()).await?;
+        let configuration_path = ctx
+            .materializer()
+            .maybe_eager_configuration_path(ctx.fs(), output.get_path())?;
+        declare_copy_materialization(
+            ctx,
+            offline_cache_path,
+            build_path,
+            value.dupe(),
+            configuration_path,
+        )
+        .await?;
 
         restored_outputs.insert(output.get_path().dupe(), value);
     }
@@ -96,6 +106,7 @@ async fn declare_copy_materialization(
     src: ProjectRelativePathBuf,
     dest: ProjectRelativePathBuf,
     value: ArtifactValue,
+    configuration_path: Option<ProjectRelativePathBuf>,
 ) -> buck2_error::Result<()> {
     let immutable_entry = value.entry().dupe().map_dir(|d| d.as_immutable());
     ctx.materializer()
@@ -103,6 +114,7 @@ async fn declare_copy_materialization(
             dest.clone(),
             value,
             vec![CopiedArtifact::new(src, dest, immutable_entry, None)],
+            configuration_path,
         )
         .await
 }

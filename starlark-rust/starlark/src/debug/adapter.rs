@@ -141,9 +141,9 @@ impl Display for PathSegment {
 impl PathSegment {
     fn get<'v>(&self, v: &Value<'v>, heap: Heap<'v>) -> crate::Result<Value<'v>> {
         match self {
-            PathSegment::Index(i) => v.at(heap.alloc(*i), heap).map_err(Into::into),
+            PathSegment::Index(i) => v.at(heap.alloc(*i), heap),
             PathSegment::Attr(key) => v.get_attr_error(key.as_str(), heap),
-            PathSegment::Key(i) => v.at(heap.alloc(i.to_owned()), heap).map_err(Into::into),
+            PathSegment::Key(i) => v.at(heap.alloc(i.to_owned()), heap),
         }
     }
 }
@@ -372,17 +372,21 @@ pub trait DapAdapter: Debug + Send + 'static {
     /// Gets the variables scope for a frame.
     ///
     /// See <https://microsoft.github.io/debug-adapter-protocol/specification#Requests_Scopes>
-    fn scopes(&self) -> anyhow::Result<ScopesInfo>;
+    fn scopes(&self, frame_id: usize) -> anyhow::Result<ScopesInfo>;
 
-    /// Gets variables for the current scope
+    /// Gets variables for the given frame
     ///
     /// See <https://microsoft.github.io/debug-adapter-protocol/specification#Requests_Variables>
-    fn variables(&self) -> anyhow::Result<VariablesInfo>;
+    fn variables(&self, frame_id: usize) -> anyhow::Result<VariablesInfo>;
 
-    /// Gets all child variables for the given access path
+    /// Gets all child variables for the given access path in the given frame
     ///
     /// See <https://microsoft.github.io/debug-adapter-protocol/specification#Requests_Variables>
-    fn inspect_variable(&self, path: VariablePath) -> anyhow::Result<InspectVariableInfo>;
+    fn inspect_variable(
+        &self,
+        frame_id: usize,
+        path: VariablePath,
+    ) -> anyhow::Result<InspectVariableInfo>;
 
     /// Resumes execution.
     ///

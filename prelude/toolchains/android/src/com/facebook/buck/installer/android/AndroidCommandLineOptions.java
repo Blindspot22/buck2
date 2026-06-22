@@ -95,6 +95,14 @@ class AndroidCommandLineOptions {
   private String logPath;
 
   @Option(
+      name = "--install-timeout",
+      metaVar = "<seconds>",
+      usage =
+          "Maximum time in seconds to wait for install to complete. Defaults to 600 seconds (10"
+              + " minutes).")
+  private long installTimeoutSeconds = 600;
+
+  @Option(
       name = "--run",
       aliases = {"-r"},
       usage = "Run an activity (the default activity for package unless -a is specified).")
@@ -176,6 +184,11 @@ class AndroidCommandLineOptions {
   @Option(name = "--restart", usage = "Restart the device after installing APEX files.")
   public RestartMode restartMode = RestartMode.auto;
 
+  @Option(
+      name = "--wait-for-device-ready",
+      usage = "Wait for the device to be ready after installation.")
+  public boolean waitForDeviceReady = false;
+
   public AndroidCommandLineOptions() {}
 
   public int getTcpPort() {
@@ -184,5 +197,9 @@ class AndroidCommandLineOptions {
 
   public String getLogPath() {
     return logPath;
+  }
+
+  public long getInstallTimeoutSeconds() {
+    return installTimeoutSeconds;
   }
 }

@@ -8,14 +8,55 @@
  * above-listed licenses.
  */
 
-// TraceEvent spec used in this file documented here: https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview?tab=t.0
-// Note: "rendering" centric stuff like cname colors are not supported: https://github.com/google/perfetto/issues/208, we'd have to switch to the protobuf API
+// TraceEvent spec used in this file documented here:
+// https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview?tab=t.0
+// Note: "rendering" centric stuff like cname colors are not supported:
+// https://github.com/google/perfetto/issues/208, we'd have to switch to the
+// protobuf API
+//
+// Originally [perfetto](https://perfetto.dev/docs/) was built by google for
+// chrome tracing, and then later for android,  linux system tracing, etc. It
+// has a concept of "processes" and "threads", which for "normal" traces are
+// directly translated into TraceEvents json objects. Field like `pid` and `tid`
+// are traditionally process id and thread id.
+//
+// In these traces, it's not really practical to assign the actual  pid/tid that
+// produced the BuckEvents in the logs to the TraceEvent objects. MUCH of buck's
+// work is done in asynchronous futures, and the thread assignments for them are
+// (somewhat) irrelevant. If an action execution future gets moved between
+// executor threads, say, we would still like to represent the spans as relating
+// to each other/owning each other.
+//
+// The json TraceEvent api is interpreted by the perfetto viewer to assume
+// relationships between events that it uses to render them. The "thread id"
+// parameter is used to group duration events together in the same horizontal
+// "track", because a thread in a program is normally executing synchronous code
+// (partcularly at the time perfetto was first written).
+//
+// We exploit that, and treat the `tid` parameter as not a literal thread id,
+// but as a "track id", assuming that perfetto will render any events with the
+// same tid in the same horizontal track.
+//
+// When processing the async spans in the logs, we keep track of which displayed
+// spans are "open" over time and which ones are assigned to tracks. As tracks
+// fill up, we just stop displaying new spans in any tracks, as perfetto doesn't
+// have a concept of duration events spanning across each other, they may only
+// nest.
+//
+//   Note: the TraceEvent data model does allow for async events, which we may
+//   want to experiment with. whether tracery supports them may determine if we
+//   can use them.
+//
+// Generally this track assignment works really well for loads, because all
+// loads occur on a limited pool of local executors, so we can generally have
+// perfetto render enough tracks/threads to render all concurrently running
+// loads. This falls apart for action execution, because we allow many thousands
+// of futures to be created and be running in parallel. Perfetto's UI tops out
+// at ~200-256 tracks/threads, so we will probably NEVER be able to render them
+// all.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::io::BufWriter;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,8 +83,12 @@ use buck2_event_observer::unpack_event::UnpackedBuckEvent;
 use buck2_event_observer::unpack_event::unpack_event;
 use buck2_events::BuckEvent;
 use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use derive_more::Display;
 use dupe::Dupe;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use serde::Serialize;
@@ -51,22 +96,18 @@ use serde_json::json;
 
 #[derive(Debug, clap::Parser)]
 pub struct ChromeTraceCommand {
-    #[clap(
-        long,
-        help = "Where to write the chrome trace JSON. If a directory is passed, the filename of the event log will be used as a base filename."
-    )]
-    pub trace_path: PathArg,
+    #[clap(flatten)]
+    pub output: OutputArgs,
 
     /// The path to read the event log from.
     #[clap(
-        long,
+        long = "path",
         help = "A path to an event-log file to read from. Only works for log files with a single command in them. If no event-log is passed, the most recent one will be used.",
         value_name = "PATH",
         // Hide because `event_log` below subsumes this.
         hide = true
     )]
-    pub path: Option<PathArg>,
-
+    pub event_log_path: Option<PathArg>,
     #[clap(
         long,
         help = "Places a global instant event at the specified time. Floating point seconds and integer nanoseconds unixtime is accepted.",
@@ -86,6 +127,24 @@ pub struct ChromeTraceCommand {
     pub(crate) event_log: EventLogOptions,
 }
 
+#[derive(Debug, clap::Parser)]
+#[group(required = true, multiple = true)]
+pub struct OutputArgs {
+    #[clap(
+        long,
+        help = "Where to write the chrome trace JSON. If a directory is passed, the filename of the event log will be used as a base filename."
+    )]
+    #[cfg(fbcode_build)]
+    pub trace_path: Option<PathArg>,
+    #[cfg(not(fbcode_build))]
+    pub trace_path: PathArg,
+
+    /// Uploads the result to manifold and generates a perfetto link for you
+    #[cfg(fbcode_build)]
+    #[clap(long)]
+    pub upload: bool,
+}
+
 struct ChromeTraceFirstPass {
     /// Track assignment needs to know, when it sees a SpanStart, whether that
     /// span is going to be included in the final trace.
@@ -102,12 +161,12 @@ struct ChromeTraceFirstPass {
     ///    of the last events.
     ///
     /// So this first pass builds up several lists of "interesting" span IDs.
-    pub long_analyses: HashSet<buck2_events::span::SpanId>,
-    pub long_loads: HashSet<buck2_events::span::SpanId>,
-    pub long_load_packages: HashSet<buck2_events::span::SpanId>,
-    pub local_actions: HashSet<buck2_events::span::SpanId>,
-    pub critical_path_action_keys: HashSet<buck2_data::ActionKey>,
-    pub critical_path_span_ids: HashSet<u64>,
+    pub long_analyses: StdBuckHashSet<buck2_events::span::SpanId>,
+    pub long_loads: StdBuckHashSet<buck2_events::span::SpanId>,
+    pub long_load_packages: StdBuckHashSet<buck2_events::span::SpanId>,
+    pub local_actions: StdBuckHashSet<buck2_events::span::SpanId>,
+    pub critical_path_action_keys: StdBuckHashSet<buck2_data::ActionKey>,
+    pub critical_path_span_ids: StdBuckHashSet<u64>,
     pub command_start: SystemTime,
     pub command_options: Option<buck2_data::CommandOptions>,
 }
@@ -118,12 +177,12 @@ impl ChromeTraceFirstPass {
     const LONG_LOAD_PACKAGE_CUTOFF: Duration = Duration::from_millis(50);
     fn new() -> Self {
         Self {
-            long_analyses: HashSet::new(),
-            long_loads: HashSet::new(),
-            long_load_packages: HashSet::new(),
-            local_actions: HashSet::new(),
-            critical_path_action_keys: HashSet::new(),
-            critical_path_span_ids: HashSet::new(),
+            long_analyses: StdBuckHashSet::default(),
+            long_loads: StdBuckHashSet::default(),
+            long_load_packages: StdBuckHashSet::default(),
+            local_actions: StdBuckHashSet::default(),
+            critical_path_action_keys: StdBuckHashSet::default(),
+            critical_path_span_ids: StdBuckHashSet::default(),
             command_start: SystemTime::UNIX_EPOCH,
             command_options: None,
         }
@@ -132,89 +191,86 @@ impl ChromeTraceFirstPass {
     fn handle_event(&mut self, event: &BuckEvent) -> buck2_error::Result<()> {
         match event.data() {
             buck2_data::buck_event::Data::SpanStart(start) => {
-                match start.data.as_ref() {
-                    Some(buck2_data::span_start_event::Data::Command(..)) => {
-                        self.command_start = event.timestamp();
-                    }
-                    Some(buck2_data::span_start_event::Data::ExecutorStage(exec)) => {
-                        // A local stage means that we want to show the entire action execution.
-                        use buck2_data::executor_stage_start::Stage;
+                if let Some(buck2_data::span_start_event::Data::Command(..)) = start.data.as_ref() {
+                    self.command_start = event.timestamp();
+                } else if let Some(buck2_data::span_start_event::Data::ExecutorStage(exec)) =
+                    start.data.as_ref()
+                {
+                    // A local stage means that we want to show the entire action execution.
+                    use buck2_data::executor_stage_start::Stage;
 
-                        if let Some(Stage::Local(local)) = &exec.stage {
-                            use buck2_data::local_stage::Stage;
+                    if let Some(Stage::Local(local)) = &exec.stage {
+                        use buck2_data::local_stage::Stage;
 
-                            let local_execution = match local.stage.as_ref() {
-                                Some(Stage::Queued(..)) => false,
-                                Some(Stage::Execute(..)) => true,
-                                Some(Stage::MaterializeInputs(..)) => false,
-                                Some(Stage::PrepareOutputs(..)) => false,
-                                Some(Stage::AcquireLocalResource(..)) => false,
-                                Some(Stage::WorkerInit(..)) => false,
-                                Some(Stage::WorkerExecute(..)) => true,
-                                Some(Stage::WorkerQueued(..)) => false,
-                                Some(Stage::WorkerWait(..)) => false,
-                                None => false,
-                            };
+                        let local_execution = match local.stage.as_ref() {
+                            Some(Stage::Queued(..)) => false,
+                            Some(Stage::Execute(..)) => true,
+                            Some(Stage::MaterializeInputs(..)) => false,
+                            Some(Stage::PrepareOutputs(..)) => false,
+                            Some(Stage::AcquireLocalResource(..)) => false,
+                            Some(Stage::WorkerInit(..)) => false,
+                            Some(Stage::WorkerExecute(..)) => true,
+                            Some(Stage::WorkerQueued(..)) => false,
+                            Some(Stage::WorkerWait(..)) => false,
+                            None => false,
+                        };
 
-                            if local_execution {
-                                self.local_actions.insert(event.parent_id().unwrap());
-                            }
+                        if local_execution {
+                            self.local_actions.insert(event.parent_id().unwrap());
                         }
                     }
-                    _ => {}
                 }
             }
             buck2_data::buck_event::Data::SpanEnd(end) => {
-                match end.data.as_ref() {
-                    Some(buck2_data::span_end_event::Data::Analysis(_)) => {
-                        if end
-                            .duration
-                            .as_ref()
-                            .expect("Analysis SpanEnd missing duration")
-                            .try_into_duration()?
-                            > Self::LONG_ANALYSIS_CUTOFF
-                        {
-                            self.long_analyses.insert(event.span_id().unwrap());
-                        }
+                if let Some(buck2_data::span_end_event::Data::Analysis(_)) = end.data.as_ref() {
+                    if end
+                        .duration
+                        .as_ref()
+                        .expect("Analysis SpanEnd missing duration")
+                        .try_into_duration()?
+                        > Self::LONG_ANALYSIS_CUTOFF
+                    {
+                        self.long_analyses.insert(event.span_id().unwrap());
                     }
-                    Some(buck2_data::span_end_event::Data::Load(_)) => {
-                        if end
-                            .duration
-                            .as_ref()
-                            .expect("Load SpanEnd missing duration")
-                            .try_into_duration()?
-                            > Self::LONG_LOAD_CUTOFF
-                        {
-                            self.long_loads.insert(event.span_id().unwrap());
-                        }
+                } else if let Some(buck2_data::span_end_event::Data::Load(_)) = end.data.as_ref() {
+                    if end
+                        .duration
+                        .as_ref()
+                        .expect("Load SpanEnd missing duration")
+                        .try_into_duration()?
+                        > Self::LONG_LOAD_CUTOFF
+                    {
+                        self.long_loads.insert(event.span_id().unwrap());
                     }
-                    Some(buck2_data::span_end_event::Data::LoadPackage(_)) => {
-                        if end
-                            .duration
-                            .as_ref()
-                            .expect("LoadPackage SpanEnd missing duration")
-                            .try_into_duration()?
-                            > Self::LONG_LOAD_PACKAGE_CUTOFF
-                        {
-                            self.long_load_packages.insert(event.span_id().unwrap());
-                        }
+                } else if let Some(buck2_data::span_end_event::Data::LoadPackage(_)) =
+                    end.data.as_ref()
+                {
+                    if end
+                        .duration
+                        .as_ref()
+                        .expect("LoadPackage SpanEnd missing duration")
+                        .try_into_duration()?
+                        > Self::LONG_LOAD_PACKAGE_CUTOFF
+                    {
+                        self.long_load_packages.insert(event.span_id().unwrap());
                     }
-                    _ => {}
-                };
+                }
             }
-            buck2_data::buck_event::Data::Instant(instant) => match instant.data.as_ref() {
-                Some(buck2_data::instant_event::Data::BuildGraphInfo(info)) => {
+            buck2_data::buck_event::Data::Instant(instant) => {
+                if let Some(buck2_data::instant_event::Data::BuildGraphInfo(info)) =
+                    instant.data.as_ref()
+                {
                     self.critical_path_span_ids = info
                         .critical_path2
                         .iter()
                         .flat_map(|entry| entry.span_ids.iter().copied())
                         .collect()
-                }
-                Some(buck2_data::instant_event::Data::CommandOptions(options)) => {
+                } else if let Some(buck2_data::instant_event::Data::CommandOptions(options)) =
+                    instant.data.as_ref()
+                {
                     self.command_options = Some(*options);
                 }
-                _ => {}
-            },
+            }
             buck2_data::buck_event::Data::Record(_) => {}
         };
         Ok(())
@@ -249,7 +305,7 @@ struct ChromeTraceInstant {
 }
 
 impl ChromeTraceInstant {
-    fn to_json(self) -> buck2_error::Result<serde_json::Value> {
+    fn into_json(self) -> buck2_error::Result<serde_json::Value> {
         let mut js = json!(
             {
                 "name": self.name,
@@ -277,9 +333,62 @@ impl ChromeTraceInstant {
             }
             ChromeTraceInstantScope::Thread(process_id, track) => {
                 obj.insert("pid".to_owned(), json!(process_id));
-                obj.insert("tid".to_owned(), json!(String::from(track.get_track_id())));
+                obj.insert("tid".to_owned(), json!(track.get_track_id().as_u64()?));
             }
         }
+
+        Ok(js)
+    }
+}
+
+// N.B. "Process" and "Thread" here are chrome/perfetto TraceEvent json object
+// terms. See comments at the top of this file about how the pid/tid field map
+// to how we use them to represent buck's activity in a trace.
+#[allow(dead_code)] // Process isn't used at this time, but is included for completeness.
+enum ChromeTraceMetadataKind {
+    Process { pid: u64 },
+    Thread { pid: u64, tid: u64 },
+}
+
+struct ChromeTraceMetadata {
+    name: String,
+    kind: ChromeTraceMetadataKind,
+    labels: Option<Vec<String>>,
+    sort_index: Option<u64>,
+}
+
+impl ChromeTraceMetadata {
+    fn into_json(self) -> buck2_error::Result<serde_json::Value> {
+        let (ev_name, pid, tid) = match self.kind {
+            ChromeTraceMetadataKind::Process { pid } => ("process_name", pid, None),
+            ChromeTraceMetadataKind::Thread { pid, tid } => ("thread_name", pid, Some(tid)),
+        };
+        let mut js = json!({
+            "name": ev_name,
+            "ph": "M", // Chrome trace "metadata event"
+            "pid": pid,
+        });
+        let obj = js
+            .as_object_mut()
+            .ok_or(buck2_error::internal_error!("expected a mutable object"))?;
+
+        if let Some(tid) = tid {
+            obj.insert("tid".to_owned(), json!(tid));
+        }
+
+        let mut args = serde_json::Map::<String, serde_json::Value>::new();
+
+        args.insert("name".to_owned(), json!(self.name));
+        if let Some(labels) = self.labels
+            && !labels.is_empty()
+        {
+            args.insert("labels".to_owned(), json!(labels));
+        }
+        if let Some(sort_index) = self.sort_index {
+            args.insert("sort_index".to_owned(), json!(sort_index));
+        }
+
+        obj.insert("args".to_owned(), args.into());
 
         Ok(js)
     }
@@ -301,7 +410,7 @@ struct ChromeTraceClosedSpan {
 }
 
 impl ChromeTraceClosedSpan {
-    fn to_json(self) -> buck2_error::Result<serde_json::Value> {
+    fn into_json(self) -> buck2_error::Result<serde_json::Value> {
         Ok(json!(
             {
                 "name": self.open.name,
@@ -309,7 +418,7 @@ impl ChromeTraceClosedSpan {
                 "dur": self.duration.as_micros() as u64,
                 "ph": "X", // Chrome trace "complete event"
                 "pid": self.open.process_id,
-                "tid": String::from(self.open.track.get_track_id()),
+                "tid": self.open.track.get_track_id().as_u64()?,
                 "cat": self.open.categories.join(","),
                 "args": self.open.args,
             }
@@ -319,13 +428,36 @@ impl ChromeTraceClosedSpan {
 
 /// Spans are directed to a category, like "critical-path" or "misc". Spans in a
 /// category that would overlap are put on different tracks within that category.
-#[derive(Clone, Copy, Dupe)]
-struct TrackId(SpanCategorization, u64);
+#[derive(Clone, Copy, Debug, Dupe)]
+struct TrackId {
+    track_key: SpanCategorization,
+    track: u64,
+}
 
 impl From<TrackId> for String {
     fn from(tid: TrackId) -> String {
         // Outputs like "misc-00", "misc-01", ...
-        format!("{}-{:02}", tid.0, tid.1)
+        format!("{}-{:02}", tid.track_key, tid.track)
+    }
+}
+
+impl TrackId {
+    fn as_u64(&self) -> buck2_error::Result<u64> {
+        // The choice of constant here is mostly arbitratry. It needs to be
+        // larger than the total number of tracks being displayed for any given
+        // track_key, which in turn is limited by the max tracks we allow to be
+        // allocated, which is limited by perfetto's max track/thread display,
+        // which is in the ~200-256 range.
+        const TRACK_KEY_MULTIPLIER: u64 = 1000;
+        if self.track >= TRACK_KEY_MULTIPLIER {
+            return Err(buck2_error::internal_error!(
+                "Track id {:?} has a track component {} that exceeds the key multiplier {}, increase the key multiplier",
+                self,
+                self.track,
+                TRACK_KEY_MULTIPLIER
+            ));
+        }
+        Ok((self.track_key as u64) * TRACK_KEY_MULTIPLIER + self.track)
     }
 }
 
@@ -370,6 +502,13 @@ impl TrackIdAllocator {
     pub fn mark_unused(&mut self, tid: u64) {
         self.unused_track_ids.insert(tid);
     }
+
+    // Some spans hard-code the track assignments they are on. We ensure we bump
+    // `lowest_never_used` to encompass such assignments to ensure we output the
+    // correct track sorting order.
+    pub fn mark_used(&mut self, tid: u64) {
+        self.lowest_never_used = self.lowest_never_used.max(tid + 1);
+    }
 }
 
 struct SimpleCounters<T> {
@@ -379,7 +518,7 @@ struct SimpleCounters<T> {
     /// Stores the current value of each timeseries.
     /// Set to None when we output a zero, so we can save a bit of filesize
     /// by omitting them from the JSON output.
-    counters: HashMap<String, SimpleCounter<T>>,
+    counters: StdBuckHashMap<String, SimpleCounter<T>>,
     zero_value: T,
     trace_events: Vec<serde_json::Value>,
 }
@@ -404,7 +543,7 @@ where
         Self {
             name,
             next_flush: SystemTime::UNIX_EPOCH,
-            counters: HashMap::new(),
+            counters: StdBuckHashMap::default(),
             trace_events: vec![],
             zero_value,
         }
@@ -531,13 +670,13 @@ struct TimestampAndAmount {
 
 struct AverageRateOfChangeCounters {
     counters: SimpleCounters<u64>,
-    previous_timestamp_and_amount_by_key: HashMap<String, TimestampAndAmount>,
+    previous_timestamp_and_amount_by_key: StdBuckHashMap<String, TimestampAndAmount>,
 }
 
 impl AverageRateOfChangeCounters {
     pub fn new(name: &'static str) -> Self {
         Self {
-            previous_timestamp_and_amount_by_key: HashMap::new(),
+            previous_timestamp_and_amount_by_key: StdBuckHashMap::default(),
             counters: SimpleCounters::<u64>::new(name, 0),
         }
     }
@@ -571,14 +710,14 @@ impl AverageRateOfChangeCounters {
 struct SpanCounters {
     counter: SimpleCounters<i32>,
     // Stores how current open spans contribute to counter values.
-    open_spans: HashMap<buck2_events::span::SpanId, (&'static str, i32)>,
+    open_spans: StdBuckHashMap<buck2_events::span::SpanId, (&'static str, i32)>,
 }
 
 impl SpanCounters {
     pub fn new(name: &'static str) -> Self {
         Self {
             counter: SimpleCounters::new(name, 0),
-            open_spans: HashMap::new(),
+            open_spans: StdBuckHashMap::default(),
         }
     }
 
@@ -607,28 +746,29 @@ impl SpanCounters {
 
 struct ChromeTraceWriter {
     trace_events: Vec<serde_json::Value>,
-    open_spans: HashMap<buck2_events::span::SpanId, ChromeTraceOpenSpan>,
+    open_spans: StdBuckHashMap<buck2_events::span::SpanId, ChromeTraceOpenSpan>,
     invocation: Invocation,
     first_pass: ChromeTraceFirstPass,
     max_tracks: u64,
     span_counters: SpanCounters,
-    unused_track_ids: HashMap<SpanCategorization, TrackIdAllocator>,
+    unused_track_ids: StdBuckHashMap<SpanCategorization, TrackIdAllocator>,
     // Wrappers to contain values from InstantEvent.Data.Snapshot as a timeseries
     snapshot_counters: SimpleCounters<u64>,
     process_memory_counters: SimpleCounters<f64>,
     rate_of_change_counters: AverageRateOfChangeCounters,
 }
 
+#[repr(u8)]
 #[derive(Copy, Clone, Dupe, Debug, Display, Hash, PartialEq, Eq)]
 enum SpanCategorization {
-    #[display("uncategorized")]
-    Uncategorized,
     #[display("critical-path")]
-    CriticalPath,
+    CriticalPath = 0,
     #[display("detailed-critical-path")]
-    DetailedCriticalPath,
+    DetailedCriticalPath = 1,
     #[display("detailed-slowest-path")]
-    DetailedSlowestPath,
+    DetailedSlowestPath = 2,
+    #[display("uncategorized")]
+    Uncategorized = 3,
 }
 
 impl ChromeTraceWriter {
@@ -637,11 +777,11 @@ impl ChromeTraceWriter {
     pub fn new(invocation: Invocation, first_pass: ChromeTraceFirstPass, max_tracks: u64) -> Self {
         Self {
             trace_events: vec![],
-            open_spans: HashMap::new(),
+            open_spans: StdBuckHashMap::default(),
             invocation,
             first_pass,
             max_tracks,
-            unused_track_ids: HashMap::new(),
+            unused_track_ids: StdBuckHashMap::default(),
             span_counters: SpanCounters::new("spans"),
             snapshot_counters: SimpleCounters::<u64>::new("snapshot_counters", 0),
             process_memory_counters: SimpleCounters::<f64>::new("process_memory", 0.0),
@@ -649,16 +789,33 @@ impl ChromeTraceWriter {
         }
     }
 
+    fn mark_track_used(
+        &mut self,
+        track_key: SpanCategorization,
+        track_id: u64,
+    ) -> buck2_error::Result<TrackId> {
+        self.unused_track_ids
+            .entry(track_key)
+            .or_insert_with(TrackIdAllocator::new)
+            .mark_used(track_id);
+        Ok(TrackId {
+            track_key,
+            track: track_id,
+        })
+    }
+
     fn assign_track_for_span(
         &mut self,
         track_key: SpanCategorization,
-        event: &BuckEvent,
+        event: Option<&BuckEvent>,
     ) -> buck2_error::Result<Option<SpanTrackAssignment>> {
-        let parent_track_id = event.parent_id().and_then(|parent_id| {
-            self.open_spans
-                .get(&parent_id)
-                .map(|open_span| open_span.track.get_track_id())
-        });
+        let parent_track_id = event
+            .and_then(|event| event.parent_id)
+            .and_then(|parent_id| {
+                self.open_spans
+                    .get(&parent_id)
+                    .map(|open_span| open_span.track.get_track_id())
+            });
 
         match parent_track_id {
             None => {
@@ -676,7 +833,7 @@ impl ChromeTraceWriter {
                     .assign_track(max);
 
                 let assignment =
-                    track.map(|track| SpanTrackAssignment::Owned(TrackId(track_key, track)));
+                    track.map(|track| SpanTrackAssignment::Owned(TrackId { track_key, track }));
 
                 Ok(assignment)
             }
@@ -684,7 +841,7 @@ impl ChromeTraceWriter {
         }
     }
 
-    pub fn to_writer<W>(mut self, file: W) -> buck2_error::Result<()>
+    pub fn into_writer<W>(mut self, file: W) -> buck2_error::Result<()>
     where
         W: Write,
     {
@@ -724,7 +881,7 @@ impl ChromeTraceWriter {
         track_key: SpanCategorization,
     ) -> buck2_error::Result<()> {
         // Allocate this span to its parent's track or to a new track.
-        let track = self.assign_track_for_span(track_key, event)?;
+        let track = self.assign_track_for_span(track_key, Some(event))?;
         if let Some(track) = track {
             self.open_span(
                 event,
@@ -1075,7 +1232,7 @@ impl ChromeTraceWriter {
                             scope: ChromeTraceInstantScope::Global,
                             args: None,
                         }
-                        .to_json()?,
+                        .into_json()?,
                     );
                 }
                 _ => {}
@@ -1091,19 +1248,39 @@ impl ChromeTraceWriter {
     fn write_instant_events(&mut self, events: Vec<ChromeTraceInstant>) -> buck2_error::Result<()> {
         self.trace_events.reserve(events.len());
         for event in events.into_iter() {
-            self.trace_events.push(event.to_json()?);
+            self.trace_events.push(event.into_json()?);
+        }
+        Ok(())
+    }
+
+    fn write_thread_names(&mut self) -> buck2_error::Result<()> {
+        for (track_key, allocator) in self.unused_track_ids.iter() {
+            for track in 0..allocator.lowest_never_used {
+                let track_id = TrackId {
+                    track_key: *track_key,
+                    track,
+                };
+                let tid = track_id.as_u64()?;
+                let event = ChromeTraceMetadata {
+                    kind: ChromeTraceMetadataKind::Thread { pid: 0, tid },
+                    name: String::from(track_id),
+                    labels: None,
+                    sort_index: Some(tid),
+                };
+                self.trace_events.push(event.into_json()?);
+            }
         }
         Ok(())
     }
 
     fn write_critical_path(
         &mut self,
-        name: SpanCategorization,
+        track_key: SpanCategorization,
         critical_path: &[buck2_data::CriticalPathEntry2],
     ) -> buck2_error::Result<()> {
         // Write critical path as a series of spans on a dedicated track
         let target_display_options = TargetDisplayOptions::for_chrome_trace();
-        self.write_critical_path_hierarchical(name, critical_path, target_display_options)
+        self.write_critical_path_hierarchical(track_key, critical_path, target_display_options)
     }
 
     /// Write the critical path with hierarchical structure:
@@ -1191,10 +1368,10 @@ impl ChromeTraceWriter {
         track: u64,
     ) -> buck2_error::Result<()> {
         // Calculate the overall start time and duration for the parent span
-        let first_start_offset = waiting_entries
-            .first()
-            .map(|e| e.start_offset_ns.unwrap_or(0))
-            .unwrap_or_else(|| main_entry.start_offset_ns.unwrap_or(0));
+        let first_start_offset = waiting_entries.first().map_or_else(
+            || main_entry.start_offset_ns.unwrap_or(0),
+            |e| e.start_offset_ns.unwrap_or(0),
+        );
 
         let parent_start_time = self
             .first_pass
@@ -1250,7 +1427,7 @@ impl ChromeTraceWriter {
         let parent_name = main_display.display_name();
 
         // Create the track ID for this group - parent owns it, children inherit it
-        let track_id = TrackId(name, track);
+        let track_id = self.mark_track_used(name, track)?;
 
         // Write parent span (owns the track)
         self.trace_events.push(
@@ -1265,7 +1442,7 @@ impl ChromeTraceWriter {
                 },
                 duration: parent_duration,
             }
-            .to_json()?,
+            .into_json()?,
         );
 
         // Small offset to avoid trace viewer rendering issues when parent/child
@@ -1310,7 +1487,7 @@ impl ChromeTraceWriter {
                         },
                         duration: adjusted_duration,
                     }
-                    .to_json()?,
+                    .into_json()?,
                 );
             }
         }
@@ -1380,7 +1557,7 @@ impl ChromeTraceWriter {
                 },
                 duration,
             }
-            .to_json()?,
+            .into_json()?,
         );
 
         Ok(())
@@ -1400,12 +1577,12 @@ impl ChromeTraceWriter {
                 .try_into_duration()?;
             if let SpanTrackAssignment::Owned(track_id) = &open.track {
                 self.unused_track_ids
-                    .get_mut(&track_id.0)
+                    .get_mut(&track_id.track_key)
                     .unwrap()
-                    .mark_unused(track_id.1);
+                    .mark_unused(track_id.track);
             }
             self.trace_events
-                .push(ChromeTraceClosedSpan { open, duration }.to_json()?);
+                .push(ChromeTraceClosedSpan { open, duration }.into_json()?);
         }
 
         match end.data.as_ref() {
@@ -1428,7 +1605,7 @@ impl ChromeTraceWriter {
                                 // "method": materialization.method, // TODO: convert to string?
                             })),
                         }
-                        .to_json()?,
+                        .into_json()?,
                     );
                 }
             }
@@ -1496,12 +1673,31 @@ impl BuckSubcommand for ChromeTraceCommand {
         _events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         // For backward compatibility, use the path field if it's set
-        let log = if let Some(path) = self.path {
+        let log = if let Some(path) = self.event_log_path {
             EventLogPathBuf::infer(path.resolve(&ctx.working_dir))?
         } else {
             self.event_log.get(&ctx).await?
         };
-        let trace_path = self.trace_path.resolve(&ctx.working_dir);
+
+        #[cfg(fbcode_build)]
+        let (trace_path, _temp_trace_file) = match (self.output.trace_path, self.output.upload) {
+            (Some(trace_path), _) => (trace_path.resolve(&ctx.working_dir), None),
+            (None, false) => {
+                return ExitResult::err(buck2_error::internal_error!(
+                    "clap should have required at least one of --trace-path/--upload"
+                ));
+            }
+            (None, true) => {
+                let temp_trace_file = tempfile::NamedTempFile::new()?;
+                (
+                    ctx.working_dir.resolve(temp_trace_file.path()),
+                    Some(temp_trace_file),
+                )
+            }
+        };
+        #[cfg(not(fbcode_build))]
+        let trace_path = self.output.trace_path.resolve(&ctx.working_dir);
+
         let dest_path = if trace_path.is_dir() {
             Self::trace_path_from_dir(trace_path, log.path())
                 .buck_error_context("Could not determine trace path")?
@@ -1522,13 +1718,64 @@ impl BuckSubcommand for ChromeTraceCommand {
         }
 
         let writer = Self::trace_writer(log, self.max_tracks, instant_events).await?;
+        #[cfg(fbcode_build)]
+        let trace_id = writer.invocation.trace_id.clone();
 
         let tracefile = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(dest_path)?;
-        writer.to_writer(BufWriter::new(tracefile))?;
+            .open(&dest_path)?;
+        let mut enc = GzEncoder::new(tracefile, Compression::default());
+        writer.into_writer(&mut enc)?;
+        drop(enc);
+
+        #[cfg(fbcode_build)]
+        if self.output.upload {
+            let bucket = buck2_common::manifold::Bucket::EVENT_LOGS;
+            let sys_info = buck2_events::metadata::system_info();
+            let username = sys_info
+                .username
+                .unwrap_or_else(|| "unknown_user".to_owned());
+            let timestamp = chrono::Utc::now().to_rfc3339();
+
+            let manifold_filename =
+                format!("flat/{trace_id}_{username}_{timestamp}.chrome_trace.gz");
+            println!("Uploading {manifold_filename}...");
+            let client = buck2_common::manifold::ManifoldClient::new().await?;
+            let explorer_url = client
+                .upload_file(
+                    &dest_path,
+                    manifold_filename.clone(),
+                    bucket,
+                    buck2_common::manifold::Ttl::from_days(30),
+                )
+                .await?;
+            fn ansi_url(url: &str, text: &str) -> String {
+                const ESC: &str = "\x1b";
+                const ESCURL: &str = const_format::concatcp!(ESC, "]8;;");
+                const ESCSEP: &str = const_format::concatcp!(ESC, "\\");
+                format!("{ESCURL}{url}{ESCSEP}{text}{ESCURL}{ESCSEP}")
+            }
+            let download_url = bucket.intern_url(manifold_filename.as_str());
+            println!(
+                "Uploaded generated trace: {}",
+                ansi_url(&explorer_url, &explorer_url)
+            );
+            println!(
+                "Direct download: {}",
+                ansi_url(&download_url, &download_url)
+            );
+
+            const PERFETTO_URL: &str =
+                "https://interncache-all.fbcdn.net/manifold/perfetto-artifacts/tree/ui/index.html";
+            let mut query_string = form_urlencoded::Serializer::new("".to_owned());
+            query_string.append_pair("url", &download_url);
+            let query_string = query_string.finish();
+            let perfetto_url = format!("{PERFETTO_URL}#!/?{}", query_string);
+
+            println!("Perfetto: {}", ansi_url(&perfetto_url, &perfetto_url));
+        }
 
         ExitResult::success()
     }
@@ -1604,6 +1851,9 @@ impl ChromeTraceCommand {
                 .handle_event(&event)
                 .with_buck_error_context(|| display::InvalidBuckEvent(event).to_string())?;
         }
+
+        writer.write_thread_names()?;
+
         Ok(writer)
     }
 }

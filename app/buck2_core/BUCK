@@ -7,7 +7,8 @@ rust_library(
     name = "buck2_core",
     srcs = glob(
         ["src/**/*.rs"],
-    ) + ["src/pattern/target_pattern.md"],
+    )
+    + ["src/pattern/target_pattern.md"],
     doc_deps = [
         "fbsource//third-party/rust:maplit",
     ],
@@ -41,7 +42,6 @@ rust_library(
         "fbsource//third-party/rust:rand",
         "fbsource//third-party/rust:ref-cast",
         "fbsource//third-party/rust:regex",
-        "fbsource//third-party/rust:relative-path",
         "fbsource//third-party/rust:sequence_trie",
         "fbsource//third-party/rust:serde",
         "fbsource//third-party/rust:smallvec",
@@ -56,6 +56,7 @@ rust_library(
         "//buck2/app/buck2_env:buck2_env",
         "//buck2/app/buck2_error:buck2_error",
         "//buck2/app/buck2_fs:buck2_fs",
+        "//buck2/app/buck2_hash:buck2_hash",
         "//buck2/app/buck2_util:buck2_util",
         "//buck2/gazebo/cmp_any:cmp_any",
         "//buck2/gazebo/dupe:dupe",
@@ -70,7 +71,6 @@ rust_library(
         "DEFAULT": [],
         "ovr_config//os:windows": [
             "fbsource//third-party/rust:common-path",
-            "fbsource//third-party/rust:winapi",
         ],
     }),
 )

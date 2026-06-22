@@ -20,6 +20,7 @@
 use allocative::Allocative;
 use starlark_derive::Freeze;
 use starlark_derive::NoSerialize;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::Trace;
 use starlark_derive::starlark_value;
 
@@ -42,7 +43,8 @@ use crate::values::ValueLike;
     derive_more::Display,
     Allocative,
     ProvidesStaticType,
-    NoSerialize
+    NoSerialize,
+    StarlarkPagable
 )]
 #[display("TestComplexValue<{}>", _0)]
 pub(crate) struct TestComplexValue<V: ValueLifetimeless>(pub(crate) V);

@@ -27,6 +27,7 @@ use dupe::Dupe;
 use crate::PagableBoxDeserialize;
 use crate::PagableDeserialize;
 use crate::PagableDeserializer;
+use crate::PagableDeserializerRecipe;
 use crate::PagableSerialize;
 use crate::PagableSerializer;
 use crate::storage::data::DataKey;
@@ -81,6 +82,7 @@ pub fn deserialize_arc<'de, T: ArcErase, D: PagableDeserializer<'de> + ?Sized>(
 ) -> anyhow::Result<T> {
     fn deserialize_fn<A: ArcErase>(
         d: &mut dyn PagableDeserializer<'_>,
+        _recipe: Arc<dyn PagableDeserializerRecipe>,
     ) -> crate::Result<Box<dyn ArcEraseDyn>> {
         let arc = A::deserialize_inner(d)?;
         Ok(Box::new(arc))
@@ -265,7 +267,7 @@ impl<T: ?Sized + PagableSerialize + for<'de> PagableBoxDeserialize<'de> + Send +
     }
 
     fn serialize_inner(&self, ser: &mut dyn PagableSerializer) -> crate::Result<()> {
-        T::pagable_serialize(&self, ser)
+        T::pagable_serialize(self, ser)
     }
 
     fn deserialize_inner<'de, D: PagableDeserializer<'de> + ?Sized>(
@@ -296,7 +298,7 @@ impl<T: PagableSerialize + for<'de> PagableDeserialize<'de> + Send + Sync + 'sta
     }
 
     fn serialize_inner(&self, ser: &mut dyn PagableSerializer) -> crate::Result<()> {
-        T::pagable_serialize(&self, ser)
+        T::pagable_serialize(self, ser)
     }
 
     fn deserialize_inner<'de, D: PagableDeserializer<'de> + ?Sized>(
@@ -431,9 +433,16 @@ impl<W: 'static, A: ArcErase<Weak = W>> ArcEraseType for StdArcEraseType<A> {
 /// This is a zero-sized type that carries the Arc type information and
 /// implements `ArcEraseType` for any `ArcErase` implementor.
 pub struct StdArcEraseType<T: 'static>(std::marker::PhantomData<T>);
+
+impl<T: 'static> Default for StdArcEraseType<T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
 impl<T: 'static> StdArcEraseType<T> {
     pub fn new() -> Self {
-        Self(std::marker::PhantomData)
+        Self::default()
     }
 }
 

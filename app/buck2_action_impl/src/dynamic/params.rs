@@ -18,6 +18,7 @@ use buck2_build_api::interpreter::rule_defs::plugins::FrozenAnalysisPlugins;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_error::internal_error;
 use gazebo::prelude::OptionExt;
+use starlark::StarlarkPagable;
 use starlark::any::ProvidesStaticType;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
@@ -38,13 +39,14 @@ use starlark::values::typing::StarlarkCallable;
 use crate::dynamic::attrs::DynamicAttrValues;
 use crate::dynamic::dynamic_actions_callable::FrozenStarlarkDynamicActionsCallable;
 
-#[derive(Allocative, Debug)]
+#[derive(Allocative, Debug, StarlarkPagable)]
 pub(crate) struct DynamicLambdaStaticFields {
     /// Input artifacts required to be materialized by the lambda.
     pub(crate) artifact_values: Box<[Artifact]>,
     /// Dynamic values I depend on.
     pub(crate) dynamic_values: Box<[DynamicValue]>,
     /// Execution platform inherited from the owner to use for actionsfbcode/buck2/app/buck2_action_impl/src/dynamic/deferred.rs
+    #[starlark_pagable(pagable)]
     pub(crate) execution_platform: ExecutionPlatformResolution,
 }
 
@@ -61,7 +63,7 @@ pub(crate) struct DynamicLambdaParams<'v> {
     pub(crate) static_fields: DynamicLambdaStaticFields,
 }
 
-#[derive(Allocative, Debug, ProvidesStaticType)]
+#[derive(Allocative, Debug, ProvidesStaticType, StarlarkPagable)]
 pub struct FrozenDynamicLambdaParams {
     pub(crate) attributes: Option<FrozenValueOfUnchecked<'static, StructRef<'static>>>,
     pub(crate) plugins: Option<FrozenValueTyped<'static, FrozenAnalysisPlugins>>,
@@ -119,11 +121,15 @@ impl<'v> Freeze for DynamicLambdaParams<'v> {
             plugins: self.plugins.freeze(freezer)?,
             lambda: self.lambda.freeze(freezer)?,
             attr_values,
-            outputs: self
-                .outputs
-                .into_iter()
-                .map(|o| o.freeze(freezer))
-                .collect::<FreezeResult<_>>()?,
+            // N.B. collect::<Result<_>> sets the lower bound to zero,
+            // which can cause over-allocations in frozen containers.
+            outputs: {
+                let mut outputs = Vec::with_capacity(self.outputs.len());
+                for output in self.outputs {
+                    outputs.push(output.freeze(freezer)?);
+                }
+                outputs.into_boxed_slice()
+            },
             static_fields: self.static_fields,
         })
     }

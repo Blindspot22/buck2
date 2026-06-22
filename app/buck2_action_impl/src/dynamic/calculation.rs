@@ -29,7 +29,11 @@ use dice::CancellationContext;
 use dice::Demand;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::dynamic::deferred::prepare_and_execute_lambda;
 use crate::dynamic::storage::FrozenDynamicLambdaParamsStorageImpl;
@@ -59,8 +63,10 @@ pub(crate) fn init_dynamic_lambda_calculation() {
     Allocative,
     Hash,
     Eq,
-    PartialEq
+    PartialEq,
+    Pagable
 )]
+#[pagable_typetag(dice::DiceKeyDyn)]
 pub struct DynamicLambdaDiceKey(DynamicLambdaResultsKey);
 
 #[async_trait]
@@ -104,6 +110,10 @@ impl Key for DynamicLambdaDiceKey {
 
     fn provide<'a>(&'a self, demand: &mut Demand<'a>) {
         demand.provide_value_with(|| BuildSignalsNodeKey::new(self.dupe()));
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
     }
 }
 

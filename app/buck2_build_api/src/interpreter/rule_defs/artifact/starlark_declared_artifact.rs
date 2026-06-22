@@ -27,7 +27,6 @@ use starlark::any::ProvidesStaticType;
 use starlark::codemap::FileSpan;
 use starlark::collections::StarlarkHasher;
 use starlark::environment::Methods;
-use starlark::environment::MethodsStatic;
 use starlark::values::AllocValue;
 use starlark::values::Demand;
 use starlark::values::Freeze;
@@ -60,7 +59,6 @@ use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
-use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
 use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 
@@ -255,9 +253,7 @@ impl<'v> CommandLineArgLike<'v> for StarlarkDeclaredArtifact<'v> {
 
     fn add_to_command_line(
         &self,
-        _cli: &mut dyn CommandLineBuilder,
-        _ctx: &mut dyn CommandLineContext,
-        _artifact_path_mapping: &dyn ArtifactPathMapper,
+        _fmt: &mut CommandLineBuilder<'v, '_>,
     ) -> buck2_error::Result<()> {
         // TODO: proper error message
         Err(buck2_error!(
@@ -323,13 +319,14 @@ impl<'v> AllocValue<'v> for StarlarkDeclaredArtifact<'v> {
     }
 }
 
+starlark::methods_static!(STARLARK_DECLARED_ARTIFACT_METHODS = artifact_methods);
+
 #[starlark_value(type = "Artifact", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkDeclaredArtifact<'v> {
     type Canonical = StarlarkArtifact;
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(artifact_methods)
+        Some(STARLARK_DECLARED_ARTIFACT_METHODS.methods())
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {

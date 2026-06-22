@@ -21,6 +21,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
 use regex::Regex;
 use starlark_map::sorted_map::SortedMap;
 
@@ -67,7 +68,7 @@ fn format_cycle(cycle: &[(String, String)]) -> String {
         .join(" -> ")
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Allocative)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Allocative, Pagable)]
 struct SectionBuilder {
     values: BTreeMap<String, ConfigValue>,
 }
@@ -83,7 +84,7 @@ impl SectionBuilder {
 /// Represents the state associated with a buckconfig that is being parsed right now.
 ///
 /// A buckconfig will generally be parsed by combining multiple command args and files
-#[derive(Debug, Clone, PartialEq, Eq, Allocative)]
+#[derive(Debug, Clone, PartialEq, Eq, Allocative, Pagable)]
 pub(crate) struct LegacyConfigParser {
     values: BTreeMap<String, SectionBuilder>,
 }
@@ -145,10 +146,7 @@ impl LegacyConfigParser {
         let pair = config_pair.to_owned();
         let cell_matches = pair.cell.as_deref() == Some(current_cell) || pair.cell.is_none();
         if cell_matches {
-            let config_section = self
-                .values
-                .entry(pair.section)
-                .or_insert_with(SectionBuilder::default);
+            let config_section = self.values.entry(pair.section).or_default();
 
             match pair.value {
                 Some(raw_value) => {
@@ -174,7 +172,7 @@ impl LegacyConfigParser {
             for (key, value) in section_builder.values.iter() {
                 self.values
                     .entry(section.to_owned())
-                    .or_insert_with(SectionBuilder::default)
+                    .or_default()
                     .values
                     .insert(key.to_owned(), value.clone());
             }
@@ -386,7 +384,7 @@ impl<'p> LegacyConfigFileParser<'p> {
                     let include_file = if let Ok(absolute) = AbsNormPath::new(include) {
                         ConfigPath::Global(absolute.to_owned().into_abs_path_buf())
                     } else {
-                        let relative = RelativePath::new(include);
+                        let relative = RelativePath::unchecked_new(include);
                         match config_path.join_to_parent_normalized(relative) {
                             Ok(d) => d,
                             Err(_) => {
@@ -415,11 +413,7 @@ impl<'p> LegacyConfigFileParser<'p> {
     fn commit_section(&mut self, section: (String, BTreeMap<String, ConfigValue>)) {
         let (section, values) = section;
         // Commit the previous section.
-        let committed = self
-            .values
-            .values
-            .entry(section)
-            .or_insert_with(SectionBuilder::default);
+        let committed = self.values.values.entry(section).or_default();
         values.into_iter().for_each(|(k, v)| {
             committed.values.insert(k, v);
         });

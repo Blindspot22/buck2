@@ -24,6 +24,11 @@ use crate::soft_error;
 
 pub const EQ_SIGN_SUBST: &str = "_eqsb_";
 
+const TARGET_NAME_VALID_CHARS: &str =
+    r"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_,.=-\/~@!+$";
+pub(crate) const TARGET_NAME_VALID_CHARS_SET: AsciiCharSet =
+    AsciiCharSet::new(TARGET_NAME_VALID_CHARS);
+
 /// 'TargetName' is the name given to a particular target.
 /// e.g. `foo` in the label `fbsource//package/path:foo`.
 #[derive(
@@ -87,11 +92,11 @@ impl TargetName {
     }
 
     fn verify(name: &str) -> buck2_error::Result<()> {
-        const VALID_CHARS: &str =
-            r"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_,.=-\/~@!+$";
-        const SET: AsciiCharSet = AsciiCharSet::new(VALID_CHARS);
-
-        if name.is_empty() || !name.as_bytes().iter().all(|&b| SET.contains(b)) {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii() && TARGET_NAME_VALID_CHARS_SET.contains(c as u8))
+        {
             return Err(Self::bad_name_error(name));
         }
 
@@ -109,7 +114,8 @@ impl TargetName {
                 "label_has_comma",
                 TargetNameError::LabelHasSpecialCharacter(name.to_owned(), ',').into(),
                 deprecation: true,
-                quiet: true
+                quiet: true,
+                error_on_oss: true
             )?;
         }
         if name.contains('$') {
@@ -117,7 +123,8 @@ impl TargetName {
                 "label_has_dollar_sign",
                 TargetNameError::LabelHasSpecialCharacter(name.to_owned(), '$').into(),
                 deprecation: true,
-                quiet: true
+                quiet: true,
+                error_on_oss: true
             )?;
         }
 
@@ -247,6 +254,11 @@ mod tests {
         assert!(TargetName::new("foo bar").is_err());
         assert!(TargetName::new("foo?bar").is_err());
         assert!(TargetName::new("foo_eqsb_bar").is_err());
+        // Parentheses must be rejected; split_cfg relies on this invariant
+        // to avoid brace-matching when splitting configuration predicates.
+        assert!(TargetName::new("foo(bar)").is_err());
+        assert!(TargetName::new("foo(").is_err());
+        assert!(TargetName::new("foo)").is_err());
 
         if let Err(e) = TargetName::new("target[label]") {
             let msg = format!("{e:#}");

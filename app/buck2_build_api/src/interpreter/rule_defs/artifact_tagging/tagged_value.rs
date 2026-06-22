@@ -15,17 +15,16 @@ use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::values::Freeze;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 use super::ArtifactTag;
 use super::TaggedVisitor;
@@ -39,13 +38,15 @@ use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
     Freeze,
     Display,
     ProvidesStaticType,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[derive(NoSerialize)] // TODO make artifacts serializable
 #[repr(C)]
 #[display("TaggedValue({}, tagged {})", inner, tag)]
 pub struct StarlarkTaggedValueGen<V: ValueLifetimeless> {
     inner: V,
+    #[starlark_pagable(pagable)]
     tag: ArtifactTag,
     inputs_only: bool,
 }
@@ -70,14 +71,15 @@ impl<'v> StarlarkTaggedValue<'v> {
 
 starlark_complex_value!(pub StarlarkTaggedValue);
 
+starlark::methods_static!(TAGGED_VALUE_METHODS = tagged_value_methods);
+
 #[starlark_value(type = "TaggedValue")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkTaggedValueGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(tagged_value_methods)
+        Some(TAGGED_VALUE_METHODS.methods())
     }
 }
 
@@ -102,6 +104,5 @@ impl<V: ValueLifetimeless> StarlarkTaggedValueGen<V> {
 }
 
 #[starlark_module]
-pub(crate) fn register_tagged_value(globals: &mut GlobalsBuilder) {
-    const TaggedValue: StarlarkValueAsType<StarlarkTaggedValue> = StarlarkValueAsType::new();
-}
+#[starlark_types(StarlarkTaggedValue<'_> as TaggedValue)]
+pub(crate) fn register_tagged_value(globals: &mut GlobalsBuilder) {}

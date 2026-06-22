@@ -67,7 +67,7 @@ def _is_resources_toolchain_enabled() -> bool:
         # Avoid returning buck2-only targets
         return False
 
-    return (read_root_config("apple", "resources_toolchain_enabled", "true").lower() == "true")
+    return read_root_config("apple", "resources_toolchain_enabled", "true").lower() == "true"
 
 def make_resource_bundle_rule(apple_resource_bundle_rule, **kwargs) -> [None, str]:
     # The `apple_resource_bundle()` target will _always_ be Xcode-based, so resources can always be used
@@ -84,6 +84,7 @@ def make_resource_bundle_rule(apple_resource_bundle_rule, **kwargs) -> [None, st
         "exec_compatible_with": kwargs.get("exec_compatible_with"),
         "labels": ["generated"],
         "product_name_from_module_name": kwargs.get("product_name_from_module_name"),
+        "skip_private_swiftinterface": kwargs.get("skip_private_swiftinterface"),
         "target_compatible_with": kwargs.get("target_compatible_with"),
         "_bundle_target_name": kwargs["name"],
         "_compile_resources_locally_override": kwargs["_compile_resources_locally_override"],
@@ -92,9 +93,6 @@ def make_resource_bundle_rule(apple_resource_bundle_rule, **kwargs) -> [None, st
         resource_bundle_kwargs[field_name] = kwargs.get(field_name)
 
     # TODO(T125269558): Remove usage of apple_resource_bundle() once we have exec groups.
-    apple_resource_bundle_rule(
-        name = resource_bundle_name,
-        **resource_bundle_kwargs
-    )
+    apple_resource_bundle_rule(name = resource_bundle_name, **resource_bundle_kwargs)
 
     return ":{}".format(resource_bundle_name)

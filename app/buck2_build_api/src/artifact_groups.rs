@@ -20,10 +20,13 @@ use allocative::Allocative;
 pub use artifact_group_values::ArtifactGroupValues;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_core::configuration::data::ConfigurationData;
+use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use derive_more::Display;
 use dice::DiceComputations;
 use dupe::Dupe;
 use gazebo::variants::UnpackVariants;
+use pagable::Pagable;
+use starlark::values::StarlarkPagableViaPagable;
 use static_assertions::assert_eq_size;
 
 use self::calculation::EnsureTransitiveSetProjectionKey;
@@ -32,7 +35,7 @@ use crate::artifact_groups::deferred::TransitiveSetKey;
 use crate::artifact_groups::promise::PromiseArtifact;
 use crate::deferred::calculation::GET_PROMISED_ARTIFACT;
 
-#[derive(Clone, Debug, Display, Dupe, PartialEq, Eq, Hash, Allocative)]
+#[derive(Clone, Debug, Display, Dupe, PartialEq, Eq, Hash, Allocative, Pagable)]
 #[display("{} {}", promise_artifact, has_content_based_path)]
 pub struct PromiseArtifactWrapper {
     pub promise_artifact: PromiseArtifact,
@@ -48,7 +51,7 @@ impl PromiseArtifactWrapper {
     }
 }
 
-#[derive(Clone, Debug, Display, Dupe, PartialEq, Eq, Hash, Allocative)]
+#[derive(Clone, Debug, Display, Dupe, PartialEq, Eq, Hash, Allocative, Pagable)]
 #[display("{} {}", key, path_resolution_may_require_artifact_value)]
 pub struct TransitiveSetProjectionWrapper {
     pub key: TransitiveSetProjectionKey,
@@ -81,7 +84,9 @@ impl TransitiveSetProjectionWrapper {
     Eq,
     Hash,
     UnpackVariants,
-    Allocative
+    Allocative,
+    Pagable,
+    StarlarkPagableViaPagable
 )]
 pub enum ArtifactGroup {
     Artifact(Artifact),
@@ -131,14 +136,12 @@ impl ArtifactGroup {
     /// configurations.
     ///
     /// This is true if the underlying artifacts are source artifacts, or if they are content-based.
-    /// It is also true if they are configured with a different platform than the target platform of
-    /// the current node (e.g. execution deps do not prevent dedupe from taking place, even if they
-    /// are configuration-based).
-    ///
-    /// Note that this does not handle transitions correctly. That is generally okay, since we usually
-    /// transition at the binary level and those don't tend to be eligible for dedupe anyway. We could
-    /// fix that by looking at the execution platform, but we don't have access to that.
-    pub fn is_eligible_for_dedupe(&self, target_platform: Option<&ConfigurationData>) -> bool {
+    /// It is also true if they are configured for an execution platform (since execution platforms
+    /// are generally shared across target configuration changes).
+    pub fn is_eligible_for_dedupe(
+        &self,
+        target_platform: Option<&ConfigurationData>,
+    ) -> buck2_data::EligibleForDedupe {
         let is_artifact_group_eligible_for_dedupe = match self {
             ArtifactGroup::Artifact(a) => !a.has_configuration_based_path(),
             ArtifactGroup::TransitiveSetProjection(p) => p.is_eligible_for_dedupe,
@@ -146,26 +149,34 @@ impl ArtifactGroup {
         };
 
         if is_artifact_group_eligible_for_dedupe {
-            return true;
+            return buck2_data::EligibleForDedupe::Eligible;
         }
 
-        if let Some(target_platform) = target_platform {
-            let artifact_group_owner = match self {
-                ArtifactGroup::Artifact(a) => a.owner().expect(
-                    "Artifact must have an owner, otherwise it would be eligible for dedupe",
-                ),
-                ArtifactGroup::TransitiveSetProjection(p) => p.key.key.holder_key().owner(),
-                // We have to assume that anonymous targets are not eligible for dedupe unless they are content-based,
-                // since they have a hash based on their inputs, which will very likely be different across configurations.
-                ArtifactGroup::Promise(_) => return false,
-            };
+        let artifact_group_owner = match self {
+            ArtifactGroup::Artifact(a) => a
+                .owner()
+                .expect("Artifact must have an owner, otherwise it would be eligible for dedupe"),
+            ArtifactGroup::TransitiveSetProjection(p) => p.key.key.holder_key().owner(),
+            // We have to assume that anonymous targets are not eligible for dedupe unless they are content-based,
+            // since they have a hash based on their inputs, which will very likely be different across configurations.
+            ArtifactGroup::Promise(_) => return buck2_data::EligibleForDedupe::IneligibleInput,
+        };
 
-            artifact_group_owner
-                .configured_label()
-                .is_some_and(|l| l.cfg() != target_platform)
-        } else {
-            // Not building for a specified target platform, input itself needs to be eligible for dedupe
-            false
+        match artifact_group_owner {
+            BaseDeferredKey::TargetLabel(a) => {
+                if a.cfg().is_marked_as_exec_platform() {
+                    if target_platform.is_some_and(|tp| tp == a.cfg()) {
+                        buck2_data::EligibleForDedupe::ExecutionPlatformUnknownEligibility
+                    } else {
+                        buck2_data::EligibleForDedupe::Eligible
+                    }
+                } else {
+                    buck2_data::EligibleForDedupe::IneligibleInput
+                }
+            }
+            // TODO(ianc) do we have a better way of detecting if an artifact being built for an anon target is eligible for dedupe?
+            BaseDeferredKey::AnonTarget(_) => buck2_data::EligibleForDedupe::Eligible,
+            BaseDeferredKey::BxlLabel(_) => buck2_data::EligibleForDedupe::IneligibleInput,
         }
     }
 }
@@ -184,7 +195,17 @@ pub enum ResolvedArtifactGroupBuildSignalsKey {
     BuildKey(BuildKey),
 }
 
-#[derive(Clone, Debug, Display, Dupe, PartialEq, Eq, Hash, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Display,
+    Dupe,
+    PartialEq,
+    Eq,
+    Hash,
+    Allocative,
+    pagable::Pagable
+)]
 #[display("TransitiveSetProjection({}, {})", key, projection)]
 pub struct TransitiveSetProjectionKey {
     pub key: TransitiveSetKey,

@@ -25,6 +25,7 @@ use std::hash::Hasher;
 use allocative::Allocative;
 use dupe::Dupe;
 use serde::Serialize;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_value;
 use starlark_map::StarlarkHashValue;
 
@@ -160,7 +161,16 @@ pub(crate) fn write_compact<W: fmt::Write>(
 }
 
 /// Runtime representation of Starlark `float` type.
-#[derive(Clone, Dupe, Copy, Debug, ProvidesStaticType, Serialize, Allocative)]
+#[derive(
+    Clone,
+    Dupe,
+    Copy,
+    Debug,
+    ProvidesStaticType,
+    Serialize,
+    Allocative,
+    StarlarkPagable
+)]
 #[serde(transparent)]
 pub struct StarlarkFloat(pub f64);
 

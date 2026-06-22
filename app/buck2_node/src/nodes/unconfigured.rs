@@ -58,6 +58,8 @@ use crate::nodes::attributes::TYPE;
 use crate::package::Package;
 use crate::rule::Rule;
 use crate::rule_type::RuleType;
+use crate::visibility::VisibilityError;
+use crate::visibility::VisibilityPatternList;
 use crate::visibility::VisibilitySpecification;
 
 /// Describes a target including its name, type, and the values that the user provided.
@@ -68,7 +70,7 @@ use crate::visibility::VisibilitySpecification;
 /// the attribute names and it doesn't store an entry for something that has a default value. All
 /// that information is contained in the AttributeSpec. This means that to access an attribute we
 /// need to look at both the attrs held by the TargetNode and the information in the AttributeSpec.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Allocative)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Allocative, Pagable)]
 pub struct TargetNode(triomphe::Arc<TargetNodeData>);
 
 impl Dupe for TargetNode {}
@@ -111,7 +113,7 @@ impl fmt::Display for RuleKind {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Allocative, Pagable)]
 pub struct TargetNodeData {
     /// Rule type for this target.
     pub rule: Arc<Rule>,
@@ -130,6 +132,7 @@ pub struct TargetNodeData {
     deps_cache: CoercedDeps,
 
     /// Call stack for the target.
+    #[pagable(discard = "None")]
     call_stack: Option<StarlarkCallStack>,
 
     /// Config modifiers set in the package this target belongs to
@@ -165,6 +168,13 @@ impl TargetNodeData {
 
     pub fn test_config_unification_rollout(&self) -> bool {
         self.test_config_unification_rollout
+    }
+
+    /// Cap inherited from `enforce_visibility_intersection()`. `Public` = no cap.
+    /// Stored on `Package` (per build file), so all targets in the same TARGETS
+    /// file share the same cap allocation.
+    pub fn visibility_cap(&self) -> &VisibilityPatternList {
+        &self.package.visibility_cap
     }
 }
 
@@ -210,7 +220,7 @@ impl TargetNode {
         ) {
             Some(v) => match v.value {
                 CoercedAttr::None => None,
-                CoercedAttr::Label(t) => Some(t.target()),
+                CoercedAttr::ConfigurationDep(t) => Some(t.target()),
                 CoercedAttr::Selector(_) | CoercedAttr::Concat(_) => {
                     unreachable!("coercer verified attribute is not configurable")
                 }
@@ -279,7 +289,23 @@ impl TargetNode {
         if self.label().pkg() == target.pkg() {
             return Ok(true);
         }
-        Ok(self.visibility()?.0.matches_target(target))
+        if !self.visibility()?.0.matches_target(target)? {
+            return Ok(false);
+        }
+        self.0.package.visibility_cap.matches_target(target)
+    }
+
+    pub fn not_visible_to_error(&self, consumer: TargetLabel) -> VisibilityError {
+        let cap = self.0.package.visibility_cap.dupe();
+        if matches!(cap, VisibilityPatternList::Public) {
+            VisibilityError::NotVisibleTo(self.label().dupe(), consumer)
+        } else {
+            let visibility = self
+                .visibility()
+                .map(|v| v.dupe())
+                .unwrap_or(VisibilitySpecification::DEFAULT);
+            VisibilityError::NotVisibleToWithCap(self.label().dupe(), consumer, visibility, cap)
+        }
     }
 
     /// Returns an iterator of all attributes.
@@ -688,7 +714,7 @@ pub mod testing {
             for (name, _attr, val) in attrs.into_iter() {
                 let idx = attr_spec.attribute_id_by_name(name).unwrap();
                 let attr = attr_spec.attribute(name).unwrap();
-                val.traverse(attr.coercer(), label.pkg(), &mut deps_cache)
+                val.traverse(attr.coercer(), Some(label.pkg()), &mut deps_cache)
                     .unwrap();
                 attributes.push_sorted(idx, val);
             }
@@ -708,6 +734,7 @@ pub mod testing {
                 Arc::new(Package {
                     buildfile_path,
                     oncall: None,
+                    visibility_cap: VisibilityPatternList::Public,
                 }),
                 label,
                 attributes,

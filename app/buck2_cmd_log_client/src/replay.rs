@@ -138,7 +138,9 @@ impl BuckSubcommand for ReplayCommand {
                 start_paused,
             )
             .await?;
-            let console = get_console_with_root(
+            // Replay doesn't surface the build-speed rating prompt, so we
+            // don't need the `used_superconsole` flag from get_console_with_root.
+            let (console, _used_superconsole) = get_console_with_root(
                 invocation.trace_id,
                 console_opts.console_type,
                 ctx.verbosity,
@@ -369,17 +371,11 @@ async fn find_next_event_with_delay(
     min_timestamp: Option<prost_types::Timestamp>,
 ) -> Option<(buck2_error::Result<StreamValue>, prost_types::Timestamp)> {
     while let Some(event) = events.next().await {
-        match &event {
-            Ok(StreamValue::Event(buck_event)) => {
-                let ts = buck_event.timestamp.unwrap();
-                if min_timestamp
-                    .is_none_or(|min_timestamp| cmp_timestamps(min_timestamp, ts).is_le())
-                {
-                    return Some((event, ts));
-                }
+        if let Ok(StreamValue::Event(buck_event)) = &event {
+            let ts = buck_event.timestamp.unwrap();
+            if min_timestamp.is_none_or(|min_timestamp| cmp_timestamps(min_timestamp, ts).is_le()) {
+                return Some((event, ts));
             }
-            // Most other kinds of events don't really happen, don't need a delay for them
-            _ => {}
         }
         if sink.send(event).is_err() {
             // The sink is closed, so we can stop sending events.

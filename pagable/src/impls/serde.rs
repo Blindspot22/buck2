@@ -8,6 +8,7 @@
  * above-listed licenses.
  */
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -45,6 +46,7 @@ macro_rules! use_serde {
     };
 }
 
+use_serde!(char);
 use_serde!(u8);
 use_serde!(u16);
 use_serde!(u32);
@@ -61,6 +63,7 @@ use_serde!(f64);
 use_serde!(bool);
 use_serde!(String);
 use_serde!(Duration);
+use_serde!(PathBuf);
 
 impl PagableSerialize for serde_json::Value {
     fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> crate::Result<()> {

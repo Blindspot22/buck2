@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -18,6 +17,7 @@ use buck2_fs::fs_util;
 use buck2_fs::paths::abs_path::AbsPathBuf;
 use buck2_fs::paths::file_name::FileName;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::StdBuckHashMap;
 use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_interpreter::factory::ProfileEventListener;
 use buck2_interpreter::starlark_profiler::data::StarlarkProfileDataAndStats;
@@ -31,7 +31,7 @@ pub(crate) struct FileWritingProfileEventListener {
 }
 
 struct State {
-    written: HashMap<ForwardRelativePathBuf, usize>,
+    written: StdBuckHashMap<ForwardRelativePathBuf, usize>,
     errors: Vec<buck2_error::Error>,
     profiles: Vec<Arc<StarlarkProfileDataAndStats>>,
 }
@@ -41,7 +41,7 @@ impl FileWritingProfileEventListener {
         Self {
             base_path,
             state: Mutex::new(State {
-                written: HashMap::new(),
+                written: StdBuckHashMap::default(),
                 errors: Vec::new(),
                 profiles: Vec::new(),
             }),
@@ -50,8 +50,8 @@ impl FileWritingProfileEventListener {
 }
 
 impl FileWritingProfileEventListener {
-    /// Writes the all_keys.list file and returns an error if any occurred while writing the profile files.
-    pub fn finalize(&self) -> buck2_error::Result<()> {
+    /// Writes the all_keys.list file and returns the path to the merged SVG if one was generated.
+    pub fn finalize(&self) -> buck2_error::Result<Option<AbsPathBuf>> {
         let lock = self.state.lock().unwrap();
         fs_util::create_dir_all(&self.base_path)?;
         let merged_profile =
@@ -62,12 +62,19 @@ impl FileWritingProfileEventListener {
             merged_profile.targets.iter().join("\n"),
         )
         .categorize_internal()?;
-        write_profile_data(&merged_profile, self.base_path.join("merged"))?;
+        let merged_prefix = self.base_path.join("merged");
+        write_profile_data(&merged_profile, merged_prefix.clone())?;
 
         if let Some(e) = lock.errors.first() {
             return Err(e.dupe());
         }
-        Ok(())
+
+        let merged_svg = merged_prefix.with_added_extension("svg");
+        if merged_svg.exists() {
+            Ok(Some(merged_svg))
+        } else {
+            Ok(None)
+        }
     }
 
     fn handle_profile_collected(

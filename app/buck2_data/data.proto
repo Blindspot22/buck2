@@ -58,7 +58,7 @@ message SpanStartEvent {
     LoadBuildFileStart load = 53;
     ExecutorStageStart executor_stage = 54;
     TestDiscoveryStart test_discovery = 55;
-    TestRunStart test_start = 56;
+    TestRunStart test_run = 56;
     FileWatcherStart file_watcher = 57;
     MaterializeRequestedArtifactStart final_materialization = 58;
     AnalysisStageStart analysis_stage = 59;
@@ -111,7 +111,7 @@ message SpanEndEvent {
     LoadBuildFileEnd load = 53;
     ExecutorStageEnd executor_stage = 54;
     TestDiscoveryEnd test_discovery = 55;
-    TestRunEnd test_end = 56;
+    TestRunEnd test_run = 56;
     SpanCancelled span_cancelled = 57;
     FileWatcherEnd file_watcher = 58;
     MaterializeRequestedArtifactEnd final_materialization = 59;
@@ -131,7 +131,7 @@ message SpanEndEvent {
     DiceCleanupEnd dice_cleanup = 73;
     ExclusiveCommandWaitEnd exclusive_command_wait = 74;
     DeferredPreparationStageEnd deferred_preparation_stage = 75;
-    DeferredEvaluationEnd deferred_evaluation = 76;
+    DynamicLambdaEnd deferred_evaluation = 76;
     BxlExecutionEnd bxl_execution = 77;
     BxlDiceInvocationEnd bxl_dice_invocation = 78;
     ReUploadEnd re_upload = 79;
@@ -326,6 +326,21 @@ message InstantEvent {
 
     // Command preemption was detected
     CommandPreempted command_preempted = 55;
+
+    // Orphan processes were killed via cgroup after action completed
+    OrphanProcessesKilled orphan_processes_killed = 56;
+
+    // Action digest tracing event
+    ActionDigestTrace action_digest_trace = 57;
+
+    // RE log stream handles available for a running action
+    ReLogStreamAvailable re_log_stream_available = 58;
+
+    // Rule type name for a CLI-resolved top-level target. Emitted once per
+    // resolved target so downstream subscribers (e.g. the invocation
+    // recorder) can accumulate rule types without the producing command
+    // having to thread them through its response.
+    TargetRuleTypeName target_rule_type_name = 59;
   }
 }
 
@@ -415,6 +430,11 @@ message DebugAdapterSnapshot {
 
 message DiceStateSnapshot {
   map<string, DiceKeyState> key_states = 1;
+  // Depth of the unbounded mpsc queue feeding the dice core-state thread,
+  // sampled at snapshot time. A sustained nonzero value means callers are
+  // submitting state requests faster than the single core-state thread can
+  // process them.
+  uint64 core_state_queue_depth = 2;
 }
 
 message DiceKeyState {
@@ -515,6 +535,18 @@ message CriticalPathEntry2 {
       ConfiguredTargetLabel standard_target = 1;
     }
     optional string target_rule_type_name = 2;
+    // When analysis is split due to anon target dependencies:
+    // absent/0 = whole (unsplit), 1 = part before anon targets, 2 = part after
+    // anon targets
+    optional uint32 part = 3;
+  }
+
+  message AnonAnalysis {
+    AnonTarget anon_target = 1;
+    // When anon analysis is split due to inner anon target dependencies:
+    // absent/0 = whole (unsplit), 1 = part before inner anon targets, 2 = part
+    // after
+    optional uint32 part = 2;
   }
 
   message DynamicAnalysis {
@@ -591,6 +623,8 @@ message CriticalPathEntry2 {
     string package = 1;
   }
 
+  message EnsureTransitiveSetProjection {}
+
   repeated uint64 span_ids = 1;
 
   // The duration we used to compute the critical path. This tracks total
@@ -635,6 +669,8 @@ message CriticalPathEntry2 {
     TestListing test_listing = 108;
     Waiting waiting = 109;
     DynamicAnalysis dynamic_analysis = 110;
+    EnsureTransitiveSetProjection ensure_transitive_set_projection = 111;
+    AnonAnalysis anon_analysis = 112;
   }
 }
 
@@ -671,6 +707,18 @@ message TopLevelTargetMetrics {
   optional uint64 remote_max_memory_peak_bytes = 6;
   // Max value for peak memory usage across all local actions.
   optional uint64 local_max_memory_peak_bytes = 7;
+  // Name of the rule type for this top-level target.
+  string target_rule_type_name = 8;
+  // Distinct RE platform identifiers used by actions for this target. Each
+  // value is the worker's `platform` property, optionally suffixed with
+  // `.subplatform` (e.g. `gpu-remote-execution.H100`) when set.
+  repeated string re_platform_names = 9;
+  // Wall-clock time in milliseconds from the start of the build at which this
+  // top-level target succeeded, failed, or timed out.
+  // The exact point in time at which the build is deemed to have started is set
+  // in the Buck2 daemon, so use this to compare durations but don't add it to a
+  // start timestamp to produce an end timestamp.
+  optional uint64 wall_clock_completion_ms = 10;
 }
 
 // Aggregated metrics across all targets in a build.
@@ -776,6 +824,10 @@ message ResourceControlEvent {
 
   // Ancestor cgroup constraints that may limit Buck2 processes
   optional AncestorCgroupConstraints ancestor_cgroup_constraints = 14;
+
+  // Arbitrary tags for categorizing events (e.g. experimental algorithm
+  // variant)
+  repeated string tags = 19;
 }
 
 // Memory constraints inherited from ancestor cgroups in the hierarchy.
@@ -847,6 +899,14 @@ message TargetCfg {
   repeated string cli_modifiers = 2;
 }
 
+// Rule type name for one CLI-resolved top-level target, emitted once per
+// target by commands that know the target node early (e.g. `buck2 test`'s
+// pattern interpretation step). The invocation recorder accumulates these
+// into `InvocationRecord.target_rule_type_names`.
+message TargetRuleTypeName {
+  string rule_type = 1;
+}
+
 // A snapshot of current system state, with useful info.
 message Snapshot {
   // Resident set size in bytes of the buck2 daemon.
@@ -867,8 +927,7 @@ message Snapshot {
   uint64 tokio_num_idle_blocking_threads = 15;
   // Tokio total number of blocking threads.
   uint64 tokio_num_blocking_threads = 16;
-  // Memory pressure as seen from all Buck2 processes (under buck2.slice)
-  uint32 allprocs_memory_pressure = 17;
+  reserved 17;
 
   uint64 re_download_bytes = 5;
   uint64 re_upload_bytes = 6;
@@ -1032,12 +1091,87 @@ message Snapshot {
   optional UnixCgroupMemoryStats allprocs_cgroup = 2003;
   // Memory usage of the forkserver daemon's slice from cgroup (if available)
   optional UnixCgroupMemoryStats forkserver_actions_cgroup = 2004;
+
+  // Detailed Tokio runtime metrics. Always populated by current daemons;
+  // absent in event logs recorded by older daemons that pre-date this field.
+  optional TokioRuntimeStats tokio_runtime_stats = 3001;
+}
+
+// https://docs.rs/tokio/latest/tokio/runtime/struct.RuntimeMetrics.html for
+// full details
+message TokioRuntimeStats {
+  message Worker {
+    // Per-snapshot delta of the count of times this worker unparked but
+    // found no work.
+    uint64 noop_count = 1;
+    // Cumulative count of park OR unpark events. Kept cumulative (unlike
+    // the other counters in this message) because per tokio docs: "an odd
+    // count means that the worker is currently parked" — the parity at
+    // snapshot time tells the consumer whether the worker is idly parked
+    // vs stuck in an in-progress long synchronous poll. Both pieces of
+    // info — delta and current parity — would otherwise need separate
+    // fields. The runtime-wide park count is derivable as half this value.
+    uint64 park_unpark_count = 2;
+    // Per-snapshot delta of the count of tasks this worker stole from
+    // other workers.
+    uint64 steal_count = 3;
+    // Per-snapshot delta of the count of tasks this worker has polled.
+    uint64 poll_count = 4;
+    // Per-snapshot delta of microseconds this worker spent busy (not
+    // parked).
+    uint64 total_busy_duration_us = 5;
+    // Per-snapshot delta of the count of tasks scheduled to this worker's
+    // local queue.
+    uint64 local_schedule_count = 6;
+    // Per-snapshot delta of the count of times this worker overflowed its
+    // local queue (forcing a push to the global queue).
+    uint64 overflow_count = 7;
+    // Current depth of this worker's local run queue at snapshot time.
+    // Gauge, not delta.
+    uint64 local_queue_depth = 8;
+    // Per-snapshot delta of per-bucket poll counts since the previous
+    // Snapshot the daemon emitted. Indices line up with
+    // `TokioRuntimeStats.poll_time_histogram_bucket_upper_bound_ns`. Trailing
+    // zeros are trimmed (consumers must treat missing trailing entries as 0;
+    // this is most snapshots, since long-poll buckets are usually empty).
+    // Empty if (a) the histogram isn't enabled in this daemon, (b) this is
+    // the first snapshot of the recording (no baseline to diff against), or
+    // (c) all per-bucket deltas were zero.
+    repeated uint64 poll_time_bucket_counts = 9;
+  }
+  // Number of currently alive tasks tracked by the runtime. Gauge.
+  uint64 num_alive_tasks = 1;
+  // Current depth of the runtime's global run queue. Gauge.
+  uint64 global_queue_depth = 2;
+  // Per-snapshot delta of the count of forced cooperative yields.
+  uint64 budget_forced_yield_count = 3;
+  // Per-snapshot delta of the count of tasks scheduled to the runtime from
+  // outside any worker thread (e.g. spawn from a blocking thread, or wake
+  // from an external thread). These tasks land in the global injection queue
+  // rather than a worker's local queue.
+  uint64 remote_schedule_count = 4;
+  // Per-worker metrics, indexed by worker id (i.e. workers[i] is the entry
+  // for worker i).
+  repeated Worker workers = 5;
+  // Upper bound (inclusive) of each histogram bucket, in nanoseconds. Same
+  // length as `Worker.poll_time_bucket_counts`. Constant for the daemon's
+  // lifetime, so to save space the daemon only populates this on the first
+  // Snapshot it emits per command — subsequent snapshots leave it empty and
+  // consumers should reuse the value captured from the first snapshot.
+  repeated uint64 poll_time_histogram_bucket_upper_bound_ns = 6;
 }
 
 message UnixCgroupMemoryStats {
   uint64 anon = 1;
   uint64 file = 2;
   uint64 kernel = 3;
+  uint64 swap_bytes = 4;
+  // Memory pressure (PSI full avg10 %) from cgroup memory.pressure.
+  // Kernel-maintained 10-second EWMA.
+  double memory_pressure_10s_avg = 5;
+  // Memory pressure (PSI full avg60 %) from cgroup memory.pressure.
+  // Kernel-maintained 60-second EWMA.
+  double memory_pressure_60s_avg = 6;
 }
 
 message UnixSystemStats {
@@ -1081,6 +1215,7 @@ message TestResult {
 message TestSessionInfo {
   // Usually this contains a test link, like in Tpx
   string info = 2;
+  optional string test_session_id = 3;
 }
 
 // We report all of the tests for a particular target simultaneously
@@ -1127,6 +1262,7 @@ message CommandStart {
     ExplainCommandStart explain = 40;
     ExpandExternalCellsCommandStart expand_external_cell = 41;
     CompleteCommandStart complete = 42;
+    HydrationCommandStart hydration = 43;
   }
 }
 
@@ -1206,6 +1342,8 @@ message ExpandExternalCellsCommandStart {}
 
 message CompleteCommandStart {}
 
+message HydrationCommandStart {}
+
 message CommandEnd {
   reserved 3, 4;
   oneof data {
@@ -1232,6 +1370,7 @@ message CommandEnd {
     ExplainCommandEnd explain = 40;
     ExpandExternalCellsCommandEnd expand_external_cell = 41;
     CompleteCommandEnd complete = 42;
+    HydrationCommandEnd hydration = 43;
   }
 
   // This should eventually be deleted. Retaining only so that ingress
@@ -1350,6 +1489,8 @@ message ExpandExternalCellsCommandEnd {}
 
 message CompleteCommandEnd {}
 
+message HydrationCommandEnd {}
+
 message LoadPackageStart {
   string path = 1;
 }
@@ -1375,6 +1516,8 @@ message LoadBuildFileEnd {
   optional uint64 cpu_instruction_count = 5;
   // Number of targets
   optional uint64 target_count = 6;
+  // Number of Starlark ticks during evaluation of BUCK file.
+  optional uint64 starlark_tick_count = 7;
 }
 
 message SharedTaskStart {
@@ -1667,7 +1810,7 @@ message ActionExecutionEnd {
   bool prefers_local = 27;
   bool requires_local = 28;
   bool allows_cache_upload = 29;
-  bool did_cache_upload = 30;
+  UploadResult cache_upload_result = 30;
 
   // Revision hash (version) for this action. This is set only when the action
   // fails.
@@ -1685,7 +1828,7 @@ message ActionExecutionEnd {
 
   // Fields related to the remote dep file cache
   bool allows_dep_file_cache_upload = 35;
-  bool did_dep_file_cache_upload = 36;
+  UploadResult dep_file_cache_upload_result = 36;
   // Remote dep file key (the digest we use to populate the action cache).
   // This is set if the action contains a dep file
   optional string dep_file_key = 37;
@@ -1754,12 +1897,39 @@ enum EligibleForDedupe {
   ELIGIBLE = 0;
   INELIGIBLE_INPUT = 1;
   INELIGIBLE_OUTPUT = 2;
+  EXECUTION_PLATFORM_UNKNOWN_ELIGIBILITY = 3;
 }
 
 enum ExpectedEligibleForDedupe {
   EXPECTED_ELIGIBLE = 0;
   EXPECTED_INELIGIBLE = 1;
   UNKNOWN_ELIGIBILITY = 2;
+}
+
+// N.B. Historically, `ActionExecutionEnd.did_*cache_upload_result`` were
+// boolean values. They've been converted to this `*_cache_upload_result` with
+// values from this enum, but it's important that the semantic meaning of the
+// 0/1 values here match the false/true meanings of the old `did_*` fields. That
+// way old buck instances that still generate true/false are interpreted
+// correctly by new ingress/buck clients.
+enum UploadResult {
+  UPLOAD_RESULT_DID_NOT_UPLOAD_UNSPECIFIED = 0;
+  UPLOAD_RESULT_UPLOADED = 1;
+  UPLOAD_RESULT_NOT_ATTEMPTED = 2;
+  UPLOAD_RESULT_NON_COMMAND_ACTION = 3;
+  UPLOAD_RESULT_ACTION_NOT_SUCCESSFUL = 4;
+  UPLOAD_RESULT_REMOTE_DEP_FILE_CACHE_HIT = 5;
+  UPLOAD_RESULT_ACTION_UPLOAD_NOT_ALLOWED = 6;
+  UPLOAD_RESULT_EXECUTOR_UPLOAD_DISABLED = 7;
+  UPLOAD_RESULT_NON_LOCAL_EXECUTION = 8;
+  UPLOAD_RESULT_REJECTED_OUTPUT_EXCEEDS_LIMIT = 9;
+  UPLOAD_RESULT_REJECTED_PERMISSION_DENIED = 10;
+  UPLOAD_RESULT_REJECTED_SYMLINK_OUTPUT = 11;
+  UPLOAD_RESULT_FAILED_UPLOAD_ACTION_BLOBS = 12;
+  UPLOAD_RESULT_FAILED_UPLOAD_OUTPUTS = 13;
+  UPLOAD_RESULT_FAILED_WRITE_ACTION_RESULT = 14;
+  UPLOAD_RESULT_FAILED_OTHER = 15;
+  UPLOAD_RESULT_HAD_DEP_FILE_BUNDLE = 16;
 }
 
 message CommandInvalidationInfo {
@@ -2025,6 +2195,42 @@ message ReBeforeAction {
 
 message ReAfterAction {
   string action_digest = 1;
+}
+
+// Event that traces operations on a subset of action digests
+message ActionDigestTrace {
+  enum ActionDigestTraceEvent {
+    UNKNOWN = 0;
+    CACHE_HIT = 1;
+    CACHE_MISS = 2;
+    REMOTE_EXECUTION = 3;
+    CACHE_UPLOAD = 4;
+  }
+
+  // Command level metadata
+  map<string, string> metadata = 1;
+  string action_digest = 2;
+  ActionDigestTraceEvent event = 3;
+  optional string event_subtype = 4;
+  optional uint64 ttl_secs = 5;
+  string re_use_case = 6;
+  // Inverse sampling rate
+  uint64 weight = 7;
+  // Schedule type (e.g., "diff", "continuous")
+  optional string schedule_type = 8;
+  // Sum of output digest sizes in bytes
+  optional uint64 storage_cost_bytes = 9;
+  // Execution time in milliseconds
+  optional uint64 compute_cost_ms = 10;
+}
+
+// RE log stream handles available for a running action
+message ReLogStreamAvailable {
+  string action_digest = 1;
+  string stdout_stream_name = 2;
+  string stderr_stream_name = 3;
+  optional string action_key = 4;
+  string use_case = 5;
 }
 
 message LocalStage {
@@ -2713,6 +2919,26 @@ message InvocationRecord {
   optional uint32 io_write_count = 428;
   optional uint32 io_canonicalize_count = 429;
   optional uint32 io_eden_settle_count = 430;
+
+  // Absolute path to the repo (project root).
+  optional string repo_path = 431;
+
+  // Peak normalized system load averages during the invocation.
+  optional double peak_normalized_system_load1 = 432;
+  optional double peak_normalized_system_load5 = 433;
+
+  // Peak swap usage (bytes) of all Buck2 processes during the invocation,
+  // from allprocs cgroup memory.swap.current.
+  uint64 memory_max_swap_bytes_allprocs = 434;
+  // Peak memory pressure (PSI full avg10 %) of all Buck2
+  // processes during the invocation, from allprocs cgroup memory.pressure.
+  double memory_max_pressure_10s_avg_allprocs = 435;
+  // Peak memory pressure (PSI full avg60 %) of all Buck2
+  // processes during the invocation, from allprocs cgroup memory.pressure.
+  double memory_max_pressure_60s_avg_allprocs = 436;
+
+  // Agent context entries passed via --agent-context.
+  repeated AgentContextEntry agent_context = 437;
 }
 
 enum InvocationOutcome {
@@ -2743,6 +2969,12 @@ message BuildTarget {
 }
 
 message ClientMetadata {
+  string key = 1;
+  string value = 2;
+}
+
+// A single agent context key-value pair passed via --agent-context.
+message AgentContextEntry {
   string key = 1;
   string value = 2;
 }
@@ -2908,7 +3140,7 @@ message ErrorReport {
   message SourceLocation {
     string path = 1;
     optional string type_name = 2;
-    optional uint32 source_line = 3;
+    uint32 source_line = 3;
   }
   message StringTag {
     string tag = 1;
@@ -2937,8 +3169,7 @@ message ErrorReport {
 // of this protobuf definition outside of buck2. Currently used in the
 // invocation record and nowhere else.
 message ProcessedErrorReport {
-  reserved 2;
-  optional buck.data.error.ErrorTier tier = 1;
+  reserved 1, 2;
   string message = 3;
   optional string telemetry_message = 4;
   optional string source_location = 5;
@@ -3023,6 +3254,7 @@ message DynamicLambdaStart {
     BxlFunctionKey bxl_key = 2;
     AnonTarget anon_target = 3;
   }
+  uint64 dynamic_inputs_bytes = 4;
 }
 
 message DynamicLambdaOwner {
@@ -3033,7 +3265,7 @@ message DynamicLambdaOwner {
   }
 }
 
-message DeferredEvaluationEnd {}
+message DynamicLambdaEnd {}
 
 // Wraps the RE upload stage of execution to report useful data on network
 // traffic.
@@ -3082,6 +3314,11 @@ message SystemInfo {
   optional string optin_vpn_check_targets_regex = 8;
   optional bool enable_stable_revision_check = 9;
   optional bool enable_health_check_process_isolation = 10;
+  optional string daemon_cgroup_path = 11;
+  optional string allprocs_cgroup_path = 12;
+  optional string daemon_cgroup_slice_path = 13;
+  // Number of CPU cores on the system (from sysconf _SC_NPROCESSORS_ONLN).
+  optional uint64 num_cores = 14;
 }
 
 message CpuCounter {
@@ -3102,6 +3339,26 @@ enum NetworkKind {
   WI_FI = 0;
   ETHERNET = 1;
   UNKNOWN_NET_KIND = 2;
+}
+
+// Network access policy for command execution.
+enum NetworkAccess {
+  NETWORK_ACCESS_ALL = 0;
+  NETWORK_ACCESS_NONE = 1;
+  NETWORK_ACCESS_LOOPBACK = 2;
+  NETWORK_ACCESS_STRICT = 3;
+  NETWORK_ACCESS_PRIVATE = 4;
+}
+
+// Logged as an instant event when cgroup-based cleanup kills orphan processes
+// that outlived the main action process.
+message OrphanProcessesKilled {
+  message OrphanProcess {
+    uint32 pid = 1;
+    // Process name from `/proc/<pid>/comm`
+    string comm = 2;
+  }
+  repeated OrphanProcess orphan_processes = 1;
 }
 
 message NetworkInterfaceStats {
@@ -3146,9 +3403,19 @@ message MaterializerCommand {
     repeated string paths = 1;
   }
 
+  message RegisterEagerPaths {
+    repeated string paths = 1;
+  }
+
+  message EagerDispatchOnDeclare {
+    string path = 1;
+  }
+
   oneof data {
     Declare declare = 1;
     Ensure ensure = 2;
     InvalidateFilePaths invalidate_file_paths = 3;
+    RegisterEagerPaths register_eager_paths = 4;
+    EagerDispatchOnDeclare eager_dispatch_on_declare = 5;
   }
 }

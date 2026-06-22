@@ -22,12 +22,19 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
@@ -43,12 +50,16 @@ public class MultiDexExecutableMain {
   /** name suffix that identifies it as a Java class file. */
   private static final String CLASS_NAME_SUFFIX = ".class";
 
+  /** Thread count for main D8 compilation (capped to avoid diminishing returns). */
+  private static final OptionalInt D8_THREAD_COUNT =
+      // NULLSAFE_FIXME[Not Vetted Third-Party]
+      OptionalInt.of(Math.min(Runtime.getRuntime().availableProcessors(), 48));
+
   @Option(name = "--primary-dex")
   @Nullable
   private String primaryDexString = null;
 
   @Option(name = "--secondary-dex-output-dir", required = true)
-  // NULLSAFE_FIXME[Field Not Initialized]
   private String secondaryDexOutputDirString;
 
   @Option(name = "--primary-dex-files-to-dex-list")
@@ -60,11 +71,9 @@ public class MultiDexExecutableMain {
   private String filesToDexList;
 
   @Option(name = "--module", required = true)
-  // NULLSAFE_FIXME[Field Not Initialized]
   private String module;
 
   @Option(name = "--canary-class-name", required = true)
-  // NULLSAFE_FIXME[Field Not Initialized]
   private String canaryClassName;
 
   @Option(name = "--android-jar")
@@ -220,14 +229,18 @@ public class MultiDexExecutableMain {
                 Optional.of(hackMainDexListForBootstrapRun),
                 Paths.get(androidJar),
                 filesToDex,
-                minSdkVersion);
+                minSdkVersion,
+                D8_THREAD_COUNT);
           } catch (CompilationFailedException e) {
             throw new IOException(e);
           }
           // Since d8 is outputting to directory, copy individual files over.
           Path createdClassesDotDex = d8OutputDirInitial.resolve("classes.dex");
           Preconditions.checkState(Files.exists(createdClassesDotDex));
-          moduleDexFilesEmitted = (int) Files.list(d8OutputDirInitial).count();
+          try (var stream = Files.list(d8OutputDirInitial)) {
+            moduleDexFilesEmitted = (int) stream.count();
+          }
+
           Path primaryDexPath = Paths.get(primaryDexString);
           Files.move(createdClassesDotDex, primaryDexPath);
           // Create and fill the bootstrap dex dir. Perhaps it would be nicer if primary dex was
@@ -252,7 +265,8 @@ public class MultiDexExecutableMain {
                 Optional.empty(),
                 Paths.get(androidJar),
                 filesToDex,
-                minSdkVersion);
+                minSdkVersion,
+                D8_THREAD_COUNT);
           } catch (CompilationFailedException e) {
             throw new IOException(e);
           }
@@ -309,7 +323,8 @@ public class MultiDexExecutableMain {
           Optional.ofNullable(primaryDexClassNamesPath),
           Paths.get(androidJar),
           classpath,
-          minSdkVersion);
+          minSdkVersion,
+          D8_THREAD_COUNT);
     } catch (CompilationFailedException e) {
       throw new IOException(e);
     }
@@ -369,30 +384,86 @@ public class MultiDexExecutableMain {
     Path canaryClassDirectory = Files.createTempDirectory("canary_classes");
     // Check if a previous step has already consumed the classes.dex file from this output dir. If
     // so, count beyond it.
-    long secondaryDexCount = Files.list(d8OutputDir).count();
-    for (int rawIndex = 0; rawIndex < secondaryDexCount; rawIndex++) {
-      String secondaryDexName = getRawSecondaryDexName(module, moduleDexFilesEmitted, rawIndex);
-      Path secondaryDexPath = secondaryDexesWithCanaries.resolve(secondaryDexName);
-      Preconditions.checkState(
-          !Files.exists(secondaryDexPath), "Path should not already exist: " + secondaryDexPath);
+    long secondaryDexCount;
+    try (var stream = Files.list(d8OutputDir)) {
+      secondaryDexCount = stream.count();
+    }
 
-      Path rawSecondaryDexPath = d8OutputDir.resolve(String.format("classes%d.dex", rawIndex + 2));
-      Preconditions.checkState(
-          Files.exists(rawSecondaryDexPath), "Expected file to exist at: " + rawSecondaryDexPath);
-      Path canaryClass = createCanaryClass(canaryClassDirectory, rawIndex + canariesCreated);
-      try {
-        D8Utils.runD8Command(
-            new D8Utils.D8DiagnosticsHandler(),
-            secondaryDexPath,
-            ImmutableList.of(rawSecondaryDexPath, canaryClass),
-            getD8Options(),
-            Optional.empty(),
-            Paths.get(androidJar),
-            ImmutableList.of(),
-            minSdkVersion);
-      } catch (CompilationFailedException e) {
-        throw new IOException(e);
+    List<Callable<Void>> tasks = new ArrayList<>();
+    for (int rawIndex = 0; rawIndex < secondaryDexCount; rawIndex++) {
+      final int idx = rawIndex;
+      tasks.add(
+          () -> {
+            mergeCanaryIntoDex(
+                d8OutputDir,
+                secondaryDexesWithCanaries,
+                canaryClassDirectory,
+                moduleDexFilesEmitted,
+                idx,
+                canariesCreated,
+                minSdkVersion);
+            return null;
+          });
+    }
+
+    runInParallel(tasks, "Canary merging");
+  }
+
+  /** Merge a single canary class into a single secondary dex. Thread-safe. */
+  private void mergeCanaryIntoDex(
+      Path d8OutputDir,
+      Path secondaryDexesWithCanaries,
+      Path canaryClassDirectory,
+      int moduleDexFilesEmitted,
+      int rawIndex,
+      int canariesCreated,
+      Optional<Integer> minSdkVersion)
+      throws IOException {
+    String secondaryDexName = getRawSecondaryDexName(module, moduleDexFilesEmitted, rawIndex);
+    Path secondaryDexPath = secondaryDexesWithCanaries.resolve(secondaryDexName);
+    Preconditions.checkState(
+        !Files.exists(secondaryDexPath), "Path should not already exist: " + secondaryDexPath);
+
+    Path rawSecondaryDexPath = d8OutputDir.resolve(String.format("classes%d.dex", rawIndex + 2));
+    Preconditions.checkState(
+        Files.exists(rawSecondaryDexPath), "Expected file to exist at: " + rawSecondaryDexPath);
+    Path canaryClass = createCanaryClass(canaryClassDirectory, rawIndex + canariesCreated);
+    try {
+      D8Utils.runD8Command(
+          new D8Utils.D8DiagnosticsHandler(),
+          secondaryDexPath,
+          ImmutableList.of(rawSecondaryDexPath, canaryClass),
+          getD8Options(),
+          Optional.empty(),
+          Paths.get(androidJar),
+          ImmutableList.of(),
+          minSdkVersion);
+    } catch (CompilationFailedException e) {
+      throw new IOException(e);
+    }
+  }
+
+  private static void runInParallel(List<Callable<Void>> tasks, String label) throws IOException {
+    if (tasks.isEmpty()) {
+      return;
+    }
+    int threadCount = Math.min(tasks.size(), Runtime.getRuntime().availableProcessors());
+    ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+    try {
+      // NULLSAFE_FIXME[Not Vetted Third-Party]
+      for (Future<Void> future : executor.invokeAll(tasks)) {
+        future.get();
       }
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause();
+      throw (cause instanceof IOException)
+          ? (IOException) cause
+          : new IOException(label + " failed", cause);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IOException(label + " interrupted", e);
+    } finally {
+      executor.shutdownNow();
     }
   }
 

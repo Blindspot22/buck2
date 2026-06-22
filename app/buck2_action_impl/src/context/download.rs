@@ -19,9 +19,9 @@ use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_error::BuckErrorContext;
 use buck2_execute::execute::request::OutputType;
 use buck2_execute::materialize::http::Checksum;
+use buck2_hash::buck_indexset;
 use chrono::TimeZone;
 use chrono::Utc;
-use indexmap::indexset;
 use starlark::environment::MethodsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -70,7 +70,7 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
         let checksum = Checksum::new(sha1.into_option(), sha256.into_option())?;
 
         this.register_action(
-            indexset![output_artifact],
+            buck_indexset![output_artifact],
             UnregisteredDownloadFileAction::new(
                 checksum,
                 size_bytes.into_option(),
@@ -107,7 +107,9 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] is_executable: bool,
         #[starlark(require = named, default = false)] is_tree: bool,
         #[starlark(require = named, default = false)] is_directory: bool,
-        #[starlark(require = named, default = NoneOr::None)] has_content_based_path: NoneOr<bool>,
+        #[starlark(require = named, default = NoneOr::Other(true))] has_content_based_path: NoneOr<
+            bool,
+        >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<ValueTyped<'v, StarlarkDeclaredArtifact<'v>>> {
         let mut registry = this.state()?;
@@ -141,7 +143,7 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
         )?;
 
         registry.register_action(
-            indexset![output_artifact],
+            buck_indexset![output_artifact],
             UnregisteredCasArtifactAction {
                 digest,
                 re_use_case: use_case,

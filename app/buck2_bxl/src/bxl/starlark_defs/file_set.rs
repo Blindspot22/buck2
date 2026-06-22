@@ -16,20 +16,20 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_common::file_ops::metadata::SimpleDirEntry;
 use buck2_core::cells::cell_path::CellPath;
+use buck2_hash::BuckIndexSet;
 use buck2_query::query::syntax::simple::eval::file_set::FileNode;
 use buck2_query::query::syntax::simple::eval::file_set::FileSet;
 use derive_more::Display;
 use display_container::fmt_container;
 use gazebo::prelude::VecExt;
-use indexmap::IndexSet;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
@@ -60,7 +60,7 @@ impl<'a> FileSetExpr<'a> {
                 bxl.parse_query_file_literal(val)?,
             )])),
             FileSetExpr::Literals(val) => {
-                let mut file_set = FileSet::new(IndexSet::new());
+                let mut file_set = FileSet::new(BuckIndexSet::default());
                 for arg in &val {
                     file_set.insert(FileNode(bxl.parse_query_file_literal(arg)?));
                 }
@@ -99,7 +99,7 @@ impl OwnedFileSetExpr {
                 core_data.parse_query_file_literal(val)?,
             )])),
             OwnedFileSetExpr::Literals(val) => {
-                let mut file_set = FileSet::new(IndexSet::new());
+                let mut file_set = FileSet::new(BuckIndexSet::default());
                 for arg in val {
                     file_set.insert(FileNode(core_data.parse_query_file_literal(arg)?));
                 }
@@ -111,10 +111,11 @@ impl OwnedFileSetExpr {
     }
 }
 
-#[derive(Debug, Display, ProvidesStaticType, Allocative)]
+#[derive(Debug, Display, ProvidesStaticType, Allocative, StarlarkPagable)]
 #[derive(NoSerialize)] // TODO maybe this should be
 pub(crate) struct StarlarkFileSet(
     /// Set of files or directories.
+    #[starlark_pagable(pagable)]
     pub(crate) FileSet,
 );
 
@@ -164,10 +165,11 @@ impl<'v> StarlarkValue<'v> for StarlarkFileSet {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(register_file_set)
+        Some(FILE_SET_METHODS.methods())
     }
 }
+
+starlark::methods_static!(FILE_SET_METHODS = register_file_set);
 
 /// A set of `file_node`s. Supports the operations such as set addition/subtraction, length,
 /// iteration, equality and indexing.
@@ -188,17 +190,18 @@ impl Deref for StarlarkFileSet {
     }
 }
 
-#[derive(Debug, Display, ProvidesStaticType, Clone, Allocative)]
+#[derive(Debug, Display, ProvidesStaticType, Clone, Allocative, StarlarkPagable)]
 #[derive(NoSerialize)]
-pub(crate) struct StarlarkFileNode(pub(crate) CellPath);
+pub(crate) struct StarlarkFileNode(#[starlark_pagable(pagable)] pub(crate) CellPath);
 
 starlark_simple_value!(StarlarkFileNode);
+
+starlark::methods_static!(FILE_NODE_METHODS = file_node_methods);
 
 #[starlark_value(type = "bxl.FileNode")]
 impl<'v> StarlarkValue<'v> for StarlarkFileNode {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(file_node_methods)
+        Some(FILE_NODE_METHODS.methods())
     }
 }
 
@@ -218,7 +221,14 @@ pub(crate) fn file_node_methods(methods: &mut MethodsBuilder) {
     }
 }
 
-#[derive(Debug, ProvidesStaticType, Clone, Allocative)]
+#[derive(
+    Debug,
+    ProvidesStaticType,
+    Clone,
+    Allocative,
+    pagable::Pagable,
+    starlark::StarlarkPagableViaPagable
+)]
 #[derive(NoSerialize)]
 pub(crate) struct StarlarkReadDirSet {
     /// Cell path to the directory/files.

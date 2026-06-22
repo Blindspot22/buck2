@@ -32,25 +32,32 @@ enum CgroupFileError {
 /// Represents an open handle to one of the standard kernel-supplied files in the cgroup
 pub(crate) struct CgroupFile(Arc<OwnedFd>, FileNameBuf);
 
+#[derive(Clone, Copy)]
+pub(crate) enum CgroupFileMode {
+    ReadOnly,
+    ReadWrite,
+    WriteOnly,
+}
+
 impl CgroupFile {
     pub async fn open(
         d: Arc<OwnedFd>,
         name: FileNameBuf,
-        write: bool,
+        mode: CgroupFileMode,
     ) -> buck2_error::Result<Self> {
-        tokio::task::spawn_blocking(move || Self::sync_open(&d, name, write)).await?
+        tokio::task::spawn_blocking(move || Self::sync_open(&d, name, mode)).await?
     }
 
     pub(crate) fn sync_open(
         d: &OwnedFd,
         name: FileNameBuf,
-        write: bool,
+        mode: CgroupFileMode,
     ) -> buck2_error::Result<Self> {
         let flags = OFlag::O_CLOEXEC
-            | if write {
-                OFlag::O_RDWR
-            } else {
-                OFlag::O_RDONLY
+            | match mode {
+                CgroupFileMode::ReadOnly => OFlag::O_RDONLY,
+                CgroupFileMode::ReadWrite => OFlag::O_RDWR,
+                CgroupFileMode::WriteOnly => OFlag::O_WRONLY,
             };
         let file = nix::fcntl::openat(
             d,
@@ -67,10 +74,12 @@ impl CgroupFile {
         data: impl AsRef<[u8]> + Send + Sync + 'static,
     ) -> buck2_error::Result<()> {
         let file = self.0.dupe();
-        Ok(
-            tokio::task::spawn_blocking(move || Self::sync_write_impl(&file, data.as_ref()))
-                .await??,
-        )
+        let name = self.1.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::sync_write_impl(&file, data.as_ref()).map_err(buck2_error::Error::from)
+        })
+        .await?
+        .with_buck_error_context(|| format!("Writing cgroup file {}", name))
     }
 
     /// Write the given buffer to the file
@@ -185,7 +194,7 @@ impl CgroupFile {
             .ok_or_else(|| {
                 CgroupFileError::UnexpectedFormat(
                     self.1.clone(),
-                    String::from_utf8_lossy(&data).to_string(),
+                    String::from_utf8_lossy(data).to_string(),
                 )
                 .into()
             })
@@ -201,7 +210,7 @@ impl CgroupFile {
             .ok_or_else(|| {
                 CgroupFileError::UnexpectedFormat(
                     self.1.clone(),
-                    String::from_utf8_lossy(&data).to_string(),
+                    String::from_utf8_lossy(data).to_string(),
                 )
                 .into()
             })
@@ -265,12 +274,14 @@ impl MemoryStat {
     }
 }
 
-pub(crate) struct ResourcePressurePart {
-    pub(crate) total: u64,
+pub struct ResourcePressurePart {
+    pub avg10: f64,
+    pub avg60: f64,
+    pub total: u64,
 }
 
-pub(crate) struct ResourcePressure {
-    pub(crate) full: ResourcePressurePart,
+pub struct ResourcePressure {
+    pub full: ResourcePressurePart,
 }
 
 impl ResourcePressure {
@@ -306,14 +317,16 @@ impl ResourcePressure {
                     Some(value)
                 }
             };
-            let _avg10 = getitem("avg10")?;
-            let _avg60 = getitem("avg60")?;
+            let avg10: f64 = getitem("avg10")?.parse().ok()?;
+            let avg60: f64 = getitem("avg60")?.parse().ok()?;
             let _avg300 = getitem("avg300")?;
             let total = getitem("total")?;
             if !rest.is_empty() {
                 return None;
             }
             Some(ResourcePressurePart {
+                avg10,
+                avg60,
                 total: total.parse().ok()?,
             })
         };
@@ -374,5 +387,7 @@ full avg10=1.10 avg60=2.20 avg300=3.30 total=45781727"#;
 
         let pressure = crate::cgroup_files::ResourcePressure::parse(sample_pressure).unwrap();
         assert_eq!(pressure.full.total, 45781727);
+        assert_eq!(pressure.full.avg10, 1.10);
+        assert_eq!(pressure.full.avg60, 2.20);
     }
 }

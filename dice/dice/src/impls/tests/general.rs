@@ -23,10 +23,14 @@ use dice_error::DiceErrorImpl;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
+use pagable::Pagable;
+use pagable::PagablePanic;
+use pagable::pagable_typetag;
 use tokio::sync::oneshot;
 
 use crate::Dice;
 use crate::DiceData;
+use crate::DiceKeyDyn;
 use crate::DynKey;
 use crate::UserCycleDetector;
 use crate::UserCycleDetectorGuard;
@@ -34,11 +38,14 @@ use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::injected::InjectedKey;
 use crate::api::key::Key;
+use crate::api::key::NoValueSerialize;
+use crate::api::key::ValueSerialize;
 use crate::api::user_data::UserComputationData;
 use crate::versions::VersionNumber;
 
-#[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct Foo(i32);
 
 #[async_trait]
@@ -48,12 +55,16 @@ impl InjectedKey for Foo {
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
     }
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
+    }
 }
 
-#[derive(Clone, Dupe, Debug, Derivative, Allocative, Display)]
+#[derive(Clone, Dupe, Debug, Derivative, Allocative, Display, PagablePanic)]
 #[derivative(PartialEq, Eq, Hash)]
 #[display("{:?}", self)]
 #[allocative(skip)]
+#[pagable_typetag(DiceKeyDyn)]
 struct KeyThatRuns {
     #[derivative(Hash = "ignore", PartialEq = "ignore")]
     barrier1: Arc<tokio::sync::Semaphore>,
@@ -79,6 +90,10 @@ impl Key for KeyThatRuns {
 
     fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
         true
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
     }
 }
 
@@ -143,9 +158,10 @@ fn dice_computations_are_parallel() {
         .unwrap();
     let barrier = Arc::new(Barrier::new(n_thread));
 
-    #[derive(Clone, Debug, Display, Derivative, Allocative)]
+    #[derive(Clone, Debug, Display, Derivative, Allocative, PagablePanic)]
     #[derivative(Hash, PartialEq, Eq)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct Blocking {
         index: usize,
         #[derivative(PartialEq = "ignore", Hash = "ignore")]
@@ -168,6 +184,10 @@ fn dice_computations_are_parallel() {
 
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
             x == y
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -205,9 +225,11 @@ fn dice_computations_are_parallel() {
 async fn different_data_per_compute_ctx() {
     struct U(usize);
 
-    #[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative)]
+    #[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative, Pagable)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct DataRequest(u8);
+
     #[async_trait]
     impl Key for DataRequest {
         type Value = usize;
@@ -222,6 +244,10 @@ async fn different_data_per_compute_ctx() {
 
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
             x == y
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -250,7 +276,8 @@ async fn different_data_per_compute_ctx() {
 
 #[test]
 fn invalid_update() {
-    #[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative)]
+    #[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct Invalid;
 
     #[async_trait]
@@ -272,16 +299,23 @@ fn invalid_update() {
         fn validity(_x: &Self::Value) -> bool {
             false
         }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
     }
 
-    let dice = Dice::new(DiceData::new());
+    let dice = Dice::new(DiceData::new(), None);
     let mut updater = dice.updater();
 
     assert!(updater.changed_to([(Invalid, ())]).is_err());
 }
 
-#[derive(Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative)]
+#[derive(
+    Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative, Pagable
+)]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct Fib(u8);
 
 #[async_trait]
@@ -317,6 +351,10 @@ impl Key for Fib {
             (Ok(x), Ok(y)) => x == y,
             _ => false,
         }
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
     }
 }
 
@@ -450,10 +488,11 @@ async fn dropping_request_future_cancels_execution() {
         }
     }
 
-    #[derive(Clone, Dupe, Debug, Derivative, Allocative, Display)]
+    #[derive(Clone, Dupe, Debug, Derivative, Allocative, Display, PagablePanic)]
     #[derivative(PartialEq, Eq, Hash)]
     #[display("{:?}", self)]
     #[allocative(skip)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct KeyThatShouldntRun {
         #[derivative(Hash = "ignore", PartialEq = "ignore")]
         barrier1: Arc<tokio::sync::Barrier>,
@@ -482,6 +521,10 @@ async fn dropping_request_future_cancels_execution() {
 
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             true
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -560,8 +603,11 @@ async fn user_cycle_detector_is_present_modern() -> anyhow::Result<()> {
 }
 
 async fn user_cycle_detector_is_present(dice: Arc<Dice>) -> anyhow::Result<()> {
-    #[derive(Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative)]
+    #[derive(
+        Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative, Pagable
+    )]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct AccessCycleGuardKey;
 
     #[async_trait]
@@ -582,6 +628,10 @@ async fn user_cycle_detector_is_present(dice: Arc<Dice>) -> anyhow::Result<()> {
 
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             true
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 

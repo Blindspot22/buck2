@@ -27,6 +27,8 @@ use dupe::Dupe;
 use either::Either;
 use indexmap::IndexMap;
 use itertools::Itertools;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark::any::ProvidesStaticType;
 use starlark::docs::DocItem;
 use starlark::docs::DocMember;
@@ -39,6 +41,7 @@ use starlark::eval::Evaluator;
 use starlark::eval::ParametersSpec;
 use starlark::eval::ParametersSpecParam;
 use starlark::eval::param_specs;
+use starlark::register_starlark_any;
 use starlark::type_matcher;
 use starlark::typing::Ty;
 use starlark::typing::TyCallable;
@@ -49,24 +52,26 @@ use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
-use starlark::values::FrozenRef;
 use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
+use starlark::values::StarlarkPagableViaPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLike;
+use starlark::values::any::FrozenAnyValue;
 use starlark::values::dict::AllocDict;
 use starlark::values::dict::DictRef;
 use starlark::values::list::AllocList;
 use starlark::values::list::ListRef;
 use starlark::values::list_or_tuple::UnpackListOrTuple;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::typing::TypeCompiled;
 use starlark::values::typing::TypeInstanceId;
 use starlark::values::typing::TypeMatcher;
+use starlark::values::typing::TypeMatcherDyn;
 use starlark::values::typing::TypeMatcherFactory;
 use starlark_map::StarlarkHasher;
 use starlark_map::StarlarkHasherBuilder;
@@ -80,6 +85,7 @@ use crate::interpreter::rule_defs::provider::ty::provider::ty_provider;
 use crate::interpreter::rule_defs::provider::ty::provider_callable::ty_provider_callable;
 use crate::interpreter::rule_defs::provider::user::UserProvider;
 use crate::interpreter::rule_defs::provider::user::user_provider_creator;
+use crate::interpreter::rule_defs::type_id_domain::Buck2TypeIdDomain;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
@@ -104,7 +110,7 @@ enum ProviderCallableError {
 /// we get it in `UserProvider::get_hashed`.
 /// To lookup in `IndexMap` we can promote it to `u64`.
 /// This is what this hasher does.
-#[derive(Default, Debug, Clone, Copy, Dupe)]
+#[derive(Default, Debug, Clone, Copy, Dupe, Pagable, StarlarkPagableViaPagable)]
 pub(crate) struct StarlarkHasherSmallPromoteBuilder(StarlarkHasherBuilder);
 pub(crate) struct StarlarkHasherSmallPromote(StarlarkHasher);
 
@@ -116,13 +122,94 @@ impl BuildHasher for StarlarkHasherSmallPromoteBuilder {
     }
 }
 
+// IMPORTANT: `Hasher` wrappers must explicitly forward every `write_*` method
+// to the inner hasher. Without forwarding, a wrapper's `write_usize` (for
+// example) takes the default byte-serialization path — which produces a
+// different hash than the inner hasher's native `write_usize`. With the
+// current `fxhash::FxHasher64` the two paths happen to agree, but this
+// breaks with `rustc_hash::FxHasher` (introduced in a follow-up diff)
+// where `write_u64` hashes the value directly as a word while
+// `write(&[u8; 8])` runs it through a different byte-hashing path.
+#[deny(clippy::missing_trait_methods)]
 impl Hasher for StarlarkHasherSmallPromote {
+    #[inline]
     fn finish(&self) -> u64 {
         self.0.finish_small().promote()
     }
 
+    #[inline]
     fn write(&mut self, bytes: &[u8]) {
         self.0.write(bytes)
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.0.write_u8(i)
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.0.write_u16(i)
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0.write_u32(i)
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0.write_u64(i)
+    }
+
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.0.write_u128(i)
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0.write_usize(i)
+    }
+
+    #[inline]
+    fn write_i8(&mut self, i: i8) {
+        self.0.write_i8(i)
+    }
+
+    #[inline]
+    fn write_i16(&mut self, i: i16) {
+        self.0.write_i16(i)
+    }
+
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.0.write_i32(i)
+    }
+
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.0.write_i64(i)
+    }
+
+    #[inline]
+    fn write_i128(&mut self, i: i128) {
+        self.0.write_i128(i)
+    }
+
+    #[inline]
+    fn write_isize(&mut self, i: isize) {
+        self.0.write_isize(i)
+    }
+
+    #[inline]
+    fn write_length_prefix(&mut self, len: usize) {
+        self.0.write_length_prefix(len)
+    }
+
+    #[inline]
+    fn write_str(&mut self, s: &str) {
+        self.0.write_str(s)
     }
 }
 
@@ -153,26 +240,32 @@ fn create_callable_function_signature(
     Ok((parameters_spec, TyCallable::new(param_spec, ret_ty)))
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, StarlarkPagable)]
 pub(crate) struct UserProviderCallableData {
+    #[starlark_pagable(pagable)]
     pub(crate) provider_id: Arc<ProviderId>,
     /// Type id of provider callable instance.
     pub(crate) ty_provider_type_instance_id: TypeInstanceId,
     pub(crate) fields: IndexMap<String, UserProviderField, StarlarkHasherSmallPromoteBuilder>,
 }
 
+register_starlark_any!(UserProviderCallableData);
+
 /// Initialized after the name is assigned to the provider.
-#[derive(Debug, Trace, Allocative)]
+#[derive(Debug, Trace, Allocative, StarlarkPagable)]
 struct UserProviderCallableNamed {
     /// The name of this provider, filled in by `export_as()`. This must be set before this
     /// object can be called and Providers created.
+    #[starlark_pagable(pagable)]
     id: Arc<ProviderId>,
     signature: ParametersSpec<FrozenValue>,
     /// This field is shared with provider instances.
-    data: FrozenRef<'static, UserProviderCallableData>,
+    data: FrozenAnyValue<UserProviderCallableData>,
     /// Type of provider instance.
+    #[starlark_pagable(pagable)]
     ty_provider: Ty,
     /// Type of provider callable.
+    #[starlark_pagable(pagable)]
     ty_callable: Ty,
 }
 
@@ -188,7 +281,16 @@ impl UserProviderCallableNamed {
     }
 }
 
-#[derive(Debug, Trace, Allocative, ProvidesStaticType, NoSerialize, Clone, Dupe)]
+#[derive(
+    Debug,
+    Trace,
+    Allocative,
+    ProvidesStaticType,
+    NoSerialize,
+    Clone,
+    Dupe,
+    StarlarkPagable
+)]
 pub(crate) struct UserProviderField {
     /// Field type.
     pub(crate) ty: TypeCompiled<FrozenValue>,
@@ -232,11 +334,20 @@ impl<'v> StarlarkValue<'v> for UserProviderField {}
 /// This object must be assigned to a variable at the top level of the module before it may be invoked
 ///
 /// Field values default to `None`
-#[derive(Debug, ProvidesStaticType, Trace, NoSerialize, Allocative)]
+#[derive(
+    Debug,
+    ProvidesStaticType,
+    Trace,
+    NoSerialize,
+    Allocative,
+    starlark::StarlarkPagable
+)]
 pub struct UserProviderCallable {
     /// The path where this `ProviderCallable` is created and assigned
+    #[starlark_pagable(pagable)]
     path: CellPath,
     /// The docstring for this provider
+    #[starlark_pagable(pagable)]
     docs: Option<DocString>,
     /// The names of the fields used in `callable`
     fields: IndexMap<String, UserProviderField, StarlarkHasherSmallPromoteBuilder>,
@@ -330,7 +441,8 @@ impl Freeze for UserProviderCallable {
     }
 }
 
-#[derive(Debug, Clone, Allocative)]
+#[derive(Debug, Clone, Allocative, Pagable)]
+#[pagable_typetag(TypeMatcherDyn)]
 struct UserProviderMatcher {
     type_instance_id: TypeInstanceId,
 }
@@ -342,14 +454,14 @@ impl TypeMatcher for UserProviderMatcher {
             Some(x) => {
                 // TODO(nga): this is a bit suboptimal:
                 //   instead we could compare just a pointer to the callable.
-                x.callable.ty_provider_type_instance_id == self.type_instance_id
+                x.callable_data().ty_provider_type_instance_id == self.type_instance_id
             }
             None => false,
         }
     }
 }
 
-#[starlark_value(type = "ProviderCallable")]
+#[starlark_value(type = "ProviderCallable", skip_vtable)]
 impl<'v> StarlarkValue<'v> for UserProviderCallable {
     type Canonical = FrozenUserProviderCallable;
 
@@ -364,7 +476,8 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
                 path: Some(self.path.clone()),
                 name: variable_name.to_owned(),
             });
-            let ty_provider_type_instance_id = TypeInstanceId::r#gen();
+            let ty_provider_type_instance_id =
+                TypeInstanceId::from_identity(Buck2TypeIdDomain::UserProvider, &*provider_id);
             let ty_provider = ty_provider(
                 &provider_id.name,
                 ty_provider_type_instance_id,
@@ -386,11 +499,13 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
             buck2_error::Ok(UserProviderCallableNamed {
                 id: provider_id.dupe(),
                 signature,
-                data: eval.frozen_heap().alloc_any(UserProviderCallableData {
-                    provider_id,
-                    fields: self.fields.clone(),
-                    ty_provider_type_instance_id,
-                }),
+                data: eval
+                    .frozen_heap()
+                    .alloc_any_value(UserProviderCallableData {
+                        provider_id,
+                        fields: self.fields.clone(),
+                        ty_provider_type_instance_id,
+                    }),
                 ty_provider,
                 ty_callable,
             })
@@ -447,9 +562,10 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
     }
 }
 
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, StarlarkPagable)]
 pub struct FrozenUserProviderCallable {
     /// The docstring for this provider
+    #[starlark_pagable(pagable)]
     docs: Option<DocString>,
     /// The names of the fields used in `callable`
     fields: IndexMap<String, UserProviderField, StarlarkHasherSmallPromoteBuilder>,
@@ -535,6 +651,7 @@ fn provider_field_parse_type<'v>(
 }
 
 #[starlark_module]
+#[starlark_types(AbstractProvider as Provider no_docs)]
 pub fn register_provider(builder: &mut GlobalsBuilder) {
     /// Create a field definition object which can be passed to `provider` type constructor.
     fn provider_field<'v>(
@@ -646,14 +763,4 @@ pub fn register_provider(builder: &mut GlobalsBuilder) {
             fields,
         ))
     }
-
-    /// Provider type, can be used in type expressions.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// def foo() -> list[Provider]:
-    ///     return [DefaultInfo()]
-    /// ```
-    const Provider: StarlarkValueAsType<AbstractProvider> = StarlarkValueAsType::new_no_docs();
 }

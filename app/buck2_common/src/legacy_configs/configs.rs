@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
 use std::io::BufRead;
@@ -18,6 +17,7 @@ use allocative::Allocative;
 use buck2_cli_proto::ConfigOverride;
 use buck2_core::cells::cell_root_path::CellRootPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
+use buck2_hash::StdBuckHashMap;
 use dupe::Dupe;
 use pagable::Pagable;
 use starlark_map::sorted_map::SortedMap;
@@ -278,7 +278,7 @@ impl LegacyBuckConfig {
         for main_config_file in config_paths {
             let mut parser = LegacyConfigParser::new();
             parser
-                .parse_file(&main_config_file, None, follow_includes, file_ops)
+                .parse_file(main_config_file, None, follow_includes, file_ops)
                 .await?;
             external_path_configs.push(ExternalPathBuckconfigData {
                 origin_path: main_config_file.clone(),
@@ -299,7 +299,7 @@ impl LegacyBuckConfig {
         let mut parser = LegacyConfigParser::combine(external_path_configs);
         for main_config_file in main_config_files {
             parser
-                .parse_file(&main_config_file, None, follow_includes, file_ops)
+                .parse_file(main_config_file, None, follow_includes, file_ops)
                 .await?;
         }
 
@@ -364,12 +364,12 @@ pub mod testing {
     }
 
     pub struct TestConfigParserFileOps {
-        data: HashMap<ProjectRelativePathBuf, String>,
+        data: StdBuckHashMap<ProjectRelativePathBuf, String>,
     }
 
     impl TestConfigParserFileOps {
         pub fn new(data: &[(&str, &str)]) -> buck2_error::Result<Self> {
-            let mut holder_data = HashMap::new();
+            let mut holder_data = StdBuckHashMap::default();
             for (file, content) in data {
                 holder_data.insert(
                     ProjectRelativePath::new(*file)?.to_owned(),
@@ -470,20 +470,16 @@ pub(crate) mod tests {
     }
 
     fn assert_config_value_is_empty(config: &LegacyBuckConfig, section: &str, key: &str) {
-        match config.get_section(section) {
-            Some(values) => match values.get(key) {
-                Some(v) => {
-                    panic!(
-                        "Expected `{}.{}` to not exist. Got `{}` for value.",
-                        section,
-                        key,
-                        v.as_str()
-                    );
-                }
-                _ => {}
-            },
-            _ => {}
-        };
+        if let Some(values) = config.get_section(section)
+            && let Some(v) = values.get(key)
+        {
+            panic!(
+                "Expected `{}.{}` to not exist. Got `{}` for value.",
+                section,
+                key,
+                v.as_str()
+            );
+        }
     }
 
     #[test]

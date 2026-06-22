@@ -11,7 +11,6 @@
 /// Buck2 having full control over how FS IO works is beneficial for implementing
 /// IO counters and retry policies that are optimized for Buck2 and the EdenFS
 /// virtualized file system.
-use std::borrow::Cow;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -23,11 +22,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub use buck2_env::soft_error::soft_error;
+#[cfg(unix)]
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
+#[cfg(unix)]
 use buck2_error::internal_error;
-use relative_path::RelativePath;
-use relative_path::RelativePathBuf;
 
 use crate::cwd::assert_cwd_is_not_set;
 pub use crate::error::IoError;
@@ -111,6 +110,7 @@ fn symlink_impl(original: &Path, link: &AbsPath) -> Result<(), IoError> {
 /// Create symlink on Windows.
 #[cfg(windows)]
 fn symlink_impl(original: &Path, link: &AbsPath) -> Result<(), IoError> {
+    use std::borrow::Cow;
     use std::io::ErrorKind;
 
     use buck2_error::ErrorTag;
@@ -166,7 +166,7 @@ fn symlink_impl(original: &Path, link: &AbsPath) -> Result<(), IoError> {
         if let Some(common_path) = common_path(&target_abspath, link) {
             let from_common = target_abspath
                 .strip_prefix(&common_path)
-                .map_err(|e| IoError::new(io::Error::new(io::ErrorKind::Other, e)))?;
+                .map_err(|e| IoError::new(io::Error::other(e)))?;
             let common_canonicalized = common_path.canonicalize().map_err(IoError::new)?;
             common_canonicalized.join(from_common)
         } else {
@@ -397,6 +397,27 @@ pub fn write<P: AsRef<AbsPath>, C: AsRef<[u8]>>(path: P, contents: C) -> Result<
         .map_err(|e| IoError::new_with_path("write", path, e))
 }
 
+/// Write `contents` to `path` and apply the executable bit when opening / creating the file.
+pub fn write_with_executable_bit<P: AsRef<AbsPath>, C: AsRef<[u8]>>(
+    path: P,
+    contents: C,
+    executable: bool,
+) -> Result<(), IoError> {
+    let _guard = IoCounterKey::Write.guard();
+    with_retries(|| {
+        let mut file = fs::File::create(path.as_ref().as_maybe_relativized())?;
+        #[cfg(unix)]
+        if executable {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o755))?;
+        }
+        #[cfg(not(unix))]
+        let _ = executable;
+        file.write_all(contents.as_ref())
+    })
+    .map_err(|e| IoError::new_with_path("write_with_executable_bit", path, e))
+}
+
 pub fn metadata<P: AsRef<AbsPath>>(path: P) -> Result<fs::Metadata, IoError> {
     let _guard = IoCounterKey::Stat.guard();
     with_retries(|| fs::metadata(path.as_ref().as_maybe_relativized()))
@@ -489,13 +510,15 @@ pub fn remove_all<P: AsRef<AbsPath>>(path: P) -> Result<(), IoError> {
     } else {
         remove_file(&path)
     };
-    if r.is_err()
-        && symlink_metadata_if_exists(&path)
-            .map_err(IoError::internal)?
-            .is_none()
-    {
-        // Other process removed it, our goal is achieved.
-        return Ok(());
+    if let Err(e) = &r {
+        // If the remove itself returned NotFound, something else removed the path between
+        // our metadata check and our remove call. Either way the prior content is gone,
+        // which is what we came here to achieve — so report success. Do NOT re-check the
+        // filesystem after the fact: a concurrent writer may have recreated content there
+        // by the time of the re-check, and that content isn't ours to delete.
+        if e.io_error_kind() == Some(io::ErrorKind::NotFound) {
+            return Ok(());
+        }
     }
     r
 }
@@ -618,7 +641,6 @@ pub fn disk_space_stats<P: AsRef<AbsPath>>(path: P) -> buck2_error::Result<DiskS
 
     #[cfg(windows)]
     fn disk_space_stats_impl(path: &AbsPath) -> buck2_error::Result<DiskSpaceStats> {
-        use std::mem::MaybeUninit;
         use std::ptr;
 
         use buck2_util::os::win::os_str::os_str_to_wide_null_term;
@@ -626,15 +648,13 @@ pub fn disk_space_stats<P: AsRef<AbsPath>>(path: P) -> buck2_error::Result<DiskS
         let path_c = os_str_to_wide_null_term(path.as_os_str());
 
         unsafe {
-            let mut free_bytes =
-                MaybeUninit::<winapi::shared::ntdef::ULARGE_INTEGER>::zeroed().assume_init();
-            let mut total_bytes =
-                MaybeUninit::<winapi::shared::ntdef::ULARGE_INTEGER>::zeroed().assume_init();
-            let r = winapi::um::fileapi::GetDiskFreeSpaceExW(
+            let mut free_bytes: u64 = 0;
+            let mut total_bytes: u64 = 0;
+            let r = windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
                 path_c.as_ptr(),
-                &mut free_bytes as *mut _,  // lpFreeBytesAvailableToCaller
-                &mut total_bytes as *mut _, // lpTotalNumberOfBytes
-                ptr::null_mut(),            // lpTotalNumberOfFreeBytes
+                &mut free_bytes,  // lpFreeBytesAvailableToCaller
+                &mut total_bytes, // lpTotalNumberOfBytes
+                ptr::null_mut(),  // lpTotalNumberOfFreeBytes
             );
             if r == 0 {
                 let e = io::Error::last_os_error();
@@ -643,8 +663,8 @@ pub fn disk_space_stats<P: AsRef<AbsPath>>(path: P) -> buck2_error::Result<DiskS
                 );
             }
             Ok(DiskSpaceStats {
-                free_space: *free_bytes.QuadPart(),
-                total_space: *total_bytes.QuadPart(),
+                free_space: free_bytes,
+                total_space: total_bytes,
             })
         }
     }
@@ -737,19 +757,6 @@ pub fn open_file_if_exists<P: AsRef<AbsPath>>(
     }))
 }
 
-// Create a relative path in a cross-patform way, we need this since RelativePath fails when
-// converting backslashes which means windows paths end up failing. RelativePathBuf doesn't have
-// this problem and we can easily coerce it into a RelativePath.
-// TODO(T143971518) Avoid RelativePath usage in buck2
-pub fn relative_path_from_system(path: &Path) -> buck2_error::Result<Cow<'_, RelativePath>> {
-    let res = if cfg!(windows) {
-        Cow::Owned(RelativePathBuf::from_path(path)?)
-    } else {
-        Cow::Borrowed(RelativePath::from_path(path)?)
-    };
-    Ok(res)
-}
-
 /// Wrapper for fs_util functions that convert to buck2_error::Result without categorization.
 /// Should only be used in tests.
 pub mod uncategorized {
@@ -765,7 +772,6 @@ pub mod uncategorized {
     pub use super::read_dir_if_exists;
     pub use super::read_if_exists;
     pub use super::read_to_string_if_exists;
-    pub use super::relative_path_from_system;
     pub use super::simplified;
     pub use super::symlink_metadata_if_exists;
     pub use super::try_exists;
@@ -824,6 +830,14 @@ pub mod uncategorized {
         super::write(path, contents).uncategorized()
     }
 
+    pub fn write_with_executable_bit<P: AsRef<AbsPath>, C: AsRef<[u8]>>(
+        path: P,
+        contents: C,
+        executable: bool,
+    ) -> buck2_error::Result<()> {
+        super::write_with_executable_bit(path, contents, executable).uncategorized()
+    }
+
     pub fn metadata<P: AsRef<AbsPath>>(path: P) -> buck2_error::Result<fs::Metadata> {
         super::metadata(path).uncategorized()
     }
@@ -878,7 +892,6 @@ pub mod uncategorized {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fs;
     use std::fs::File;
     use std::io;
@@ -887,7 +900,7 @@ mod tests {
 
     use assert_matches::assert_matches;
     use buck2_error::ErrorTag;
-    use relative_path::RelativePath;
+    use buck2_hash::StdBuckHashMap;
 
     use crate::error::IoResultExt;
     use crate::fs_util::IoError;
@@ -1387,26 +1400,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn test_windows_relative_path() -> buck2_error::Result<()> {
-        assert_eq!(
-            fs_util::relative_path_from_system(Path::new("foo\\bar"))?,
-            RelativePath::new("foo/bar")
-        );
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_relative_path() -> buck2_error::Result<()> {
-        assert_eq!(
-            fs_util::relative_path_from_system(Path::new("foo/bar"))?,
-            RelativePath::new("foo/bar")
-        );
-        Ok(())
-    }
-
     #[test]
     fn test_set_executable() {
         #[cfg(unix)]
@@ -1523,7 +1516,7 @@ mod tests {
         use std::io::ErrorKind;
 
         let tempdir = tempfile::tempdir().unwrap();
-        let mut test_cases = HashMap::new();
+        let mut test_cases = StdBuckHashMap::default();
         // The behavior of these test cases varies by platform
         let should_succeed = cfg!(target_os = "macos");
         let expected_attempts = if should_succeed { MAX_IO_ATTEMPTS } else { 1 };
@@ -1554,6 +1547,23 @@ mod tests {
             check_io_with_retry(&test_path, results.0, results.1, results.2);
         }
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_dir_on_file_tags_not_a_directory() -> buck2_error::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let canonical = tempdir.path().canonicalize()?;
+        let root = AbsNormPath::new(&canonical)?;
+        let file_path = root.join(ForwardRelativePath::unchecked_new("a_file"));
+        fs_util::write(&file_path, b"content")?;
+        let file_path = AbsNormPath::new(&file_path)?;
+        let err = crate::fs_util::read_dir(file_path)
+            .categorize_input()
+            .err()
+            .expect("Error expected");
+        assert!(err.has_tag(ErrorTag::InputPathNotADirectory));
         Ok(())
     }
 

@@ -89,7 +89,6 @@ pub mod paths;
 pub(crate) mod sequence_trie_allocative;
 pub mod unchecked_cell_rel_path;
 
-use std::collections::HashMap;
 use std::collections::hash_map;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -97,11 +96,13 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_fs::paths::abs_path::AbsPath;
 use buck2_fs::paths::file_name::FileNameBuf;
+use buck2_hash::StdBuckHashMap;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
 use gazebo::prelude::*;
 use instance::CellInstance;
 use itertools::Itertools;
+use pagable::Pagable;
 use sequence_trie::SequenceTrie;
 
 use crate::cells::alias::CellAlias;
@@ -140,11 +141,11 @@ enum CellError {
 /// A 'CellAliasResolver' is unique to a 'CellInstance'.
 /// It is responsible for resolving all 'CellAlias' encountered within the
 /// 'CellInstance' into the global canonical 'CellName's
-#[derive(Clone, Dupe, Debug, PartialEq, Eq, Allocative)]
+#[derive(Clone, Dupe, Debug, PartialEq, Eq, Allocative, Pagable)]
 pub struct CellAliasResolver {
     /// Current cell name.
     current: CellName,
-    aliases: Arc<HashMap<NonEmptyCellAlias, CellName>>,
+    aliases: Arc<StdBuckHashMap<NonEmptyCellAlias, CellName>>,
 }
 
 impl CellAliasResolver {
@@ -152,7 +153,7 @@ impl CellAliasResolver {
     /// this will fail
     pub fn new(
         current: CellName,
-        mut aliases: HashMap<NonEmptyCellAlias, CellName>,
+        mut aliases: StdBuckHashMap<NonEmptyCellAlias, CellName>,
     ) -> buck2_error::Result<CellAliasResolver> {
         let current_as_alias = NonEmptyCellAlias::new(current.as_str().to_owned())?;
         if let Some(alias_target) = aliases.insert(current_as_alias, current) {
@@ -171,7 +172,7 @@ impl CellAliasResolver {
         root_aliases: &CellAliasResolver,
         alias_list: impl IntoIterator<Item = (NonEmptyCellAlias, NonEmptyCellAlias)>,
     ) -> buck2_error::Result<CellAliasResolver> {
-        let mut aliases: HashMap<_, _> = root_aliases
+        let mut aliases: StdBuckHashMap<_, _> = root_aliases
             .mappings()
             .map(|(x, y)| (x.to_owned(), y))
             .collect();
@@ -210,12 +211,12 @@ impl CellAliasResolver {
 
 /// Resolves 'CellName's into 'CellInstance's.
 // TODO(bobyf) we need to check if cells changed
-#[derive(Clone, Dupe, PartialEq, Eq, Debug, Allocative)]
+#[derive(Clone, Dupe, PartialEq, Eq, Debug, Allocative, Pagable)]
 pub struct CellResolver(Arc<CellResolverInternals>);
 
-#[derive(PartialEq, Eq, Debug, Allocative)]
+#[derive(PartialEq, Eq, Debug, Allocative, Pagable)]
 struct CellResolverInternals {
-    cells: HashMap<CellName, CellInstance>,
+    cells: StdBuckHashMap<CellName, CellInstance>,
     #[allocative(visit = crate::cells::sequence_trie_allocative::visit_sequence_trie)]
     path_mappings: SequenceTrie<FileNameBuf, CellName>,
     root_cell: CellName,
@@ -241,7 +242,8 @@ impl CellResolver {
             }
         }
 
-        let mut cells_map: HashMap<CellName, CellInstance> = HashMap::with_capacity(cells.len());
+        let mut cells_map: StdBuckHashMap<CellName, CellInstance> =
+            StdBuckHashMap::with_capacity_and_hasher(cells.len(), Default::default());
         for cell in cells {
             match cells_map.entry(cell.name()) {
                 hash_map::Entry::Occupied(entry) => {
@@ -382,7 +384,7 @@ impl CellResolver {
         if other_path.is_empty() {
             Self::testing_with_names_and_paths_with_alias(
                 &[(other_name, other_path)],
-                HashMap::new(),
+                StdBuckHashMap::default(),
             )
         } else {
             Self::testing_with_names_and_paths_with_alias(
@@ -393,7 +395,7 @@ impl CellResolver {
                         CellRootPathBuf::testing_new(""),
                     ),
                 ],
-                HashMap::new(),
+                StdBuckHashMap::default(),
             )
         }
     }
@@ -401,13 +403,13 @@ impl CellResolver {
     pub fn testing_with_names_and_paths(cells: &[(CellName, CellRootPathBuf)]) -> CellResolver {
         Self::testing_with_names_and_paths_with_alias(
             &cells.map(|(name, path)| (*name, path.clone())),
-            HashMap::new(),
+            StdBuckHashMap::default(),
         )
     }
 
     pub fn testing_with_names_and_paths_with_alias(
         cells: &[(CellName, CellRootPathBuf)],
-        mut root_cell_aliases: HashMap<NonEmptyCellAlias, CellName>,
+        mut root_cell_aliases: StdBuckHashMap<NonEmptyCellAlias, CellName>,
     ) -> CellResolver {
         assert_eq!(
             cells.len(),

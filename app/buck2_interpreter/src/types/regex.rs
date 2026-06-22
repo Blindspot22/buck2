@@ -18,22 +18,34 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::typing::Ty;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 /// Wrapper for `regex::Regex`.
-#[derive(ProvidesStaticType, Debug, NoSerialize, Allocative)]
+#[derive(
+    ProvidesStaticType,
+    Debug,
+    NoSerialize,
+    Allocative,
+    starlark::StarlarkPagable
+)]
 pub enum StarlarkBuckRegex {
     // TODO(nga): do not skip.
     //   And this is important because regex can have a lot of cache.
-    Regular(#[allocative(skip)] regex::Regex),
-    Fancy(#[allocative(skip)] fancy_regex::Regex),
+    Regular(
+        #[allocative(skip)]
+        #[starlark_pagable(pagable)]
+        regex::Regex,
+    ),
+    Fancy(
+        #[allocative(skip)]
+        #[starlark_pagable(pagable)]
+        fancy_regex::Regex,
+    ),
 }
 
 impl StarlarkBuckRegex {
@@ -59,11 +71,12 @@ impl StarlarkBuckRegex {
     }
 }
 
+starlark::methods_static!(REGEX_METHODS = regex_methods);
+
 #[starlark_value(type = "BuckRegex")] // "regex" is used for "experimental_regex" in starlark-rust.
 impl<'v> StarlarkValue<'v> for StarlarkBuckRegex {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(regex_methods)
+        Some(REGEX_METHODS.methods())
     }
 
     fn typechecker_ty(&self) -> Option<Ty> {
@@ -114,6 +127,7 @@ fn regex_methods(builder: &mut MethodsBuilder) {
 }
 
 #[starlark_module]
+#[starlark_types(StarlarkBuckRegex as BuckRegex)]
 pub fn register_buck_regex(builder: &mut GlobalsBuilder) {
     /// Compile a regular expression from a string.
     ///
@@ -144,8 +158,6 @@ pub fn register_buck_regex(builder: &mut GlobalsBuilder) {
             )),
         }
     }
-
-    const BuckRegex: StarlarkValueAsType<StarlarkBuckRegex> = StarlarkValueAsType::new();
 }
 
 #[cfg(test)]

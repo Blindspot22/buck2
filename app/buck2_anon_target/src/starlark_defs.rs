@@ -29,7 +29,6 @@ use starlark::codemap::FileSpan;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
@@ -45,7 +44,6 @@ use starlark::values::dict::UnpackDictEntries;
 use starlark::values::list::AllocList;
 use starlark::values::list_or_tuple::UnpackListOrTuple;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark_map::small_map::SmallMap;
 
 use crate::anon_targets::AnonTargetKey;
@@ -105,11 +103,12 @@ impl Display for StarlarkAnonTarget<'_> {
     }
 }
 
+starlark::methods_static!(ANON_TARGET_METHODS = anon_target_methods);
+
 #[starlark_value(type = "AnonTarget", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkAnonTarget<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(anon_target_methods)
+        Some(ANON_TARGET_METHODS.methods())
     }
 }
 
@@ -200,11 +199,12 @@ impl Display for StarlarkAnonTargets<'_> {
     }
 }
 
+starlark::methods_static!(ANON_TARGETS_METHODS = anon_targets_methods);
+
 #[starlark_value(type = "AnonTargets", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkAnonTargets<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(anon_targets_methods)
+        Some(ANON_TARGETS_METHODS.methods())
     }
 }
 
@@ -238,10 +238,8 @@ fn anon_targets_methods(builder: &mut MethodsBuilder) {
 }
 
 #[starlark_module]
-pub(crate) fn register_anon_target_types(globals: &mut GlobalsBuilder) {
-    const AnonTarget: StarlarkValueAsType<StarlarkAnonTarget> = StarlarkValueAsType::new();
-    const AnonTargets: StarlarkValueAsType<StarlarkAnonTargets> = StarlarkValueAsType::new();
-}
+#[starlark_types(StarlarkAnonTarget<'_> as AnonTarget, StarlarkAnonTargets<'_> as AnonTargets)]
+pub(crate) fn register_anon_target_types(globals: &mut GlobalsBuilder) {}
 
 pub(crate) fn init_register_anon_target_types() {
     REGISTER_BUCK2_ANON_TARGETS_GLOBALS.init(register_anon_target_types);
@@ -359,7 +357,7 @@ fn analysis_actions_methods_anon_target(builder: &mut MethodsBuilder) {
             artifact.declaration_location.dupe(),
             promise,
             artifact.short_path.clone(),
-            artifact.has_content_based_path,
+            true,
         ))
     }
 }

@@ -16,7 +16,6 @@ use std::sync::OnceLock;
 
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_common::file_ops::delegate::FileOpsDelegate;
-use buck2_common::file_ops::dice::ReadFileProxy;
 use buck2_common::file_ops::metadata::FileMetadata;
 use buck2_common::file_ops::metadata::FileType;
 use buck2_common::file_ops::metadata::RawDirEntry;
@@ -61,7 +60,12 @@ use cmp_any::PartialEqAny;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::PagablePanic;
+use pagable::pagable_typetag;
 
 fn load_nano_prelude() -> buck2_error::Result<BundledCell> {
     let path = env::var("NANO_PRELUDE")
@@ -214,7 +218,7 @@ impl DirectoryDigester<ContentsAndMetadata, BundledDirectoryDigest> for BundledD
     }
 }
 
-#[derive(allocative::Allocative)]
+#[derive(allocative::Allocative, PagablePanic)]
 pub(crate) struct BundledFileOpsDelegate {
     dir: ImmutableDirectory<ContentsAndMetadata, BundledDirectoryDigest>,
 }
@@ -318,17 +322,15 @@ impl BundledFileOpsDelegate {
     }
 }
 
+#[pagable_typetag]
 #[async_trait::async_trait]
 impl FileOpsDelegate for BundledFileOpsDelegate {
     async fn read_file_if_exists(
         &self,
         _ctx: &mut DiceComputations<'_>,
         path: &'async_trait CellRelativePath,
-    ) -> buck2_error::Result<ReadFileProxy> {
-        let res = self.read_file_if_exists(path)?;
-        Ok(ReadFileProxy::new_with_captures(res, |res| async move {
-            Ok(res.map(|s| s.to_owned()))
-        }))
+    ) -> buck2_error::Result<Option<String>> {
+        Ok(self.read_file_if_exists(path)?.map(|s| s.to_owned()))
     }
 
     /// Return the list of file outputs, sorted.
@@ -400,6 +402,7 @@ async fn declare_all_source_artifacts(
             path,
             content: entry.contents.to_vec(),
             is_executable: entry.metadata.is_executable,
+            configuration_path: None,
         });
     }
 
@@ -423,8 +426,10 @@ pub(crate) async fn get_file_ops_delegate(
         PartialEq,
         Eq,
         Hash,
-        allocative::Allocative
+        allocative::Allocative,
+        Pagable
     )]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct BundledFileOpsDelegateKey(CellName);
 
     #[async_trait::async_trait]
@@ -445,6 +450,10 @@ pub(crate) async fn get_file_ops_delegate(
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             // No need for non-trivial equality, because this has no deps and is never recomputed
             false
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            OkPagableValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -478,7 +487,7 @@ pub(crate) async fn materialize_all(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use super::*;
 
@@ -491,7 +500,7 @@ mod tests {
     async fn test_smoke_read() {
         let ops = testing_ops();
         let content = ops
-            .read_file_if_exists(&CellRelativePath::unchecked_new("dir/src.txt"))
+            .read_file_if_exists(CellRelativePath::unchecked_new("dir/src.txt"))
             .unwrap()
             .unwrap();
         let content = if cfg!(windows) {
@@ -503,7 +512,7 @@ mod tests {
         };
         assert_eq!(content, "foobar\n");
         assert!(
-            ops.read_file_if_exists(&CellRelativePath::unchecked_new("dir/does_not_exist.txt"))
+            ops.read_file_if_exists(CellRelativePath::unchecked_new("dir/does_not_exist.txt"))
                 .unwrap()
                 .is_none()
         );
@@ -513,7 +522,7 @@ mod tests {
     async fn test_executable_bit() {
         let ops = testing_ops();
         assert_matches!(
-            ops.read_path_metadata_if_exists(&CellRelativePath::unchecked_new("dir/src.txt"))
+            ops.read_path_metadata_if_exists(CellRelativePath::unchecked_new("dir/src.txt"))
                 .unwrap()
                 .unwrap(),
             RawPathMetadata::File(FileMetadata {
@@ -522,7 +531,7 @@ mod tests {
             }),
         );
         assert_matches!(
-            ops.read_path_metadata_if_exists(&CellRelativePath::unchecked_new("dir/src2.txt"))
+            ops.read_path_metadata_if_exists(CellRelativePath::unchecked_new("dir/src2.txt"))
                 .unwrap()
                 .unwrap(),
             RawPathMetadata::File(FileMetadata {

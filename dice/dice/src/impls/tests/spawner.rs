@@ -20,11 +20,16 @@ use dice_futures::cancellation::CancellationContext;
 use dice_futures::spawner::Spawner;
 use dupe::Dupe;
 use futures::future::BoxFuture;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use tokio::task::JoinHandle;
 
+use crate::DiceKeyDyn;
 use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::key::Key;
+use crate::api::key::NoValueSerialize;
+use crate::api::key::ValueSerialize;
 use crate::api::user_data::UserComputationData;
 use crate::impls::dice::Dice;
 
@@ -42,7 +47,8 @@ impl<S> Spawner<S> for MySpawner {
     }
 }
 
-#[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash)]
+#[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash, Pagable)]
+#[pagable_typetag(DiceKeyDyn)]
 struct K;
 
 #[async_trait]
@@ -58,6 +64,10 @@ impl Key for K {
 
     fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
         true
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
     }
 }
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test, env
+from buck2.tests.e2e_util.helper.utils import filter_events
 
 
 def watchman_dependency_linux_only() -> bool:
@@ -236,6 +237,63 @@ async def test_sqlite_materializer_state_buckconfig_version_change(
 
     # just starting the buck2 daemon should delete the sqlite materializer state
     await buck.audit_config()
+
+
+@buck_test(
+    data_dir="modify_deferred_materialization_deps",
+    skip_for_os=["windows"],
+)
+async def test_materialization_spans_have_parent_id(buck: Buck) -> None:
+    """Materialization spans should be parented to the span that triggered them,
+    not appear as root spans with parent_id == 0."""
+    await buck.build("//:check")
+
+    materialization_events = await filter_events(
+        buck,
+        "Event",
+        "data",
+        "SpanStart",
+        "data",
+        "Materialization",
+        return_root=True,
+    )
+
+    assert len(materialization_events) > 0, "Expected at least one Materialization span"
+    for event in materialization_events:
+        assert event["Event"]["parent_id"] != 0, (
+            f"Materialization span has parent_id == 0 (no parent): {event}"
+        )
+
+
+@buck_test(
+    data_dir="modify_deferred_materialization_deps",
+    skip_for_os=["windows"],
+)
+async def test_materializer_command_events_have_parent_id(buck: Buck) -> None:
+    """MaterializerCommand instant events emitted on the synchronous command
+    processing thread should be parented to the span that sent the command,
+    not appear as root events with parent_id == 0.  This requires
+    verbose_materializer_event_log = true in .buckconfig."""
+    await buck.build("//:check")
+
+    command_events = await filter_events(
+        buck,
+        "Event",
+        "data",
+        "Instant",
+        "data",
+        "MaterializerCommand",
+        return_root=True,
+    )
+
+    assert len(command_events) > 0, (
+        "Expected at least one MaterializerCommand instant event "
+        "(is verbose_materializer_event_log enabled?)"
+    )
+    for event in command_events:
+        assert event["Event"]["parent_id"] != 0, (
+            f"MaterializerCommand event has parent_id == 0 (no parent): {event}"
+        )
 
 
 def disable_sqlite_materializer_state(buck: Buck) -> None:

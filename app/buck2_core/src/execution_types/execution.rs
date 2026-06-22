@@ -14,8 +14,6 @@ use allocative::Allocative;
 use dupe::Dupe;
 use indent_write::indentable::Indentable;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
-use once_cell::sync::OnceCell;
 use pagable::Pagable;
 use starlark_map::ordered_map::OrderedMap;
 
@@ -27,22 +25,6 @@ use crate::execution_types::executor_config::CommandExecutorConfig;
 use crate::provider::label::ProvidersLabel;
 use crate::target::configured_target_label::ConfiguredTargetLabel;
 use crate::target::label::label::TargetLabel;
-
-/// Whether to apply execution modifiers to exec_deps.
-/// This flag gates the behavior of applying cfg_constructor modifiers to exec_deps,
-/// which affects action digests. Default is false.
-pub static APPLY_EXEC_MODIFIERS: OnceCell<bool> = OnceCell::new();
-
-pub fn init_apply_exec_modifiers(value: Option<bool>) -> buck2_error::Result<()> {
-    let value = value.unwrap_or(false);
-    APPLY_EXEC_MODIFIERS.set(value).map_err(|_| {
-        buck2_error::buck2_error!(
-            buck2_error::ErrorTag::Tier0,
-            "APPLY_EXEC_MODIFIERS is already initialized"
-        )
-    })?;
-    Ok(())
-}
 
 /// An execution platform is used for the execution deps of a target, those dependencies that
 /// need to be invoked as part of a build action or otherwise need to be configured against the
@@ -304,26 +286,13 @@ impl ExecutionPlatformResolution {
 
     /// Create a new complete resolution directly for testing purposes.
     /// In production code, use `ExecutionPlatformResolutionPartial::new(...).finalize(...)`.
-    pub fn new(
+    pub fn new_for_testing(
         platform: Option<ExecutionPlatform>,
         skipped: Vec<(String, ExecutionPlatformIncompatibleReason)>,
     ) -> Self {
         Self::Resolved {
             base: ExecutionPlatformResolutionBase::new(platform, skipped),
             exec_dep_cfgs: Arc::new(OrderedMap::new()),
-        }
-    }
-
-    /// Create a new complete resolution with exec_dep_cfgs.
-    /// Use this when you have the full exec_dep configuration mapping.
-    pub fn new_with_exec_dep_cfgs(
-        platform: Option<ExecutionPlatform>,
-        skipped: Vec<(String, ExecutionPlatformIncompatibleReason)>,
-        exec_dep_cfgs: OrderedMap<TargetLabel, ConfigurationData>,
-    ) -> Self {
-        Self::Resolved {
-            base: ExecutionPlatformResolutionBase::new(platform, skipped),
-            exec_dep_cfgs: Arc::new(exec_dep_cfgs),
         }
     }
 
@@ -365,16 +334,6 @@ impl ExecutionPlatformResolution {
         }
     }
 
-    /// Get the per-exec_dep configurations.
-    /// Returns an empty map for Unspecified state.
-    pub fn exec_dep_cfgs(&self) -> &OrderedMap<TargetLabel, ConfigurationData> {
-        static EMPTY: Lazy<OrderedMap<TargetLabel, ConfigurationData>> = Lazy::new(OrderedMap::new);
-        match self {
-            Self::Unspecified => &EMPTY,
-            Self::Resolved { exec_dep_cfgs, .. } => exec_dep_cfgs,
-        }
-    }
-
     /// Returns true if this is in the Unspecified state (no execution platform resolution).
     /// This is used during dependency gathering before execution platform is resolved.
     pub fn is_unspecified(&self) -> bool {
@@ -390,9 +349,6 @@ impl ExecutionPlatformResolution {
     /// If the target is not found in `Resolved` state, this indicates a bug where the
     /// exec_dep was not collected during dependency gathering.
     pub fn cfg_for_exec_dep(&self, target: &TargetLabel) -> buck2_error::Result<ConfigurationData> {
-        if !*APPLY_EXEC_MODIFIERS.get().unwrap_or(&false) {
-            return Ok(self.base_cfg().cfg().dupe());
-        }
         match self {
             Self::Unspecified => {
                 // During gather_deps, we use the base cfg as a placeholder.

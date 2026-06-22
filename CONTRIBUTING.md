@@ -44,7 +44,7 @@ outlined on that page and do not file a public issue.
 
 ## Coding Style, Compiling, and Hacking Pro-tips
 
-See [HACKING.md](./HACKING.md) for the nitty gritty on how to contribute.
+See [here](./docs/developers/basics.md) for the nitty gritty on how to contribute.
 
 ## License
 

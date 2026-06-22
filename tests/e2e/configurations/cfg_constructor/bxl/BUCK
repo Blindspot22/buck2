@@ -1,19 +1,63 @@
 load("@fbcode//buck2/tests:bxl_test.bzl", "bxl_test")
+load("@prelude//cfg/modifier:buckconfig_backed_modifiers.bzl", "BuckconfigBackedModifier", "buckconfig_backed_modifiers")
+load(":test_platform_rule.bzl", "test_platform")
 
 oncall("build_infra")
 
-[bxl_test(
-    src = src,
-) for src in glob(
-    ["test_*.bxl"],
-    exclude = ["test_sanitizer_buckconfig_backed_modifiers.bxl"],
-)]
+[
+    bxl_test(
+        src = src,
+    )
+    for src in glob(
+        ["test_*.bxl"],
+        exclude = [
+            "test_sanitizer_buckconfig_backed_modifiers.bxl",
+            "test_platform_buckconfig_backed_modifiers.bxl",
+        ],
+    )
+]
 
-[bxl_test(
-    name = "{}_test".format(sanitizer),
-    src = "test_sanitizer_buckconfig_backed_modifiers.bxl",
+[
+    bxl_test(
+        name = "{}_test".format(sanitizer),
+        src = "test_sanitizer_buckconfig_backed_modifiers.bxl",
+        buck_args = [
+            "--config",
+            "fbcode.sanitizer={}".format(sanitizer),
+        ],
+    )
+    for sanitizer in ("address", "address-undefined", "thread", "hwaddress")
+]
+
+# Test infrastructure for buckconfig-backed platform modifiers
+test_platform(
+    name = "test_linux_x86_64_platform",
+    constraint_values = [
+        "ovr_config//cpu/constraints:x86_64",
+        "ovr_config//os/constraints:linux",
+    ],
+)
+
+buckconfig_backed_modifiers(
+    name = "test_platform_modifiers",
+    post_platform = [],
+    pre_cli = [],
+    pre_platform = [
+        BuckconfigBackedModifier(
+            oncall = "build_infra",
+            platforms = [":test_linux_x86_64_platform"],
+            property = "use_platform",
+            section = "test",
+            value = "linux_x86_64",
+        ),
+    ],
+)
+
+bxl_test(
+    name = "test_platform_buckconfig_backed_modifiers_test",
+    src = "test_platform_buckconfig_backed_modifiers.bxl",
     buck_args = [
         "--config",
-        "fbcode.sanitizer={}".format(sanitizer),
+        "test.use_platform=linux_x86_64",
     ],
-) for sanitizer in ("address", "address-undefined", "thread", "hwaddress")]
+)

@@ -26,11 +26,15 @@ use dice::DiceProjectionComputations;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
 use dice::Key;
+use dice::OkPagableValueSerialize;
 use dice::OpaqueValue;
+use dice::PagableValueSerialize;
 use dice::ProjectionKey;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::dice::cells::HasCellResolver;
 use crate::legacy_configs::cells::BuckConfigBasedCells;
@@ -153,6 +157,15 @@ pub trait HasLegacyConfigs {
     where
         buck2_error::Error: From<<T as FromStr>::Err>,
         T: Send + Sync + 'static;
+
+    async fn parse_legacy_config_list_property<T: FromStr>(
+        &mut self,
+        cell_name: CellName,
+        key: BuckconfigKeyRef<'_>,
+    ) -> buck2_error::Result<Option<Vec<T>>>
+    where
+        buck2_error::Error: From<<T as FromStr>::Err>,
+        T: Send + Sync + 'static;
 }
 
 pub trait SetLegacyConfigs {
@@ -164,8 +177,9 @@ pub trait SetLegacyConfigs {
     fn set_none_legacy_config_external_data(&mut self) -> buck2_error::Result<()>;
 }
 
-#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct LegacyExternalBuckConfigDataKey;
 
 impl InjectedKey for LegacyExternalBuckConfigDataKey {
@@ -174,10 +188,15 @@ impl InjectedKey for LegacyExternalBuckConfigDataKey {
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        PagableValueSerialize::<Self::Value>::new()
+    }
 }
 
 #[derive(Clone, Display, Debug, Hash, Eq, PartialEq, Allocative, Pagable)]
 #[display("LegacyBuckConfigForCellKey({})", self.cell_name)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct LegacyBuckConfigForCellKey {
     cell_name: CellName,
 }
@@ -214,6 +233,10 @@ impl Key for LegacyBuckConfigForCellKey {
             _ => false,
         }
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
 /// The computation `LegacyBuckConfigForCellKey` computation might encounter an error.
@@ -223,7 +246,8 @@ impl Key for LegacyBuckConfigForCellKey {
 /// increasing the size of the value returned from that computation. Instead, we'll use a different
 /// projection key to extract just the error from the cell computation, and compute that when
 /// constructing the `OpaqueLegacyBuckConfigOnDice`.
-#[derive(Debug, Display, Hash, Eq, PartialEq, Clone, Allocative)]
+#[derive(Debug, Display, Hash, Eq, PartialEq, Clone, Allocative, Pagable)]
+#[pagable_typetag(dice::DiceProjectionDyn)]
 struct LegacyBuckConfigErrorKey();
 
 impl ProjectionKey for LegacyBuckConfigErrorKey {
@@ -241,10 +265,37 @@ impl ProjectionKey for LegacyBuckConfigErrorKey {
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x.is_none() && y.is_none()
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        struct T;
+        impl ValueSerialize for T {
+            type Value = <LegacyBuckConfigErrorKey as ProjectionKey>::Value;
+
+            fn pagable_serialize_value(
+                &self,
+                v: &Self::Value,
+                _ser: &mut dyn pagable::PagableSerializer,
+            ) -> Option<pagable::Result<()>> {
+                match v {
+                    Some(_) => unimplemented!(),
+                    None => Some(Ok(())),
+                }
+            }
+
+            fn pagable_deserialize_value<'de, D: pagable::PagableDeserializer<'de> + ?Sized>(
+                &self,
+                _deser: &mut D,
+            ) -> pagable::Result<Self::Value> {
+                Ok(None)
+            }
+        }
+        T
+    }
 }
 
-#[derive(Debug, Display, Hash, Eq, PartialEq, Clone, Allocative)]
+#[derive(Debug, Display, Hash, Eq, PartialEq, Clone, Allocative, Pagable)]
 #[display("{}.{}", section, property)]
+#[pagable_typetag(dice::DiceProjectionDyn)]
 struct LegacyBuckConfigPropertyProjectionKey {
     section: String,
     property: String,
@@ -271,6 +322,10 @@ impl ProjectionKey for LegacyBuckConfigPropertyProjectionKey {
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        PagableValueSerialize::<Self::Value>::new()
     }
 }
 
@@ -354,6 +409,23 @@ impl HasLegacyConfigs for DiceComputations<'_> {
         T: Send + Sync + 'static,
     {
         LegacyBuckConfig::parse_value(
+            key,
+            self.get_legacy_config_property(cell_name, key)
+                .await?
+                .as_deref(),
+        )
+    }
+
+    async fn parse_legacy_config_list_property<T: FromStr>(
+        &mut self,
+        cell_name: CellName,
+        key: BuckconfigKeyRef<'_>,
+    ) -> buck2_error::Result<Option<Vec<T>>>
+    where
+        buck2_error::Error: From<<T as FromStr>::Err>,
+        T: Send + Sync + 'static,
+    {
+        LegacyBuckConfig::parse_list_value(
             key,
             self.get_legacy_config_property(cell_name, key)
                 .await?

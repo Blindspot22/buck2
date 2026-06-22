@@ -60,6 +60,7 @@ enum LifecycleError {
 /// The connector wraps all buckd calls with flushing.
 pub struct BuckdClientConnector {
     client: BuckdClient,
+    pub cgroup_path_of_buck2_daemon: Option<String>,
 }
 
 impl BuckdClientConnector {
@@ -585,12 +586,23 @@ impl FlushingBuckdClient<'_> {
     );
 
     oneshot_method!(flush_dep_files, FlushDepFilesRequest, GenericResponse);
+    stream_method!(
+        hydration,
+        HydrationRequest,
+        GenericResponse,
+        NoPartialResult
+    );
 
     oneshot_method!(unstable_crash, UnstableCrashRequest, GenericResponse);
     debug_method!(
         unstable_heap_dump,
         UnstableHeapDumpRequest,
         UnstableHeapDumpResponse
+    );
+    debug_method!(
+        unstable_flush_pgo_profile,
+        UnstableFlushPgoProfileRequest,
+        UnstableFlushPgoProfileResponse
     );
     debug_method!(
         unstable_allocator_stats,

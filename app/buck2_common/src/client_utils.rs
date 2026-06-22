@@ -71,22 +71,16 @@ async fn get_channel_uds_no_symlink(connect_to: &Path) -> buck2_error::Result<Ch
     use tonic::codegen::http::Uri;
     use tower::service_fn;
 
-    let io = tokio::net::UnixStream::connect(&connect_to).await?;
-
-    // tokio provides a UnixStream that has implementations for AsyncRead/AsyncWrite,
-    // but its own connect_with_connector uses the hyper equivalents
-    // Use the hyper interop wrapper to paper over this discrepancy
-    let io = hyper_util::rt::tokio::TokioIo::new(io);
-
-    let mut io = Some(io);
+    let connect_to = connect_to.to_owned();
     // This URL string is not relevant to the connection. Some URL is required for the function to work but the closure running inside connect_with_connector()
     // deals with connecting to the unix domain socket.
     Endpoint::try_from("http://[::]:50051")?
         .connect_with_connector(service_fn(move |_: Uri| {
-            let io = io
-                .take()
-                .ok_or_else(|| "Cannot reconnect after connection loss to uds".to_owned());
-            futures::future::ready(io)
+            let path = connect_to.clone();
+            async move {
+                let io = tokio::net::UnixStream::connect(&path).await?;
+                Ok::<_, std::io::Error>(hyper_util::rt::tokio::TokioIo::new(io))
+            }
         }))
         .await
         .tag(ErrorTag::ServerTransportError)

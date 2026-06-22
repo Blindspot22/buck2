@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
 #![feature(min_specialization)]
 #![allow(clippy::large_enum_variant)]
 
@@ -317,6 +316,7 @@ partial_result_convert!(DapMessage);
 define_request!(KillRequest);
 define_request!(StatusRequest);
 define_request!(PingRequest);
+define_request!(HydrationRequest, has(context));
 
 define_request!(BuildRequest, has(context, build_options));
 define_request!(BxlRequest, has(context, build_options));

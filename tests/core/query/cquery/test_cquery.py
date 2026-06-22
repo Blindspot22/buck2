@@ -274,7 +274,7 @@ async def test_declared_deps_query(buck: Buck) -> None:
         buck.cquery(
             "root//:declared_deps",
         ),
-        stderr_regex="Invalid target pattern `\\$declared_deps` is not allowed",
+        stderr_regex="Error parsing target pattern `\\$declared_deps`",
     )
 
 

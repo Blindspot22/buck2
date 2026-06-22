@@ -28,16 +28,20 @@ use allocative::Allocative;
 use dupe::Dupe;
 use starlark_derive::NoSerialize;
 use starlark_derive::ProvidesStaticType;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_value;
 
 use crate as starlark;
+use crate::docs::DocItem;
+use crate::docs::DocString;
+use crate::docs::DocType;
 use crate::private::Private;
+use crate::static_starlark_value;
 use crate::typing::ParamSpec;
 use crate::typing::Ty;
 use crate::typing::TyBasic;
 use crate::typing::callable::TyCallable;
 use crate::values::AllocFrozenValue;
-use crate::values::AllocStaticSimple;
 use crate::values::AllocValue;
 use crate::values::Freeze;
 use crate::values::FreezeResult;
@@ -61,13 +65,42 @@ use crate::values::typing::callable::param::StarlarkCallableParamSpec;
     derive_more::Display,
     Allocative,
     ProvidesStaticType,
-    NoSerialize
+    NoSerialize,
+    StarlarkPagable
 )]
 #[display("{}", Self::TYPE)]
 pub(crate) struct TypingCallable;
 
 #[starlark_value(type = "typing.Callable")]
 impl<'v> StarlarkValue<'v> for TypingCallable {
+    fn documentation(&self) -> DocItem {
+        DocItem::Type(DocType {
+            docs: DocString::from_docstring(
+                crate::docs::DocStringKind::Rust,
+                "\
+Type annotation for callable objects (e.g. functions).
+
+This is a generic type whose parameters indicate the argument types and return type of the object.
+
+# Examples
+
+```starlark
+def f(i: int, s: str) -> bool:
+...
+
+# would be matched by:
+
+typing.Callable[[int, str], bool]
+```
+
+See also [`typing.Callable` in the Python documentation][1].
+
+[1]: https://docs.python.org/3/library/typing.html#typing.Callable",
+            ),
+            ..DocType::from_starlark_value::<Self>()
+        })
+    }
+
     fn eval_type(&self) -> Option<Ty> {
         Some(StarlarkCallable::<StarlarkCallableParamAny, FrozenValue>::starlark_type_repr())
     }
@@ -93,11 +126,10 @@ impl<'v> StarlarkValue<'v> for TypingCallable {
     }
 }
 
+static_starlark_value!(CALLABLE: TypingCallable = TypingCallable);
+
 impl AllocFrozenValue for TypingCallable {
     fn alloc_frozen_value(self, _heap: &FrozenHeap) -> FrozenValue {
-        static CALLABLE: AllocStaticSimple<TypingCallable> =
-            AllocStaticSimple::alloc(TypingCallable);
-
         CALLABLE.to_frozen_value()
     }
 }
@@ -107,10 +139,12 @@ impl AllocFrozenValue for TypingCallable {
     Debug,
     ProvidesStaticType,
     NoSerialize,
-    derive_more::Display
+    derive_more::Display,
+    StarlarkPagable
 )]
 #[display("{}", callable)]
 pub(crate) struct TypingCallableAt2 {
+    #[starlark_pagable(pagable)]
     callable: TyCallable,
 }
 
@@ -212,6 +246,7 @@ impl<'v, P: StarlarkCallableParamSpec, R: StarlarkTypeRepr> AllocValue<'v>
 /// Marker for a callable value.
 #[derive(Allocative)]
 #[allocative(bound = "")]
+#[derive(StarlarkPagable)]
 pub struct FrozenStarlarkCallable<
     P: StarlarkCallableParamSpec = StarlarkCallableParamAny,
     R: StarlarkTypeRepr = FrozenValue,

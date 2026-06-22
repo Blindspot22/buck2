@@ -22,13 +22,19 @@ use async_trait::async_trait;
 use derive_more::Display;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::PagablePanic;
+use pagable::pagable_typetag;
 use tempfile::NamedTempFile;
 
 use crate::Dice;
+use crate::DiceKeyDyn;
 use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::injected::InjectedKey;
 use crate::api::key::Key;
+use crate::api::key::NoValueSerialize;
+use crate::api::key::ValueSerialize;
 use crate::api::transaction::DiceTransactionUpdater;
 
 #[derive(Debug, Clone, Dupe, PartialEq, Allocative)]
@@ -37,8 +43,9 @@ enum Encoding {
     Ascii,
 }
 
-#[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct EncodingConfig();
 
 impl InjectedKey for EncodingConfig {
@@ -46,6 +53,9 @@ impl InjectedKey for EncodingConfig {
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
+    }
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
     }
 }
 
@@ -82,8 +92,9 @@ impl SetEncodings for DiceTransactionUpdater {
 
 struct Filesystem<'c, 'd>(&'c mut DiceComputations<'d>);
 
-#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, PagablePanic)]
 #[display("File({})", _0.display())]
+#[pagable_typetag(DiceKeyDyn)]
 struct File(PathBuf);
 
 #[async_trait]
@@ -109,6 +120,10 @@ impl Key for File {
             (Ok(x), Ok(y)) => x == y,
             _ => false,
         }
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
     }
 }
 

@@ -7,6 +7,9 @@ rust_library(
     srcs = glob(
         ["src/**/*.rs"],
     ),
+    test_deps = [
+        # @oss-disable[end= ]: "//common/rust/environment:environment",
+    ],
     test_env = {
         "PREP_CGROUP_SCRIPT": "$(location fbcode//buck2/shed/cgroups:prep_cgroup)",
         "USE_SOME_MEMORY_BIN": "$(location //buck2/shed/cgroups/use_some_memory:use_some_memory)",
@@ -24,6 +27,7 @@ rust_library(
         "//buck2/app/buck2_error:buck2_error",
         "//buck2/app/buck2_events:buck2_events",
         "//buck2/app/buck2_fs:buck2_fs",
+        "//buck2/app/buck2_hash:buck2_hash",
         "//buck2/app/buck2_util:buck2_util",
         "//buck2/app/buck2_wrapper_common:buck2_wrapper_common",
         "//buck2/gazebo/dupe:dupe",

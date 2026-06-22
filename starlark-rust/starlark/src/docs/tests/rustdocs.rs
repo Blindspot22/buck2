@@ -20,6 +20,7 @@ use derive_more::Display;
 use serde::Serialize;
 use starlark_derive::NoSerialize;
 use starlark_derive::ProvidesStaticType;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_module;
 use starlark_derive::starlark_value;
 use starlark_map::small_map::SmallMap;
@@ -32,7 +33,6 @@ use crate::docs::DocParam;
 use crate::environment::GlobalsBuilder;
 use crate::environment::Methods;
 use crate::environment::MethodsBuilder;
-use crate::environment::MethodsStatic;
 use crate::eval::Arguments;
 use crate::eval::Evaluator;
 use crate::eval::runtime::params::display::PARAM_FMT_OPTIONAL;
@@ -43,7 +43,6 @@ use crate::values::Value;
 use crate::values::ValueOfUnchecked;
 use crate::values::list::UnpackList;
 use crate::values::none::NoneType;
-use crate::values::starlark_value_as_type::StarlarkValueAsType;
 use crate::values::tuple::UnpackTuple;
 
 #[derive(
@@ -51,7 +50,8 @@ use crate::values::tuple::UnpackTuple;
     derive_more::Display,
     Allocative,
     NoSerialize,
-    ProvidesStaticType
+    ProvidesStaticType,
+    StarlarkPagable
 )]
 #[display("input")]
 struct InputTypeRepr;
@@ -60,7 +60,8 @@ struct InputTypeRepr;
     derive_more::Display,
     Allocative,
     NoSerialize,
-    ProvidesStaticType
+    ProvidesStaticType,
+    StarlarkPagable
 )]
 #[display("output")]
 struct OutputTypeRepr;
@@ -72,11 +73,9 @@ impl<'v> StarlarkValue<'v> for InputTypeRepr {}
 impl<'v> StarlarkValue<'v> for OutputTypeRepr {}
 
 #[starlark_module]
-#[allow(unused_variables)] // Since this is for a test
+#[starlark_types(InputTypeRepr as Input, OutputTypeRepr as Output)]
 fn globals(builder: &mut GlobalsBuilder) {
-    const Input: StarlarkValueAsType<InputTypeRepr> = StarlarkValueAsType::new();
-    const Output: StarlarkValueAsType<OutputTypeRepr> = StarlarkValueAsType::new();
-
+    #[allow(unused_variables)]
     fn simple(
         arg_int: i32,
         arg_bool: bool,
@@ -86,6 +85,7 @@ fn globals(builder: &mut GlobalsBuilder) {
         unimplemented!()
     }
 
+    #[allow(unused_variables)]
     fn default_arg<'v>(
         arg1: Option<Value<'v>>,
         #[starlark(default = NoneType)] arg2: Value<'v>,
@@ -94,6 +94,7 @@ fn globals(builder: &mut GlobalsBuilder) {
         unimplemented!()
     }
 
+    #[allow(unused_variables)]
     fn args_kwargs<'v>(
         #[starlark(args)] args: UnpackTuple<Value<'v>>,
         #[starlark(kwargs)] kwargs: Value<'v>,
@@ -101,6 +102,7 @@ fn globals(builder: &mut GlobalsBuilder) {
         unimplemented!()
     }
 
+    #[allow(unused_variables)]
     fn custom_types<'v>(
         arg1: StringValue<'v>,
         arg2: ValueOfUnchecked<'v, InputTypeRepr>,
@@ -109,10 +111,12 @@ fn globals(builder: &mut GlobalsBuilder) {
         unimplemented!()
     }
 
+    #[allow(unused_variables)]
     fn pos_named(arg1: i32, #[starlark(require = named)] arg2: i32) -> anyhow::Result<i32> {
         unimplemented!()
     }
 
+    #[allow(unused_variables)]
     fn with_arguments(args: &Arguments) -> anyhow::Result<i32> {
         unimplemented!()
     }
@@ -156,15 +160,23 @@ def with_arguments(*args, **kwargs) -> int: pass
     }
 }
 
-#[derive(ProvidesStaticType, Debug, Display, Allocative, Serialize)]
+#[derive(
+    ProvidesStaticType,
+    Debug,
+    Display,
+    Allocative,
+    Serialize,
+    StarlarkPagable
+)]
 #[display("obj")]
 struct Obj;
+
+starlark::methods_static!(OBJ_METHODS = object);
 
 #[starlark_value(type = "obj")]
 impl<'v> StarlarkValue<'v> for Obj {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(object)
+        Some(OBJ_METHODS.methods())
     }
 }
 

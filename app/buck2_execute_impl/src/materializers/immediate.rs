@@ -26,6 +26,8 @@ use buck2_execute::execute::clean_output_paths::CleanOutputPaths;
 use buck2_execute::execute::clean_output_paths::cleanup_path;
 use buck2_execute::materialize::materializer::CasDownloadInfo;
 use buck2_execute::materialize::materializer::WriteRequest;
+use buck2_execute::materialize::utils::dynamic_priority_handle::DynamicPriorityHandle;
+use buck2_execute::materialize::utils::priority_semaphore::Priority;
 use buck2_execute::re::manager::ReConnectionManager;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
@@ -51,6 +53,7 @@ pub async fn write_to_disk<'a>(
                     path,
                     content,
                     is_executable,
+                    configuration_path: _,
                 } in requests
                 {
                     let digest = TrackedFileDigest::from_content(
@@ -123,7 +126,9 @@ pub async fn cas_download(
     let re_conn = re.get_re_connection();
     let re_client = re_conn.get_client().with_use_case(info.re_use_case);
     cancellations
-        .critical_section(|| re_client.materialize_files(files))
+        .critical_section(|| {
+            re_client.materialize_files(files, DynamicPriorityHandle::new(Priority::High))
+        })
         .await?;
     Ok(())
 }

@@ -9,6 +9,8 @@
  */
 
 use buck2_common::init::ResourceControlConfig;
+use buck2_core::soft_error;
+use buck2_error::buck2_error;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::paths::abs_norm_path::AbsNormPath;
@@ -21,6 +23,7 @@ use crate::cgroup::CgroupLeaf;
 use crate::cgroup::CgroupMinimal;
 use crate::cgroup::EffectiveResourceConstraints;
 use crate::cgroup_files::CgroupFile;
+use crate::cgroup_files::CgroupFileMode;
 use crate::path::CgroupPathBuf;
 
 #[derive(buck2_error::Error)]
@@ -56,6 +59,29 @@ fn parse_procfs_cgroup_output(out: &str) -> buck2_error::Result<CgroupPathBuf> {
     Ok(CgroupPathBuf::new_in_cgroup_fs(AbsNormPath::new(cgroup)?))
 }
 
+/// Read this process's cgroup v2 path from `/proc/self/cgroup` for best-effort logging.
+///
+/// Returns `None` if procfs cannot be read or if the process is not in exactly one cgroup v2
+/// hierarchy. This intentionally uses synchronous I/O because it reads a small local procfs file
+/// during daemon startup/logging, where a best-effort value is sufficient.
+pub fn read_current_cgroup() -> Option<String> {
+    let procfs_out = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    parse_procfs_cgroup_output(&procfs_out)
+        .ok()
+        .map(|p| p.to_string())
+}
+
+/// Read the cgroup path of the buck2 daemon process based on its pid from the client side
+pub fn read_cgroup_path_of_buck2_daemon(daemon_pid: i64) -> buck2_error::Result<Option<String>> {
+    let path = format!("/proc/{}/cgroup", daemon_pid);
+    let procfs_out = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let cgroup_path = parse_procfs_cgroup_output(&procfs_out)?;
+    Ok(Some(cgroup_path.to_string()))
+}
+
 pub struct PreppedBuckCgroups {
     allprocs: CgroupMinimal,
     daemon: CgroupMinimal,
@@ -84,7 +110,7 @@ impl PreppedBuckCgroups {
         let daemon_procs = CgroupFile::sync_open(
             daemon_cgroup.dir_fd(),
             FileNameBuf::unchecked_new("cgroup.procs"),
-            true,
+            CgroupFileMode::ReadWrite,
         )?;
         daemon_procs.sync_write(b"0")?;
 
@@ -154,6 +180,9 @@ pub struct BuckCgroupTree {
     ///
     /// This does not reflect any of our own configuration
     effective_resource_constraints: EffectiveResourceConstraints,
+    /// Whether the `cpuset` controller is available in the parent cgroup. Used to gate
+    /// per-action cpuset features so they no-op on hosts that don't have it.
+    cpuset_available: bool,
 }
 
 impl BuckCgroupTree {
@@ -163,6 +192,25 @@ impl BuckCgroupTree {
         config: &ResourceControlConfig,
     ) -> buck2_error::Result<Self> {
         let enabled_controllers = prepped.allprocs.read_enabled_controllers().await?;
+
+        // Drain any orphan processes from the scope root into the daemon child cgroup.
+        // This is necessary because processes may have been spawned in the scope root
+        // before prep_current_process() moved the daemon. cgroupv2 requires that a
+        // cgroup has no processes directly in it before enabling subtree controllers.
+        let _orphans = prepped.allprocs.drain_to_child(&prepped.daemon).await?;
+
+        let cpuset_available = enabled_controllers.contains("cpuset");
+        if !cpuset_available {
+            soft_error!(
+                "daemon_cpuset_unavailable",
+                buck2_error!(
+                    buck2_error::ErrorTag::Environment,
+                    "cpuset controller is not available in the daemon's parent cgroup"
+                ),
+                quiet: true
+            )
+            .ok();
+        }
 
         let allprocs = prepped
             .allprocs
@@ -220,6 +268,7 @@ impl BuckCgroupTree {
             forkserver,
             daemon,
             effective_resource_constraints,
+            cpuset_available,
         })
     }
 
@@ -242,6 +291,10 @@ impl BuckCgroupTree {
 
     pub(crate) fn effective_resource_constraints(&self) -> &EffectiveResourceConstraints {
         &self.effective_resource_constraints
+    }
+
+    pub fn cpuset_available(&self) -> bool {
+        self.cpuset_available
     }
 }
 
@@ -293,6 +346,109 @@ mod tests {
             resolve_memory_restriction_value("50%", Some(100)).unwrap()
         );
         assert_eq!(None, resolve_memory_restriction_value("50%", None).unwrap());
+    }
+
+    /// Tests that an orphan process sitting directly in a cgroup causes EBUSY
+    /// when enabling subtree control, due to cgroupv2's no-internal-process constraint.
+    #[tokio::test]
+    async fn test_orphan_process_causes_ebusy() {
+        use buck2_util::process::background_command;
+
+        let Some(r) = Cgroup::create_internal_for_test().await else {
+            return;
+        };
+
+        // Spawn a long-running process to act as the orphan
+        let mut orphan = background_command("sleep");
+        orphan.arg("300");
+        let mut orphan = orphan.spawn().unwrap();
+        let orphan_pid = orphan.id();
+
+        // Create a fresh cgroup and move the orphan into it
+        let root = r
+            .make_child(FileNameBuf::unchecked_new("ebusy_root"))
+            .await
+            .unwrap();
+        let root_path = root.path().as_abs_path().to_path_buf();
+        let root_procs_path = root_path.join("cgroup.procs");
+        std::fs::write(&root_procs_path, orphan_pid.to_string()).unwrap();
+
+        // Verify the orphan is in the root cgroup
+        let procs_content = std::fs::read_to_string(&root_procs_path).unwrap();
+        assert!(
+            procs_content.contains(&orphan_pid.to_string()),
+            "Orphan PID {} should be in root cgroup, got: {}",
+            orphan_pid,
+            procs_content.trim()
+        );
+
+        // Enabling subtree control fails with EBUSY when a process sits directly in the
+        // cgroup. Write "+memory" directly to cgroup.subtree_control via the filesystem.
+        let subtree_control_path = root_path.join("cgroup.subtree_control");
+        let ebusy_result = std::fs::write(&subtree_control_path, "+memory");
+        match ebusy_result {
+            Err(e) => {
+                assert_eq!(
+                    e.raw_os_error(),
+                    Some(nix::libc::EBUSY),
+                    "Expected EBUSY, got: {}",
+                    e
+                );
+            }
+            Ok(_) => panic!("Expected EBUSY error, but subtree control write succeeded"),
+        }
+
+        orphan.kill().unwrap();
+        orphan.wait().unwrap();
+    }
+
+    /// Tests that `drain_to_child()` (via `set_up()`) moves an orphan process out of the
+    /// scope root and into the daemon child cgroup before enabling subtree control.
+    #[tokio::test]
+    async fn test_drain_to_child_moves_orphan_to_daemon() {
+        use buck2_util::process::background_command;
+
+        let Some(r) = Cgroup::create_internal_for_test().await else {
+            return;
+        };
+
+        // Spawn a long-running process to act as the orphan
+        let mut orphan = background_command("sleep");
+        orphan.arg("300");
+        let mut orphan = orphan.spawn().unwrap();
+        let orphan_pid = orphan.id();
+
+        // Create a fresh cgroup and move the orphan into it
+        let root = r
+            .make_child(FileNameBuf::unchecked_new("drain_root"))
+            .await
+            .unwrap();
+        let root_procs_path = root.path().as_abs_path().join("cgroup.procs");
+        std::fs::write(&root_procs_path, orphan_pid.to_string()).unwrap();
+
+        // Run the full set_up() flow, which drains orphans via drain_to_child().
+        let p = PreppedBuckCgroups::testing_new_in(root).await;
+        let t = BuckCgroupTree::set_up(
+            p,
+            &ResourceControlConfig {
+                ..ResourceControlConfig::testing_default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Verify the orphan was moved to the daemon child cgroup
+        let daemon_procs_path = t.daemon().path().as_abs_path().join("cgroup.procs");
+        let daemon_procs_content = std::fs::read_to_string(&daemon_procs_path).unwrap();
+        assert!(
+            daemon_procs_content.contains(&orphan_pid.to_string()),
+            "Orphan PID {} should have been moved to daemon cgroup, got: {}",
+            orphan_pid,
+            daemon_procs_content.trim()
+        );
+
+        orphan.kill().unwrap();
+        orphan.wait().unwrap();
     }
 
     #[tokio::test]

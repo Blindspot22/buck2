@@ -94,15 +94,11 @@ impl<'a> CqueryUniverseInner<'a> {
 
         configured_node_visit_all_deps(universe.iter().map(|t| t.as_ref()), |target| {
             let label = target.label();
-            let package_targets: &mut _ = targets
-                .entry(label.pkg().dupe())
-                .or_insert_with(BTreeMap::new);
+            let package_targets: &mut _ = targets.entry(label.pkg().dupe()).or_default();
 
             let nodes: &mut _ = match package_targets.get_mut(label.name()) {
                 Some(v) => v,
-                None => package_targets
-                    .entry(label.name())
-                    .or_insert_with(BTreeSet::new),
+                None => package_targets.entry(label.name()).or_default(),
             };
 
             let inserted = nodes.insert(LabelIndexed(target));
@@ -328,6 +324,7 @@ mod tests {
                         ConfiguredProvidersPatternExtra {
                             providers: providers_name(),
                             cfg,
+                            exec_cfg: ConfigurationPredicate::Any,
                         },
                     )])),
                 )]),
@@ -340,7 +337,7 @@ mod tests {
             CqueryUniverse::build(&TargetSet::from_iter([ConfiguredTargetNode::testing_new(
                 target_label.dupe(),
                 "idris_library",
-                ExecutionPlatformResolution::new(None, Vec::new()),
+                ExecutionPlatformResolution::new_for_testing(None, Vec::new()),
                 vec![],
                 None,
             )]))

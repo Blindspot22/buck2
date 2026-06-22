@@ -35,18 +35,30 @@ pub enum QueryError {
         max: usize,
         actual: usize,
     },
-    #[error("too few args. function `{function}` requires at least {min} args, got {actual}")]
+    #[error(
+        "too few args. function `{function}` requires at least {min} args, got {actual}. Missing at least arg `{next_arg_name}`."
+    )]
     TooFewArgs {
         function: String,
+        next_arg_name: String,
         min: usize,
         actual: usize,
+    },
+    #[error(
+        "None is not a valid value for function `{function}` argument [{arg_idx}] `{arg_name}: {arg_type}`"
+    )]
+    NoneNotAccepted {
+        function: String,
+        arg_name: String,
+        arg_idx: String,
+        arg_type: String,
     },
     #[error("function `{0}` is not implemented yet")]
     FunctionUnimplemented(&'static str),
     #[error("Argument `{1}` to `{0}` is not yet supported in buck2")]
     ArgNotYetSupported(String, String),
     #[error("Invalid traversal depth `{0}`")]
-    InvalidDepth(i32),
+    InvalidDepth(u32),
     #[error("File literal `{1}` not within the project root `{}`", .0)]
     FileLiteralNotInProject(ProjectRoot, String),
     #[error("query function {0} not available in this context")]

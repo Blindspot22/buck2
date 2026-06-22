@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
@@ -27,6 +26,7 @@ use buck2_grpc::ServerHandle;
 use buck2_grpc::make_channel;
 use buck2_grpc::spawn_oneshot;
 use buck2_grpc::to_tonic;
+use buck2_hash::StdBuckHashMap;
 use buck2_test_proto::AttachInfoMessageRequest;
 use buck2_test_proto::Empty;
 use buck2_test_proto::EndOfTestResultsRequest;
@@ -36,6 +36,8 @@ use buck2_test_proto::ReportTestResultRequest;
 use buck2_test_proto::ReportTestSessionRequest;
 use buck2_test_proto::ReportTestsDiscoveredRequest;
 use buck2_test_proto::Testing;
+use buck2_test_proto::UploadFileToCasRequest;
+use buck2_test_proto::UploadFileToCasResponse;
 use buck2_test_proto::test_orchestrator_client;
 use buck2_test_proto::test_orchestrator_server;
 use dupe::Dupe;
@@ -51,6 +53,7 @@ use tower_layer::Layer;
 use tracing::Level;
 
 use crate::data::ArgValue;
+use crate::data::CasDigest;
 use crate::data::ConfiguredTargetHandle;
 use crate::data::DeclaredOutput;
 use crate::data::ExecuteRequest2;
@@ -122,7 +125,7 @@ impl DownwardApi for TestOrchestratorClient {
         Ok(())
     }
 
-    async fn external(&self, data: HashMap<String, String>) -> buck2_error::Result<()> {
+    async fn external(&self, data: StdBuckHashMap<String, String>) -> buck2_error::Result<()> {
         let event = data.into();
 
         self.downward_api_client
@@ -146,6 +149,7 @@ impl TestOrchestratorClient {
         pre_create_dirs: Vec<DeclaredOutput>,
         executor_override: Option<ExecutorConfigOverride>,
         required_local_resources: RequiredLocalResources,
+        disable_test_execution_caching: bool,
     ) -> buck2_error::Result<ExecuteResponse> {
         let test_executable = TestExecutable {
             stage: ui_prints,
@@ -161,6 +165,7 @@ impl TestOrchestratorClient {
             host_sharing_requirements,
             executor_override,
             required_local_resources,
+            disable_test_execution_caching,
         };
 
         let req: buck2_test_proto::ExecuteRequest2 = req
@@ -230,6 +235,7 @@ impl TestOrchestratorClient {
                     suite,
                     testcases: tests,
                     variant: None,
+                    repeat_count: None,
                 }),
             })
             .await?;
@@ -237,10 +243,17 @@ impl TestOrchestratorClient {
         Ok(())
     }
 
-    pub async fn report_test_session(&self, session_info: String) -> buck2_error::Result<()> {
+    pub async fn report_test_session(
+        &self,
+        session_info: String,
+        test_session_id: Option<String>,
+    ) -> buck2_error::Result<()> {
         self.test_orchestrator_client
             .clone()
-            .report_test_session(ReportTestSessionRequest { session_info })
+            .report_test_session(ReportTestSessionRequest {
+                session_info,
+                test_session_id,
+            })
             .await?;
 
         Ok(())
@@ -296,6 +309,29 @@ impl TestOrchestratorClient {
             .await?;
         Ok(())
     }
+
+    pub async fn upload_to_cas(
+        &self,
+        local_path: String,
+        ttl_seconds: i64,
+        use_case: String,
+    ) -> buck2_error::Result<CasDigest> {
+        let UploadFileToCasResponse { digest } = self
+            .test_orchestrator_client
+            .clone()
+            .upload_file_to_cas(UploadFileToCasRequest {
+                local_path,
+                ttl_config: Some(buck2_test_proto::TtlConfig {
+                    ttl_seconds,
+                    use_case,
+                }),
+            })
+            .await?
+            .into_inner();
+
+        let digest = digest.ok_or_else(|| internal_error!("Missing `digest`"))?;
+        Ok(digest)
+    }
 }
 
 struct TestOrchestratorService<T: TestOrchestrator> {
@@ -318,6 +354,7 @@ where
                 host_sharing_requirements,
                 executor_override,
                 required_local_resources,
+                disable_test_execution_caching,
             } = request
                 .into_inner()
                 .try_into()
@@ -343,6 +380,7 @@ where
                     pre_create_dirs,
                     executor_override,
                     required_local_resources,
+                    disable_test_execution_caching,
                 )
                 .await
                 .buck_error_context("Execution failed")?;
@@ -450,10 +488,13 @@ where
         request: tonic::Request<ReportTestSessionRequest>,
     ) -> Result<tonic::Response<Empty>, tonic::Status> {
         to_tonic(async move {
-            let ReportTestSessionRequest { session_info } = request.into_inner();
+            let ReportTestSessionRequest {
+                session_info,
+                test_session_id,
+            } = request.into_inner();
 
             self.inner
-                .report_test_session(session_info)
+                .report_test_session(session_info, test_session_id)
                 .await
                 .buck_error_context("Failed to report test session summary")?;
 
@@ -513,6 +554,31 @@ where
                 .buck_error_context("Failed to attach info messages")?;
 
             Ok(Empty {})
+        })
+        .await
+    }
+
+    async fn upload_file_to_cas(
+        &self,
+        request: tonic::Request<UploadFileToCasRequest>,
+    ) -> Result<tonic::Response<UploadFileToCasResponse>, tonic::Status> {
+        to_tonic(async move {
+            let UploadFileToCasRequest {
+                local_path,
+                ttl_config,
+            } = request.into_inner();
+
+            let ttl_config = ttl_config.ok_or_else(|| internal_error!("Missing `ttl_config`"))?;
+
+            let digest = self
+                .inner
+                .upload_to_cas(local_path, ttl_config.ttl_seconds, ttl_config.use_case)
+                .await
+                .buck_error_context("Failed to upload file to CAS")?;
+
+            Ok(UploadFileToCasResponse {
+                digest: Some(digest),
+            })
         })
         .await
     }

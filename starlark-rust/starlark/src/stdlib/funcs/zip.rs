@@ -16,6 +16,7 @@
  */
 
 use allocative::Allocative;
+use pagable::Pagable;
 use starlark_derive::starlark_module;
 
 use crate as starlark;
@@ -26,7 +27,9 @@ use crate::typing::Ty;
 use crate::typing::TypingOracleCtx;
 use crate::typing::call_args::TyCallArgs;
 use crate::typing::callable::TyCallable;
+use crate::typing::custom::TyCustomDyn;
 use crate::typing::error::TypingOrInternalError;
+use crate::typing::function::TyCustomFunction;
 use crate::typing::function::TyCustomFunctionImpl;
 use crate::values::FrozenValue;
 use crate::values::Heap;
@@ -35,8 +38,12 @@ use crate::values::ValueOfUnchecked;
 use crate::values::tuple::UnpackTuple;
 use crate::values::typing::StarlarkIter;
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Allocative)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Allocative, Pagable
+)]
 struct ZipType;
+
+pagable::register_typetag!(TyCustomFunction<ZipType> as dyn TyCustomDyn);
 
 impl TyCustomFunctionImpl for ZipType {
     fn as_callable(&self) -> TyCallable {

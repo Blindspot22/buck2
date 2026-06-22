@@ -24,8 +24,8 @@ use serde::Serializer;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::StarlarkHasher;
 use starlark::environment::Methods;
-use starlark::environment::MethodsStatic;
 use starlark::values::Demand;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Value;
@@ -47,14 +47,22 @@ use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
-use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
 use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 
 /// A wrapper for an `Artifact` that is guaranteed to be bound, such as outputs
 /// from dependencies, or source files.
-#[derive(Debug, Dupe, Clone, PartialEq, ProvidesStaticType, Allocative)]
+#[derive(
+    Debug,
+    Dupe,
+    Clone,
+    PartialEq,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 pub struct StarlarkArtifact {
+    #[starlark_pagable(pagable)]
     pub(crate) artifact: Artifact,
     // A set of ArtifactGroups that should be materialized along with the main artifact
     pub(crate) associated_artifacts: AssociatedArtifacts,
@@ -242,13 +250,8 @@ impl<'v> CommandLineArgLike<'v> for StarlarkArtifact {
         command_line_arg_like_impl!(StarlarkArtifact::starlark_type_repr());
     }
 
-    fn add_to_command_line(
-        &self,
-        cli: &mut dyn CommandLineBuilder,
-        ctx: &mut dyn CommandLineContext,
-        artifact_path_mapping: &dyn ArtifactPathMapper,
-    ) -> buck2_error::Result<()> {
-        cli.push_location(ctx.resolve_artifact(&self.artifact, artifact_path_mapping)?);
+    fn add_to_command_line(&self, fmt: &mut CommandLineBuilder<'v, '_>) -> buck2_error::Result<()> {
+        fmt.push_artifact(&self.artifact)?;
         Ok(())
     }
 
@@ -276,11 +279,12 @@ impl<'v> CommandLineArgLike<'v> for StarlarkArtifact {
     }
 }
 
+starlark::methods_static!(STARLARK_ARTIFACT_METHODS = artifact_methods);
+
 #[starlark_value(type = "Artifact")]
 impl<'v> StarlarkValue<'v> for StarlarkArtifact {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(artifact_methods)
+        Some(STARLARK_ARTIFACT_METHODS.methods())
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {

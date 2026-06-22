@@ -19,7 +19,7 @@ write_string = rule(
 )
 
 def _copy_impl(ctx):
-    out = ctx.actions.declare_output("action_output")
+    out = ctx.actions.declare_output("action_output", has_content_based_path = False)
     ctx.actions.run(
         cmd_args(["cp", ctx.attrs.src, out.as_output()]),
         category = "cp",
@@ -35,7 +35,7 @@ copy = rule(
 )
 
 def _copy_to_dir_impl(ctx):
-    out = ctx.actions.declare_output("action_output", dir = True)
+    out = ctx.actions.declare_output("action_output", dir = True, has_content_based_path = False)
     ctx.actions.run(
         cmd_args([
             "sh",
@@ -59,7 +59,7 @@ copy_to_dir = rule(
 def _download(ctx: AnalysisContext):
     url = "https://interncache-all.fbcdn.net/manifold/buck_build_test/tree/buck2_test/http_archive/test.tgz"
     sha1 = "1a45666759704bf08fc670aa96118a0415c470fc"
-    download = ctx.actions.download_file("download", url, sha1 = sha1)
+    download = ctx.actions.download_file("download", url, sha1 = sha1, has_content_based_path = False)
     return [
         DefaultInfo(default_output = download),
     ]
@@ -82,24 +82,21 @@ def _cas_artifact_impl(ctx: AnalysisContext):
     )
     return [DefaultInfo(default_output = out)]
 
-cas_artifact = rule(impl = _cas_artifact_impl, attrs = {
-    "digest": attrs.string(),
-    "expires_after_timestamp": attrs.int(default = 0),
-    "is_directory": attrs.bool(default = False),
-    "is_tree": attrs.bool(default = False),
-    "use_case": attrs.string(default = "buck2-testing"),
-})
+cas_artifact = rule(
+    impl = _cas_artifact_impl,
+    attrs = {
+        "digest": attrs.string(),
+        "expires_after_timestamp": attrs.int(default = 0),
+        "is_directory": attrs.bool(default = False),
+        "is_tree": attrs.bool(default = False),
+        "use_case": attrs.string(default = "buck2-testing"),
+    },
+)
 
 def symlink_files_impl(ctx):
-    srcs = {
-        src.short_path: src
-        for src in ctx.attrs.srcs
-    }
-    srcs.update({
-        "subdir/{}.suffix".format(src.short_path): src
-        for src in ctx.attrs.srcs
-    })
-    out = ctx.actions.symlinked_dir("out", srcs)
+    srcs = {src.short_path: src for src in ctx.attrs.srcs}
+    srcs.update({"subdir/{}.suffix".format(src.short_path): src for src in ctx.attrs.srcs})
+    out = ctx.actions.symlinked_dir("out", srcs, has_content_based_path = False)
     return [DefaultInfo(default_output = out)]
 
 symlink_files = rule(
@@ -110,7 +107,7 @@ symlink_files = rule(
 )
 
 def _write_json_impl(ctx: AnalysisContext) -> list[Provider]:
-    out = ctx.actions.write_json("out.json", ctx.attrs.content)
+    out = ctx.actions.write_json("out.json", ctx.attrs.content, has_content_based_path = False)
     return [DefaultInfo(default_output = out)]
 
 write_json = rule(

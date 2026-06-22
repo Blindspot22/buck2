@@ -7,14 +7,18 @@
 # above-listed licenses.
 
 def _cp_impl(ctx: AnalysisContext):
-    out = ctx.actions.declare_output("out")
-    ctx.actions.run(cmd_args(
-        "fbpython",
-        "-c",
-        "import shutil, sys; from pathlib import Path; shutil.copyfile(Path(sys.argv[1]), Path(sys.argv[2]))",
-        ctx.attrs.src,
-        out.as_output(),
-    ), category = "cp", local_only = ctx.attrs.local_only)
+    out = ctx.actions.declare_output("out", has_content_based_path = False)
+    ctx.actions.run(
+        cmd_args(
+            "fbpython",
+            "-c",
+            "import shutil, sys; from pathlib import Path; shutil.copyfile(Path(sys.argv[1]), Path(sys.argv[2]))",
+            ctx.attrs.src,
+            out.as_output(),
+        ),
+        category = "cp",
+        local_only = ctx.attrs.local_only,
+    )
 
     return [
         DefaultInfo(default_output = out),
@@ -29,7 +33,7 @@ cp = rule(
 )
 
 def _cp_via_builtin_impl(ctx: AnalysisContext):
-    out = ctx.actions.copy_file("out", ctx.attrs.src)
+    out = ctx.actions.copy_file("out", ctx.attrs.src, has_content_based_path = False)
     return [DefaultInfo(default_output = out)]
 
 cp_via_builtin = rule(
@@ -40,25 +44,28 @@ cp_via_builtin = rule(
 )
 
 def _stat_path_impl(ctx: AnalysisContext):
-    out = ctx.actions.declare_output("out")
+    out = ctx.actions.declare_output("out", has_content_based_path = False)
     if ctx.attrs.project != None:
         project = " / '" + ctx.attrs.project + "'"
     else:
         project = ""
-    ctx.actions.run(cmd_args(
-        "fbpython",
-        "-c",
+    ctx.actions.run(
         cmd_args(
-            "import sys",
-            "from pathlib import Path",
-            "p = Path(sys.argv[2])" + project,
-            "p.stat()",  # Just make sure this succeeds
-            "open(sys.argv[1], 'w').write(str(p.is_symlink()))",
-            delimiter = "; ",
+            "fbpython",
+            "-c",
+            cmd_args(
+                "import sys",
+                "from pathlib import Path",
+                "p = Path(sys.argv[2])" + project,
+                "p.stat()",  # Just make sure this succeeds
+                "open(sys.argv[1], 'w').write(str(p.is_symlink()))",
+                delimiter = "; ",
+            ),
+            out.as_output(),
+            ctx.attrs.path,
         ),
-        out.as_output(),
-        ctx.attrs.path,
-    ), category = "stat_path")
+        category = "stat_path",
+    )
     return [
         DefaultInfo(default_output = out),
     ]

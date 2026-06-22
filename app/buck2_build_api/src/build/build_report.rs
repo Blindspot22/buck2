@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::hash_map::DefaultHasher;
 use std::fs::OpenOptions;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -58,6 +57,8 @@ use buck2_execute::directory::ActionSharedDirectory;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_hash::BuckDefaultHasher;
+use buck2_sketches::DependencyGraphSketch;
 use buck2_wrapper_common::invocation_id::TraceId;
 use derivative::Derivative;
 use dice::DiceComputations;
@@ -74,7 +75,9 @@ use crate::build::ConfiguredBuildTargetResult;
 use crate::build::action_error::ActionErrorBuildOptions;
 use crate::build::action_error::BuildReportActionError;
 use crate::build::action_error::MAX_ERROR_CONTENT_BYTES;
+use crate::build::detailed_aggregated_metrics::types::ActionGraphSketchResult;
 use crate::build::detailed_aggregated_metrics::types::AllTargetsAggregatedData;
+use crate::build::detailed_aggregated_metrics::types::ArtifactPathSketchResult;
 use crate::build::detailed_aggregated_metrics::types::DetailedAggregatedMetrics;
 use crate::build::detailed_aggregated_metrics::types::TopLevelTargetAggregatedData;
 use crate::build::graph_properties::GraphPropertiesOptions;
@@ -109,8 +112,6 @@ pub struct BuildReport {
     build_metrics: Option<AllTargetsBuildMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     total_configured_graph_sketch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    action_graph_sketch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_category: Option<String>,
 }
@@ -156,9 +157,31 @@ pub(crate) struct ConfiguredBuildReportEntry {
     /// A sketch of the analysis memory used by this target
     #[serde(skip_serializing_if = "Option::is_none")]
     retained_analysis_memory_sketch: Option<String>,
+    /// A sketch of peak memory usage during analysis for this target
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peak_analysis_memory_sketch: Option<String>,
+    /// A sketch of peak memory usage during BUCK file loading across transitive packages
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peak_load_memory_sketch: Option<String>,
     /// A sketch of the action graph for this target
     #[serde(skip_serializing_if = "Option::is_none")]
     action_graph_sketch: Option<String>,
+    /// A sketch of artifact counts for this target
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_count_sketch: Option<String>,
+    /// A sketch of artifact sizes for this target
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_size_sketch: Option<String>,
+    /// Estimated cardinality of `artifact_count_sketch`. Populated only when the
+    /// `buck2.log_sketch_cardinalities` buckconfig is set; the corresponding
+    /// sketch field is left intact in both cases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_count_sketch_cardinality: Option<f64>,
+    /// Estimated cardinality of `artifact_size_sketch`. Populated only when the
+    /// `buck2.log_sketch_cardinalities` buckconfig is set; the corresponding
+    /// sketch field is left intact in both cases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_size_sketch_cardinality: Option<f64>,
 }
 
 /// DO NOT UPDATE WITHOUT UPDATING `docs/users/build_observability/build_report.md`!
@@ -177,6 +200,15 @@ pub(crate) struct TargetBuildMetrics {
     pub remote_max_memory_peak_bytes: u64,
     /// Max value for peak memory usage across all local actions.
     pub local_max_memory_peak_bytes: u64,
+    /// Distinct RE platform identifiers used by actions for this target. Each
+    /// value is the worker's `platform` property, optionally suffixed with
+    /// `.subplatform` (e.g. `gpu-remote-execution.H100`) when set.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub re_platform_names: Vec<String>,
+    /// Wall-clock time in milliseconds from the start of the build at which
+    /// this top-level target succeeded, failed, or timed out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wall_clock_completion_ms: Option<u64>,
 }
 
 /// DO NOT UPDATE WITHOUT UPDATING `docs/users/build_observability/build_report.md`!
@@ -238,6 +270,7 @@ struct BuildReportError {
     /// For example, two targets in different packages may have the same cause (evaluation of
     /// common bzl file), but error stack will be different.
     cause_index: usize,
+    error_category: String,
 }
 
 #[derive(Derivative, Serialize, Eq, PartialEq, Hash, Clone)]
@@ -277,7 +310,8 @@ pub struct BuildReportCollector<'a> {
     exclude_action_error_diagnostics: bool,
     truncate_error_content: bool,
     graph_properties_opts: GraphPropertiesOptions,
-    total_configured_graph_sketch: Option<VersionedSketcher<ConfiguredTargetLabel>>,
+    total_configured_graph_sketch:
+        Option<VersionedSketcher<ConfiguredTargetLabel, DependencyGraphSketch>>,
 }
 
 // Build report generation should never produce an input error, always return an error with an infra tag
@@ -349,6 +383,8 @@ impl<'a> BuildReportCollector<'a> {
         configured_to_pattern_modifiers: &HashMap<ConfiguredProvidersLabel, BTreeSet<Modifiers>>,
         other_errors: &BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
         detailed_metrics: Option<DetailedAggregatedMetrics>,
+        action_graph_sketch_result: Option<ActionGraphSketchResult>,
+        artifact_path_sketch_result: Option<ArtifactPathSketchResult>,
         graph_properties_opts: GraphPropertiesOptions,
     ) -> Result<BuildReport, BuildReportGenerationError> {
         let mut this = Self::new(
@@ -374,16 +410,53 @@ impl<'a> BuildReportCollector<'a> {
             HashMap::new();
         let mut action_graph_sketches_by_configured: HashMap<ConfiguredProvidersLabel, String> =
             HashMap::new();
+        let mut artifact_count_sketches_by_configured: HashMap<ConfiguredProvidersLabel, String> =
+            HashMap::new();
+        let mut artifact_size_sketches_by_configured: HashMap<ConfiguredProvidersLabel, String> =
+            HashMap::new();
+        let mut artifact_count_cardinalities_by_configured: HashMap<ConfiguredProvidersLabel, f64> =
+            HashMap::new();
+        let mut artifact_size_cardinalities_by_configured: HashMap<ConfiguredProvidersLabel, f64> =
+            HashMap::new();
         if let Some(detailed_metrics) = detailed_metrics.as_ref() {
             for top_level_metrics in &detailed_metrics.top_level_target_metrics {
                 metrics_by_configured.insert(
                     top_level_metrics.target.clone(),
                     Self::convert_per_target_metrics(top_level_metrics).into(),
                 );
-                if let Some(sketch) = &top_level_metrics.action_graph_sketch {
+            }
+        }
+        if let Some(sketch_result) = action_graph_sketch_result.as_ref() {
+            for (label, sketch) in &sketch_result.per_target_sketches {
+                if let Some(sketch) = sketch {
                     if !sketch.is_empty() {
                         action_graph_sketches_by_configured
-                            .insert(top_level_metrics.target.clone(), sketch.serialize());
+                            .insert(label.clone(), sketch.serialize());
+                    }
+                }
+            }
+        }
+        let log_sketch_cardinalities = graph_properties_opts.log_sketch_cardinalities;
+        if let Some(sketch_result) = artifact_path_sketch_result.as_ref() {
+            for (label, sketches) in &sketch_result.per_target_sketches {
+                if let Some(count_sketch) = sketches.count.as_ref() {
+                    if !count_sketch.is_empty() {
+                        artifact_count_sketches_by_configured
+                            .insert(label.clone(), count_sketch.serialize());
+                        if log_sketch_cardinalities {
+                            artifact_count_cardinalities_by_configured
+                                .insert(label.clone(), count_sketch.estimated_cardinality());
+                        }
+                    }
+                }
+                if let Some(size_sketch) = sketches.size.as_ref() {
+                    if !size_sketch.is_empty() {
+                        artifact_size_sketches_by_configured
+                            .insert(label.clone(), size_sketch.serialize());
+                        if log_sketch_cardinalities {
+                            artifact_size_cardinalities_by_configured
+                                .insert(label.clone(), size_sketch.estimated_cardinality());
+                        }
                     }
                 }
             }
@@ -463,6 +536,10 @@ impl<'a> BuildReportCollector<'a> {
                     errors,
                     &mut metrics_by_configured,
                     &action_graph_sketches_by_configured,
+                    &artifact_count_sketches_by_configured,
+                    &artifact_size_sketches_by_configured,
+                    &artifact_count_cardinalities_by_configured,
+                    &artifact_size_cardinalities_by_configured,
                     &mut all_error_reports,
                 )?;
 
@@ -494,6 +571,8 @@ impl<'a> BuildReportCollector<'a> {
         bxl_label: &BxlFunctionLabel,
         errors: &[buck2_error::Error],
         detailed_metrics: Option<DetailedAggregatedMetrics>,
+        _action_graph_sketch_result: Option<ActionGraphSketchResult>,
+        _artifact_path_sketch_result: Option<ArtifactPathSketchResult>,
         graph_properties_opts: GraphPropertiesOptions,
     ) -> Result<BuildReport, BuildReportGenerationError> {
         let mut this = Self::new(
@@ -549,12 +628,6 @@ impl<'a> BuildReportCollector<'a> {
             .total_configured_graph_sketch
             .map(|sketcher| sketcher.into_mergeable_graph_sketch().serialize());
 
-        let action_graph_sketch = detailed_metrics
-            .as_ref()
-            .and_then(|m| m.action_graph_sketch.as_ref())
-            .filter(|sketch| !sketch.is_empty())
-            .map(|sketch| sketch.serialize());
-
         // Determine error category using existing Buck2 error classification
         let error_category = if let Some(best_error_report) = best_error(&all_error_reports) {
             Some(best_error_report.category().to_string())
@@ -577,7 +650,6 @@ impl<'a> BuildReportCollector<'a> {
             build_metrics: detailed_metrics
                 .map(|m| Self::convert_all_target_build_metrics(&m.all_targets_build_metrics)),
             total_configured_graph_sketch,
-            action_graph_sketch,
             error_category,
         })
     }
@@ -603,6 +675,8 @@ impl<'a> BuildReportCollector<'a> {
             amortized_metrics: Self::convert_aggregated_build_metrics(&metrics.amortized_metrics),
             remote_max_memory_peak_bytes: metrics.remote_max_memory_peak_bytes,
             local_max_memory_peak_bytes: metrics.local_max_memory_peak_bytes,
+            re_platform_names: metrics.re_platform_names.to_vec(),
+            wall_clock_completion_ms: metrics.wall_clock_completion_ms,
         }
     }
 
@@ -627,7 +701,7 @@ impl<'a> BuildReportCollector<'a> {
     // ============================================================================
 
     pub(crate) fn update_string_cache(&mut self, string: String) -> String {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = BuckDefaultHasher::new();
         string.hash(&mut hasher);
         let hash = hasher.finish().to_string();
         self.strings.insert(hash.clone(), string);
@@ -647,6 +721,10 @@ impl<'a> BuildReportCollector<'a> {
         errors: &[buck2_error::Error],
         metrics: &mut HashMap<ConfiguredProvidersLabel, Arc<TargetBuildMetrics>>,
         action_graph_sketches: &HashMap<ConfiguredProvidersLabel, String>,
+        artifact_count_sketches: &HashMap<ConfiguredProvidersLabel, String>,
+        artifact_size_sketches: &HashMap<ConfiguredProvidersLabel, String>,
+        artifact_count_cardinalities: &HashMap<ConfiguredProvidersLabel, f64>,
+        artifact_size_cardinalities: &HashMap<ConfiguredProvidersLabel, f64>,
         all_error_reports: &mut Vec<ErrorReport>,
     ) -> buck2_error::Result<BuildReportEntry> {
         // NOTE: if we're actually building a thing, then the package path must exist, but be
@@ -677,6 +755,10 @@ impl<'a> BuildReportCollector<'a> {
                 results,
                 metrics,
                 action_graph_sketches,
+                artifact_count_sketches,
+                artifact_size_sketches,
+                artifact_count_cardinalities,
+                artifact_size_cardinalities,
                 all_error_reports,
             )?;
 
@@ -735,6 +817,10 @@ impl<'a> BuildReportCollector<'a> {
         >,
         metrics: &mut HashMap<ConfiguredProvidersLabel, Arc<TargetBuildMetrics>>,
         action_graph_sketches: &HashMap<ConfiguredProvidersLabel, String>,
+        artifact_count_sketches: &HashMap<ConfiguredProvidersLabel, String>,
+        artifact_size_sketches: &HashMap<ConfiguredProvidersLabel, String>,
+        artifact_count_cardinalities: &HashMap<ConfiguredProvidersLabel, f64>,
+        artifact_size_cardinalities: &HashMap<ConfiguredProvidersLabel, f64>,
         all_error_reports: &mut Vec<ErrorReport>,
     ) -> buck2_error::Result<ConfiguredBuildReportEntry> {
         let mut configured_report = ConfiguredBuildReportEntry::default();
@@ -742,7 +828,7 @@ impl<'a> BuildReportCollector<'a> {
         for (label, result) in results {
             let provider_name: Arc<str> = report_providers_name(label).into();
 
-            result.outputs.iter().for_each(|res| match res {
+            result.outputs.iter().for_each(|timed| match &timed.inner {
                 Ok(artifacts) => {
                     if artifacts.provider_type == BuildProviderType::Default {
                         for (artifact, value) in artifacts.values.iter() {
@@ -773,7 +859,7 @@ impl<'a> BuildReportCollector<'a> {
                 }
             });
 
-            errors.extend(result.errors.iter().cloned());
+            errors.extend(result.errors.iter().map(|t| t.inner.clone()));
             // Collect result errors into all_error_reports for global error categorization
             all_error_reports.extend(errors.iter().map(ErrorReport::from));
 
@@ -798,16 +884,37 @@ impl<'a> BuildReportCollector<'a> {
 
                 if let Some(retained_analysis_memory_sketch) =
                     graph_properties.retained_analysis_memory_sketch.as_ref()
+                    && self.graph_properties_opts.retained_analysis_memory_sketch
                 {
-                    if self.graph_properties_opts.retained_analysis_memory_sketch {
-                        configured_report.retained_analysis_memory_sketch =
-                            Some(retained_analysis_memory_sketch.serialize());
-                    }
+                    configured_report.retained_analysis_memory_sketch =
+                        Some(retained_analysis_memory_sketch.serialize());
+                }
+
+                if let Some(peak_analysis_memory_sketch) =
+                    graph_properties.peak_analysis_memory_sketch.as_ref()
+                    && self.graph_properties_opts.peak_analysis_memory_sketch
+                {
+                    configured_report.peak_analysis_memory_sketch =
+                        Some(peak_analysis_memory_sketch.serialize());
+                }
+
+                if let Some(peak_load_memory_sketch) =
+                    graph_properties.peak_load_memory_sketch.as_ref()
+                    && self.graph_properties_opts.peak_load_memory_sketch
+                {
+                    configured_report.peak_load_memory_sketch =
+                        Some(peak_load_memory_sketch.serialize());
                 }
             }
 
             configured_report.build_metrics = metrics.get(label).duped();
             configured_report.action_graph_sketch = action_graph_sketches.get(label).cloned();
+            configured_report.artifact_count_sketch = artifact_count_sketches.get(label).cloned();
+            configured_report.artifact_size_sketch = artifact_size_sketches.get(label).cloned();
+            configured_report.artifact_count_sketch_cardinality =
+                artifact_count_cardinalities.get(label).copied();
+            configured_report.artifact_size_sketch_cardinality =
+                artifact_size_cardinalities.get(label).copied();
         }
         configured_report.errors =
             self.convert_error_list(&errors, EntryLabel::Target(target_with_modifiers));
@@ -840,6 +947,7 @@ impl<'a> BuildReportCollector<'a> {
             message: String,
             error_tags: Vec<String>,
             action_error: Option<BuildReportActionError>,
+            error_category: String,
         }
 
         let mut temp = Vec::with_capacity(errors.len());
@@ -848,6 +956,7 @@ impl<'a> BuildReportCollector<'a> {
             // This is to make sure that we can be deterministic
             let root = e.root_id();
             let error_report: ErrorReport = e.into();
+            let error_category = error_report.category().to_string();
             let message = if let Some(telemetry_message) = error_report.telemetry_message {
                 telemetry_message
             } else {
@@ -880,6 +989,7 @@ impl<'a> BuildReportCollector<'a> {
                         },
                     )
                 }),
+                error_category,
             });
         }
         // Sort the errors. This sort *almost* guarantees full determinism, but unfortunately
@@ -928,6 +1038,7 @@ impl<'a> BuildReportCollector<'a> {
                 action_error: info.action_error,
                 error_tags: info.error_tags,
                 cause_index,
+                error_category: info.error_category,
             });
         }
 
@@ -1082,6 +1193,8 @@ pub fn write_build_report(
     configured_to_pattern_modifiers: &HashMap<ConfiguredProvidersLabel, BTreeSet<Modifiers>>,
     other_errors: &BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
     detailed_metrics: Option<DetailedAggregatedMetrics>,
+    action_graph_sketch_result: Option<ActionGraphSketchResult>,
+    artifact_path_sketch_result: Option<ArtifactPathSketchResult>,
 ) -> Result<Option<String>, buck2_error::Error> {
     let build_report = BuildReportCollector::convert(
         trace_id,
@@ -1098,6 +1211,8 @@ pub fn write_build_report(
         configured_to_pattern_modifiers,
         other_errors,
         detailed_metrics,
+        action_graph_sketch_result,
+        artifact_path_sketch_result,
         opts.graph_properties_opts,
     )?;
 
@@ -1119,6 +1234,8 @@ pub fn write_bxl_build_report(
     bxl_label: &BxlFunctionLabel,
     errors: &[buck2_error::Error],
     detailed_metrics: Option<DetailedAggregatedMetrics>,
+    action_graph_sketch_result: Option<ActionGraphSketchResult>,
+    artifact_path_sketch_result: Option<ArtifactPathSketchResult>,
 ) -> Result<Option<String>, buck2_error::Error> {
     let build_report = BuildReportCollector::convert_bxl(
         trace_id,
@@ -1134,6 +1251,8 @@ pub fn write_bxl_build_report(
         bxl_label,
         errors,
         detailed_metrics,
+        action_graph_sketch_result,
+        artifact_path_sketch_result,
         opts.graph_properties_opts,
     )?;
 
@@ -1156,6 +1275,8 @@ pub fn stream_build_report(
     configured_to_pattern_modifiers: &HashMap<ConfiguredProvidersLabel, BTreeSet<Modifiers>>,
     other_errors: &BTreeMap<Option<ProvidersLabel>, Vec<buck2_error::Error>>,
     detailed_metrics: Option<DetailedAggregatedMetrics>,
+    action_graph_sketch_result: Option<ActionGraphSketchResult>,
+    artifact_path_sketch_result: Option<ArtifactPathSketchResult>,
 ) -> buck2_error::Result<()> {
     let build_report = BuildReportCollector::convert(
         trace_id,
@@ -1172,6 +1293,8 @@ pub fn stream_build_report(
         configured_to_pattern_modifiers,
         other_errors,
         detailed_metrics,
+        action_graph_sketch_result,
+        artifact_path_sketch_result,
         opts.graph_properties_opts,
     )?;
 

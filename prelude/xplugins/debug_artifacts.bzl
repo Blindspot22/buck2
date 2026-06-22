@@ -14,9 +14,7 @@ load(
     "XPluginsManifestInfo",
 )
 
-def xplugins_get_debug_artifacts_info(
-        ctx: AnalysisContext,
-        deps: list[Dependency]) -> XPluginsDebugArtifactsInfo | None:
+def xplugins_get_debug_artifacts_info(ctx: AnalysisContext, deps: list[Dependency]) -> XPluginsDebugArtifactsInfo | None:
     children = []
     for dep in deps:
         info = dep.get(XPluginsDebugArtifactsInfo)
@@ -64,12 +62,13 @@ def xplugins_get_debug_artifacts_subtargets(actions: AnalysisActions, info: XPlu
                 "path": filename,
             })
 
-    manifest_file = actions.write_json("manifest.json", manifest, pretty = True)
+    manifest_file = actions.write_json("manifest.json", manifest, pretty = True, has_content_based_path = False)
     dir_contents["MANIFEST.json"] = manifest_file
 
     directory = actions.copied_dir(
         "XPluginsFunctionMappings",
         dir_contents,
+        has_content_based_path = False,
     )
 
     return [

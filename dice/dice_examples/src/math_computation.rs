@@ -21,6 +21,7 @@ use allocative::Allocative;
 use async_trait::async_trait;
 use derive_more::Display;
 use dice::DiceComputations;
+use dice::DiceKeyDyn;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
 use dice::Key;
@@ -29,18 +30,20 @@ use dupe::Dupe;
 use futures::FutureExt;
 use futures::future;
 use futures::future::BoxFuture;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
-#[derive(Clone, Dupe, PartialEq, Eq, Hash, Display, Debug, Allocative)]
+#[derive(Clone, Dupe, PartialEq, Eq, Hash, Display, Debug, Allocative, Pagable)]
 #[display("Var({})", _0)]
 pub struct Var(pub Arc<String>);
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Allocative)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Allocative, Pagable)]
 pub enum Unit {
     Var(Var),
     Literal(i64),
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, Allocative)]
+#[derive(PartialEq, Eq, Clone, Debug, Allocative, Pagable)]
 pub enum Equation {
     Add(Vec<Unit>),
     Unit(Unit),
@@ -126,12 +129,17 @@ impl MathEquations for DiceTransactionUpdater {
     }
 }
 
-#[derive(Clone, Display, Debug, Dupe, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Dupe, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("Eval({})", _0)]
+#[pagable_typetag(DiceKeyDyn)]
 pub struct EvalVar(pub Var);
 #[async_trait]
 impl Key for EvalVar {
     type Value = Result<i64, Arc<anyhow::Error>>;
+
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     async fn compute(
         &self,
@@ -141,7 +149,7 @@ impl Key for EvalVar {
         let equation = lookup_unit(ctx, &self.0).await.map_err(Arc::new)?;
         Ok(match &*equation {
             Equation::Add(adds) => resolve_units(ctx, &adds[..]).await?.iter().sum(),
-            Equation::Unit(unit) => resolve_units(ctx, std::slice::from_ref(&unit)).await?[0],
+            Equation::Unit(unit) => resolve_units(ctx, std::slice::from_ref(unit)).await?[0],
         })
     }
 
@@ -188,11 +196,16 @@ async fn lookup_unit(ctx: &mut DiceComputations<'_>, var: &Var) -> anyhow::Resul
     Ok(ctx.compute(&LookupVar(var.clone())).await?)
 }
 
-#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("Lookup({})", _0)]
+#[pagable_typetag(DiceKeyDyn)]
 struct LookupVar(Var);
 impl InjectedKey for LookupVar {
     type Value = Arc<Equation>;
+
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y

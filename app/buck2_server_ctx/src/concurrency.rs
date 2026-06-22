@@ -695,12 +695,9 @@ impl ConcurrencyHandler {
             if is_same_state && cmd.preemption_setting == PreemptibleWhen::OnDifferentState {
                 continue;
             }
-            match cmd.preempt.take() {
-                Some(preempt) => {
-                    let _ = preempt.send(());
-                }
-                None => {}
-            };
+            if let Some(preempt) = cmd.preempt.take() {
+                let _ = preempt.send(());
+            }
         }
     }
 
@@ -730,18 +727,16 @@ impl ConcurrencyHandler {
     ) -> buck2_error::Result<()> {
         let active_commands = format_traces(active_commands, current_command);
 
-        match state {
-            RunState::NestedSameState => {
-                soft_error!(
-                    "nested_invocation_same_dice_state",
-                    ConcurrencyHandlerError::NestedInvocationWithSameStates(
-                        active_commands,
-                        current_command.format_argv(),
-                    )
-                    .into()
-                )?;
-            }
-            _ => {}
+        if let RunState::NestedSameState = state {
+            soft_error!(
+                "nested_invocation_same_dice_state",
+                ConcurrencyHandlerError::NestedInvocationWithSameStates(
+                    active_commands,
+                    current_command.format_argv(),
+                )
+                .into(),
+                error_on_oss: true
+            )?;
         }
 
         Ok(())
@@ -834,10 +829,14 @@ mod tests {
     use dice::DiceComputations;
     use dice::InjectedKey;
     use dice::Key;
+    use dice::PagableValueSerialize;
+    use dice::ValueSerialize;
     use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
     use futures::pin_mut;
     use futures::poll;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
     use parking_lot::Mutex;
     use tokio::sync::Barrier;
     use tokio::sync::RwLock;
@@ -877,7 +876,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Dupe, Display, Debug, Hash, Eq, PartialEq, Allocative)]
+    #[derive(Clone, Dupe, Display, Debug, Hash, Eq, PartialEq, Allocative, Pagable)]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct K;
 
     #[async_trait]
@@ -886,6 +886,10 @@ mod tests {
 
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             false
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            PagableValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -1502,11 +1506,13 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Clone, Dupe, Derivative, Allocative, Display)]
+    #[derive(Clone, Dupe, Derivative, Allocative, Display, Pagable)]
     #[derivative(Hash, Eq, PartialEq, Debug)]
     #[display("CleanupTestKey")]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct CleanupTestKey {
         #[derivative(Debug = "ignore", Hash = "ignore", PartialEq = "ignore")]
+        #[pagable(discard = "Arc::new(Mutex::new(()))")]
         is_executing: Arc<Mutex<()>>,
     }
 
@@ -1514,6 +1520,7 @@ mod tests {
     impl Key for CleanupTestKey {
         type Value = ();
 
+        #[allow(clippy::await_holding_lock)] // Intentional: testing exclusive access
         async fn compute(
             &self,
             _ctx: &mut DiceComputations,
@@ -1521,15 +1528,17 @@ mod tests {
         ) -> Self::Value {
             let _guard = self.is_executing.lock();
 
-            // TODO: use critical_section as it's simpler, but this stack doesn't have it and
-            // this works equally well here :)
             cancellation
-                .with_structured_cancellation(|_obs| tokio::time::sleep(Duration::from_secs(1)))
+                .critical_section(|| tokio::time::sleep(Duration::from_secs(1)))
                 .await;
         }
 
         fn equality(_me: &Self::Value, _other: &Self::Value) -> bool {
             true
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            PagableValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -1637,8 +1646,8 @@ mod tests {
     where
         F: Fn(&BuckEvent) -> bool + Send,
     {
-        // 2 millis was too short on windows, fails concurrency::tests::exclusive_command_lock
-        tokio::time::timeout(Duration::from_millis(4), async {
+        // Short timeouts are too flaky in OD environments under load.
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(event) = source.try_receive() {
                     if let Some(event) = event.unpack_buck() {
@@ -1700,6 +1709,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // Intentional: testing exclusive access
     async fn exclusive_command_lock() -> buck2_error::Result<()> {
         let dice = make_default_dice().await;
         let concurrency = ConcurrencyHandler::new(dice.dupe());

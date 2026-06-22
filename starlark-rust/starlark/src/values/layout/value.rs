@@ -66,6 +66,10 @@ use crate::eval::compiler::def::Def;
 use crate::eval::compiler::def::FrozenDef;
 use crate::eval::runtime::arguments::ArgumentsFull;
 use crate::eval::runtime::frame_span::FrameSpan;
+use crate::pagable::starlark_deserialize::StarlarkDeserialize;
+use crate::pagable::starlark_deserialize::StarlarkDeserializeContext;
+use crate::pagable::starlark_serialize::StarlarkSerialize;
+use crate::pagable::starlark_serialize::StarlarkSerializeContext;
 use crate::sealed::Sealed;
 use crate::typing::ParamIsRequired;
 use crate::typing::ParamSpec;
@@ -74,7 +78,6 @@ use crate::typing::TyCallable;
 use crate::util::ArcStr;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
-use crate::values::FrozenRef;
 use crate::values::FrozenStringValue;
 use crate::values::FrozenValueTyped;
 use crate::values::Heap;
@@ -245,6 +248,7 @@ impl Equivalent<Value<'_>> for FrozenValue {
 /// when working directly with [`FrozenValue`]s. See the type [`OwnedFrozenValue`](crate::values::OwnedFrozenValue)
 /// for a little bit more safety.
 #[derive(Clone, Copy, Dupe, ProvidesStaticType, Allocative)]
+#[derive(pagable::PagablePanic)]
 // One possible change: moving from Blackhole during GC
 pub struct FrozenValue(
     #[allocative(skip)] // Because it is owned by the heap.
@@ -665,7 +669,7 @@ impl<'v> Value<'v> {
 
     pub(crate) fn invoke_with_loc(
         self,
-        location: Option<FrozenRef<'static, FrameSpan>>,
+        location: Option<&'static FrameSpan>,
         args: &Arguments<'v, '_>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> crate::Result<Value<'v>> {
@@ -682,6 +686,21 @@ impl<'v> Value<'v> {
             Some(&def.parameters)
         } else if let Some(def) = self.downcast_ref::<FrozenDef>() {
             Some(def.parameters.as_value())
+        } else {
+            None
+        }
+    }
+
+    /// Returns the name of a callable value, if known.
+    ///
+    /// Works for user-defined functions (`def`/`lambda`) and native functions.
+    pub fn function_name(self) -> Option<&'v str> {
+        if let Some(def) = self.downcast_ref::<Def>() {
+            Some(def.def_info.name.as_str())
+        } else if let Some(def) = self.downcast_ref::<FrozenDef>() {
+            Some(def.def_info.name.as_str())
+        } else if let Some(native) = self.downcast_ref::<NativeFunction>() {
+            Some(&native.name)
         } else {
             None
         }
@@ -838,12 +857,11 @@ impl<'v> Value<'v> {
     }
 
     /// Implement the `str()` function - converts a string value to itself,
-    /// otherwise uses `repr()`.
+    /// otherwise calls `collect_str()` (which handles bytes, etc.).
     pub fn to_str(self) -> String {
-        match self.unpack_str() {
-            None => self.to_repr(),
-            Some(s) => s.to_owned(),
-        }
+        let mut s = String::new();
+        self.collect_str(&mut s);
+        s
     }
 
     /// Implement the `repr()` function.
@@ -1212,28 +1230,6 @@ impl FrozenValue {
             // Empty tuple is statically allocated.
             || matches!(Tuple::from_value(self.to_value()), Some(t) if t.len() == 0)
     }
-
-    /// Downcast to given type.
-    #[inline]
-    pub fn downcast_frozen_ref<T: StarlarkValue<'static>>(self) -> Option<FrozenRef<'static, T>> {
-        self.downcast_ref::<T>().map(|value| FrozenRef { value })
-    }
-
-    /// Downcast to string.
-    #[inline]
-    pub fn downcast_frozen_str(self) -> Option<FrozenRef<'static, str>> {
-        self.to_value()
-            .unpack_str()
-            .map(|value| FrozenRef { value })
-    }
-
-    /// Note: see docs about ['Value::unpack_box_str'] about instability
-    #[inline]
-    pub fn downcast_frozen_starlark_str(self) -> Option<FrozenRef<'static, StarlarkStr>> {
-        self.to_value()
-            .unpack_starlark_str()
-            .map(|value| FrozenRef { value })
-    }
 }
 
 impl<'v> Serialize for Value<'v> {
@@ -1254,6 +1250,18 @@ impl Serialize for FrozenValue {
         S: Serializer,
     {
         self.to_value().serialize(s)
+    }
+}
+
+impl StarlarkSerialize for FrozenValue {
+    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+        ctx.serialize_frozen_value(*self)
+    }
+}
+
+impl StarlarkDeserialize for FrozenValue {
+    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
+        ctx.deserialize_frozen_value()
     }
 }
 
@@ -1319,11 +1327,7 @@ pub trait ValueLike<'v>:
 
     /// `str(x)`.
     fn collect_str(self, collector: &mut String) {
-        if let Some(s) = self.to_value().unpack_str() {
-            collector.push_str(s);
-        } else {
-            self.collect_repr(collector);
-        }
+        self.collect_repr(collector);
     }
 
     /// `x == other`.
@@ -1403,6 +1407,22 @@ impl<'v> ValueLike<'v> for Value<'v> {
         }
     }
 
+    fn collect_str(self, collector: &mut String) {
+        // Fast path: strings don't need cycle detection or vtable dispatch.
+        if let Some(s) = self.unpack_starlark_str() {
+            collector.push_str(s.as_str());
+            return;
+        }
+        match repr_stack_push(self) {
+            Ok(_guard) => {
+                self.get_ref().collect_str(collector);
+            }
+            Err(..) => {
+                self.get_ref().collect_repr_cycle(collector);
+            }
+        }
+    }
+
     fn write_hash(self, hasher: &mut StarlarkHasher) -> crate::Result<()> {
         self.get_ref().write_hash(hasher)
     }
@@ -1443,6 +1463,11 @@ impl<'v> ValueLike<'v> for FrozenValue {
     #[inline]
     fn collect_repr(self, collector: &mut String) {
         self.to_value().collect_repr(collector)
+    }
+
+    #[inline]
+    fn collect_str(self, collector: &mut String) {
+        self.to_value().collect_str(collector)
     }
 
     #[inline]
@@ -1567,6 +1592,33 @@ mod tests {
             e.to_string().contains("Value is not callable: NoneType"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn test_function_name_def() {
+        let module = assert::pass_module("def my_func(x, y): return x + y");
+        let f = module.get("my_func").unwrap();
+        assert_eq!(Some("my_func"), f.value().function_name());
+    }
+
+    #[test]
+    fn test_function_name_lambda() {
+        let module = assert::pass_module("f = lambda x: x");
+        let f = module.get("f").unwrap();
+        assert_eq!(Some("lambda"), f.value().function_name());
+    }
+
+    #[test]
+    fn test_function_name_native() {
+        let g = Globals::standard();
+        let f = g.get("bool").unwrap();
+        assert_eq!(Some("bool"), f.function_name());
+    }
+
+    #[test]
+    fn test_function_name_non_callable() {
+        assert_eq!(None, Value::new_none().function_name());
+        assert_eq!(None, Value::testing_new_int(5).function_name());
     }
 
     #[test]

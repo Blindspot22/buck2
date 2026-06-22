@@ -26,17 +26,19 @@ use buck2_core::fs::buck_out_path::BuildArtifactPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::soft_error;
+pub use buck2_data::NetworkAccess;
 use buck2_directory::directory::dashmap_directory_interner::DashMapDirectoryInterner;
 use buck2_directory::directory::directory::Directory;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
 use buck2_directory::directory::fingerprinted_directory::FingerprintedDirectory;
 use buck2_error::buck2_error;
+use buck2_hash::BuckIndexSet;
 use derive_more::Display;
 use dupe::Dupe;
 use gazebo::variants::UnpackVariants;
 use host_sharing::host_sharing::HostSharingRequirements;
-use indexmap::IndexSet;
 use itertools::Itertools;
+use pagable::Pagable;
 use prost::Message;
 use remote_execution as RE;
 use sorted_vector_map::SortedVectorMap;
@@ -106,7 +108,7 @@ struct IncompatibleExecutorPreferences {
     b: ExecutorPreference,
 }
 
-#[derive(Copy, Clone, Dupe, Display, Debug, Allocative)]
+#[derive(Copy, Clone, Dupe, Display, Debug, Allocative, PartialEq, Pagable)]
 pub enum ExecutorPreference {
     Default,
     /// Fails when executed by a remote-only executor
@@ -207,7 +209,7 @@ impl ExecutorPreference {
 
 pub struct CommandExecutionPaths {
     inputs: Vec<CommandExecutionInput>,
-    outputs: IndexSet<CommandExecutionOutput>,
+    outputs: BuckIndexSet<CommandExecutionOutput>,
 
     input_directory: ActionImmutableDirectory,
     output_paths: Vec<(ProjectRelativePathBuf, OutputType)>,
@@ -219,7 +221,7 @@ pub struct CommandExecutionPaths {
 impl CommandExecutionPaths {
     pub fn new(
         inputs: Vec<CommandExecutionInput>,
-        outputs: IndexSet<CommandExecutionOutput>,
+        outputs: BuckIndexSet<CommandExecutionOutput>,
         fs: &ArtifactFs,
         digest_config: DigestConfig,
         interner: Option<&DashMapDirectoryInterner<ActionDirectoryMember, TrackedFileDigest>>,
@@ -229,7 +231,7 @@ impl CommandExecutionPaths {
         // RE spec requires outputs to be sorted:
         // https://github.com/bazelbuild/remote-apis/blob/1f36c310b28d762b258ea577ed08e8203274efae/build/bazel/remote/execution/v2/remote_execution.proto#L667-L669
         // We sort early here and not when we create RE action in order for local and remote actions to be in-sync.
-        let outputs: IndexSet<_> = outputs
+        let outputs: BuckIndexSet<_> = outputs
             .into_iter()
             .sorted_by_key(|e| {
                 let resolved = e
@@ -280,12 +282,9 @@ impl CommandExecutionPaths {
         let mut input_files_bytes = 0;
 
         for entry in input_directory.unordered_walk_leaves().without_paths() {
-            match entry {
-                ActionDirectoryMember::File(f) => {
-                    input_files_bytes += f.digest.size();
-                }
-                _ => {}
-            };
+            if let ActionDirectoryMember::File(f) = entry {
+                input_files_bytes += f.digest.size();
+            }
         }
 
         input_files_bytes
@@ -395,13 +394,19 @@ pub struct CommandExecutionRequest {
     /// RE custom tupperware image.
     remote_execution_custom_image: Option<RemoteExecutorCustomImage>,
     /// RE execution policy.
-    meta_internal_extra_params: MetaInternalExtraParams,
+    meta_internal_extra_params: Arc<MetaInternalExtraParams>,
     /// Failed action outputs to materialize
     outputs_for_error_handler: Vec<BuildArtifactPath>,
     /// String representation of a key that uniquely identifies a RunAction
     run_action_key: Option<String>,
 
     is_test: bool,
+    /// Whether to skip resource control (cgroup) for this command.
+    /// Set for local resource setup commands whose backgrounded processes
+    /// must survive after the setup script exits.
+    skip_resource_control: bool,
+
+    network_access: Option<NetworkAccess>,
 }
 
 impl CommandExecutionRequest {
@@ -434,10 +439,12 @@ impl CommandExecutionRequest {
             re_gang_workers: Vec::new(),
             remote_execution_dependencies: Vec::new(),
             remote_execution_custom_image: None,
-            meta_internal_extra_params: MetaInternalExtraParams::default(),
+            meta_internal_extra_params: MetaInternalExtraParams::default_arc(),
             outputs_for_error_handler: Vec::new(),
             run_action_key: None,
             is_test: false,
+            skip_resource_control: false,
+            network_access: None,
         }
     }
 
@@ -691,7 +698,7 @@ impl CommandExecutionRequest {
 
     pub fn with_meta_internal_extra_params(
         mut self,
-        meta_internal_extra_params: MetaInternalExtraParams,
+        meta_internal_extra_params: Arc<MetaInternalExtraParams>,
     ) -> Self {
         self.meta_internal_extra_params = meta_internal_extra_params;
         self
@@ -718,6 +725,24 @@ impl CommandExecutionRequest {
     pub fn is_test(&self) -> bool {
         self.is_test
     }
+
+    pub fn with_skip_resource_control(mut self) -> Self {
+        self.skip_resource_control = true;
+        self
+    }
+
+    pub fn skip_resource_control(&self) -> bool {
+        self.skip_resource_control
+    }
+
+    pub fn with_network_access(mut self, v: Option<NetworkAccess>) -> Self {
+        self.network_access = v;
+        self
+    }
+
+    pub fn network_access(&self) -> Option<NetworkAccess> {
+        self.network_access
+    }
 }
 
 /// Is an output a file or a directory
@@ -732,7 +757,8 @@ impl CommandExecutionRequest {
     Allocative,
     Ord,
     PartialOrd,
-    strong_hash::StrongHash
+    strong_hash::StrongHash,
+    Pagable
 )]
 pub enum OutputType {
     /// We don't know - used to represent legacy code that doesn't yet declare the output type properly.
@@ -768,7 +794,8 @@ impl OutputType {
                 )
                 .into(),
                 deprecation: true,
-                quiet: true
+                quiet: true,
+                error_on_oss: true
             )?;
             Ok(())
         } else if self == output_type
@@ -790,7 +817,6 @@ pub enum CommandExecutionOutputRef<'a> {
     BuildArtifact {
         path: &'a BuildArtifactPath,
         output_type: OutputType,
-        supports_incremental_remote: bool,
     },
     TestPath {
         path: &'a BuckOutTestPath,
@@ -807,11 +833,7 @@ impl CommandExecutionOutputRef<'_> {
         content_hash: Option<&ContentBasedPathHash>,
     ) -> buck2_error::Result<ResolvedCommandExecutionOutput> {
         match self {
-            Self::BuildArtifact {
-                path,
-                output_type,
-                supports_incremental_remote: _,
-            } => Ok(ResolvedCommandExecutionOutput {
+            Self::BuildArtifact { path, output_type } => Ok(ResolvedCommandExecutionOutput {
                 path: fs.resolve_build(path, content_hash)?,
                 create: OutputCreationBehavior::Parent,
                 output_type: *output_type,
@@ -831,11 +853,7 @@ impl CommandExecutionOutputRef<'_> {
         fs: &ArtifactFs,
     ) -> buck2_error::Result<ResolvedCommandExecutionOutput> {
         match self {
-            Self::BuildArtifact {
-                path,
-                output_type,
-                supports_incremental_remote: _,
-            } => Ok(ResolvedCommandExecutionOutput {
+            Self::BuildArtifact { path, output_type } => Ok(ResolvedCommandExecutionOutput {
                 path: fs.resolve_build_configuration_hash_path(path)?,
                 create: OutputCreationBehavior::Parent,
                 output_type: *output_type,
@@ -850,14 +868,9 @@ impl CommandExecutionOutputRef<'_> {
 
     pub fn cloned(&self) -> CommandExecutionOutput {
         match self {
-            Self::BuildArtifact {
-                path,
-                output_type,
-                supports_incremental_remote,
-            } => CommandExecutionOutput::BuildArtifact {
+            Self::BuildArtifact { path, output_type } => CommandExecutionOutput::BuildArtifact {
                 path: (*path).dupe(),
                 output_type: *output_type,
-                supports_incremental_remote: *supports_incremental_remote,
             },
             Self::TestPath { path, create } => CommandExecutionOutput::TestPath {
                 path: (*path).clone(),
@@ -879,7 +892,6 @@ pub enum CommandExecutionOutput {
     BuildArtifact {
         path: BuildArtifactPath,
         output_type: OutputType,
-        supports_incremental_remote: bool,
     },
     TestPath {
         path: BuckOutTestPath,
@@ -890,14 +902,9 @@ pub enum CommandExecutionOutput {
 impl CommandExecutionOutput {
     pub fn as_ref(&self) -> CommandExecutionOutputRef<'_> {
         match self {
-            Self::BuildArtifact {
-                path,
-                output_type,
-                supports_incremental_remote,
-            } => CommandExecutionOutputRef::BuildArtifact {
+            Self::BuildArtifact { path, output_type } => CommandExecutionOutputRef::BuildArtifact {
                 path,
                 output_type: *output_type,
-                supports_incremental_remote: *supports_incremental_remote,
             },
             Self::TestPath { path, create } => CommandExecutionOutputRef::TestPath {
                 path,

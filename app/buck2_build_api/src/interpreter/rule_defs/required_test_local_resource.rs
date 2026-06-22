@@ -14,13 +14,20 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::starlark_value;
 
 /// Object describing which local resources are needed for a given test rule.
-#[derive(Debug, Display, NoSerialize, ProvidesStaticType, Allocative)]
+#[derive(
+    Debug,
+    Display,
+    NoSerialize,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[display(
     "RequiredTestLocalResource(name: {}, listing: {}, execution: {})",
     self.name,
@@ -38,11 +45,14 @@ pub struct StarlarkRequiredTestLocalResource {
 
 starlark_simple_value!(StarlarkRequiredTestLocalResource);
 
+starlark::methods_static!(
+    REQUIRED_TEST_LOCAL_RESOURCE_METHODS = required_test_local_resource_methods
+);
+
 #[starlark_value(type = "RequiredTestLocalResource")]
 impl<'v> StarlarkValue<'v> for StarlarkRequiredTestLocalResource {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(required_test_local_resource_methods)
+        Some(REQUIRED_TEST_LOCAL_RESOURCE_METHODS.methods())
     }
 }
 

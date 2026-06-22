@@ -48,7 +48,15 @@ async def test_cpp_test_coverage_filter_by_path_outside_target(
 
     expected_paths = [p for p in paths if p.startswith("fbcode/folly")]
     assert len(expected_paths) > 0, str(paths)
-    unexpected_paths = [p for p in paths if not p.startswith("fbcode/folly")]
+    # third-party headers transitively included by folly now appear with real
+    # source paths due to -fcoverage-prefix-map; allow them.
+    unexpected_paths = [
+        p
+        for p in paths
+        if not p.startswith("fbcode/folly")
+        and not p.startswith("third-party/fast_float/")
+        and not p.startswith("third-party/libdwarf/")
+    ]
     assert len(unexpected_paths) == 0, str(paths)
 
 
@@ -103,7 +111,13 @@ async def test_cpp_test_coverage_filter_by_path_in_link_group_with_dev_lg(
 
     expected_paths = [p for p in paths if p.startswith("fbcode/folly")]
     assert len(expected_paths) > 0, str(paths)
-    unexpected_paths = [p for p in paths if not p.startswith("fbcode/folly")]
+    unexpected_paths = [
+        p
+        for p in paths
+        if not p.startswith("fbcode/folly")
+        and not p.startswith("third-party/fast_float/")
+        and not p.startswith("third-party/libdwarf/")
+    ]
     assert len(unexpected_paths) == 0, str(paths)
 
 
@@ -456,7 +470,12 @@ async def test_cpp_test_coverage_filter_by_file_and_path(
     assert len(source_paths) == 1, f"expected to find {source_path} in {paths}"
 
     unexpected_paths = [
-        p for p in paths if p != source_path and not p.startswith("fbcode/folly")
+        p
+        for p in paths
+        if p != source_path
+        and not p.startswith("fbcode/folly")
+        and not p.startswith("third-party/fast_float/")
+        and not p.startswith("third-party/libdwarf/")
     ]
     assert len(unexpected_paths) == 0, (
         f"Only coverage for the test source file and files under fbcode/folly should have been collected, but got {unexpected_paths}"

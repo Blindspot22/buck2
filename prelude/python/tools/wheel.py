@@ -6,6 +6,8 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
+from __future__ import annotations
+
 # pyre-strict
 
 import argparse
@@ -19,7 +21,7 @@ import shutil
 import sys
 import zipfile
 from types import TracebackType
-from typing import cast, Optional
+from typing import cast
 
 
 def normalize_name(name: str) -> str:
@@ -36,6 +38,15 @@ def normalize_name(name: str) -> str:
     return pep503_normalized_name.replace("-", "_")
 
 
+def readme_content_type(path: str) -> str:
+    _, ext = os.path.splitext(path.lower())
+    if ext in (".md", ".markdown"):
+        return "text/markdown"
+    if ext == ".rst":
+        return "text/x-rst"
+    return "text/plain"
+
+
 # pyre-fixme[24]: Generic type `AbstractContextManager` expects 1 type parameter.
 class WheelBuilder(contextlib.AbstractContextManager):
     def __init__(
@@ -47,8 +58,9 @@ class WheelBuilder(contextlib.AbstractContextManager):
         python_tag: str = "py3",
         abi_tag: str = "none",
         platform_tag: str = "any",
-        entry_points: Optional[dict[str, str]] = None,
-        metadata: Optional[list[tuple[str, str]]] = None,
+        entry_points: dict[str, str] | None = None,
+        metadata: list[tuple[str, str]] | None = None,
+        readme: str | None = None,
     ) -> None:
         self._name = name
 
@@ -64,10 +76,15 @@ class WheelBuilder(contextlib.AbstractContextManager):
         self._platform_tag = platform_tag
         self._record: list[str] = []
         self._outf = zipfile.ZipFile(output, mode="w")
-        self._entry_points: Optional[dict[str, str]] = entry_points
+        self._entry_points: dict[str, str] | None = entry_points
         self._metadata: list[tuple[str, str]] = []
+        self._readme = readme
         self._metadata.append(("Name", name))
         self._metadata.append(("Version", version))
+        if readme is not None:
+            self._metadata.append(
+                ("Description-Content-Type", readme_content_type(readme))
+            )
         if metadata is not None:
             self._metadata.extend(metadata)
 
@@ -114,9 +131,14 @@ class WheelBuilder(contextlib.AbstractContextManager):
         )
 
     def close(self) -> None:
+        metadata = "".join([f"{key}: {val}\n" for key, val in self._metadata])
+        if self._readme is not None:
+            with open(self._readme, encoding="utf-8") as readme:
+                metadata += "\n" + readme.read()
+
         self.writestr(
             self._dist_info("METADATA"),
-            "".join([f"{key}: {val}\n" for key, val in self._metadata]),
+            metadata,
         )
 
         # Determine Root-Is-Purelib based on platform tag
@@ -148,9 +170,9 @@ Tag: {self._python_tag}-{self._abi_tag}-{self._platform_tag}
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc_value: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         self.close()
 
@@ -169,6 +191,7 @@ def main(argv: list[str]) -> None:
         "--src-path", nargs=2, dest="src_paths", action="append", default=[]
     )
     parser.add_argument("--metadata", nargs=2, action="append", default=[])
+    parser.add_argument("--readme", default=None)
     parser.add_argument("--data", nargs=2, action="append", default=[])
     args = parser.parse_args(argv[1:])
 
@@ -195,6 +218,7 @@ def main(argv: list[str]) -> None:
             json.loads(args.entry_points) if args.entry_points is not None else None
         ),
         metadata=args.metadata,
+        readme=args.readme,
     ) as whl:
         all_srcs = {}
         for src in args.manifests:
@@ -220,4 +244,5 @@ def main(argv: list[str]) -> None:
             whl.write_data(dst, src)
 
 
-sys.exit(main(sys.argv))
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

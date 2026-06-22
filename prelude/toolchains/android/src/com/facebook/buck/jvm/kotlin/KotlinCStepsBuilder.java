@@ -51,6 +51,7 @@ public class KotlinCStepsBuilder {
       KosabiPluginOptions kosabiPluginOptions,
       KspStepsBuilder.KSPInvocationStatus kspInvocationStatus,
       ImmutableList<AbsPath> sourceOnlyAbiClasspath,
+      ImmutableList<AbsPath> applicabilityClasspath,
       ImmutableList.Builder<IsolatedStep> postKotlinCompilationFailureSteps,
       ImmutableList<AbsPath> classpathSnapshots,
       KotlinCDAnalytics kotlinCDAnalytics) {
@@ -65,10 +66,6 @@ public class KotlinCStepsBuilder {
             moduleName);
 
     LanguageVersion kotlincLanguageVersion = extraParams.getLanguageVersion();
-
-    if (invokingRule.isSourceOnlyAbi() && !extraParams.getShouldKosabiJvmAbiGenUseK2()) {
-      kotlincLanguageVersion = LanguageVersion.Companion.getK1();
-    }
 
     KotlincStep kotlincStep =
         new KotlincStep(
@@ -90,6 +87,7 @@ public class KotlinCStepsBuilder {
             invokingRule.isSourceOnlyAbi()
                 && kspInvocationStatus == KspStepsBuilder.KSPInvocationStatus.KSP2_INVOKED,
             sourceOnlyAbiClasspath,
+            applicabilityClasspath,
             extraParams.getShouldVerifySourceOnlyAbiConstraints(),
             postKotlinCompilationFailureSteps.build(),
             extraParams.getDepTrackerPlugin(),
@@ -108,7 +106,7 @@ public class KotlinCStepsBuilder {
                     classpathSnapshots),
             kotlinCDAnalytics,
             kotlincLanguageVersion,
-            extraParams.getShouldKosabiJvmAbiGenUseK2() && kotlincLanguageVersion.getSupportsK2());
+            kotlincLanguageVersion.getSupportsK2());
     steps.add(kotlincStep);
   }
 

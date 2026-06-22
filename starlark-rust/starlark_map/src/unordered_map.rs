@@ -26,17 +26,17 @@ use std::ops::Index;
 use allocative::Allocative;
 use hashbrown::HashTable;
 use hashbrown::hash_table;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use pagable::PagableDeserialize;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use pagable::PagableDeserializer;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use pagable::PagableSerialize;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use pagable::PagableSerializer;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use serde::Deserialize;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use serde::Serialize;
 
 use crate::Equivalent;
@@ -243,7 +243,7 @@ impl<K, V> UnorderedMap<K, V> {
         K: Ord,
     {
         let mut entries = Vec::from_iter(self.entries_unordered());
-        entries.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+        entries.sort_by_key(|(k1, _)| *k1);
         entries
     }
 
@@ -319,7 +319,7 @@ impl<K: Eq + Hash, V> FromIterator<(K, V)> for UnorderedMap<K, V> {
     }
 }
 
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 impl<K: PagableSerialize, V: PagableSerialize> PagableSerialize for UnorderedMap<K, V> {
     fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> pagable::Result<()> {
         usize::serialize(&self.len(), serializer.serde())?;
@@ -331,7 +331,7 @@ impl<K: PagableSerialize, V: PagableSerialize> PagableSerialize for UnorderedMap
     }
 }
 
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 impl<'de, K, V> PagableDeserialize<'de> for UnorderedMap<K, V>
 where
     K: PagableDeserialize<'de> + Eq + Hash,

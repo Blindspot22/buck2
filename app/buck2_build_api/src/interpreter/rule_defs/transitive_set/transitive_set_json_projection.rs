@@ -22,10 +22,10 @@ use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::values::Freeze;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
@@ -49,7 +49,16 @@ use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetProje
 /// The projected values are all stored on the TransitiveSet itself and this value will reference back to that. The main
 /// point of this object is to provide a distinct value that the write_json implementation understands so that the value
 /// can be passed to that.
-#[derive(Debug, Clone, Coerce, Trace, Freeze, ProvidesStaticType, Allocative)]
+#[derive(
+    Debug,
+    Clone,
+    Coerce,
+    Trace,
+    Freeze,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[derive(NoSerialize)] // TODO we should probably have a serialization for transitive set
 #[repr(C)]
 pub struct TransitiveSetJsonProjectionGen<V: ValueLifetimeless> {
@@ -96,12 +105,9 @@ impl<'v, V: ValueLike<'v>> TransitiveSetJsonProjectionGen<V> {
                 key: set.key().dupe(),
                 projection: self.projection,
             },
-            *set.projection_path_resolution_may_require_artifact_value
-                .get(self.projection)
-                .expect("Valid ID"),
-            *set.projection_is_eligible_for_dedupe
-                .get(self.projection)
-                .expect("Valid ID"),
+            set.projection_path_resolution_may_require_artifact_value
+                .get(self.projection)?,
+            set.projection_is_eligible_for_dedupe.get(self.projection)?,
         ))
     }
 }
@@ -121,14 +127,17 @@ impl<'v, V: ValueLike<'v>> TransitiveSetJsonProjectionGen<V> {
 
 starlark_complex_value!(pub TransitiveSetJsonProjection);
 
+starlark::methods_static!(
+    TRANSITIVE_SET_JSON_PROJECTION_METHODS = transitive_set_json_projection_methods
+);
+
 #[starlark_value(type = "TransitiveSetJsonProjection")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for TransitiveSetJsonProjectionGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(transitive_set_json_projection_methods)
+        Some(TRANSITIVE_SET_JSON_PROJECTION_METHODS.methods())
     }
 }
 

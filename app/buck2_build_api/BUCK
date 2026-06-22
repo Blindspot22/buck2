@@ -5,6 +5,18 @@ oncall("build_infra")
 rust_library(
     name = "buck2_build_api",
     srcs = glob(["src/**/*.rs"]),
+    # `//buck2/remote_execution:remote_execution` is an alias selecting between
+    # the internal and OSS impls; autocargo doesn't follow aliases, so point at
+    # the OSS rust_library directly for cargo's sake.
+    autocargo = {
+        "cargo_toml_config": {
+            "extra_buck_dependencies": {
+                "dependencies": [
+                    "fbcode//buck2/remote_execution/oss/re_grpc:remote_execution",
+                ],
+            },
+        },
+    },
     test_deps = [
         "//buck2/app/buck2_certs:buck2_certs",
         "//buck2/app/buck2_wrapper_common:buck2_wrapper_common",
@@ -12,15 +24,12 @@ rust_library(
     deps = [
         "fbsource//third-party/rust:async-recursion",
         "fbsource//third-party/rust:async-trait",
-        "fbsource//third-party/rust:base64",
         "fbsource//third-party/rust:blake3",
         "fbsource//third-party/rust:console",
-        "fbsource//third-party/rust:dashmap",
         "fbsource//third-party/rust:derivative",
         "fbsource//third-party/rust:derive_more",
         "fbsource//third-party/rust:either",
         "fbsource//third-party/rust:futures",
-        "fbsource//third-party/rust:fxhash",
         "fbsource//third-party/rust:indexmap",
         "fbsource//third-party/rust:internment",
         "fbsource//third-party/rust:inventory",
@@ -33,6 +42,7 @@ rust_library(
         "fbsource//third-party/rust:serde",
         "fbsource//third-party/rust:serde_json",
         "fbsource//third-party/rust:smallvec",
+        "fbsource//third-party/rust:sorted_vector_map",
         "fbsource//third-party/rust:static_assertions",
         "fbsource//third-party/rust:tokio",
         "fbsource//third-party/rust:tracing",
@@ -53,6 +63,7 @@ rust_library(
         "//buck2/app/buck2_execute:buck2_execute",
         "//buck2/app/buck2_file_watcher:buck2_file_watcher",
         "//buck2/app/buck2_fs:buck2_fs",
+        "//buck2/app/buck2_hash:buck2_hash",
         "//buck2/app/buck2_http:buck2_http",
         "//buck2/app/buck2_interpreter:buck2_interpreter",
         "//buck2/app/buck2_node:buck2_node",
@@ -60,6 +71,7 @@ rust_library(
         "//buck2/app/buck2_test_api:buck2_test_api",
         "//buck2/app/buck2_util:buck2_util",
         "//buck2/app/buck2_wrapper_common:buck2_wrapper_common",
+        "//buck2/buck2_sketches:buck2_sketches",
         "//buck2/dice/dice:dice",
         "//buck2/dice/dice_futures:dice_futures",
         "//buck2/gazebo/display_container:display_container",
@@ -71,6 +83,5 @@ rust_library(
         "//buck2/shed/setsketch:setsketch",
         "//buck2/starlark-rust/starlark:starlark",
         "//buck2/starlark-rust/starlark_map:starlark_map",
-        "//common/rust/shed/sorted_vector_map:sorted_vector_map",
     ],
 )

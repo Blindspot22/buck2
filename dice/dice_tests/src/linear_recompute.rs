@@ -19,19 +19,35 @@ use dice::DiceComputations;
 use dice::Key;
 use dice_futures::cancellation::CancellationContext;
 use futures::future::FutureExt;
+use pagable::Pagable;
+use pagable::PagableTagged;
 
 #[tokio::test]
 async fn test_linear_recompute_tracks_deps() {
-    #[derive(Allocative, Clone, Copy, Debug, Display, Eq, PartialEq, Hash)]
+    #[derive(Allocative, Clone, Copy, Debug, Display, Eq, PartialEq, Hash, Pagable)]
     enum K {
         #[display("K::Top")]
         Top,
         #[display("K::Mid({})", _0)]
         Mid(u32),
     }
+    impl PagableTagged for K {
+        fn pagable_type_tag(&self) -> &'static str {
+            "K"
+        }
+        fn pagable_serialize_body(
+            &self,
+            ser: &mut dyn pagable::PagableSerializer,
+        ) -> pagable::Result<()> {
+            <Self as pagable::PagableSerialize>::pagable_serialize(self, ser)
+        }
+    }
 
     #[async_trait]
     impl Key for K {
+        fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+            dice::NoValueSerialize::<Self::Value>::new()
+        }
         type Value = u32;
 
         async fn compute(

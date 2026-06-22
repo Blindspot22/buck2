@@ -25,11 +25,15 @@ use derive_more::Display;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_error::DiceError;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use either::Either;
 use futures::future::FutureExt;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::cached_validation_result::CachedValidationResult;
 use crate::cached_validation_result::CachedValidationResultData;
@@ -39,9 +43,10 @@ use crate::single_validation_key::SingleValidationKey;
 
 /// DICE key that corresponds to a validation of a whole target subgraph rooted at the given node.
 #[derive(
-    Clone, Display, Dupe, Allocative, Derivative, Hash, Eq, PartialEq, Debug
+    Clone, Display, Dupe, Allocative, Derivative, Hash, Eq, PartialEq, Debug, Pagable
 )]
 #[repr(transparent)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 pub(crate) struct TransitiveValidationKey(pub ConfiguredTargetLabel);
 
 impl TransitiveValidationKey {
@@ -153,6 +158,10 @@ impl Key for TransitiveValidationKey {
 
     fn validity(x: &Self::Value) -> bool {
         x.is_ok()
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
     }
 }
 

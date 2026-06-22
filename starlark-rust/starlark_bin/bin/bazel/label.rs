@@ -48,7 +48,7 @@ impl fmt::Display for Label {
 
         if let Some(package) = &self.package {
             f.write_str("//")?;
-            f.write_str(&package)?;
+            f.write_str(package)?;
         }
 
         f.write_str(":")?;
@@ -71,7 +71,7 @@ impl Label {
     pub fn parse(label: &str) -> Result<Self, LabelParseError> {
         match label.split_once("//") {
             Some((repo_part, rest)) => {
-                let repo = if repo_part == "" {
+                let repo = if repo_part.is_empty() {
                     None
                 } else {
                     Some(Self::parse_repo(repo_part).ok_or_else(|| LabelParseError {

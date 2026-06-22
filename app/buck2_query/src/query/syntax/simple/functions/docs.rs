@@ -11,7 +11,7 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 
-use indexmap::IndexMap;
+use buck2_hash::BuckIndexMap;
 use itertools::Itertools;
 
 use crate::query::syntax::simple::functions::helpers::QueryArgType;
@@ -97,7 +97,7 @@ impl FunctionDescription {
 
 // Instances created by #[query_module]
 pub struct ModuleDescription {
-    pub functions: IndexMap<&'static str, FunctionDescription>,
+    pub functions: BuckIndexMap<&'static str, FunctionDescription>,
 
     pub short_help: Option<String>,
     pub details: Option<String>,
@@ -113,7 +113,7 @@ impl QueryEnvironmentDescription {
         let merged_sorted_functions = self
             .mods
             .iter()
-            .fold(IndexMap::new(), |acc, module| {
+            .fold(BuckIndexMap::default(), |acc, module| {
                 acc.into_iter().chain(module.functions.iter()).collect()
             })
             .into_iter()
@@ -153,19 +153,16 @@ impl QueryEnvironmentDescription {
 
 fn render_arg_type_markdown(v: QueryArgType, options: &MarkdownOptions) -> String {
     let anchor = if options.links_enabled {
-        &format!(
-            "<a class=\"anchorWithStickyNavbar\" name=\"{}\"></a>",
-            v.internal_link_id()
-        )
+        &format!("{{#{}}}", v.internal_link_id())
     } else {
         ""
     };
-    let mut rendered = format!("- *{}*{}: ", v.repr(), anchor);
+    let mut rendered = format!("### *{}*{}\n\n", v.repr(), anchor);
     if let Some(short_description) = v.short_description(options) {
         rendered.push_str(short_description.as_ref());
     }
     if let Some(description) = v.description() {
-        rendered.push_str(&format!("\n\n  {description}"));
+        rendered.push_str(&format!("\n\n{description}"));
     }
     rendered
 }

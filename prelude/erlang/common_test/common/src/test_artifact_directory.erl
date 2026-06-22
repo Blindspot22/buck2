@@ -85,7 +85,7 @@ prepare(ExecutionDir, Tests, ArtifactAnnotationFunction) ->
         fun(_ArtifactDir) ->
             link_tar_ball(ExecutionDir),
             link_to_artifact_dir(
-                join_paths(ExecutionDir, "erlang.perfetto-trace"), ExecutionDir, ArtifactAnnotationFunction
+                join_paths(ExecutionDir, "result_exec.json"), ExecutionDir, ArtifactAnnotationFunction
             ),
             case coverage_tmp_dir() of
                 undefined ->
@@ -107,6 +107,9 @@ prepare(ExecutionDir, Tests, ArtifactAnnotationFunction) ->
                      || File <- LogFiles,
                         filelib:is_regular(File, ?raw_file_access)
                     ],
+                    link_to_artifact_dir(
+                        join_paths(LogPrivate, "test.pftrace"), LogPrivate, ArtifactAnnotationFunction
+                    ),
                     link_to_artifact_dir(
                         join_paths(LogPrivate, "test_metrics.tcompact.b64"),
                         LogPrivate,

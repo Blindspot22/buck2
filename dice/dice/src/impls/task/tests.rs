@@ -10,7 +10,6 @@
 
 use std::any::Any;
 use std::hash::Hash;
-use std::sync::atomic::Ordering;
 use std::task::Poll;
 
 use allocative::Allocative;
@@ -24,14 +23,19 @@ use dupe::Dupe;
 use futures::FutureExt;
 use futures::pin_mut;
 use futures::poll;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use tokio::sync::Barrier;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
 
+use crate::DiceKeyDyn;
 use crate::api::computations::DiceComputations;
 use crate::api::key::Key;
+use crate::api::key::NoValueSerialize;
+use crate::api::key::ValueSerialize;
 use crate::arc::Arc;
 use crate::impls::key::DiceKey;
 use crate::impls::key::ParentKey;
@@ -45,7 +49,8 @@ use crate::impls::value::MaybeValidDiceValue;
 use crate::impls::value::TrackedInvalidationPaths;
 use crate::versions::VersionRanges;
 
-#[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash)]
+#[derive(Allocative, Clone, Dupe, Debug, Display, Eq, PartialEq, Hash, Pagable)]
+#[pagable_typetag(DiceKeyDyn)]
 struct K;
 
 #[async_trait]
@@ -62,6 +67,10 @@ impl Key for K {
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
     }
 }
 
@@ -164,8 +173,8 @@ async fn not_ready_until_dropped() -> anyhow::Result<()> {
 
     sent_finish.notified().await;
 
-    assert!(!task.internal.state.is_ready(Ordering::SeqCst));
-    assert!(!task.internal.state.is_terminated(Ordering::SeqCst));
+    assert!(!task.is_ready());
+    assert!(!task.is_terminated());
     assert!(task.is_pending());
 
     assert_matches!(poll!(&mut promise), Poll::Pending);
@@ -174,8 +183,8 @@ async fn not_ready_until_dropped() -> anyhow::Result<()> {
 
     let v = promise.await;
 
-    assert!(task.internal.state.is_ready(Ordering::SeqCst));
-    assert!(!task.internal.state.is_terminated(Ordering::SeqCst));
+    assert!(task.is_ready());
+    assert!(!task.is_terminated());
     assert!(!task.is_pending());
 
     assert!(
@@ -214,8 +223,8 @@ async fn never_ready_results_in_terminated() -> anyhow::Result<()> {
     let v = promise.await;
     assert!(v.is_err());
 
-    assert!(!task.internal.state.is_ready(Ordering::SeqCst));
-    assert!(task.internal.state.is_terminated(Ordering::SeqCst));
+    assert!(!task.is_ready());
+    assert!(task.is_terminated());
     assert!(!task.is_pending());
 
     Ok(())
@@ -649,8 +658,8 @@ async fn dropping_all_waiters_cancels_task() {
     let await_termination = task.await_termination();
     futures::pin_mut!(await_termination);
 
-    assert!(!task.internal.state.is_ready(Ordering::SeqCst));
-    assert!(!task.internal.state.is_terminated(Ordering::SeqCst));
+    assert!(!task.is_ready());
+    assert!(!task.is_terminated());
     assert!(task.is_pending());
     assert_matches!(futures::poll!(&mut await_termination), Poll::Pending);
 
@@ -689,8 +698,8 @@ async fn dropping_all_waiters_cancels_task() {
 
     task.await_termination().await;
 
-    assert!(!task.internal.state.is_ready(Ordering::SeqCst));
-    assert!(task.internal.state.is_terminated(Ordering::SeqCst));
+    assert!(!task.is_ready());
+    assert!(task.is_terminated());
     assert!(!task.is_pending());
 }
 
@@ -709,4 +718,47 @@ async fn task_that_already_cancelled_returns_cancelled() {
         }
         Err(_) => {}
     }
+}
+
+#[tokio::test]
+async fn dropping_termination_observer_does_not_cancel_task() {
+    let barrier = Arc::new(Barrier::new(2));
+
+    let task = spawn_dice_task(DiceKey { index: 888 }, &TokioSpawner, &(), {
+        let barrier = barrier.dupe();
+        |handle| {
+            async move {
+                let _handle = handle;
+                barrier.wait().await;
+                futures::future::pending().await
+            }
+            .boxed()
+        }
+    });
+
+    barrier.wait().await;
+
+    // Register a dependant so the task stays alive
+    let promise = task
+        .depended_on_by(ParentKey::Some(DiceKey { index: 0 }))
+        .unwrap();
+
+    assert!(task.is_pending());
+
+    // Create and drop a termination observer — this should NOT cancel the task
+    let observer = task.await_termination();
+    drop(observer);
+
+    // Task should still be pending and not cancelled
+    assert!(task.is_pending());
+    assert!(!task.is_terminated());
+
+    // Should still be able to register new dependants
+    let promise2 = task
+        .depended_on_by(ParentKey::Some(DiceKey { index: 1 }))
+        .unwrap();
+    assert!(task.is_pending());
+
+    drop(promise);
+    drop(promise2);
 }

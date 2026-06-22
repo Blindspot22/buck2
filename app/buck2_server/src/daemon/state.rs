@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,6 +15,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use allocative::Allocative;
+use buck2_build_api::interpreter::rule_defs::context::init_action_has_content_based_path_default;
+use buck2_build_api::interpreter::rule_defs::context::init_declare_output_has_content_based_path_default;
 use buck2_build_api::spawner::BuckSpawner;
 use buck2_cli_proto::unstable_dice_dump_request::DiceDumpFormat;
 use buck2_common::cas_digest::DigestAlgorithm;
@@ -32,8 +33,6 @@ use buck2_common::sqlite::sqlite_db::SqliteDb;
 use buck2_common::sqlite::sqlite_db::SqliteIdentity;
 use buck2_core::buck2_env;
 use buck2_core::cells::name::CellName;
-use buck2_core::configuration::data::init_deconflict_content_based_paths_rollout;
-use buck2_core::execution_types::execution::init_apply_exec_modifiers;
 use buck2_core::facebook_only;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
@@ -68,6 +67,7 @@ use buck2_execute_impl::sqlite::materializer_db::MaterializerState;
 use buck2_execute_impl::sqlite::materializer_db::MaterializerStateSqliteDb;
 use buck2_file_watcher::file_watcher::FileWatcher;
 use buck2_fs::cwd::WorkingDirectory;
+use buck2_hash::StdBuckHashMap;
 use buck2_http::HttpClient;
 use buck2_http::HttpClientBuilder;
 use buck2_re_configuration::RemoteExecutionStaticMetadata;
@@ -86,6 +86,7 @@ use host_sharing::NamedSemaphores;
 use remote::ScribeConfig;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
+use tracing::Instrument;
 
 use crate::active_commands::ActiveCommandDropGuard;
 use crate::ctx::BaseServerCommandContext;
@@ -110,8 +111,8 @@ pub struct DaemonState {
     /// This holds the main data shared across different commands.
     pub(crate) data: Arc<DaemonStateData>,
 
-    /// Our working directory, if we did set one.
-    working_directory: Option<WorkingDirectory>,
+    /// Our working directory.
+    working_directory: WorkingDirectory,
 }
 
 /// DaemonStateData is the main shared data across all commands. It's lazily initialized on
@@ -204,6 +205,10 @@ pub struct DaemonStateData {
     /// A unique identifier for this instance of the daemon
     pub daemon_id: DaemonId,
 
+    /// Cgroup path of the process that launched this daemon before Buck moved the daemon into its
+    /// managed cgroup.
+    pub daemon_originating_cgroup: Option<String>,
+
     /// Semaphores for running actions locally. These need to be shared across commands.
     #[allocative(skip)]
     pub named_semaphores_for_run_actions: Arc<NamedSemaphores>,
@@ -231,14 +236,13 @@ impl DaemonStatePanicDiceDump for DaemonStateData {
 }
 
 impl DaemonState {
-    #[tracing::instrument(name = "daemon_listener", skip_all)]
     pub(crate) async fn new(
         fb: fbinit::FacebookInit,
         paths: InvocationPaths,
         init_ctx: BuckdServerInitPreferences,
         rt: &Handle,
         materializations: MaterializationMethod,
-        working_directory: Option<WorkingDirectory>,
+        working_directory: WorkingDirectory,
         cgroup_tree: Option<BuckCgroupTree>,
         daemon_id: DaemonId,
     ) -> Result<Self, buck2_error::Error> {
@@ -294,7 +298,7 @@ impl DaemonState {
         }
 
         let daemon_state_data_rt = rt.clone();
-        rt.spawn(async move {
+        let init_fut = async move {
             let fs = paths.project_root().clone();
 
             tracing::info!("Reading config...");
@@ -331,6 +335,7 @@ impl DaemonState {
                 section: "buck2",
                 property: "event_log_message_batch_size",
             })?;
+            tracing::info!("Initializing scribe sink...");
             let scribe_sink = Self::init_scribe_sink(
                 fb,
                 ScribeConfig {
@@ -386,7 +391,7 @@ impl DaemonState {
                 root_config,
             )?);
 
-            let mut ignore_specs: HashMap<CellName, IgnoreSet> = HashMap::new();
+            let mut ignore_specs: StdBuckHashMap<CellName, IgnoreSet> = StdBuckHashMap::default();
             for (cell, _) in cells.cells() {
                 let config = legacy_cells.parse_single_cell(cell, &fs).await?;
                 ignore_specs.insert(
@@ -472,6 +477,14 @@ impl DaemonState {
                     .unwrap_or_else(RolloutPercentage::never)
                     .roll();
 
+                let eager_materialization_enabled = root_config
+                    .parse::<RolloutPercentage>(BuckconfigKeyRef {
+                        section: "buck2",
+                        property: "eager_materialization_enabled",
+                    })?
+                    .unwrap_or_else(RolloutPercentage::never)
+                    .roll();
+
                 DeferredMaterializerConfigs {
                     materialize_final_artifacts: matches!(
                         materializations,
@@ -487,10 +500,13 @@ impl DaemonState {
                     verbose_materializer_log,
                     clean_stale_config,
                     disable_eager_write_dispatch,
+                    eager_materialization_enabled,
                 }
             };
             let disable_eager_write_dispatch =
                 deferred_materializer_configs.disable_eager_write_dispatch;
+            let eager_materialization_enabled =
+                deferred_materializer_configs.eager_materialization_enabled;
 
             let use_eden_thrift_read = root_config
                 .parse(BuckconfigKeyRef {
@@ -499,6 +515,7 @@ impl DaemonState {
                 })?
                 .unwrap_or(cfg!(any(target_os = "macos", target_os = "windows")));
 
+            tracing::info!("Creating materializer...");
             let (io, _, (materializer_db, materializer_state), incremental_db_state) =
                 futures::future::try_join4(
                     create_io_provider(
@@ -577,6 +594,7 @@ impl DaemonState {
                 daemon_dispatcher.dupe(),
             )?;
 
+            tracing::info!("Creating memory tracker...");
             let memory_tracker = memory_tracker::create_memory_tracker(
                 cgroup_tree,
                 &init_ctx.daemon_startup_config.resource_control,
@@ -586,6 +604,7 @@ impl DaemonState {
 
             // Create this after the materializer because it'll want to write to buck-out, and an Eden
             // materializer would create buck-out now.
+            tracing::info!("Launching forkserver...");
             let forkserver = maybe_launch_forkserver(
                 root_config,
                 &paths.forkserver_state_dir(),
@@ -593,10 +612,12 @@ impl DaemonState {
             )
             .await?;
 
+            tracing::info!("Constructing DICE...");
             let dice = init_ctx
                 .construct_dice(io.dupe(), digest_config, root_config)
                 .await?;
 
+            tracing::info!("Creating file watcher...");
             let file_watcher = <dyn FileWatcher>::new(
                 fb,
                 paths.project_root(),
@@ -674,22 +695,24 @@ impl DaemonState {
                 format!("memory_tracker-enabled:{}", memory_tracker.is_some()),
                 format!("action-freezing-enabled:{}", action_freezing_enabled),
                 format!("has-cgroup:{}", memory_tracker.is_some()),
+                format!("eager-materialization:{}", eager_materialization_enabled,),
             ];
             let system_warning_config = SystemWarningConfig::from_config(root_config)?;
 
-            // TODO(jtbraun): Modifies action digest, remove after confirming bvb works fine.
-            let deconflict_content_based_paths_rollout = root_config.parse(BuckconfigKeyRef {
-                section: "buck2",
-                property: "deconflict_content_based_paths_rollout",
-            })?;
-            init_deconflict_content_based_paths_rollout(deconflict_content_based_paths_rollout)?;
+            let declare_output_has_content_based_path_default =
+                root_config.parse(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "declare_output_has_content_based_path_default",
+                })?;
+            init_declare_output_has_content_based_path_default(
+                declare_output_has_content_based_path_default,
+            )?;
 
-            // TODO(nero): Modifies action digest: gates applying cfg_constructor modifiers to exec_deps. Remove after confirming bvb works fine.
-            let apply_exec_modifiers = root_config.parse(BuckconfigKeyRef {
+            let action_has_content_based_path_default = root_config.parse(BuckconfigKeyRef {
                 section: "buck2",
-                property: "apply_exec_modifiers",
+                property: "action_has_content_based_path_default",
             })?;
-            init_apply_exec_modifiers(apply_exec_modifiers)?;
+            init_action_has_content_based_path_default(action_has_content_based_path_default)?;
 
             // Kick off an initial sync eagerly. This gets Watchamn to start watching the path we care
             // about (potentially kicking off an initial crawl).
@@ -719,10 +742,12 @@ impl DaemonState {
                 previous_command_data: LockedPreviousCommandData::new(),
                 incremental_db_state,
                 daemon_id: daemon_id.dupe(),
+                daemon_originating_cgroup: init_ctx.daemon_originating_cgroup,
                 named_semaphores_for_run_actions: Arc::new(NamedSemaphores::new()),
             }))
-        })
-        .await?
+        };
+        let daemon_listener_span = tracing::Span::current();
+        rt.spawn(init_fut.instrument(daemon_listener_span)).await?
     }
 
     fn create_materializer(
@@ -841,28 +866,26 @@ impl DaemonState {
     }
 
     pub fn validate_cwd(&self) -> buck2_error::Result<()> {
-        if let Some(working_directory) = &self.working_directory {
-            let res = working_directory.is_stale().and_then(|stale| {
-                if stale {
-                    Err(buck2_error!(
-                        buck2_error::ErrorTag::Environment,
-                        "Buck appears to be running in a stale working directory. \
-                         This will likely lead to failed or slow builds. \
-                         To remediate, restart Buck2."
-                    ))
-                } else {
-                    Ok(())
-                }
-            });
+        let res = self.working_directory.is_stale().and_then(|stale| {
+            if stale {
+                Err(buck2_error!(
+                    buck2_error::ErrorTag::Environment,
+                    "Buck appears to be running in a stale working directory. \
+                     This will likely lead to failed or slow builds. \
+                     To remediate, restart Buck2."
+                ))
+            } else {
+                Ok(())
+            }
+        });
 
-            tag_result!(
-                "stale_cwd",
-                res,
-                quiet: true,
-                daemon_in_memory_state_is_corrupted: true,
-                task: false
-            )?;
-        }
+        tag_result!(
+            "stale_cwd",
+            res,
+            quiet: true,
+            daemon_in_memory_state_is_corrupted: true,
+            task: false
+        )?;
 
         Ok(())
     }
@@ -929,8 +952,7 @@ fn convert_algorithm_kind(kind: DigestAlgorithmFamily) -> buck2_error::Result<Di
         DigestAlgorithmFamily::Blake3Keyed => {
             #[cfg(fbcode_build)]
             {
-                let key = blake3_constants::BLAKE3_HASH_KEY;
-                DigestAlgorithm::Blake3Keyed { key }
+                DigestAlgorithm::Blake3Keyed
             }
 
             #[cfg(not(fbcode_build))]
@@ -987,7 +1009,7 @@ async fn http_client_from_startup_config(
         Timeout::Value(d) => {
             builder.with_write_timeout(Some(d));
         }
-        _ => {}
+        Timeout::Default | Timeout::NoTimeout => {}
     }
 
     Ok(builder)

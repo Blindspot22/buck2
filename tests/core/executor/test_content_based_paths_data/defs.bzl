@@ -6,12 +6,74 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
+# Regression fixture for a writer-vs-writer race on shared content-based
+# paths, minimized from prelude/rust/build.bzl
+# _create_transitive_dependency_symlinks.
+#
+# When a target that uses has_content_based_path = True for a write_json
+# output is analyzed under many configurations, every analysis independently
+# submits its own declare_write. Each call runs cleanup_path -> write_file
+# via the immediate-write path, and the cleanup operations race on the
+# shared __<target>__/<content_hash>/ on-disk path. The losing writer's
+# remove then returns ENOENT, which caused the OSS bootstrap
+# "No such file or directory" failures that motivated D101857169.
+#
+# The fixture defines a single shared producer target and a consumer rule
+# that exercises the output; TARGETS.fixture instantiates many consumers
+# under different platforms so the producer is re-analyzed once per
+# configuration.
+
+def _rust_pattern_producer_impl(ctx):
+    # Stable content that does NOT depend on configuration. A per-test-run
+    # seed (via buckconfig) invalidates the RE cache between runs, but
+    # every configuration within one run produces the same JSON, so every
+    # analysis resolves to the same content-hash path.
+    out = ctx.actions.write_json(
+        ctx.actions.declare_output("artifacts.json", has_content_based_path = True),
+        {"seed": read_config("cbp_race", "seed", "0")},
+        pretty = True,
+    )
+    return [DefaultInfo(default_output = out)]
+
+rust_pattern_producer = rule(
+    impl = _rust_pattern_producer_impl,
+    attrs = {},
+)
+
+def _rust_pattern_consumer_impl(ctx):
+    out = ctx.actions.declare_output("out.txt")
+    producer_out = ctx.attrs.producer[DefaultInfo].default_outputs[0]
+
+    # Mirror the rust `deps` action: cmd_args with format="--artifacts={}"
+    # so the consumer references the producer's on-disk content-based path.
+    ctx.actions.run(
+        cmd_args(
+            "fbpython",
+            "-c",
+            "import argparse\np = argparse.ArgumentParser()\np.add_argument('--artifacts', type=argparse.FileType('r'), required=True)\np.add_argument('--out', required=True)\na = p.parse_args()\nopen(a.out, 'w').write(a.artifacts.read())",
+            cmd_args(producer_out, format = "--artifacts={}"),
+            cmd_args(out.as_output(), format = "--out={}"),
+        ),
+        category = "consume_cbp",
+        local_only = True,
+    )
+    return [DefaultInfo(default_output = out)]
+
+rust_pattern_consumer = rule(
+    impl = _rust_pattern_consumer_impl,
+    attrs = {
+        "producer": attrs.dep(),
+    },
+)
+
 def project(f: Artifact):
     return f
 
-NameSet = transitive_set(args_projections = {
-    "project": project,
-})
+NameSet = transitive_set(
+    args_projections = {
+        "project": project,
+    }
+)
 
 def _write_with_content_based_path_impl(ctx):
     artifact_input = ctx.actions.write("artifact_input", "artifact_input", has_content_based_path = True)
@@ -247,22 +309,28 @@ download_with_content_based_path = rule(
 
 def _failing_validation_with_content_based_path_impl(ctx):
     validation = ctx.actions.declare_output("validation.json", has_content_based_path = True)
-    validation = ctx.actions.write_json(validation, {
-        "data": {
-            "message": "This is a failing validation",
-            "status": "failure",
+    validation = ctx.actions.write_json(
+        validation,
+        {
+            "data": {
+                "message": "This is a failing validation",
+                "status": "failure",
+            },
+            "version": 1,
         },
-        "version": 1,
-    }, pretty = True)
+        pretty = True,
+    )
 
     return [
-        DefaultInfo(default_output = ctx.actions.write("out", "hello world")),
-        ValidationInfo(validations = [
-            ValidationSpec(
-                name = "whistle",
-                validation_result = validation,
-            ),
-        ]),
+        DefaultInfo(default_output = ctx.actions.write("out", "hello world", has_content_based_path = False)),
+        ValidationInfo(
+            validations = [
+                ValidationSpec(
+                    name = "whistle",
+                    validation_result = validation,
+                ),
+            ]
+        ),
     ]
 
 failing_validation_with_content_based_path = rule(
@@ -284,8 +352,7 @@ def _dynamic_with_content_based_path_impl(ctx: AnalysisContext) -> list[Provider
 
 dynamic_with_content_based_path = rule(
     impl = _dynamic_with_content_based_path_impl,
-    attrs = {
-    },
+    attrs = {},
 )
 
 def _basic_dynamic_output_new_impl(actions: AnalysisActions, src: ArtifactValue, out: OutputArtifact):
@@ -305,16 +372,17 @@ def _dynamic_new_with_content_based_path_impl(ctx: AnalysisContext) -> list[Prov
     input = ctx.actions.write(input, str("input"))
     output = ctx.actions.declare_output("out", has_content_based_path = True)
 
-    ctx.actions.dynamic_output_new(_basic_dynamic_output_new(
-        src = input,
-        out = output.as_output(),
-    ))
+    ctx.actions.dynamic_output_new(
+        _basic_dynamic_output_new(
+            src = input,
+            out = output.as_output(),
+        )
+    )
     return [DefaultInfo(default_output = output)]
 
 dynamic_new_with_content_based_path = rule(
     impl = _dynamic_new_with_content_based_path_impl,
-    attrs = {
-    },
+    attrs = {},
 )
 
 def _use_projection_with_content_based_path_impl(ctx):
@@ -360,8 +428,7 @@ def _use_projection_with_content_based_path_impl(ctx):
 
 use_projection_with_content_based_path = rule(
     impl = _use_projection_with_content_based_path_impl,
-    attrs = {
-    },
+    attrs = {},
 )
 
 def _ignores_content_based_artifact_impl(ctx):
@@ -447,8 +514,7 @@ def _uses_relative_to_impl(ctx):
 
 uses_relative_to = rule(
     impl = _uses_relative_to_impl,
-    attrs = {
-    },
+    attrs = {},
 )
 
 def _sets_inconsistent_params_impl(ctx):
@@ -482,8 +548,7 @@ def _argsfile_with_incorrectly_declared_output_impl(ctx):
 
 argsfile_with_incorrectly_declared_output = rule(
     impl = _argsfile_with_incorrectly_declared_output_impl,
-    attrs = {
-    },
+    attrs = {},
 )
 
 def _incremental_action_impl(ctx) -> list[Provider]:
@@ -535,14 +600,107 @@ def _resolve_promise_artifact_impl(ctx: AnalysisContext) -> list[Provider]:
     if ctx.attrs.assert_promised_artifact_has_content_based_path:
         hello_artifact = ctx.actions.assert_has_content_based_path(hello_artifact)
 
-    written = ctx.actions.write("hello.out", hello_artifact)
+    written = ctx.actions.write("hello.out", hello_artifact, has_content_based_path = False)
 
     return [DefaultInfo(default_output = written)]
 
-resolve_promise_artifact = rule(impl = _resolve_promise_artifact_impl, attrs = {
-    "artifact_has_content_based_path": attrs.bool(),
-    "assert_promised_artifact_has_content_based_path": attrs.bool(),
-})
+resolve_promise_artifact = rule(
+    impl = _resolve_promise_artifact_impl,
+    attrs = {
+        "artifact_has_content_based_path": attrs.bool(),
+        "assert_promised_artifact_has_content_based_path": attrs.bool(),
+    },
+)
+
+AnonConsumerInfo = provider(fields = ["out"])
+
+def _anon_consumer_impl(ctx: AnalysisContext) -> list[Provider]:
+    out = ctx.actions.write("consumer_out", ctx.attrs.input, has_content_based_path = False)
+    return [DefaultInfo(), AnonConsumerInfo(out = out)]
+
+_anon_consumer = anon_rule(
+    impl = _anon_consumer_impl,
+    attrs = {
+        "input": attrs.source(),
+    },
+    artifact_promise_mappings = {
+        "out": lambda x: x[AnonConsumerInfo].out,
+    },
+)
+
+def _pass_cbp_promise_to_anon_target_impl(ctx: AnalysisContext) -> list[Provider]:
+    producer = ctx.actions.anon_target(_anon, {"has_content_based_path": True})
+    hello_artifact = producer.artifact("hello")
+    hello_artifact = ctx.actions.assert_has_content_based_path(hello_artifact)
+
+    consumer = ctx.actions.anon_target(_anon_consumer, {"input": hello_artifact})
+    consumer_out = consumer.artifact("out")
+
+    return [DefaultInfo(default_output = consumer_out)]
+
+pass_cbp_promise_to_anon_target = rule(
+    impl = _pass_cbp_promise_to_anon_target_impl,
+    attrs = {},
+)
+
+AnonNonCbpInfo = provider(fields = ["artifact"])
+
+def _anon_non_cbp_impl(ctx: AnalysisContext) -> list[Provider]:
+    out = ctx.actions.write("out", "anon_content", has_content_based_path = False)
+    return [DefaultInfo(), AnonNonCbpInfo(artifact = out)]
+
+_anon_non_cbp = anon_rule(
+    impl = _anon_non_cbp_impl,
+    attrs = {},
+    artifact_promise_mappings = {
+        "out": lambda x: x[AnonNonCbpInfo].artifact,
+    },
+)
+
+def _anon_non_cbp_wrapper_impl(ctx):
+    anon = ctx.actions.anon_target(_anon_non_cbp, {})
+    anon_artifact = anon.artifact("out")
+    return [DefaultInfo(), AnonNonCbpInfo(artifact = anon_artifact)]
+
+anon_non_cbp_wrapper = rule(
+    impl = _anon_non_cbp_wrapper_impl,
+    attrs = {},
+)
+
+def _run_with_anon_non_cbp_dep_impl(ctx):
+    anon_artifact = ctx.attrs.dep[AnonNonCbpInfo].artifact
+
+    # Content-based script
+    script = ctx.actions.declare_output("script.py", has_content_based_path = True)
+    script = ctx.actions.write(
+        script,
+        [
+            "import sys",
+            "with open(sys.argv[1], 'w') as f:",
+            "  f.write(sys.argv[2])",
+        ],
+    )
+
+    # Content-based output
+    out = ctx.actions.declare_output("out", has_content_based_path = True)
+    args = cmd_args(["fbpython", script, out.as_output(), "hello world"])
+    args.add(cmd_args(hidden = anon_artifact))
+
+    ctx.actions.run(
+        args,
+        category = "test_run",
+        expect_eligible_for_dedupe = True,
+        prefer_remote = True,
+    )
+
+    return [DefaultInfo(default_output = out)]
+
+run_with_anon_non_cbp_dep = rule(
+    impl = _run_with_anon_non_cbp_dep_impl,
+    attrs = {
+        "dep": attrs.dep(),
+    },
+)
 
 def _not_eligible_for_dedupe_impl(ctx) -> list[Provider]:
     script = ctx.actions.write(
@@ -566,10 +724,13 @@ def _not_eligible_for_dedupe_impl(ctx) -> list[Provider]:
 
     return [DefaultInfo(out)]
 
-not_eligible_for_dedupe = rule(impl = _not_eligible_for_dedupe_impl, attrs = {
-    "expect_eligible_for_dedupe": attrs.bool(default = False),
-    "run_action_output_has_content_based_path": attrs.bool(default = True),
-})
+not_eligible_for_dedupe = rule(
+    impl = _not_eligible_for_dedupe_impl,
+    attrs = {
+        "expect_eligible_for_dedupe": attrs.bool(default = False),
+        "run_action_output_has_content_based_path": attrs.bool(default = True),
+    },
+)
 
 def _failing_run_with_content_based_path_impl(ctx):
     script = ctx.actions.write(
@@ -593,6 +754,54 @@ def _failing_run_with_content_based_path_impl(ctx):
 
 failing_run_with_content_based_path = rule(
     impl = _failing_run_with_content_based_path_impl,
+    attrs = {},
+)
+
+def _non_content_based_exec_dep_impl(ctx):
+    script = ctx.actions.write(
+        "script.py",
+        [
+            "import sys",
+            "with open(sys.argv[1], 'w') as f:",
+            "  f.write('hello world')",
+        ],
+        has_content_based_path = False,
+    )
+    out = ctx.actions.declare_output("out", has_content_based_path = True)
+    ctx.actions.run(
+        cmd_args(["fbpython", script, out.as_output()]),
+        category = "test_exec_dep",
+        # This is ignored for exec deps
+        expect_eligible_for_dedupe = True,
+    )
+    return [DefaultInfo(default_output = out)]
+
+non_content_based_exec_dep = rule(
+    impl = _non_content_based_exec_dep_impl,
+    attrs = {},
+)
+
+def _uses_exec_dep_impl(ctx):
+    dep_out = ctx.attrs.exec_dep[DefaultInfo].default_outputs[0]
+    script = ctx.actions.write(
+        "script.py",
+        [
+            "import shutil",
+            "import sys",
+            "shutil.copyfile(sys.argv[1], sys.argv[2])",
+        ],
+        has_content_based_path = True,
+    )
+    out = ctx.actions.declare_output("out", has_content_based_path = True)
+    ctx.actions.run(
+        cmd_args(["fbpython", script, dep_out, out.as_output()]),
+        category = "test_uses_exec_dep",
+    )
+    return [DefaultInfo(default_output = out)]
+
+uses_exec_dep = rule(
+    impl = _uses_exec_dep_impl,
     attrs = {
+        "exec_dep": attrs.exec_dep(),
     },
 )

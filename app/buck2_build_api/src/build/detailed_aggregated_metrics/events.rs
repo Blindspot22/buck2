@@ -10,9 +10,14 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use buck2_artifact::actions::key::ActionKey;
 use buck2_core::deferred::key::DeferredHolderKey;
+use buck2_error::ErrorTag;
+use buck2_error::buck2_error;
 use buck2_error::internal_error;
 use dupe::Dupe;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -20,11 +25,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::build::detailed_aggregated_metrics::implementation::state::DetailedAggregatedMetricsStateTracker;
 use crate::build::detailed_aggregated_metrics::types::ActionExecutionMetrics;
+use crate::build::detailed_aggregated_metrics::types::ActionGraphSketchResult;
 use crate::build::detailed_aggregated_metrics::types::DetailedAggregatedMetrics;
 use crate::build::detailed_aggregated_metrics::types::PerBuildEvents;
 use crate::build::detailed_aggregated_metrics::types::TopLevelTargetSpec;
-use crate::build::graph_properties::GraphPropertiesOptions;
-use crate::build::sketch_impl::MergeableGraphSketch;
 use crate::deferred::calculation::DeferredHolder;
 
 pub(crate) enum DetailedAggregatedMetricsEvent {
@@ -32,12 +36,11 @@ pub(crate) enum DetailedAggregatedMetricsEvent {
     AnalysisComplete(DeferredHolderKey, DeferredHolder),
     ComputeMetrics(
         PerBuildEvents,
-        GraphPropertiesOptions,
         tokio::sync::oneshot::Sender<buck2_error::Result<DetailedAggregatedMetrics>>,
     ),
     ComputeActionGraphSketch(
         Vec<TopLevelTargetSpec>,
-        tokio::sync::oneshot::Sender<buck2_error::Result<Option<MergeableGraphSketch<ActionKey>>>>,
+        tokio::sync::oneshot::Sender<buck2_error::Result<ActionGraphSketchResult>>,
     ),
     ActionExecuted(ActionExecutionMetrics),
 }
@@ -46,13 +49,12 @@ struct DetailedAggregatedMetricsEventHandlerInner {
     sender: UnboundedSender<DetailedAggregatedMetricsEvent>,
 }
 
+/// Handle to the running tracker task: a thin wrapper over the channel used to
+/// send it events.
 #[derive(Clone, Dupe)]
-pub struct DetailedAggregatedMetricsEventHandler(Arc<DetailedAggregatedMetricsEventHandlerInner>);
-
-pub(crate) fn start_detailed_aggregated_metrics_state_tracker()
--> DetailedAggregatedMetricsEventHandler {
-    DetailedAggregatedMetricsStateTracker::start()
-}
+pub(crate) struct DetailedAggregatedMetricsEventHandler(
+    Arc<DetailedAggregatedMetricsEventHandlerInner>,
+);
 
 impl DetailedAggregatedMetricsEventHandler {
     pub(crate) fn new() -> (Self, UnboundedReceiver<DetailedAggregatedMetricsEvent>) {
@@ -65,66 +67,142 @@ impl DetailedAggregatedMetricsEventHandler {
         )
     }
 
-    pub fn action_executed(&self, ev: ActionExecutionMetrics) {
-        self.0
-            .sender
-            .send(DetailedAggregatedMetricsEvent::ActionExecuted(ev))
-            .expect(
-                "DetailedAggregagatedMetrics event handler should never exit while sender lives",
-            );
+    fn send(&self, event: DetailedAggregatedMetricsEvent) -> buck2_error::Result<()> {
+        self.0.sender.send(event).map_err(|_| {
+            internal_error!("DetailedAggregatedMetrics event handler exited while sender lives")
+        })?;
+        Ok(())
     }
 
-    pub fn analysis_started(&self, key: &DeferredHolderKey) {
-        self.0
-            .sender
-            .send(DetailedAggregatedMetricsEvent::AnalysisStarted(key.dupe()))
-            .expect(
-                "DetailedAggregagatedMetrics event handler should never exit while sender lives",
-            );
-    }
-
-    pub fn analysis_complete(&self, key: &DeferredHolderKey, result: &DeferredHolder) {
-        self.0
-            .sender
-            .send(DetailedAggregatedMetricsEvent::AnalysisComplete(
-                key.dupe(),
-                result.dupe(),
-            ))
-            .expect(
-                "DetailedAggregagatedMetrics event handler should never exit while sender lives",
-            );
-    }
-
-    pub(crate) async fn compute_metrics(
+    async fn compute_metrics(
         &self,
         events: PerBuildEvents,
-        graph_properties: GraphPropertiesOptions,
     ) -> buck2_error::Result<DetailedAggregatedMetrics> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.0
-            .sender
-            .send(DetailedAggregatedMetricsEvent::ComputeMetrics(
-                events,
-                graph_properties,
-                tx,
-            ))
-            .map_err(|_| internal_error!("detailed metrics state tracker is gone"))?;
+        self.send(DetailedAggregatedMetricsEvent::ComputeMetrics(events, tx))?;
         rx.await?
     }
 
-    pub(crate) async fn compute_action_graph_sketch(
+    async fn compute_action_graph_sketch(
         &self,
         top_level_targets: Vec<TopLevelTargetSpec>,
-    ) -> buck2_error::Result<Option<MergeableGraphSketch<ActionKey>>> {
+    ) -> buck2_error::Result<ActionGraphSketchResult> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.0
-            .sender
-            .send(DetailedAggregatedMetricsEvent::ComputeActionGraphSketch(
-                top_level_targets,
-                tx,
-            ))
-            .map_err(|_| internal_error!("detailed metrics state tracker is gone"))?;
+        self.send(DetailedAggregatedMetricsEvent::ComputeActionGraphSketch(
+            top_level_targets,
+            tx,
+        ))?;
         rx.await?
+    }
+}
+
+/// Daemon-global handle stored in DICE global data (so must be `Send + Sync`); the
+/// single entry point for recording analyses/actions and computing metrics.
+///
+/// The tracker is spawned lazily by the first [`Self::enable`], so daemons that
+/// never collect metrics retain nothing. Once enabled it stays enabled for the
+/// daemon's lifetime.
+#[derive(Default)]
+pub struct DetailedAggregatedMetricsHandle {
+    tracker: OnceLock<DetailedAggregatedMetricsEventHandler>,
+    /// Set when an analysis is observed before the tracker is enabled. Those
+    /// analyses may later be reused from the DICE cache without recomputing, so
+    /// the tracker's view would be permanently incomplete; the compute methods
+    /// then return empty results.
+    analysis_nodes_not_recorded: AtomicBool,
+}
+
+impl DetailedAggregatedMetricsHandle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Spawn the tracker if not already running (idempotent). Reports a soft
+    /// error if analyses already ran while disabled, since metrics will be
+    /// incomplete; enabling on the daemon's first command (or first build command)
+    /// avoids this.
+    pub fn enable(&self) {
+        if self.tracker.get().is_some() {
+            return;
+        }
+        if self.analysis_nodes_not_recorded.load(Ordering::Relaxed) {
+            let _ignored = buck2_core::soft_error!(
+                "detailed_aggregated_metrics_enabled_after_analysis",
+                buck2_error!(
+                    ErrorTag::Tier0,
+                    "Detailed aggregated metrics / action graph sketch were enabled after analyses \
+                     already ran on this daemon; collected metrics may be incomplete for analyses \
+                     reused from earlier commands. Enable the config on the daemon's first command."
+                )
+            );
+        }
+        let _ = self
+            .tracker
+            .get_or_init(DetailedAggregatedMetricsStateTracker::start);
+    }
+
+    pub fn action_executed(&self, ev: ActionExecutionMetrics) -> buck2_error::Result<()> {
+        match self.tracker.get() {
+            Some(tracker) => tracker.send(DetailedAggregatedMetricsEvent::ActionExecuted(ev)),
+            None => Ok(()),
+        }
+    }
+
+    pub fn analysis_started(&self, key: &DeferredHolderKey) -> buck2_error::Result<()> {
+        match self.tracker.get() {
+            Some(tracker) => {
+                tracker.send(DetailedAggregatedMetricsEvent::AnalysisStarted(key.dupe()))
+            }
+            None => {
+                self.analysis_nodes_not_recorded
+                    .store(true, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn analysis_complete(
+        &self,
+        key: &DeferredHolderKey,
+        result: &DeferredHolder,
+    ) -> buck2_error::Result<()> {
+        match self.tracker.get() {
+            Some(tracker) => tracker.send(DetailedAggregatedMetricsEvent::AnalysisComplete(
+                key.dupe(),
+                result.dupe(),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn compute_metrics(
+        &self,
+        events: PerBuildEvents,
+    ) -> buck2_error::Result<DetailedAggregatedMetrics> {
+        // Incomplete tracker view: report empty rather than partial metrics.
+        if self.analysis_nodes_not_recorded.load(Ordering::Relaxed) {
+            return Ok(DetailedAggregatedMetrics::default());
+        }
+        match self.tracker.get() {
+            Some(tracker) => tracker.compute_metrics(events).await,
+            None => Err(internal_error!(
+                "should have had a detailed aggregated metrics event holder"
+            )),
+        }
+    }
+
+    pub async fn compute_action_graph_sketch(
+        &self,
+        top_level_targets: Vec<TopLevelTargetSpec>,
+    ) -> buck2_error::Result<ActionGraphSketchResult> {
+        // Incomplete tracker view: report empty rather than partial sketch.
+        if self.analysis_nodes_not_recorded.load(Ordering::Relaxed) {
+            return Ok(ActionGraphSketchResult::default());
+        }
+        match self.tracker.get() {
+            Some(tracker) => tracker.compute_action_graph_sketch(top_level_targets).await,
+            None => Ok(ActionGraphSketchResult::default()),
+        }
     }
 }
 

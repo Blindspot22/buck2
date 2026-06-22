@@ -19,17 +19,24 @@ use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::FrozenValueTyped;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
+use starlark::values::Value;
 use starlark::values::ValueTyped;
 use starlark::values::starlark_value;
 
-#[derive(ProvidesStaticType, Debug, NoSerialize, Allocative)]
+#[derive(
+    ProvidesStaticType,
+    Debug,
+    NoSerialize,
+    Allocative,
+    pagable::Pagable,
+    starlark::StarlarkPagableViaPagable
+)]
 pub(crate) struct StarlarkAnalysisResult {
     // Invariant: The subtarget specified on the label is present in the analysis result.
     analysis: AnalysisResult,
@@ -63,11 +70,12 @@ impl StarlarkAnalysisResult {
 
 starlark_simple_value!(StarlarkAnalysisResult);
 
+starlark::methods_static!(STARLARK_ANALYSIS_RESULT_METHODS = starlark_analysis_result_methods);
+
 #[starlark_value(type = "bxl.AnalysisResult")]
 impl<'v> StarlarkValue<'v> for StarlarkAnalysisResult {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(starlark_analysis_result_methods)
+        Some(STARLARK_ANALYSIS_RESULT_METHODS.methods())
     }
 }
 
@@ -98,6 +106,54 @@ fn starlark_analysis_result_methods(builder: &mut MethodsBuilder) {
                 .value()
                 .value_typed())
         }
+    }
+
+    /// Returns a list of structs describing each provider in the collection.
+    /// Each struct has three fields:
+    /// - `name`: The provider type name (e.g., `"DefaultInfo"`, `"FooInfo"`)
+    /// - `path`: The cell path of the `.bzl` file where the provider was defined
+    ///   (e.g., `"fbcode//pkg/defs.bzl"`), or `None` for built-in providers
+    /// - `value`: The provider instance itself
+    ///
+    /// This enables BXL scripts to enumerate all providers on a target without
+    /// knowing the provider types in advance.
+    ///
+    /// Sample usage:
+    /// ```python
+    /// def _impl_providers_info(ctx):
+    ///     node = ctx.configured_targets("root//bin:the_binary")
+    ///     result = ctx.analysis(node)
+    ///     for info in result.providers_info():
+    ///         ctx.output.print(info.name)
+    ///         ctx.output.print(info.path)
+    ///         ctx.output.print(info.value)
+    /// ```
+    fn providers_info<'v>(
+        this: &'v StarlarkAnalysisResult,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let collection: FrozenValueTyped<'_, FrozenProviderCollection> = unsafe {
+            this.analysis
+                .lookup_inner(&this.label)?
+                .value()
+                .value_typed()
+        };
+        let heap = eval.heap();
+        let mut result = Vec::new();
+        for (id, value) in collection.as_ref().iter_providers() {
+            let name = heap.alloc(id.name.as_str());
+            let path = match &id.path {
+                Some(p) => heap.alloc(p.to_string()),
+                None => Value::new_none(),
+            };
+            let info = heap.alloc(starlark::values::structs::AllocStruct([
+                ("name", name),
+                ("path", path),
+                ("value", value.to_value()),
+            ]));
+            result.push(info);
+        }
+        Ok(heap.alloc(result))
     }
 
     /// Converts the analysis result into a `Dependency`. Currently, you can only get a `Dependency` without any

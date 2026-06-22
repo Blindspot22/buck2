@@ -38,13 +38,12 @@ use crate as starlark;
 use crate::any::ProvidesStaticType;
 use crate::coerce::coerce;
 use crate::environment::Methods;
-use crate::environment::MethodsStatic;
 use crate::hint::likely;
 use crate::hint::unlikely;
 use crate::private::Private;
+use crate::static_starlark_value;
 use crate::typing::Ty;
 use crate::values::AllocFrozenValue;
-use crate::values::AllocStaticSimple;
 use crate::values::AllocValue;
 use crate::values::FrozenHeap;
 use crate::values::FrozenStringValue;
@@ -98,8 +97,10 @@ pub(crate) type FrozenList = ListGen<FrozenListData>;
 
 pub(crate) type List<'v> = ListGen<ListData<'v>>;
 
-pub(crate) static VALUE_EMPTY_FROZEN_LIST: AllocStaticSimple<ListGen<FrozenListData>> =
-    AllocStaticSimple::alloc(unsafe { ListGen(FrozenListData::new(0)) });
+static_starlark_value!(pub(crate) VALUE_EMPTY_FROZEN_LIST: ListGen<FrozenListData> = unsafe { ListGen(FrozenListData::new(0)) });
+
+// ListGen's Canonical is FrozenList;
+crate::register_ty_starlark_value!(FrozenList);
 
 impl ListGen<FrozenListData> {
     pub(crate) fn offset_of_content() -> usize {
@@ -421,10 +422,7 @@ pub(crate) fn display_list(xs: &[Value], f: &mut fmt::Formatter<'_>) -> fmt::Res
     fmt_container(f, "[", "]", xs.iter())
 }
 
-pub(crate) fn list_methods() -> Option<&'static Methods> {
-    static RES: MethodsStatic = MethodsStatic::new();
-    RES.methods(crate::values::types::list::methods::list_methods)
-}
+starlark::methods_static!(LIST_METHODS = crate::values::types::list::methods::list_methods);
 
 #[starlark_value(type = ListData::TYPE)]
 impl<'v, T: ListLike<'v> + 'v> StarlarkValue<'v> for ListGen<T>
@@ -441,7 +439,7 @@ where
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        list_methods()
+        Some(LIST_METHODS.methods())
     }
 
     fn collect_repr(&self, s: &mut String) {

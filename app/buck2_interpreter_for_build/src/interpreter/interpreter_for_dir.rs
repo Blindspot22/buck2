@@ -58,10 +58,10 @@ use buck2_util::per_thread_instruction_counter::PerThreadInstructionCounter;
 use dice::CancellationContext;
 use dupe::Dupe;
 use gazebo::prelude::*;
+use pagable::Pagable;
 use starlark::codemap::FileSpan;
 use starlark::environment::FrozenModule;
 use starlark::syntax::AstModule;
-use starlark::values::OwnedFrozenRef;
 use starlark::values::any_complex::StarlarkAnyComplex;
 
 use crate::interpreter::buckconfig::BuckConfigsViewForStarlark;
@@ -144,7 +144,7 @@ pub fn get_starlark_warning_link() -> &'static str {
 /// The Interpreter is responsible for parsing files to an AST and then
 /// evaluating that AST. The Interpreter doesn't maintain state or cache results
 /// of parsing or loading imports.
-#[derive(Allocative)]
+#[derive(Allocative, Pagable)]
 pub(crate) struct InterpreterForDir {
     /// Non-cell-specific information.
     global_state: Arc<GlobalInterpreterState>,
@@ -193,7 +193,7 @@ impl LoadResolver for InterpreterLoadResolver {
             current_dir_with_allowed_relative: &self.config.current_dir_with_allowed_relative_dirs,
         };
         let path = parse_import(
-            &self.config.cell_info.cell_alias_resolver(),
+            self.config.cell_info.cell_alias_resolver(),
             relative_import_option,
             path,
         )?;
@@ -272,6 +272,7 @@ struct EvalResult {
     starlark_peak_allocated_byte_limit: OnceCell<Option<u64>>,
     is_profiling_enabled: bool,
     cpu_instruction_count: Option<u64>,
+    starlark_tick_count: u64,
 }
 
 impl InterpreterForDir {
@@ -511,8 +512,8 @@ impl InterpreterForDir {
         );
 
         let print = EventDispatcherPrintHandler(get_dispatcher());
-        let (finished_eval, (cpu_instruction_count, is_profiling_enabled)) = eval_provider
-            .with_evaluator(
+        let (finished_eval, (cpu_instruction_count, starlark_tick_count, is_profiling_enabled)) =
+            eval_provider.with_evaluator(
                 env,
                 cancellation.into(),
                 |eval, is_profiling_enabled_by_provider| {
@@ -533,7 +534,12 @@ impl InterpreterForDir {
                         Ok(_) => {
                             let cpu_instruction_count =
                                 instruction_counter.and_then(|c| c.collect().ok());
-                            Ok((cpu_instruction_count, is_profiling_enabled_by_provider))
+                            let starlark_tick_count = eval.get_total_tick_count();
+                            Ok((
+                                cpu_instruction_count,
+                                starlark_tick_count,
+                                is_profiling_enabled_by_provider,
+                            ))
                         }
                         Err(p) => Err(p.into()),
                     }
@@ -546,6 +552,7 @@ impl InterpreterForDir {
                 is_profiling_enabled,
                 starlark_peak_allocated_byte_limit: extra.starlark_peak_allocated_byte_limit,
                 cpu_instruction_count,
+                starlark_tick_count,
             },
         ))
     }
@@ -619,6 +626,7 @@ impl InterpreterForDir {
                 parent,
                 visibility: RefCell::new(None),
                 test_config_unification_rollout: RefCell::new(None),
+                enforces_visibility_intersection: RefCell::new(false),
             });
 
             let (finished_eval, eval_result) = self.eval(
@@ -634,20 +642,19 @@ impl InterpreterForDir {
 
             let per_file_context = eval_result.additional;
 
-            let (token, extra): (_, Option<OwnedFrozenRef<FrozenPackageFileExtra>>) =
-                if InterpreterExtraValue::get(&env)?
-                    .package_extra
-                    .get()
-                    .is_some()
-                {
-                    // Only freeze if there's something to freeze, otherwise we will needlessly freeze
-                    // globals. TODO(nga): add API to only freeze extra.
-                    let (token, frozen, _) = finished_eval.freeze_and_finish(env)?;
-                    (token, FrozenPackageFileExtra::get(&frozen)?)
-                } else {
-                    let (token, _) = finished_eval.finish()?;
-                    (token, None)
-                };
+            let (token, extra) = if InterpreterExtraValue::get(&env)?
+                .package_extra
+                .get()
+                .is_some()
+            {
+                // Only freeze if there's something to freeze, otherwise we will needlessly freeze
+                // globals. TODO(nga): add API to only freeze extra.
+                let (token, frozen, _) = finished_eval.freeze_and_finish(env)?;
+                (token, FrozenPackageFileExtra::get(&frozen)?)
+            } else {
+                let (token, _) = finished_eval.finish()?;
+                (token, None)
+            };
 
             let package_file_eval_ctx = per_file_context.into_package_file()?;
 
@@ -728,14 +735,18 @@ impl InterpreterForDir {
             } else {
                 let (token, profile_data) = finished_eval.finish()?;
 
+                let mut result = EvaluationResult::from(internals);
+                result.starlark_peak_allocated_bytes = starlark_peak_allocated_bytes;
+
                 Ok((
                     token,
                     (
                         profile_data,
                         EvaluationResultWithStats {
-                            result: EvaluationResult::from(internals),
+                            result,
                             starlark_peak_allocated_bytes,
                             cpu_instruction_count: eval_result.cpu_instruction_count,
+                            starlark_tick_count: eval_result.starlark_tick_count,
                         },
                     ),
                 ))

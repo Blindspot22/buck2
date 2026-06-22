@@ -16,6 +16,7 @@ use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
+use buck2_hash::BuckIndexMap;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::configured_frontend::ConfiguredTargetNodeCalculation;
 use buck2_node::nodes::configured_ref::ConfiguredGraphNodeRef;
@@ -24,12 +25,16 @@ use derive_more::Display;
 use dice::DiceComputations;
 use dice::Key;
 use dice::LinearRecomputeDiceComputations;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use dupe::OptionDupedExt;
 use futures::FutureExt;
-use indexmap::IndexMap;
+use pagable::Pagable;
+use pagable::StaticStr;
+use pagable::pagable_typetag;
 
 use crate::analysis::environment::ConfiguredGraphQueryEnvironmentDelegate;
 use crate::analysis::environment::get_from_template_placeholder_info;
@@ -60,13 +65,14 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
 
     async fn get_targets_from_template_placeholder_info(
         &self,
-        template_name: &'static str,
+        template_name: StaticStr,
         targets: TargetSet<ConfiguredGraphNodeRef>,
     ) -> buck2_error::Result<TargetSet<ConfiguredGraphNodeRef>> {
-        #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+        #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
         #[display("template_placeholder_info_query({})", template_name)]
+        #[pagable_typetag(dice::DiceKeyDyn)]
         struct TemplatePlaceholderInfoQueryKey {
-            template_name: &'static str,
+            template_name: StaticStr,
             // Use `ConfiguredTargetLabel` instead of `ConfiguredGraphNodeRef` here because `ConfiguredGraphNodeRef`
             // only computes Hash and PartialEq based on the label. If we use `ConfiguredGraphNodeRef` directly we
             // may cache stale ConfiguredTargetNodes and end up with a bug like T133069783.
@@ -89,7 +95,7 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
                                 ctx.try_compute_join(self.targets.iter(), |ctx, target| {
                                     async move {
                                         ctx.get_configured_target_node(target)
-                                            .await?
+                                            .await
                                             .require_compatible()
                                     }
                                     .boxed()
@@ -125,6 +131,10 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
                 // result is not comparable
                 false
             }
+
+            fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+                OkPagableValueSerialize::<Self::Value>::new()
+            }
         }
 
         let targets: Vec<_> = targets
@@ -155,7 +165,7 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
 /// don't inadvertently cause flattening of those sets.
 fn find_target_nodes(
     targets: TargetSet<ConfiguredGraphNodeRef>,
-    label_to_artifact: IndexMap<ConfiguredTargetLabel, Artifact>,
+    label_to_artifact: BuckIndexMap<ConfiguredTargetLabel, Artifact>,
 ) -> buck2_error::Result<TargetSet<ConfiguredGraphNodeRef>> {
     let mut queue: VecDeque<_> = targets.iter().duped().collect();
     let mut seen = targets;

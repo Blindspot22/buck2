@@ -29,14 +29,12 @@ use buck2_execute::digest_config::HasDigestConfig;
 use buck2_execute::directory::ActionDirectoryBuilder;
 use buck2_execute::execute::blobs::ActionBlobs;
 use buck2_execute::materialize::materializer::HasMaterializer;
-use dashmap::DashSet;
+use buck2_hash::BuckDashSet;
 use dice::DiceComputations;
-use dice::DiceComputationsData;
 use dice::UserComputationData;
 use dice_futures::spawn::spawn_dropcancel;
 use dupe::Dupe;
 use futures::FutureExt;
-use futures::future::BoxFuture;
 
 use crate::actions::artifact::get_artifact_fs::GetArtifactFs;
 use crate::actions::artifact::materializer::ArtifactMaterializer;
@@ -46,97 +44,34 @@ use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::ArtifactGroupValues;
 use crate::artifact_groups::calculation::ArtifactGroupCalculation;
 
-/// Configuration for experimental faster materialization mode.
-#[derive(Clone, Copy)]
-pub struct MaterializerFastRolloutConfig {
-    /// If true, spawn materialization futures early rather than running inline.
-    pub spawn: bool,
-    /// If true, use `tokio::task::unconstrained` when polling materialization futures.
-    pub unconstrained: bool,
-}
-
-pub trait HasMaterializerFastRolloutConfig {
-    fn set_materializer_fast_rollout_config(&mut self, config: MaterializerFastRolloutConfig);
-
-    fn get_materializer_fast_rollout_config(&self) -> MaterializerFastRolloutConfig;
-}
-
-impl HasMaterializerFastRolloutConfig for UserComputationData {
-    fn set_materializer_fast_rollout_config(&mut self, config: MaterializerFastRolloutConfig) {
-        self.data.set(config);
-    }
-
-    fn get_materializer_fast_rollout_config(&self) -> MaterializerFastRolloutConfig {
-        const DEFAULT: MaterializerFastRolloutConfig = MaterializerFastRolloutConfig {
-            spawn: false,
-            unconstrained: false,
-        };
-        *self
-            .data
-            .get::<MaterializerFastRolloutConfig>()
-            .unwrap_or(&DEFAULT)
-    }
-}
-
-fn maybe_spawned<T: Send + 'static>(
-    data: &DiceComputationsData,
-    should_spawn: bool,
-    f: BoxFuture<'static, T>,
-) -> impl Future<Output = T> {
-    if should_spawn {
-        spawn_dropcancel(
-            move |_cancellations| f,
-            &*data.per_transaction_data().spawner,
-            data.per_transaction_data(),
-        )
-        .left_future()
-    } else {
-        f.right_future()
-    }
-}
-
 pub async fn materialize_and_upload_artifact_group(
     ctx: &mut DiceComputations<'_>,
     artifact_group: &ArtifactGroup,
     contexts: MaterializationAndUploadContext,
-    queue_tracker: &Arc<DashSet<BuildArtifact>>,
+    queue_tracker: &Arc<BuckDashSet<BuildArtifact>>,
 ) -> buck2_error::Result<ArtifactGroupValues> {
-    let config = ctx
-        .per_transaction_data()
-        .get_materializer_fast_rollout_config();
     let (values, _) = {
         let fut = ctx.try_compute2(
-            |mut ctx| {
-                let group = &artifact_group;
+            |ctx| {
+                let group = artifact_group;
                 async move {
-                    materialize_artifact_group(
-                        &mut ctx,
-                        config.spawn,
-                        group,
-                        contexts.0,
-                        queue_tracker,
-                    )
-                    .await
+                    materialize_artifact_group(ctx, group, contexts.0, queue_tracker).await
                 }
                 .boxed()
             },
-            |mut ctx| {
-                let group = &artifact_group;
+            |ctx| {
+                let group = artifact_group;
                 async move {
                     match contexts.1 {
                         UploadContext::Skip => Ok(()),
-                        UploadContext::Upload => ensure_uploaded(&mut ctx, group.clone()).await,
+                        UploadContext::Upload => ensure_uploaded(ctx, group).await,
                     }
                 }
                 .boxed()
             },
         );
 
-        if config.unconstrained {
-            tokio::task::unconstrained(fut).await?
-        } else {
-            fut.await?
-        }
+        tokio::task::unconstrained(fut).await?
     };
 
     Ok(values)
@@ -144,10 +79,9 @@ pub async fn materialize_and_upload_artifact_group(
 
 async fn materialize_artifact_group(
     ctx: &mut DiceComputations<'_>,
-    should_spawn: bool,
     artifact_group: &ArtifactGroup,
     materialization_context: MaterializationContext,
-    queue_tracker: &Arc<DashSet<BuildArtifact>>,
+    queue_tracker: &Arc<BuckDashSet<BuildArtifact>>,
 ) -> buck2_error::Result<ArtifactGroupValues> {
     let values = ctx.ensure_artifact_group(artifact_group).await?;
 
@@ -179,6 +113,7 @@ async fn materialize_artifact_group(
                     let artifact = artifact.dupe();
                     let value = value.dupe();
                     let shared_data = shared_data.dupe();
+                    let artifact_group = artifact_group.dupe();
 
                     async move {
                         let (data, artifact_fs, materializer) = &*shared_data;
@@ -202,7 +137,7 @@ async fn materialize_artifact_group(
                             let symlink_value = builder.build(&configuration_hash_path)?;
 
                             materializer
-                            .declare_copy(configuration_hash_path.clone(), symlink_value, Vec::new())
+                            .declare_copy(configuration_hash_path.clone(), symlink_value, Vec::new(), None)
                             .await
                             .buck_error_context(
                                 "Failed to declare configuration path to content-based path symlinks",
@@ -214,13 +149,18 @@ async fn materialize_artifact_group(
                             waiting_data,
                             force,
                             configuration_hash_path,
+                            &artifact_group,
                         )
                         .await
                         .buck_error_context("Failed to materialize artifacts")?;
                         buck2_error::Ok(())
                     }
                 };
-                materialize_futs.push(maybe_spawned(&data, should_spawn, fut.boxed()));
+                materialize_futs.push(spawn_dropcancel(
+                    move |_cancellations| fut.boxed(),
+                    &*data.per_transaction_data().spawner,
+                    data.per_transaction_data(),
+                ));
             }
         }
 
@@ -262,8 +202,9 @@ async fn ensure_uploaded(
         })
         .ok()
         .flatten()
-        .map(|v| RemoteExecutorUseCase::new((*v).to_owned()))
-        .unwrap_or_else(RemoteExecutorUseCase::buck2_default);
+        .map_or_else(RemoteExecutorUseCase::buck2_default, |v| {
+            RemoteExecutorUseCase::new((*v).to_owned())
+        });
     ctx.per_transaction_data()
         .get_re_client()
         .with_use_case(re_use_case)
@@ -339,21 +280,22 @@ impl From<(Materializations, Uploads)> for MaterializationAndUploadContext {
 /// This map contains all the artifacts that we enqueued for materialization. This ensures
 /// we don't enqueue the same thing more than once. Should be shared across work done
 /// in a single DICE transaction.
-pub struct MaterializationQueueTrackerHolder(Arc<DashSet<BuildArtifact>>);
+pub struct MaterializationQueueTrackerHolder(Arc<BuckDashSet<BuildArtifact>>);
 
 pub trait HasMaterializationQueueTracker {
     fn init_materialization_queue_tracker(&mut self);
 
-    fn get_materialization_queue_tracker(&self) -> Arc<DashSet<BuildArtifact>>;
+    fn get_materialization_queue_tracker(&self) -> Arc<BuckDashSet<BuildArtifact>>;
 }
 
 impl HasMaterializationQueueTracker for UserComputationData {
     fn init_materialization_queue_tracker(&mut self) {
-        self.data
-            .set(MaterializationQueueTrackerHolder(Arc::new(DashSet::new())));
+        self.data.set(MaterializationQueueTrackerHolder(Arc::new(
+            BuckDashSet::default(),
+        )));
     }
 
-    fn get_materialization_queue_tracker(&self) -> Arc<DashSet<BuildArtifact>> {
+    fn get_materialization_queue_tracker(&self) -> Arc<BuckDashSet<BuildArtifact>> {
         self.data
             .get::<MaterializationQueueTrackerHolder>()
             .expect("MaterializationQueueTracker should be set")

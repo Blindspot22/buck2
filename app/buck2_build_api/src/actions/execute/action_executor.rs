@@ -39,7 +39,7 @@ use buck2_execute::execute::action_digest_and_blobs::ActionDigestAndBlobs;
 use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::execute::blocking::HasBlockingExecutor;
 use buck2_execute::execute::cache_uploader::CacheUploadInfo;
-use buck2_execute::execute::cache_uploader::CacheUploadResult;
+use buck2_execute::execute::cache_uploader::CacheUploadResults;
 use buck2_execute::execute::cache_uploader::IntoRemoteDepFile;
 use buck2_execute::execute::claim::MutexClaimManager;
 use buck2_execute::execute::clean_output_paths::CleanOutputPaths;
@@ -65,6 +65,10 @@ use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
 use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
 use buck2_file_watcher::mergebase::GetMergebase;
 use buck2_file_watcher::mergebase::Mergebase;
+use buck2_hash::BuckHashMap;
+use buck2_hash::BuckIndexMap;
+use buck2_hash::BuckIndexSet;
+use buck2_hash::buck_indexmap;
 use buck2_http::HttpClient;
 use derivative::Derivative;
 use derive_more::Display;
@@ -72,10 +76,6 @@ use dice::DiceComputations;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use either::Either;
-use fxhash::FxHashMap;
-use indexmap::IndexMap;
-use indexmap::IndexSet;
-use indexmap::indexmap;
 use itertools::Itertools;
 use remote_execution::TActionResult2;
 
@@ -94,15 +94,15 @@ use crate::artifact_groups::ArtifactGroup;
 use crate::artifact_groups::ArtifactGroupValues;
 
 /// This is the result of the action as exposed to other things in the dice computation.
-#[derive(Clone, Dupe, Debug, PartialEq, Eq, Allocative)]
+#[derive(Clone, Dupe, Debug, PartialEq, Eq, Allocative, pagable::Pagable)]
 pub struct ActionOutputs(Arc<ActionOutputsData>);
 
 impl OutputSize for ActionOutputs {
-    fn calc_output_count_and_bytes(&self) -> OutputCountAndBytes {
+    fn calc_output_count_and_bytes(&self, include_symlinks: bool) -> OutputCountAndBytes {
         let mut total_count = 0;
         let mut total_bytes = 0;
         for v in self.values() {
-            let count_and_bytes = v.calc_output_count_and_bytes();
+            let count_and_bytes = v.calc_output_count_and_bytes(include_symlinks);
             total_count += count_and_bytes.count;
             total_bytes += count_and_bytes.bytes;
         }
@@ -113,10 +113,10 @@ impl OutputSize for ActionOutputs {
     }
 }
 
-#[derive(Derivative, Debug, Allocative)]
+#[derive(Derivative, Debug, Allocative, pagable::Pagable)]
 #[derivative(PartialEq, Eq)]
 struct ActionOutputsData {
-    outputs: IndexMap<BuildArtifactPath, ArtifactValue>,
+    outputs: BuckIndexMap<BuildArtifactPath, ArtifactValue>,
 }
 
 /// Metadata associated with the execution of this action.
@@ -137,9 +137,9 @@ pub enum ActionExecutionKind {
         prefers_local: bool,
         requires_local: bool,
         allows_cache_upload: bool,
-        did_cache_upload: bool,
+        cache_upload_result: buck2_data::UploadResult,
         allows_dep_file_cache_upload: bool,
-        did_dep_file_cache_upload: bool,
+        dep_file_cache_upload_result: buck2_data::UploadResult,
         eligible_for_full_hybrid: bool,
         dep_file_key: Option<DepFileDigest>,
         scheduling_mode: Option<SchedulingMode>,
@@ -165,13 +165,27 @@ pub struct CommandExecutionRef<'a> {
     pub prefers_local: bool,
     pub requires_local: bool,
     pub allows_cache_upload: bool,
-    pub did_cache_upload: bool,
+    pub cache_upload_result: buck2_data::UploadResult,
     pub allows_dep_file_cache_upload: bool,
-    pub did_dep_file_cache_upload: bool,
+    pub dep_file_cache_upload_result: buck2_data::UploadResult,
     pub eligible_for_full_hybrid: bool,
     pub scheduling_mode: Option<SchedulingMode>,
     pub dep_file_key: &'a Option<DepFileDigest>,
     pub incremental_kind: buck2_data::IncrementalKind,
+}
+
+pub(crate) const fn did_upload_from_upload_result(upload_result: buck2_data::UploadResult) -> bool {
+    matches!(upload_result, buck2_data::UploadResult::Uploaded)
+}
+
+impl CommandExecutionRef<'_> {
+    pub fn did_cache_upload(&self) -> bool {
+        did_upload_from_upload_result(self.cache_upload_result)
+    }
+
+    pub fn did_dep_file_cache_upload(&self) -> bool {
+        did_upload_from_upload_result(self.dep_file_cache_upload_result)
+    }
 }
 
 impl ActionExecutionKind {
@@ -194,9 +208,9 @@ impl ActionExecutionKind {
                 prefers_local,
                 requires_local,
                 allows_cache_upload,
-                did_cache_upload,
+                cache_upload_result,
                 allows_dep_file_cache_upload,
-                did_dep_file_cache_upload,
+                dep_file_cache_upload_result,
                 dep_file_key,
                 eligible_for_full_hybrid,
                 scheduling_mode,
@@ -207,9 +221,9 @@ impl ActionExecutionKind {
                 prefers_local: *prefers_local,
                 requires_local: *requires_local,
                 allows_cache_upload: *allows_cache_upload,
-                did_cache_upload: *did_cache_upload,
+                cache_upload_result: *cache_upload_result,
                 allows_dep_file_cache_upload: *allows_dep_file_cache_upload,
-                did_dep_file_cache_upload: *did_dep_file_cache_upload,
+                dep_file_cache_upload_result: *dep_file_cache_upload_result,
                 dep_file_key,
                 eligible_for_full_hybrid: *eligible_for_full_hybrid,
                 scheduling_mode: *scheduling_mode.dupe(),
@@ -221,12 +235,12 @@ impl ActionExecutionKind {
 }
 
 impl ActionOutputs {
-    pub fn new(outputs: IndexMap<BuildArtifactPath, ArtifactValue>) -> Self {
+    pub fn new(outputs: BuckIndexMap<BuildArtifactPath, ArtifactValue>) -> Self {
         Self(Arc::new(ActionOutputsData { outputs }))
     }
 
     pub fn from_single(artifact: BuildArtifactPath, value: ArtifactValue) -> Self {
-        Self::new(indexmap! {artifact => value})
+        Self::new(buck_indexmap! {artifact => value})
     }
 
     pub fn get(&self, artifact: &BuildArtifactPath) -> Option<&ArtifactValue> {
@@ -354,12 +368,28 @@ impl BuckActionExecutor {
             output_trees_download_config,
         }
     }
+
+    pub(crate) fn materializer(&self) -> &dyn Materializer {
+        self.materializer.as_ref()
+    }
+
+    pub(crate) fn is_local_execution_possible(
+        &self,
+        executor_preference: buck2_execute::execute::request::ExecutorPreference,
+    ) -> bool {
+        self.command_executor
+            .is_local_execution_possible(executor_preference)
+    }
+
+    pub(crate) fn is_full_hybrid_enabled(&self) -> bool {
+        self.command_executor.is_full_hybrid_enabled()
+    }
 }
 
 struct BuckActionExecutionContext<'a> {
     executor: &'a BuckActionExecutor,
     action: &'a RegisteredAction,
-    inputs: IndexMap<ArtifactGroup, ArtifactGroupValues>,
+    inputs: BuckIndexMap<ArtifactGroup, ArtifactGroupValues>,
     outputs: &'a [BuildArtifact],
     command_reports: &'a mut Vec<CommandExecutionReport>,
     cancellations: &'a CancellationContext,
@@ -402,8 +432,8 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
 
     fn artifact_path_mapping(
         &self,
-        filter: Option<IndexSet<ArtifactGroup>>,
-    ) -> FxHashMap<&Artifact, ContentBasedPathHash> {
+        filter: Option<BuckIndexSet<ArtifactGroup>>,
+    ) -> BuckHashMap<&Artifact, ContentBasedPathHash> {
         self.inputs
             .iter()
             .filter(|(ag, _)| {
@@ -518,8 +548,8 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
             outputs,
             report,
             rejected_execution,
-            did_cache_upload,
-            did_dep_file_cache_upload,
+            cache_upload_result,
+            dep_file_cache_upload_result,
             dep_file_key,
             eligible_for_full_hybrid,
             scheduling_mode,
@@ -546,9 +576,9 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
                             prefers_local: executor_preference.prefers_local(),
                             requires_local: executor_preference.requires_local(),
                             allows_cache_upload,
-                            did_cache_upload,
+                            cache_upload_result,
                             allows_dep_file_cache_upload,
-                            did_dep_file_cache_upload,
+                            dep_file_cache_upload_result,
                             dep_file_key,
                             eligible_for_full_hybrid,
                             scheduling_mode,
@@ -605,7 +635,7 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         execution_result: &CommandExecutionResult,
         re_result: Option<TActionResult2>,
         dep_file_bundle: Option<&mut dyn IntoRemoteDepFile>,
-    ) -> buck2_error::Result<CacheUploadResult> {
+    ) -> buck2_error::Result<CacheUploadResults> {
         let action = self.target();
         Ok(self
             .executor
@@ -680,7 +710,7 @@ impl BuckActionExecutor {
     pub(crate) async fn execute(
         &self,
         waiting_data: WaitingData,
-        inputs: IndexMap<ArtifactGroup, ArtifactGroupValues>,
+        inputs: BuckIndexMap<ArtifactGroup, ArtifactGroupValues>,
         action: &RegisteredAction,
         cancellations: &CancellationContext,
     ) -> (
@@ -851,10 +881,12 @@ mod tests {
     use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
     use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
     use buck2_fs::fs_util::uncategorized as fs_util;
+    use buck2_hash::buck_indexset;
     use buck2_http::HttpClientBuilder;
     use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
-    use indexmap::indexset;
+    use pagable::PagablePanic;
+    use pagable::pagable_typetag;
     use sorted_vector_map::SortedVectorMap;
 
     use crate::actions::Action;
@@ -901,6 +933,7 @@ mod tests {
                     path_separator: PathSeparatorKind::Unix,
                     output_paths_behavior: Default::default(),
                     use_bazel_protocol_remote_persistent_workers: false,
+                    network_access: None,
                 },
                 Default::default(),
             ),
@@ -915,6 +948,7 @@ mod tests {
             Arc::new(FsIoProvider::new(
                 project_fs,
                 CasDigestConfig::testing_default(),
+                false,
             )),
             HttpClientBuilder::https_with_system_roots()
                 .await
@@ -925,13 +959,14 @@ mod tests {
             OutputTreesDownloadConfig::new(None, true),
         );
 
-        #[derive(Debug, Allocative)]
+        #[derive(Debug, Allocative, PagablePanic)] // test
         struct TestingAction {
             inputs: BoxSliceSet<ArtifactGroup>,
             outputs: BoxSliceSet<BuildArtifact>,
             ran: AtomicBool,
         }
 
+        #[pagable_typetag]
         #[async_trait]
         impl Action for TestingAction {
             fn kind(&self) -> buck2_data::ActionKind {
@@ -985,7 +1020,6 @@ mod tests {
                             .map(|b| CommandExecutionOutput::BuildArtifact {
                                 path: b.get_path().dupe(),
                                 output_type: OutputType::FileOrDirectory,
-                                supports_incremental_remote: false,
                             })
                             .collect(),
                         ctx.fs(),
@@ -1037,12 +1071,12 @@ mod tests {
             }
         }
 
-        let inputs = indexset![ArtifactGroup::Artifact(Artifact::from(
+        let inputs = buck_indexset![ArtifactGroup::Artifact(Artifact::from(
             SourceArtifact::new(SourcePath::testing_new("cell//pkg", "source"))
         ))];
         let label =
             TargetLabel::testing_parse("cell//pkg:foo").configure(ConfigurationData::testing_new());
-        let outputs = indexset![BuildArtifact::testing_new(
+        let outputs = buck_indexset![BuildArtifact::testing_new(
             label.dupe(),
             "output",
             ActionIndex::new(0),

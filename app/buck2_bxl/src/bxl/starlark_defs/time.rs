@@ -13,7 +13,6 @@ use std::time::Instant;
 use allocative::Allocative;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::NoSerialize;
@@ -30,7 +29,8 @@ use starlark::values::starlark_value;
     derive_more::Display,
     ProvidesStaticType,
     NoSerialize,
-    Allocative
+    Allocative,
+    starlark::StarlarkPagablePanic // okay("bxl")
 )]
 #[display("{:?}", _0)]
 pub(crate) struct StarlarkInstant(pub(crate) Instant);
@@ -81,10 +81,11 @@ fn starlark_instant_methods(builder: &mut MethodsBuilder) {
 
 starlark_simple_value!(StarlarkInstant);
 
+starlark::methods_static!(STARLARK_INSTANT_METHODS = starlark_instant_methods);
+
 #[starlark_value(type = "bxl.Instant")]
 impl<'v> StarlarkValue<'v> for StarlarkInstant {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(starlark_instant_methods)
+        Some(STARLARK_INSTANT_METHODS.methods())
     }
 }

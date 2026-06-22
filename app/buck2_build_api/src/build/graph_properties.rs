@@ -12,19 +12,26 @@ use std::fmt;
 
 use allocative::Allocative;
 use async_trait::async_trait;
-use buck2_core::configuration::compatibility::MaybeCompatible;
+use buck2_core::configuration::compatibility::ResultMaybeCompatible;
+use buck2_core::configuration::compatibility::ResultMaybeCompatibleValueSerialize;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::configured_frontend::ConfiguredTargetNodeCalculation;
+use buck2_sketches::DependencyGraphSketch;
+use buck2_sketches::MemoryUsageSketch;
 use buck2_util::commas::commas;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
+use dice::ValueSerialize;
 use dupe::Dupe;
 use futures::FutureExt;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::build::detailed_aggregated_metrics::buck2_sketches::AnalysisGraphPropertiesKey;
+use crate::build::detailed_aggregated_metrics::buck2_sketches::LoadGraphPropertiesKey;
 use crate::build::detailed_aggregated_metrics::buck2_sketches::compute_configured_graph_sketch;
 use crate::build::sketch_impl::MergeableGraphSketch;
 
@@ -34,7 +41,15 @@ pub struct GraphPropertiesOptions {
     pub configured_graph_sketch: bool,
     pub total_configured_graph_sketch: bool,
     pub retained_analysis_memory_sketch: bool,
+    pub peak_analysis_memory_sketch: bool,
+    pub peak_load_memory_sketch: bool,
     pub action_graph_sketch: bool,
+    pub artifact_count_sketch: bool,
+    pub artifact_size_sketch: bool,
+    /// When true, every sketch field emitted in the build report is accompanied
+    /// by a sibling `<field>_cardinality` field carrying the sketch's
+    /// `estimated_cardinality()`. The serialized sketch is left intact.
+    pub log_sketch_cardinalities: bool,
 }
 
 impl fmt::Display for GraphPropertiesOptions {
@@ -44,7 +59,12 @@ impl fmt::Display for GraphPropertiesOptions {
             configured_graph_sketch,
             total_configured_graph_sketch,
             retained_analysis_memory_sketch,
+            peak_analysis_memory_sketch,
+            peak_load_memory_sketch,
             action_graph_sketch,
+            artifact_count_sketch,
+            artifact_size_sketch,
+            log_sketch_cardinalities,
         } = *self;
 
         let mut comma = commas();
@@ -69,9 +89,34 @@ impl fmt::Display for GraphPropertiesOptions {
             write!(f, "retained_analysis_memory_sketch")?;
         }
 
+        if peak_analysis_memory_sketch {
+            comma(f)?;
+            write!(f, "peak_analysis_memory_sketch")?;
+        }
+
+        if peak_load_memory_sketch {
+            comma(f)?;
+            write!(f, "peak_load_memory_sketch")?;
+        }
+
         if action_graph_sketch {
             comma(f)?;
             write!(f, "action_graph_sketch")?;
+        }
+
+        if artifact_count_sketch {
+            comma(f)?;
+            write!(f, "artifact_count_sketch")?;
+        }
+
+        if artifact_size_sketch {
+            comma(f)?;
+            write!(f, "artifact_size_sketch")?;
+        }
+
+        if log_sketch_cardinalities {
+            comma(f)?;
+            write!(f, "log_sketch_cardinalities")?;
         }
 
         Ok(())
@@ -85,14 +130,24 @@ impl GraphPropertiesOptions {
             configured_graph_sketch,
             total_configured_graph_sketch,
             retained_analysis_memory_sketch,
+            peak_analysis_memory_sketch,
+            peak_load_memory_sketch,
             action_graph_sketch,
+            artifact_count_sketch,
+            artifact_size_sketch,
+            // Presentation-only flag: doesn't request any sketch on its own.
+            log_sketch_cardinalities: _,
         } = self;
 
         !configured_graph_size
             && !configured_graph_sketch
             && !total_configured_graph_sketch
             && !retained_analysis_memory_sketch
+            && !peak_analysis_memory_sketch
+            && !peak_load_memory_sketch
             && !action_graph_sketch
+            && !artifact_count_sketch
+            && !artifact_size_sketch
     }
 
     pub(crate) fn should_compute_configured_graph_sketch(self) -> bool {
@@ -100,16 +155,21 @@ impl GraphPropertiesOptions {
     }
 }
 
-#[derive(Clone, Dupe, Debug, Eq, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Debug, Eq, PartialEq, Allocative, Pagable)]
 pub struct ConfiguredGraphPropertiesValues {
     pub configured_graph_size: u64,
-    pub configured_graph_sketch: Option<MergeableGraphSketch<ConfiguredTargetLabel>>,
+    pub configured_graph_sketch:
+        Option<MergeableGraphSketch<ConfiguredTargetLabel, DependencyGraphSketch>>,
 }
 
 #[derive(Clone, Dupe, Debug, Eq, PartialEq, Allocative)]
 pub struct GraphPropertiesValues {
     pub configured: ConfiguredGraphPropertiesValues,
-    pub retained_analysis_memory_sketch: Option<MergeableGraphSketch<StarlarkEvalKind>>,
+    pub retained_analysis_memory_sketch:
+        Option<MergeableGraphSketch<StarlarkEvalKind, MemoryUsageSketch>>,
+    pub peak_analysis_memory_sketch:
+        Option<MergeableGraphSketch<StarlarkEvalKind, MemoryUsageSketch>>,
+    pub peak_load_memory_sketch: Option<MergeableGraphSketch<StarlarkEvalKind, MemoryUsageSketch>>,
 }
 
 #[derive(
@@ -120,13 +180,15 @@ pub struct GraphPropertiesValues {
     Eq,
     Hash,
     PartialEq,
-    Allocative
+    Allocative,
+    Pagable
 )]
 #[display(
     "GraphPropertiesKey: {}, configured_graph_sketch={}",
     label,
     configured_graph_sketch
 )]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct ConfiguredGraphPropertiesKey {
     label: ConfiguredTargetLabel,
     configured_graph_sketch: bool,
@@ -134,7 +196,7 @@ struct ConfiguredGraphPropertiesKey {
 
 #[async_trait]
 impl Key for ConfiguredGraphPropertiesKey {
-    type Value = buck2_error::Result<MaybeCompatible<ConfiguredGraphPropertiesValues>>;
+    type Value = ResultMaybeCompatible<ConfiguredGraphPropertiesValues>;
 
     async fn compute(
         &self,
@@ -142,16 +204,24 @@ impl Key for ConfiguredGraphPropertiesKey {
         _cancellation: &CancellationContext,
     ) -> Self::Value {
         let configured_node = ctx.get_configured_target_node(&self.label).await?;
-        Ok(configured_node.map(|configured_node| {
-            compute_configured_graph_sketch(configured_node, self.configured_graph_sketch)
-        }))
+        ResultMaybeCompatible::Compatible(compute_configured_graph_sketch(
+            configured_node,
+            self.configured_graph_sketch,
+        ))
     }
 
     fn equality(a: &Self::Value, b: &Self::Value) -> bool {
         match (a, b) {
-            (Ok(a), Ok(b)) => a == b,
+            (ResultMaybeCompatible::Compatible(a), ResultMaybeCompatible::Compatible(b)) => a == b,
+            (ResultMaybeCompatible::Incompatible(a), ResultMaybeCompatible::Incompatible(b)) => {
+                a == b
+            }
             _ => false,
         }
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        ResultMaybeCompatibleValueSerialize::<ConfiguredGraphPropertiesValues>::new()
     }
 }
 
@@ -161,9 +231,11 @@ pub async fn get_graph_properties(
     label: &ConfiguredTargetLabel,
     configured_graph_sketch: bool,
     retained_analysis_memory_sketch: bool,
-) -> buck2_error::Result<MaybeCompatible<GraphPropertiesValues>> {
-    let (conf, analysis) = ctx
-        .try_compute2(
+    peak_analysis_memory_sketch: bool,
+    peak_load_memory_sketch: bool,
+) -> ResultMaybeCompatible<GraphPropertiesValues> {
+    let (configured_graph, analysis_sketches, load_sketch) = ctx
+        .compute3(
             |ctx| {
                 async {
                     ctx.compute(&ConfiguredGraphPropertiesKey {
@@ -176,25 +248,47 @@ pub async fn get_graph_properties(
             },
             |ctx| {
                 async {
-                    if retained_analysis_memory_sketch {
-                        Ok(Some(
+                    let (retained, analysis_peak) =
+                        if retained_analysis_memory_sketch || peak_analysis_memory_sketch {
                             ctx.compute(&AnalysisGraphPropertiesKey {
                                 label: label.dupe(),
+                                compute_retained: retained_analysis_memory_sketch,
+                                compute_peak: peak_analysis_memory_sketch,
                             })
-                            .await??,
-                        ))
+                            .await??
+                            .to_result_maybe_compatible()?
+                        } else {
+                            (None, None)
+                        };
+                    ResultMaybeCompatible::Compatible((retained, analysis_peak))
+                }
+                .boxed()
+            },
+            |ctx| {
+                async {
+                    if peak_load_memory_sketch {
+                        let sketch = ctx
+                            .compute(&LoadGraphPropertiesKey {
+                                label: label.dupe(),
+                            })
+                            .await??
+                            .to_result_maybe_compatible()?;
+                        ResultMaybeCompatible::Compatible(Some(sketch))
                     } else {
-                        Ok(None)
+                        ResultMaybeCompatible::Compatible(None)
                     }
                 }
                 .boxed()
             },
         )
-        .await?;
-    Ok(conf.map(|conf| GraphPropertiesValues {
-        configured: conf,
-        retained_analysis_memory_sketch: analysis.map(|a| a.require_compatible().unwrap()),
-    }))
+        .await;
+    let (retained, analysis_peak) = analysis_sketches?;
+    ResultMaybeCompatible::Compatible(GraphPropertiesValues {
+        configured: configured_graph?,
+        retained_analysis_memory_sketch: retained,
+        peak_analysis_memory_sketch: analysis_peak,
+        peak_load_memory_sketch: load_sketch?,
+    })
 }
 
 /// Returns the total graph size for all dependencies of a target without caching the result on the DICE graph.

@@ -22,11 +22,11 @@ use compact_str::CompactString;
 use derive_more::Display;
 use pagable::Pagable;
 use ref_cast::RefCast;
-use relative_path::RelativePath;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::paths::forward_rel_path::ForwardRelativePath;
+use crate::paths::relative_path::RelativePath;
 
 /// Errors from ForwardRelativePath creation
 #[derive(buck2_error::Error, Debug)]
@@ -114,7 +114,7 @@ impl AsRef<str> for FileName {
 impl AsRef<RelativePath> for FileName {
     #[inline]
     fn as_ref(&self) -> &RelativePath {
-        RelativePath::new(&self.0)
+        RelativePath::unchecked_new(&self.0)
     }
 }
 
@@ -352,7 +352,7 @@ impl AsRef<str> for FileNameBuf {
 impl AsRef<RelativePath> for FileNameBuf {
     #[inline]
     fn as_ref(&self) -> &RelativePath {
-        RelativePath::new(self.0.as_str())
+        RelativePath::unchecked_new(self.0.as_str())
     }
 }
 

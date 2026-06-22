@@ -6,7 +6,6 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
-# pyre-unsafe
 
 import os
 import re
@@ -114,13 +113,13 @@ def golden(*, output: str, rel_path: str) -> None:
 
     if _is_update_invocation():
         Path(path_in_src).parent.mkdir(parents=True, exist_ok=True)
-        with open(path_in_src, "w") as f:
+        with open(path_in_src, "w", encoding="utf-8") as f:
             f.write(output)
         return
 
     assert os.path.exists(path_in_src), f"Golden path `{path_in_src}` must exist"
 
-    with open(path_in_src, "r") as f:
+    with open(path_in_src, "r", encoding="utf-8") as f:
         expected = f.read()
 
     if _remove_ci_labels(expected) != _remove_ci_labels(output):
@@ -177,6 +176,21 @@ def sanitize_stderr(s: str) -> str:
     s = re.sub(
         r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<UUID>", s
     )
+    # Sanitize daemon process info file paths.
+    s = re.sub(
+        r"^    Daemon process info from .+:?$",
+        "    Daemon process info from <BUCKD_INFO>",
+        s,
+        flags=re.MULTILINE,
+    )
+    s = re.sub(
+        r"^    daemon dir: .+$", "    daemon dir: <DAEMON_DIR>", s, flags=re.MULTILINE
+    )
+    s = re.sub(r"^    pid: \d+$", "    pid: <PID>", s, flags=re.MULTILINE)
+    s = re.sub(
+        r"^    endpoint: tcp:\d+$", "    endpoint: tcp:<PORT>", s, flags=re.MULTILINE
+    )
+    s = re.sub(r"^    version: \S+$", "    version: <VERSION>", s, flags=re.MULTILINE)
     # Remove "Commands" line
     s = re.sub(r"Commands: .+", "Commands: <COMMAND_STATS>", s)
     # Remove "Cache hits" percentage
@@ -186,6 +200,33 @@ def sanitize_stderr(s: str) -> str:
     # Remove thread ID & path from "panicked at" line
     s = re.sub(r"\([0-9]+\) panicked at .+", "(<THREAD_ID>) panicked at <PATH>", s)
     return sanitize_hashes(s)
+
+
+def sanitize_daemon_stderr(s: str) -> str:
+    """Sanitize daemon tracing output embedded in error messages.
+
+    Daemon stderr uses tracing-subscriber format with ANSI codes and
+    timestamps like '2026-03-11T21:36:35.686733Z'.
+    """
+    # Strip ANSI escape codes
+    s = re.sub(r"\x1b\[[0-9;]*m", "", s)
+    # Sanitize daemon tracing timestamps (ISO 8601 with fractional seconds)
+    s = re.sub(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z", "<DAEMON_TIMESTAMP>", s)
+    # Sanitize PIDs
+    s = re.sub(r"PID: \d+", "PID: <PID>", s)
+    # Sanitize endpoint ports
+    s = re.sub(r"Endpoint: tcp:\d+", "Endpoint: tcp:<PORT>", s)
+    # Sanitize version strings
+    s = re.sub(r"Version: \S+", "Version: <VERSION>", s)
+    # Sanitize scratch paths
+    s = re.sub(r"/data/users/\S+", "<SCRATCH_PATH>", s)
+    # Sanitize timed out duration
+    s = re.sub(r"timed out after [\d.]+s", "timed out after <DURATION>", s)
+    # Strip lines with env override logging (these vary by environment)
+    s = re.sub(r"^.*Env override found.*\n", "", s, flags=re.MULTILINE)
+    # Strip trailing whitespace on each line
+    s = re.sub(r" +$", "", s, flags=re.MULTILINE)
+    return sanitize_stderr(s)
 
 
 def sanitize_stacktrace(s: str) -> str:

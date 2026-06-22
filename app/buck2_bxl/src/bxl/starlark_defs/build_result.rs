@@ -12,7 +12,6 @@ use allocative::Allocative;
 use buck2_build_api::bxl::build_result::BxlBuildResult;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::NoSerialize;
@@ -35,7 +34,8 @@ use crate::bxl::starlark_defs::context::build::StarlarkProvidersArtifactIterable
     derive_more::Display,
     ProvidesStaticType,
     NoSerialize,
-    Allocative
+    Allocative,
+    starlark::StarlarkPagablePanic // okay("bxl")
 )]
 pub(crate) struct StarlarkBxlBuildResult(pub(crate) BxlBuildResult);
 
@@ -85,10 +85,11 @@ fn starlark_build_result_methods(builder: &mut MethodsBuilder) {
 
 starlark_simple_value!(StarlarkBxlBuildResult);
 
+starlark::methods_static!(STARLARK_BUILD_RESULT_METHODS = starlark_build_result_methods);
+
 #[starlark_value(type = "bxl.BuildResult")]
 impl<'v> StarlarkValue<'v> for StarlarkBxlBuildResult {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(starlark_build_result_methods)
+        Some(STARLARK_BUILD_RESULT_METHODS.methods())
     }
 }

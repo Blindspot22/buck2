@@ -82,6 +82,19 @@ impl EventDispatcher {
         }
     }
 
+    /// Creates an Event Dispatcher that reports a soft_error if any event is
+    /// dispatched through it. Used as a sentinel for code paths that should not
+    /// emit events; if they do, it means a real EventDispatcher needs to be
+    /// threaded through from the caller/requestor.
+    pub fn error_on_event() -> EventDispatcher {
+        use crate::sink::error_on_event::ErrorOnEventSink;
+        EventDispatcher {
+            trace_id: TraceId::null(),
+            daemon_id: DaemonId::null(),
+            sink: Arc::new(ErrorOnEventSink),
+        }
+    }
+
     /// Emits an event annotated with the current trace ID.
     pub fn buck_event(&self, data: buck_event::Data) {
         self.event_with_span_id(data, None, current_span());
@@ -105,6 +118,22 @@ impl EventDispatcher {
 
     pub fn streaming_output(&self, message: String) {
         self.instant_event(buck2_data::StdoutStreamingOutput { message })
+    }
+
+    /// Like `instant_event`, but bypasses internal buffering. See [`EventSink::send_now`].
+    pub async fn instant_event_send_now<E: Into<buck2_data::instant_event::Data>>(&self, data: E) {
+        let instant = buck2_data::InstantEvent {
+            data: Some(data.into()),
+        };
+        let now = SystemTime::now();
+        let event = BuckEvent::new(
+            now,
+            self.trace_id.dupe(),
+            None,
+            current_span(),
+            instant.into(),
+        );
+        self.sink.send_now(Event::Buck(event)).await;
     }
 
     fn event_with_span_id<E: Into<buck_event::Data>>(
@@ -216,6 +245,50 @@ where
             }
             task::Poll::Pending => task::Poll::Pending,
         }
+    }
+}
+
+/// A [`Future`] wrapper that captures the current [`SpanId`] at construction
+/// time and proxies it into each [`Future::poll`] call via
+/// [`maybe_proxy_current_span`]. This is the async counterpart to the
+/// synchronous `maybe_proxy_current_span`, allowing span context to follow
+/// futures that may be polled on a different tokio task or thread.
+#[pin_project]
+pub struct SpanProxyAsync<Fut, R>
+where
+    Fut: Future<Output = R>,
+{
+    #[pin]
+    fut: Fut,
+    span_id: Option<SpanId>,
+}
+
+impl<Fut, R> SpanProxyAsync<Fut, R>
+where
+    Fut: Future<Output = R>,
+{
+    pub fn new(fut: Fut) -> Self {
+        SpanProxyAsync {
+            fut,
+            span_id: current_span(),
+        }
+    }
+
+    pub fn new_with_span(fut: Fut, span_id: Option<SpanId>) -> Self {
+        SpanProxyAsync { fut, span_id }
+    }
+}
+
+impl<Fut, R> Future for SpanProxyAsync<Fut, R>
+where
+    Fut: Future<Output = R>,
+{
+    type Output = R;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let this = self.project();
+        let span_id = *this.span_id;
+        maybe_proxy_current_span(span_id, || this.fut.poll(cx))
     }
 }
 
@@ -372,6 +445,51 @@ impl Drop for Span {
     }
 }
 
+struct RestoreSpan<'a> {
+    tl_span: &'a Cell<Option<SpanId>>,
+    previous_span: Option<SpanId>,
+}
+
+impl Drop for RestoreSpan<'_> {
+    fn drop(&mut self) {
+        self.tl_span.set(self.previous_span);
+    }
+}
+
+/// Temporarily installs a captured `SpanId` as the `CURRENT_SPAN` on the
+/// current thread while executing `fun`. This is used to propagate span
+/// context from a parent thread into worker threads (e.g. the IO executor),
+/// so that actions executed on those threads appear under the correct span.
+///
+/// If the current thread already has its own span set, the proxied span is
+/// **not** installed (don't-clobber semantics). The thread-local
+/// `RootSpansRecorder` is also cleared for the duration to prevent the worker
+/// thread from accidentally recording spans belonging to the caller.
+///
+/// No-op when `span_id` is `None`.
+pub fn maybe_proxy_current_span<T, Fun>(span_id: Option<SpanId>, fun: Fun) -> T
+where
+    Fun: FnOnce() -> T,
+{
+    match span_id {
+        Some(span_id) => unset_thread_local_recorder(|| {
+            CURRENT_SPAN.with(|tl_span| {
+                let previous_span = tl_span.replace(Some(span_id));
+                if previous_span.is_some() {
+                    // This thread already has its own span; don't override it.
+                    tl_span.set(previous_span);
+                }
+                let _guard = RestoreSpan {
+                    tl_span,
+                    previous_span,
+                };
+                fun()
+            })
+        }),
+        None => fun(),
+    }
+}
+
 thread_local! {
     static CURRENT_SPAN: Cell<Option<SpanId>> = const { Cell::new(None) };
 }
@@ -392,12 +510,12 @@ where
     EVENTS.sync_scope(dispatcher, func)
 }
 
-// Wraps the Future fut with a TaskLocalFuture that sets the task_local dispatcher before polling fut.
+// Wraps the Future fut with a TaskLocalFuture that sets the task_local dispatcher and the current_span (if any) before polling fut.
 pub fn with_dispatcher_async<F, R>(dispatcher: EventDispatcher, fut: F) -> impl Future<Output = R>
 where
     F: Future<Output = R>,
 {
-    EVENTS.scope(dispatcher, fut)
+    EVENTS.scope(dispatcher, SpanProxyAsync::new(fut))
 }
 
 /// Get the ambient dispatcher, if one is available (and None otherwise). In contexts that aren't

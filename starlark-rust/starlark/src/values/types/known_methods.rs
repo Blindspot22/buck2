@@ -22,14 +22,19 @@ use once_cell::sync::Lazy;
 use crate::environment::Methods;
 use crate::eval::Arguments;
 use crate::eval::Evaluator;
+use crate::pagable::StarlarkDeserialize;
+use crate::pagable::StarlarkDeserializeContext;
+use crate::pagable::StarlarkSerialize;
+use crate::pagable::StarlarkSerializeContext;
 use crate::values::FrozenValueTyped;
+use crate::values::StarlarkValue;
 use crate::values::Value;
-use crate::values::dict::value::dict_methods;
+use crate::values::dict::value::FrozenDict;
 use crate::values::function::NativeMeth;
 use crate::values::function::NativeMethod;
-use crate::values::list::value::list_methods;
-use crate::values::set::value::set_methods;
-use crate::values::string::str_type::str_methods;
+use crate::values::list::value::FrozenList;
+use crate::values::set::value::FrozenSet;
+use crate::values::string::StarlarkStr;
 
 /// Method and a `Methods` container which declares it.
 #[derive(Clone, Copy, Dupe)]
@@ -40,6 +45,26 @@ pub(crate) struct KnownMethod {
     method: FrozenValueTyped<'static, NativeMethod>,
     /// Copied here from `method` to faster invocation (one fewer deref).
     imp: &'static NativeMeth,
+}
+
+// `type_methods` and `imp` are `'static` pointers tied to the in-process
+// known-methods table. Round-trip the method name only and re-resolve via
+// `get_known_method` on deserialize.
+impl StarlarkSerialize for KnownMethod {
+    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+        self.method.as_ref().name.starlark_serialize(ctx)
+    }
+}
+
+impl StarlarkDeserialize for KnownMethod {
+    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
+        let name = String::starlark_deserialize(ctx)?;
+        get_known_method(&name).ok_or_else(|| {
+            crate::Error::new_other(anyhow::anyhow!(
+                "KnownMethod `{name}` not in known-methods table on deserialize"
+            ))
+        })
+    }
 }
 
 impl KnownMethod {
@@ -91,10 +116,10 @@ impl KnownMethods {
         }
 
         // We don't need to add all the methods, only the most common ones. This is fine.
-        add_methods(&mut methods, list_methods());
-        add_methods(&mut methods, dict_methods());
-        add_methods(&mut methods, set_methods());
-        add_methods(&mut methods, str_methods());
+        add_methods(&mut methods, FrozenList::get_methods());
+        add_methods(&mut methods, FrozenDict::get_methods());
+        add_methods(&mut methods, FrozenSet::get_methods());
+        add_methods(&mut methods, StarlarkStr::get_methods());
 
         KnownMethods { methods }
     }

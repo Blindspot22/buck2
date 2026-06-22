@@ -18,8 +18,10 @@ use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::values::Freeze;
-use starlark::values::FrozenRef;
+use starlark::values::FrozenStringValue;
 use starlark::values::FrozenValue;
+use starlark::values::FrozenValueTyped;
+use starlark::values::StarlarkPagable;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
@@ -30,6 +32,7 @@ use starlark::values::dict::AllocDict;
 use starlark::values::dict::DictRef;
 use starlark::values::dict::DictType;
 use starlark::values::dict::FrozenDictRef;
+use starlark::values::string::StarlarkStr;
 
 use crate as buck2_build_api;
 use crate::interpreter::rule_defs::cmd_args::value::FrozenCommandLineArg;
@@ -82,7 +85,16 @@ enum TemplatePlaceholderInfoError {
 ///  - keyed_variables: A mapping of names to arg-like values or dictionary of string to
 ///        arg-like values. These are used for "keyed placeholder" expansion.
 #[internal_provider(template_placeholder_info_creator)]
-#[derive(Clone, Debug, Trace, Coerce, Freeze, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Trace,
+    Coerce,
+    Freeze,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[repr(C)]
 pub struct TemplatePlaceholderInfoGen<V: ValueLifetimeless> {
     // `Value` in both fields is command line arg.
@@ -95,13 +107,13 @@ pub struct TemplatePlaceholderInfoGen<V: ValueLifetimeless> {
 }
 
 impl FrozenTemplatePlaceholderInfo {
-    pub fn unkeyed_variables(&self) -> SmallMap<FrozenRef<'static, str>, FrozenCommandLineArg> {
+    pub fn unkeyed_variables(&self) -> SmallMap<FrozenStringValue, FrozenCommandLineArg> {
         FrozenDictRef::from_frozen_value(self.unkeyed_variables.get())
             .expect("should be a dict-like object")
             .iter()
             .map(|(k, v)| {
                 (
-                    k.downcast_frozen_str().expect("should have string keys"),
+                    FrozenValueTyped::<StarlarkStr>::new(k).expect("should have string keys"),
                     FrozenCommandLineArg::new(v).unwrap(),
                 )
             })
@@ -111,31 +123,35 @@ impl FrozenTemplatePlaceholderInfo {
     pub fn keyed_variables(
         &self,
     ) -> SmallMap<
-        FrozenRef<'static, str>,
-        Either<FrozenCommandLineArg, SmallMap<FrozenRef<'static, str>, FrozenCommandLineArg>>,
+        FrozenStringValue,
+        Either<FrozenCommandLineArg, SmallMap<FrozenStringValue, FrozenCommandLineArg>>,
     > {
         FrozenDictRef::from_frozen_value(self.keyed_variables.get())
             .expect("should be a dict-like object")
             .iter()
             .map(|(k, v)| {
-                (k.downcast_frozen_str().expect("should have string keys"), {
-                    if let Some(dict) = FrozenDictRef::from_frozen_value(v) {
-                        Either::Right(
-                            dict.iter()
-                                .map(|(k, v)| {
-                                    (
-                                        k.downcast_frozen_str().expect("should have string keys"),
-                                        FrozenCommandLineArg::new(v).unwrap(),
-                                    )
-                                })
-                                .collect(),
-                        )
-                    } else if let Ok(cmd) = FrozenCommandLineArg::new(v) {
-                        Either::Left(cmd)
-                    } else {
-                        unreachable!("should be dict or command line")
-                    }
-                })
+                (
+                    FrozenValueTyped::<StarlarkStr>::new(k).expect("should have string keys"),
+                    {
+                        if let Some(dict) = FrozenDictRef::from_frozen_value(v) {
+                            Either::Right(
+                                dict.iter()
+                                    .map(|(k, v)| {
+                                        (
+                                            FrozenValueTyped::<StarlarkStr>::new(k)
+                                                .expect("should have string keys"),
+                                            FrozenCommandLineArg::new(v).unwrap(),
+                                        )
+                                    })
+                                    .collect(),
+                            )
+                        } else if let Ok(cmd) = FrozenCommandLineArg::new(v) {
+                            Either::Left(cmd)
+                        } else {
+                            unreachable!("should be dict or command line")
+                        }
+                    },
+                )
             })
             .collect()
     }

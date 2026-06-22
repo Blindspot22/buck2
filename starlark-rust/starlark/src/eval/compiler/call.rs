@@ -17,9 +17,11 @@
 
 //! Compile function calls.
 
+use starlark_derive::StarlarkPagable;
 use starlark_derive::VisitSpanMut;
 use starlark_syntax::slice_vec_ext::VecExt;
 
+use crate as starlark;
 use crate::collections::symbol::symbol::Symbol;
 use crate::eval::compiler::args::ArgsCompiledValue;
 use crate::eval::compiler::def_inline::InlineDefBody;
@@ -34,11 +36,12 @@ use crate::eval::runtime::inlined_frame::InlinedFrameAlloc;
 use crate::eval::runtime::visit_span::VisitSpanMut;
 use crate::values::FrozenStringValue;
 use crate::values::FrozenValue;
+use crate::values::FrozenValueTyped;
 use crate::values::Value;
 use crate::values::enumeration::FrozenEnumType;
 use crate::values::string::dot_format::parse_format_one;
 
-#[derive(Clone, Debug, VisitSpanMut)]
+#[derive(Clone, Debug, VisitSpanMut, StarlarkPagable)]
 pub(crate) struct CallCompiled {
     pub(crate) fun: IrSpanned<ExprCompiled>,
     pub(crate) args: ArgsCompiledValue,
@@ -231,10 +234,10 @@ impl CallCompiled {
         fun: &IrSpanned<ExprCompiled>,
         args: &ArgsCompiledValue,
     ) -> Option<ExprCompiled> {
-        let fun = fun.as_value()?.downcast_frozen_ref::<FrozenEnumType>()?;
+        let fun = FrozenValueTyped::<FrozenEnumType>::new(fun.as_value()?)?;
         let arg = args.one_pos()?.as_value()?;
         Some(ExprCompiled::Value(
-            fun.value.construct(arg.to_value()).ok()?,
+            fun.as_ref().construct(arg.to_value()).ok()?,
         ))
     }
 

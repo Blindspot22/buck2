@@ -19,23 +19,24 @@ use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_error::BuckErrorContext;
+use buck2_hash::BuckDashMap;
 use cmp_any::PartialEqAny;
-use dashmap::DashMap;
 use derivative::Derivative;
 use dice::DiceComputations;
 use dice::UserComputationData;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::dice::data::HasIoProvider;
 use crate::file_ops::delegate::FileOpsDelegate;
-use crate::file_ops::dice::ReadFileProxy;
 use crate::file_ops::metadata::RawDirEntry;
 use crate::file_ops::metadata::RawPathMetadata;
 
 /// A `FileOpsDelegate` implementation that calls out to the `IoProvider` to read files.
 ///
 /// This is used for everything except 1) tests, and 2) external cells.
-#[derive(Clone, Dupe, Derivative, Allocative)]
+#[derive(Clone, Dupe, Derivative, Allocative, Pagable)]
 #[derivative(PartialEq)]
 pub(super) struct IoFileOpsDelegate {
     pub(super) cells: CellResolver,
@@ -43,9 +44,9 @@ pub(super) struct IoFileOpsDelegate {
 }
 
 impl IoFileOpsDelegate {
-    fn resolve(&self, path: &CellRelativePath) -> ProjectRelativePathBuf {
-        let cell_root = self.cells.get(self.cell).unwrap().path();
-        cell_root.as_project_relative_path().join(path)
+    fn resolve(&self, path: &CellRelativePath) -> buck2_error::Result<ProjectRelativePathBuf> {
+        let cell_root = self.cells.get(self.cell)?.path();
+        Ok(cell_root.as_project_relative_path().join(path))
     }
 
     fn get_cell_path(&self, path: &ProjectRelativePath) -> CellPath {
@@ -53,17 +54,17 @@ impl IoFileOpsDelegate {
     }
 }
 
+#[pagable_typetag]
 #[async_trait]
 impl FileOpsDelegate for IoFileOpsDelegate {
     async fn read_file_if_exists(
         &self,
         ctx: &mut DiceComputations<'_>,
         path: &'async_trait CellRelativePath,
-    ) -> buck2_error::Result<ReadFileProxy> {
-        Ok(ReadFileProxy::new_with_captures(
-            (self.resolve(path), ctx.global_data().get_io_provider()),
-            |(project_path, io)| async move { io.read_file_if_exists(project_path).await },
-        ))
+    ) -> buck2_error::Result<Option<String>> {
+        let project_path = self.resolve(path)?;
+        let io = ctx.global_data().get_io_provider();
+        io.read_file_if_exists(project_path).await
     }
 
     async fn read_dir(
@@ -71,7 +72,7 @@ impl FileOpsDelegate for IoFileOpsDelegate {
         ctx: &mut DiceComputations<'_>,
         path: &'async_trait CellRelativePath,
     ) -> buck2_error::Result<Arc<[RawDirEntry]>> {
-        let project_path = self.resolve(path);
+        let project_path = self.resolve(path)?;
         let read_dir_cache = ctx
             .per_transaction_data()
             .data
@@ -85,7 +86,8 @@ impl FileOpsDelegate for IoFileOpsDelegate {
             .get_io_provider()
             .read_dir(project_path.clone())
             .await
-            .with_buck_error_context(|| format!("Error listing dir `{path}`"))?;
+            .with_buck_error_context(|| format!("Error listing dir `{path}`"))?
+            .into_entries();
 
         // Make sure entries are deterministic, since read_dir isn't.
         entries.sort_by(|a, b| a.file_name.cmp(&b.file_name));
@@ -100,7 +102,7 @@ impl FileOpsDelegate for IoFileOpsDelegate {
         ctx: &mut DiceComputations<'_>,
         path: &'async_trait CellRelativePath,
     ) -> buck2_error::Result<Option<RawPathMetadata>> {
-        let project_path = self.resolve(path);
+        let project_path = self.resolve(path)?;
 
         let res = ctx
             .global_data()
@@ -133,7 +135,7 @@ impl FileOpsDelegate for IoFileOpsDelegate {
     }
 }
 
-struct ReadDirCache(DashMap<ProjectRelativePathBuf, Arc<[RawDirEntry]>>);
+struct ReadDirCache(BuckDashMap<ProjectRelativePathBuf, Arc<[RawDirEntry]>>);
 
 pub fn initialize_read_dir_cache(data: &mut UserComputationData) {
     data.data.set(ReadDirCache(Default::default()));

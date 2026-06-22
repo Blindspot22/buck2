@@ -19,13 +19,12 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
@@ -39,9 +38,10 @@ enum StarlarkAttributeError {
     Debug,
     ProvidesStaticType,
     NoSerialize,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
-pub struct StarlarkAttribute(Attribute);
+pub struct StarlarkAttribute(#[starlark_pagable(pagable)] Attribute);
 
 starlark_simple_value!(StarlarkAttribute);
 
@@ -49,12 +49,13 @@ starlark_simple_value!(StarlarkAttribute);
 #[starlark_module]
 fn starlark_attribute_methods(builder: &mut MethodsBuilder) {}
 
+starlark::methods_static!(STARLARK_ATTRIBUTE_METHODS = starlark_attribute_methods);
+
 #[starlark_value(type = "Attr")]
 impl<'v> StarlarkValue<'v> for StarlarkAttribute {
     // Used to add type documentation to the generated documentation
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(starlark_attribute_methods)
+        Some(STARLARK_ATTRIBUTE_METHODS.methods())
     }
 }
 
@@ -85,7 +86,5 @@ impl StarlarkAttribute {
 }
 
 #[starlark_module]
-pub(crate) fn register_attr_type(globals: &mut GlobalsBuilder) {
-    /// Starlark type of the attribute object (for example, returned from `attrs.string()`).
-    const Attr: StarlarkValueAsType<StarlarkAttribute> = StarlarkValueAsType::new();
-}
+#[starlark_types(StarlarkAttribute as Attr)]
+pub(crate) fn register_attr_type(globals: &mut GlobalsBuilder) {}

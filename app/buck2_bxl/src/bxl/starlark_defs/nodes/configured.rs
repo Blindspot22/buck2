@@ -10,8 +10,6 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt;
 use std::path::Path;
@@ -28,6 +26,7 @@ use buck2_build_api::actions::query::PackageLabelOption;
 use buck2_build_api::analysis::AnalysisResult;
 use buck2_build_api::bxl::unconfigured_attribute::StarlarkCoercedAttr;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
+use buck2_build_api::interpreter::rule_defs::provider::builtin::configuration_info::ConfigurationInfo;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::data::HasIoProvider;
 use buck2_core::cells::cell_path::CellPath;
@@ -38,6 +37,8 @@ use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_error::BuckErrorContext;
 use buck2_fs::paths::abs_path::AbsPath;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use buck2_interpreter::types::target_label::StarlarkConfiguredTargetLabel;
 use buck2_node::attrs::attr_type::arg::StringWithMacros;
 use buck2_node::attrs::attr_type::dict::DictLiteral;
@@ -57,13 +58,13 @@ use derivative::Derivative;
 use derive_more::Display;
 use dupe::Dupe;
 use futures::FutureExt;
+use pagable::Pagable;
 use serde::Serialize;
 use serde::Serializer;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
@@ -127,7 +128,7 @@ fn attr_with_stripped_cfg(attr: &ConfiguredAttr) -> buck2_error::Result<CoercedA
             CoercedAttr::Dep(dep.label.unconfigured())
         }
         ConfiguredAttr::SplitTransitionDep(dep) => {
-            let deps: HashSet<_> = dep.deps.values().map(|l| l.unconfigured()).collect();
+            let deps: StdBuckHashSet<_> = dep.deps.values().map(|l| l.unconfigured()).collect();
             if deps.len() != 1 {
                 return Err(buck2_error::internal_error!(
                     "ConfiguredSplitTransitionDep should have exactly one dep, but found {}",
@@ -272,18 +273,30 @@ fn attr_with_stripped_cfg(attr: &ConfiguredAttr) -> buck2_error::Result<CoercedA
     })
 }
 
-#[derive(Debug, Display, ProvidesStaticType, Allocative, Clone, Dupe)]
+#[derive(
+    Debug,
+    Display,
+    ProvidesStaticType,
+    Allocative,
+    Clone,
+    Dupe,
+    pagable::Pagable,
+    starlark::StarlarkPagableViaPagable
+)]
 #[derive(NoSerialize)] // TODO probably should be serializable the same as how queries serialize
 #[display("configured_target_node(name = {}, ...)", self.0.label())]
 pub(crate) struct StarlarkConfiguredTargetNode(pub(crate) ConfiguredTargetNode);
 
 starlark_simple_value!(StarlarkConfiguredTargetNode);
 
+starlark::methods_static!(
+    CONFIGURED_TARGET_NODE_VALUE_METHODS = configured_target_node_value_methods
+);
+
 #[starlark_value(type = "bxl.ConfiguredTargetNode")]
 impl<'v> StarlarkValue<'v> for StarlarkConfiguredTargetNode {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(configured_target_node_value_methods)
+        Some(CONFIGURED_TARGET_NODE_VALUE_METHODS.methods())
     }
 }
 
@@ -744,9 +757,45 @@ fn configured_target_node_value_methods(builder: &mut MethodsBuilder) {
                 .map(|node| StarlarkConfiguredTargetNode(node.dupe())),
         ))
     }
+
+    /// Returns a `ConfigurationInfo` representing this node's configuration,
+    /// or `None` if the configuration is not bound.
+    ///
+    /// The returned `ConfigurationInfo` has a `constraints` dict mapping
+    /// `TargetLabel` (constraint settings) to `ConstraintValueInfo` (constraint values),
+    /// and an empty `values` dict.
+    ///
+    /// Sample usage:
+    /// ```python
+    /// def _impl_configuration_info(ctx):
+    ///     node = ctx.configured_targets("my_cell//bin:the_binary")
+    ///     cfg_info = node.configuration_info()
+    ///     if cfg_info != None:
+    ///         for setting, value in cfg_info.constraints.items():
+    ///             ctx.output.print(str(setting) + "=" + str(value))
+    /// ```
+    fn configuration_info<'v>(
+        this: &StarlarkConfiguredTargetNode,
+        heap: Heap<'v>,
+    ) -> starlark::Result<NoneOr<Value<'v>>> {
+        let cfg = this.0.label().cfg();
+        if !cfg.is_bound() {
+            return Ok(NoneOr::None);
+        }
+        let data = cfg.data()?;
+        let info = ConfigurationInfo::from_configuration_data(data, heap);
+        Ok(NoneOr::Other(heap.alloc(info)))
+    }
 }
 
-#[derive(Debug, Clone, ProvidesStaticType, Allocative)]
+#[derive(
+    Debug,
+    Clone,
+    ProvidesStaticType,
+    Allocative,
+    Pagable,
+    starlark::StarlarkPagableViaPagable
+)]
 #[repr(C)]
 pub(crate) struct StarlarkConfiguredAttr(ConfiguredAttr, PackageLabel);
 
@@ -779,11 +828,12 @@ impl Serialize for StarlarkConfiguredAttr {
 
 starlark_simple_value!(StarlarkConfiguredAttr);
 
+starlark::methods_static!(CONFIGURED_ATTR_METHODS = configured_attr_methods);
+
 #[starlark_value(type = "bxl.ConfiguredAttr")]
 impl<'v> StarlarkValue<'v> for StarlarkConfiguredAttr {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(configured_attr_methods)
+        Some(CONFIGURED_ATTR_METHODS.methods())
     }
 }
 
@@ -873,11 +923,12 @@ pub(crate) struct StarlarkLazyAttrs<'v> {
     configured_target_node: &'v StarlarkConfiguredTargetNode,
 }
 
+starlark::methods_static!(LAZY_ATTRS_METHODS = lazy_attrs_methods);
+
 #[starlark_value(type = "bxl.LazyAttrs", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkLazyAttrs<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(lazy_attrs_methods)
+        Some(LAZY_ATTRS_METHODS.methods())
     }
 }
 
@@ -929,7 +980,7 @@ fn lazy_attrs_methods(builder: &mut MethodsBuilder) {
                         .configured_target_node
                         .0
                         .special_attrs()
-                        .collect::<HashMap<_, _>>();
+                        .collect::<StdBuckHashMap<_, _>>();
                     let attr = special_attrs.get(attr);
                     match attr {
                         None => NoneOr::None,
@@ -963,11 +1014,12 @@ pub(crate) struct StarlarkLazyResolvedAttrs<'v> {
     resolution_ctx_data: RefCell<LazyAttrResolutionCache>,
 }
 
+starlark::methods_static!(LAZY_RESOLVED_ATTRS_METHODS = lazy_resolved_attrs_methods);
+
 #[starlark_value(type = "bxl.LazyResolvedAttrs", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkLazyResolvedAttrs<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(lazy_resolved_attrs_methods)
+        Some(LAZY_RESOLVED_ATTRS_METHODS.methods())
     }
 }
 
@@ -1038,7 +1090,7 @@ fn lazy_resolved_attrs_methods(builder: &mut MethodsBuilder) {
                         .configured_node
                         .0
                         .special_attrs()
-                        .collect::<HashMap<_, _>>();
+                        .collect::<StdBuckHashMap<_, _>>();
                     let attr = special_attrs.get(attr);
                     match attr {
                         None => NoneOr::None,

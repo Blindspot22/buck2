@@ -6,7 +6,7 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
-load("@prelude//android:android_providers.bzl", "AndroidApkInfo", "AndroidInstrumentationApkInfo")
+load("@prelude//android:android_providers.bzl", "AndroidApkExopackageInfo", "AndroidApkInfo", "AndroidInstrumentationApkInfo")
 load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
 load("@prelude//java:class_to_srcs.bzl", "JavaClassToSourceMapInfo")
 load("@prelude//java:java_providers.bzl", "JavaPackagingInfo", "get_all_java_packaging_deps_tset")
@@ -20,6 +20,7 @@ load(
     "traverse_shared_library_info",
 )
 load("@prelude//test:inject_test_run_info.bzl", "inject_test_run_info")
+load("@prelude//tests:test_listing.bzl", "TestListingInfo")
 load("@prelude//utils:argfile.bzl", "at_argfile")
 load("@prelude//utils:expect.bzl", "expect")
 
@@ -45,8 +46,9 @@ def android_instrumentation_test_impl(ctx: AnalysisContext):
     extra_classpath = []
     if ctx.attrs.instrumentation_test_listener != None:
         extra_classpath.extend([
-            get_all_java_packaging_deps_tset(ctx, java_packaging_infos = [ctx.attrs.instrumentation_test_listener[JavaPackagingInfo]])
-                .project_as_args("full_jar_args", ordering = "bfs"),
+            get_all_java_packaging_deps_tset(ctx, java_packaging_infos = [ctx.attrs.instrumentation_test_listener[JavaPackagingInfo]]).project_as_args(
+                "full_jar_args", ordering = "bfs"
+            ),
         ])
 
         shared_library_info = merge_shared_libraries(
@@ -84,9 +86,9 @@ def android_instrumentation_test_impl(ctx: AnalysisContext):
                 ],
             )
 
-    target_package_file = ctx.actions.declare_output("target_package_file")
-    package_file = ctx.actions.declare_output("package_file")
-    test_runner_file = ctx.actions.declare_output("test_runner_file")
+    target_package_file = ctx.actions.declare_output("target_package_file", has_content_based_path = False)
+    package_file = ctx.actions.declare_output("package_file", has_content_based_path = False)
+    test_runner_file = ctx.actions.declare_output("test_runner_file", has_content_based_path = False)
     manifest_utils_cmd = cmd_args(ctx.attrs._android_toolchain[AndroidToolchainInfo].manifest_utils[RunInfo])
     manifest_utils_cmd.add([
         "--manifest-path",
@@ -123,6 +125,8 @@ def android_instrumentation_test_impl(ctx: AnalysisContext):
         cmd.append("--collect-tombstones")
     if ctx.attrs.record_video:
         cmd.append("--record-video")
+    if android_toolchain.collect_perfetto:
+        cmd.append("--collect-perfetto")
     if ctx.attrs.log_extractors:
         for arg_name, arg_value in ctx.attrs.log_extractors.items():
             cmd.extend(
@@ -141,8 +145,30 @@ def android_instrumentation_test_impl(ctx: AnalysisContext):
         ],
     )
 
+    # Exopackage secondary dexes live out-of-band, not in base.apk. Pass the build's secondary-dex
+    # dir so the runner pushes them to /data/local/tmp/exopackage/<pkg>/secondary-dex before
+    # Application init; otherwise classes in those dexes (e.g. com.facebook.R$style) hit NoClassDefFoundError on RE.
+    apk_exopackage_info = ctx.attrs.apk.get(AndroidApkExopackageInfo)
+    if apk_exopackage_info != None:
+        cmd.extend([
+            "--exopackage-secondary-dex-local-dir",
+            apk_exopackage_info.secondary_dex_directory,
+        ])
+
+    listing_info = ctx.attrs._android_toolchain[TestListingInfo]
+
+    list_tests = listing_info.list_tests
+    if list_tests != None and "tpx:supports_static_listing=true" in ctx.attrs.labels and "tpx:supports_static_listing=false" not in ctx.attrs.labels:
+        list_tests_command = cmd_args([
+            list_tests[RunInfo],
+            "list-tests",
+            "--sources-file",
+            ctx.actions.write("source_files.txt", ctx.attrs._test_srcs, with_inputs = True, has_content_based_path = False),
+        ])
+        env["TPX_LIST_TESTS_COMMAND"] = list_tests_command
+
     labels = ctx.attrs.labels
-    if read_root_config("test", "use_tpx_standard_output") == "true":
+    if "tpx:supports-test-result-output-spec" not in labels:
         labels.append("tpx:supports-test-result-output-spec")
 
     test_info = ExternalRunnerTestInfo(
@@ -229,7 +255,10 @@ def _compute_executor_overrides(ctx: AnalysisContext, instrumentation_test_can_r
 
 def _compute_emulator_abi(labels: list[str]):
     emulator_abi_labels = [label for label in labels if label.startswith(ANDROID_EMULATOR_ABI_LABEL_PREFIX)]
-    expect(len(emulator_abi_labels) <= 1, "multiple '{}' labels were found:[{}], there must be only one!".format(ANDROID_EMULATOR_ABI_LABEL_PREFIX, ", ".join(emulator_abi_labels)))
+    expect(
+        len(emulator_abi_labels) <= 1,
+        "multiple '{}' labels were found:[{}], there must be only one!".format(ANDROID_EMULATOR_ABI_LABEL_PREFIX, ", ".join(emulator_abi_labels)),
+    )
     if len(emulator_abi_labels) == 0:
         return None
     else:  # len(emulator_abi_labels) == 1:
@@ -238,7 +267,10 @@ def _compute_emulator_abi(labels: list[str]):
 # replicating the logic in https://fburl.com/code/1fqowxu4 to match buck1's behavior
 def _compute_emulator_subplatform(labels: list[str]) -> str:
     emulator_subplatform_labels = [label for label in labels if label.startswith("re_emulator_")]
-    expect(len(emulator_subplatform_labels) <= 1, "multiple 're_emulator_' labels were found:[{}], there must be only one!".format(", ".join(emulator_subplatform_labels)))
+    expect(
+        len(emulator_subplatform_labels) <= 1,
+        "multiple 're_emulator_' labels were found:[{}], there must be only one!".format(", ".join(emulator_subplatform_labels)),
+    )
     if len(emulator_subplatform_labels) == 0:
         return DEFAULT_ANDROID_SUBPLATFORM
     else:  # len(emulator_subplatform_labels) == 1:
@@ -246,7 +278,10 @@ def _compute_emulator_subplatform(labels: list[str]) -> str:
 
 def _compute_emulator_platform(labels: list[str]) -> str:
     emulator_platform_labels = [label for label in labels if label.startswith("re_platform_")]
-    expect(len(emulator_platform_labels) <= 1, "multiple 're_platform_' labels were found:[{}], there must be only one!".format(", ".join(emulator_platform_labels)))
+    expect(
+        len(emulator_platform_labels) <= 1,
+        "multiple 're_platform_' labels were found:[{}], there must be only one!".format(", ".join(emulator_platform_labels)),
+    )
     if len(emulator_platform_labels) == 0:
         return DEFAULT_ANDROID_PLATFORM
     else:  # len(emulator_platform_labels) == 1:
@@ -261,8 +296,23 @@ def _compute_re_use_case(labels: list[str]) -> str:
         return re_use_case_labels[0].replace("re_opts_use_case=", "")
 
 def _validate_executor_override_re_config(re_caps: dict[str, str], re_use_case: str):
-    expect(re_use_case in SUPPORTED_USE_CASES, "Unexpected {} use case found, value is expected to be on of the following: {}", re_use_case, ", ".join(SUPPORTED_USE_CASES))
+    expect(
+        re_use_case in SUPPORTED_USE_CASES,
+        "Unexpected {} use case found, value is expected to be on of the following: {}",
+        re_use_case,
+        ", ".join(SUPPORTED_USE_CASES),
+    )
     if "pool" in re_caps:
-        expect(re_caps["pool"] in SUPPORTED_POOLS, "Unexpected {} pool found, value is expected to be on of the following: {}", re_caps["pool"], ", ".join(SUPPORTED_POOLS))
+        expect(
+            re_caps["pool"] in SUPPORTED_POOLS,
+            "Unexpected {} pool found, value is expected to be on of the following: {}",
+            re_caps["pool"],
+            ", ".join(SUPPORTED_POOLS),
+        )
     if "platform" in re_caps:
-        expect(re_caps["platform"] in SUPPORTED_PLATFORMS, "Unexpected {} platform found, value is expected to be on of the following: {}", re_caps["platform"], ", ".join(SUPPORTED_PLATFORMS))
+        expect(
+            re_caps["platform"] in SUPPORTED_PLATFORMS,
+            "Unexpected {} platform found, value is expected to be on of the following: {}",
+            re_caps["platform"],
+            ", ".join(SUPPORTED_PLATFORMS),
+        )

@@ -24,13 +24,13 @@ use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::typing::Ty;
 use starlark::values::Freeze;
 use starlark::values::FrozenValue;
 use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
@@ -40,7 +40,6 @@ use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueOfUncheckedGeneric;
 use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark_map::StarlarkHasher;
 
 use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollection;
@@ -65,7 +64,8 @@ enum DependencyError {
     Freeze,
     ProvidesStaticType,
     NoSerialize,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[repr(C)]
 pub struct DependencyGen<V: ValueLifetimeless> {
@@ -127,6 +127,8 @@ impl<'v> Dependency<'v> {
     }
 }
 
+starlark::methods_static!(DEPENDENCY_METHODS = dependency_methods);
+
 #[starlark_value(type = "Dependency")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for DependencyGen<V>
 where
@@ -137,8 +139,7 @@ where
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(dependency_methods)
+        Some(DEPENDENCY_METHODS.methods())
     }
 
     fn at(&self, index: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
@@ -295,6 +296,7 @@ fn dependency_methods(builder: &mut MethodsBuilder) {
 }
 
 #[starlark_module]
-pub(crate) fn register_dependency(globals: &mut GlobalsBuilder) {
-    const Dependency: StarlarkValueAsType<DependencyGen<FrozenValue>> = StarlarkValueAsType::new();
-}
+#[starlark_types(
+    DependencyGen<FrozenValue> as Dependency
+)]
+pub(crate) fn register_dependency(globals: &mut GlobalsBuilder) {}

@@ -6,7 +6,6 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
-load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load(
     "@prelude//linking:link_info.bzl",
     "LinkStyle",
@@ -18,114 +17,127 @@ load(
 )
 load(
     "@prelude//utils:utils.bzl",
+    "from_named_set",
     "map_val",
     "value_or",
 )
 load(":cgo_builder.bzl", "get_cgo_build_context")
-load(":compile.bzl", "GoTestInfo", "get_inherited_compile_pkgs")
+load(":compile.bzl", "GoTestInfo")
 load(":coverage.bzl", "GoCoverageMode")
-load(":link.bzl", "GoBuildMode", "link")
-load(":package_builder.bzl", "build_package")
+load(":link.bzl", "GoBuildMode", "get_inherited_link_pkgs", "link")
+load(":package_builder.bzl", "GoBuildConfig", "GoSourceInputs", "declare_package_build")
 load(":packages.bzl", "go_attr_pkg_name")
 load(":toolchain.bzl", "evaluate_cgo_enabled")
 
 def _gen_test_main(
-        ctx: AnalysisContext,
-        pkg_name: str,
-        coverage_mode: [GoCoverageMode, None],
-        coverage_vars: dict[str, cmd_args],
-        test_go_files: cmd_args) -> Artifact:
+    ctx: AnalysisContext,
+    pkg_import_path: str,
+    coverage_mode: [GoCoverageMode, None],
+    cover_packages: list[str],  # packages those are included for coverage
+    test_go_files_argsfile: Artifact,
+) -> Artifact:
     """
     Generate a `main.go` which calls tests from the given sources.
     """
+    cover_pkgs_argsfile = ctx.actions.declare_output("cover_pkgs_argsfile", has_content_based_path = True)
+    ctx.actions.write(cover_pkgs_argsfile, [["--cover-pkgs", pkg] for pkg in cover_packages])
+
     output = ctx.actions.declare_output("main.go", has_content_based_path = True)
     cmd = []
     cmd.append(ctx.attrs._testmaingen[RunInfo])
 
     # if ctx.attrs.coverage_mode:
-    # cmd.append(cmd_args(ctx.attrs.coverage_mode, format = "--cover-mode={}"))
     cmd.append(cmd_args(output.as_output(), format = "--output={}"))
-    cmd.append(cmd_args(pkg_name, format = "--import-path={}"))
+    cmd.append(cmd_args(pkg_import_path, format = "--import-path={}"))
     if coverage_mode != None:
         cmd.extend(["--cover-mode", coverage_mode.value])
-    for _, vars in coverage_vars.items():
-        cmd.append(vars)
-    cmd.append(test_go_files)
+    cmd.append(cmd_args(cover_pkgs_argsfile, format = "@{}"))
+    cmd.append(cmd_args(test_go_files_argsfile, format = "@{}"))
     ctx.actions.run(cmd_args(cmd), category = "go_test_main_gen")
     return output
 
-def is_subpackage_of(other_pkg_name: str, pkg_name: str) -> bool:
-    return pkg_name == other_pkg_name or other_pkg_name.startswith(pkg_name + "/")
+def is_subpackage_of(other_pkg_import_path: str, pkg_import_path: str) -> bool:
+    return pkg_import_path == other_pkg_import_path or other_pkg_import_path.startswith(pkg_import_path + "/")
 
 def go_test_impl(ctx: AnalysisContext) -> list[Provider]:
-    cxx_toolchain_available = CxxToolchainInfo in ctx.attrs._cxx_toolchain
-    pkg_name = go_attr_pkg_name(ctx)
-    cgo_enabled = evaluate_cgo_enabled(cxx_toolchain_available, ctx.attrs.cgo_enabled)
+    pkg_import_path = go_attr_pkg_name(ctx)
+    cgo_enabled = evaluate_cgo_enabled(ctx.attrs._cgo_enabled)
 
     deps = ctx.attrs.deps
     srcs = ctx.attrs.srcs
+    coverage_enabled = ctx.attrs.coverage_enabled
 
-    # Copy the srcs, deps and pkg_name from the target library when set. The
+    # Copy the srcs, deps and pkg_import_path from the target library when set. The
     # library code gets compiled together with the tests.
     if ctx.attrs.target_under_test:
         lib = ctx.attrs.target_under_test[GoTestInfo]
         srcs += lib.srcs
         deps += lib.deps
 
-        # TODO: should we assert that pkg_name != None here?
-        pkg_name = lib.pkg_name
+        # TODO: should we assert that pkg_import_path != None here?
+        pkg_import_path = lib.pkg_import_path
+        coverage_enabled = coverage_enabled or lib.coverage_enabled
 
     # If coverage is enabled for this test, we need to preprocess the sources
     # with the Go cover tool.
     coverage_mode = GoCoverageMode(ctx.attrs._coverage_mode) if ctx.attrs._coverage_mode else None
     cgo_build_context = get_cgo_build_context(ctx)
-    coverage_vars = {}
     pkgs = {}
 
     # Compile all tests into a package.
-    tests, tests_pkg_info = build_package(
+    tests, tests_pkg_info, test_go_files_argsfile = declare_package_build(
         ctx = ctx,
-        pkg_name = pkg_name,
+        pkg_import_path = pkg_import_path,
         main = False,
-        srcs = srcs,
-        package_root = ctx.attrs.package_root,
+        sources = GoSourceInputs(
+            srcs = srcs,
+            embed_srcs = from_named_set(ctx.attrs.embed_srcs),
+            package_root = ctx.attrs.package_root,
+        ),
         cgo_build_context = cgo_build_context,
-        deps = deps,
+        config = GoBuildConfig(
+            compiler_flags = ctx.attrs.compiler_flags,
+            build_tags = ctx.attrs._build_tags,
+            coverage_enabled = coverage_enabled,
+            coverage_mode = coverage_mode,
+            with_tests = True,
+            cgo_enabled = cgo_enabled,
+        ),
         pkgs = pkgs,
-        compiler_flags = ctx.attrs.compiler_flags,
-        build_tags = ctx.attrs._build_tags,
-        coverage_mode = coverage_mode,
-        embedcfg = ctx.attrs.embedcfg,
-        embed_srcs = ctx.attrs.embed_srcs,
-        with_tests = True,
-        cgo_enabled = cgo_enabled,
+        deps = deps,
     )
 
-    if coverage_mode != None:
-        coverage_vars[pkg_name] = tests.coverage_vars
+    cover_packages = []
 
-        # Get all packages that are linked to the test (i.e. the entire dependency tree)
-        for name, pkg in get_inherited_compile_pkgs(deps).items():
-            if ctx.label != None and is_subpackage_of(name, ctx.label.package):
-                coverage_vars[name] = pkg.coverage_vars
-                pkgs[name] = pkg
+    # Cover the test package itself
+    if tests.coverage_instrumented:
+        cover_packages.append(pkg_import_path)
 
-    pkgs[pkg_name] = tests
+    # Get all packages that are linked to the test (i.e. the entire dependency tree)
+    for import_path, pkg in get_inherited_link_pkgs(deps).items():
+        if pkg.coverage_instrumented:
+            # Cover dependencies with coverage instrumented
+            cover_packages.append(import_path)
+
+    pkgs[pkg_import_path] = tests
 
     # Generate a 'main.go' file (test runner) which runs the actual tests from the package above.
     # Build the it as a separate package (<foo>.test) - which imports and invokes the test package.
-    gen_main = _gen_test_main(ctx, pkg_name, coverage_mode, coverage_vars, tests.test_go_files)
-    main, _ = build_package(
+    gen_main = _gen_test_main(ctx, pkg_import_path, coverage_mode, cover_packages, test_go_files_argsfile)
+    main, _, _ = declare_package_build(
         ctx = ctx,
-        pkg_name = pkg_name + ".test",
+        pkg_import_path = pkg_import_path + ".test",
         main = True,
-        srcs = [gen_main],
-        package_root = "",
+        sources = GoSourceInputs(
+            srcs = [gen_main],
+            package_root = "",
+        ),
         cgo_build_context = None,
+        config = GoBuildConfig(
+            cgo_enabled = cgo_enabled,
+        ),
         pkgs = pkgs,
-        coverage_mode = None,
         cgo_gen_dir_name = "cgo_gen_test_main",
-        cgo_enabled = cgo_enabled,
     )
 
     # Link the above into a Go binary.
@@ -144,12 +156,12 @@ def go_test_impl(ctx: AnalysisContext) -> list[Provider]:
     # As per v1, copy in resources next to binary.
     copied_resources = []
     for resource in ctx.attrs.resources:
-        copied_resources.append(ctx.actions.copy_file(resource.short_path, resource))
+        copied_resources.append(ctx.actions.copy_file(resource.short_path, resource, has_content_based_path = False))
 
     run_cmd = cmd_args(bin, hidden = [runtime_files, external_debug_info] + copied_resources)
 
     # Setup RE executors based on the `remote_execution` param.
-    re_executor, executor_overrides = get_re_executors_from_props(ctx)
+    re_executors = get_re_executors_from_props(ctx)
 
     return inject_test_run_info(
         ctx,
@@ -159,16 +171,16 @@ def go_test_impl(ctx: AnalysisContext) -> list[Provider]:
             env = ctx.attrs.env,
             labels = ctx.attrs.labels,
             contacts = ctx.attrs.contacts,
-            default_executor = re_executor,
-            executor_overrides = executor_overrides,
+            default_executor = re_executors.default_executor,
+            executor_overrides = re_executors.executor_overrides,
             # FIXME: Consider setting to true
-            run_from_project_root = re_executor != None,
-            use_project_relative_paths = re_executor != None,
+            run_from_project_root = re_executors.run_from_project_root,
+            use_project_relative_paths = re_executors.use_project_relative_paths,
         ),
     ) + [
         DefaultInfo(
             default_output = bin,
-            other_outputs = [gen_main] + runtime_files + external_debug_info,
+            other_outputs = [gen_main] + runtime_files + external_debug_info + copied_resources,
         ),
         tests_pkg_info,
     ]

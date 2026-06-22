@@ -23,11 +23,14 @@ use derive_more::Display;
 use dice::DetectCycles;
 use dice::Dice;
 use dice::DiceComputations;
+use dice::DiceKeyDyn;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
 use dice::Key;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use tempfile::NamedTempFile;
 
 #[derive(Debug, Clone, Dupe, PartialEq, Allocative)]
@@ -36,12 +39,17 @@ enum Encoding {
     Ascii,
 }
 
-#[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct EncodingConfig();
 
 impl InjectedKey for EncodingConfig {
     type Value = Encoding;
+
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
@@ -81,13 +89,17 @@ impl SetEncodings for DiceTransactionUpdater {
 
 struct Filesystem<'c, 'd>(&'c mut DiceComputations<'d>);
 
-#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("File({})", _0.display())]
-struct File(PathBuf);
+#[pagable_typetag(DiceKeyDyn)]
+struct File(#[pagable(flatten_serde)] PathBuf);
 
 #[async_trait]
 impl Key for File {
     type Value = Result<Arc<String>, Arc<anyhow::Error>>;
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
     async fn compute(
         &self,
         ctx: &mut DiceComputations,

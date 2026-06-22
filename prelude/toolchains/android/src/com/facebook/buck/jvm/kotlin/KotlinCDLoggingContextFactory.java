@@ -58,8 +58,6 @@ public class KotlinCDLoggingContextFactory {
   private static ClasspathChangesParam create(ClasspathChanges classpathChanges) {
     if (classpathChanges instanceof ClasspathChanges.ToBeComputedByIncrementalCompiler) {
       return ClasspathChangesParam.TO_BE_COMPUTED_BY_INCREMENTAL_COMPILER;
-    } else if (classpathChanges instanceof ClasspathChanges.HasRemovals) {
-      return ClasspathChangesParam.HAS_REMOVALS;
     } else if (classpathChanges instanceof ClasspathChanges.NoChanges) {
       return ClasspathChangesParam.NO_CHANGES;
     } else if (classpathChanges instanceof ClasspathChanges.Unknown) {
@@ -70,10 +68,10 @@ public class KotlinCDLoggingContextFactory {
   }
 
   private static StepParam create(KotlincStep kotlincStep) {
+    // KSP2 step is emitted by its own factory
+    // TODO asoshin: move all other steps to use KSP2 pattern for logging
     if (kotlincStep instanceof KosabiStubgenStep) {
       return StepParam.KOSABI_STUBGEN;
-    } else if (kotlincStep instanceof Ksp1Step) {
-      return StepParam.KSP1;
     } else if (kotlincStep instanceof KaptStep) {
       return StepParam.KAPT;
     } else {

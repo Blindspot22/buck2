@@ -35,6 +35,7 @@ use crate::starlark_complex_value;
 use crate::typing::Ty;
 use crate::values::Freeze;
 use crate::values::Heap;
+use crate::values::StarlarkPagable;
 use crate::values::StarlarkValue;
 use crate::values::Trace;
 use crate::values::Value;
@@ -48,7 +49,16 @@ use crate::values::record::record_type::record_fields;
 use crate::values::types::type_instance_id::TypeInstanceId;
 
 /// An actual record.
-#[derive(Clone, Debug, Trace, Coerce, Freeze, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Trace,
+    Coerce,
+    Freeze,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[repr(C)]
 pub struct RecordGen<V: ValueLifetimeless> {
     pub(crate) typ: V, // Must be RecordType

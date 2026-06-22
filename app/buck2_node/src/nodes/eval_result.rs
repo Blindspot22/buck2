@@ -26,6 +26,7 @@ use buck2_core::target::name::TargetNameRef;
 use dupe::Dupe;
 use gazebo::prelude::*;
 use itertools::Itertools;
+use pagable::Pagable;
 
 use crate::attrs::coerced_attr::CoercedAttr;
 use crate::attrs::inspect_options::AttrInspectOptions;
@@ -247,7 +248,7 @@ impl MissingTargets {
 }
 
 /// An EvaluationResult contains the list of targets resulting from evaluating a build file.
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub struct EvaluationResult {
     /// The buildfile path that corresponds to this result.
     /// unlike a .bzl file, a build file (BUCK, TARGETS, etc) will only be loaded in
@@ -256,7 +257,10 @@ pub struct EvaluationResult {
     imports: Vec<ImportPath>,
     super_package: SuperPackage,
     targets: TargetsMap,
+    #[pagable(discard = "None")]
     pub starlark_profile: Option<Arc<dyn StarlarkProfileDataAndStatsDyn>>,
+    /// Peak allocated bytes on the starlark heap during BUCK file evaluation.
+    pub starlark_peak_allocated_bytes: u64,
 }
 
 impl EvaluationResult {
@@ -273,6 +277,7 @@ impl EvaluationResult {
             targets,
             // This is populated later when `Evaluator` is finalized.
             starlark_profile: None,
+            starlark_peak_allocated_bytes: 0,
         }
     }
 
@@ -382,6 +387,8 @@ pub struct EvaluationResultWithStats {
     pub starlark_peak_allocated_bytes: u64,
     /// Instruction count during evaluation of `BUCK` file.
     pub cpu_instruction_count: Option<u64>,
+    /// Starlark tick count (function calls + loop backedges) during evaluation.
+    pub starlark_tick_count: u64,
 }
 
 #[derive(Debug)]

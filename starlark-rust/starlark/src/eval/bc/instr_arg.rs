@@ -50,10 +50,13 @@ use crate::eval::runtime::arguments::ArgSymbol;
 use crate::eval::runtime::frame_span::FrameSpan;
 use crate::eval::runtime::slots::LocalCapturedSlotId;
 use crate::eval::runtime::slots::LocalSlotId;
-use crate::values::FrozenRef;
+use crate::pagable::StarlarkDeserialize;
+use crate::pagable::StarlarkSerialize;
 use crate::values::FrozenValue;
 use crate::values::FrozenValueTyped;
 use crate::values::StarlarkValue;
+use crate::values::any::FrozenAnyValue;
+use crate::values::any::StarlarkAnyRegistered;
 use crate::values::layout::value_not_special::FrozenValueNotSpecial;
 use crate::values::types::known_methods::KnownMethod;
 use crate::values::typing::type_compiled::compiled::TypeCompiled;
@@ -74,7 +77,7 @@ impl Display for TruncateValueRepr {
 }
 
 /// Instruction fixed argument.
-pub(crate) trait BcInstrArg: 'static {
+pub(crate) trait BcInstrArg: 'static + StarlarkSerialize + StarlarkDeserialize {
     /// Append space then append the argument, or append nothing if the argument is empty.
     fn fmt_append(
         param: &Self,
@@ -364,10 +367,7 @@ impl BcInstrArg for String {
     fn visit_jump_addr(_param: &Self, _ip: BcAddr, _consumer: &mut dyn FnMut(BcAddr)) {}
 }
 
-impl<T: Display> BcInstrArg for FrozenRef<'static, T>
-where
-    FrozenRef<'static, T>: Copy,
-{
+impl<T: Display + StarlarkAnyRegistered> BcInstrArg for FrozenAnyValue<T> {
     fn fmt_append(
         param: &Self,
         _ip: BcAddr,
@@ -375,22 +375,6 @@ where
         f: &mut dyn Write,
     ) -> fmt::Result {
         write!(f, " {}", param.as_ref())
-    }
-
-    fn visit_jump_addr(_param: &Self, _ip: BcAddr, _consumer: &mut dyn FnMut(BcAddr)) {}
-}
-
-impl<T: Display> BcInstrArg for FrozenRef<'static, [T]>
-where
-    FrozenRef<'static, T>: Copy,
-{
-    fn fmt_append(
-        param: &Self,
-        _ip: BcAddr,
-        _end_arg: Option<&BcInstrEndArg>,
-        f: &mut dyn Write,
-    ) -> fmt::Result {
-        write!(f, " [{}]", param.iter().map(|v| format!("{v}")).join(", "))
     }
 
     fn visit_jump_addr(_param: &Self, _ip: BcAddr, _consumer: &mut dyn FnMut(BcAddr)) {}

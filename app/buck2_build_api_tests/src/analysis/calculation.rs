@@ -8,12 +8,12 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use buck2_build_api::actions::execute::dice_data::set_fallback_executor_config;
 use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
-use buck2_build_api::build::detailed_aggregated_metrics::dice::SetDetailedAggregatedMetricsEventHandler;
+use buck2_build_api::build::detailed_aggregated_metrics::dice::SetDetailedAggregatedMetricsHandle;
+use buck2_build_api::build::detailed_aggregated_metrics::events::DetailedAggregatedMetricsHandle;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::default_info::DefaultInfoCallable;
 use buck2_build_api::interpreter::rule_defs::provider::callable::register_provider;
 use buck2_build_api::interpreter::rule_defs::provider::registration::register_builtin_providers;
@@ -43,6 +43,7 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::digest_config::SetDigestConfig;
+use buck2_hash::StdBuckHashMap;
 use buck2_interpreter::dice::starlark_debug::SetStarlarkDebugger;
 use buck2_interpreter::extra::InterpreterHostArchitecture;
 use buck2_interpreter::extra::InterpreterHostPlatform;
@@ -75,7 +76,7 @@ async fn test_analysis_calculation() -> buck2_error::Result<()> {
         ),
     ]);
     let mut interpreter = Tester::with_cells((
-        CellAliasResolver::new(CellName::testing_new("cell"), HashMap::new())?,
+        CellAliasResolver::new(CellName::testing_new("cell"), StdBuckHashMap::default())?,
         resolver.dupe(),
         LegacyBuckConfig::empty(),
         CellPathWithAllowedRelativeDir::new(CellPath::testing_new("cell//pkg"), None),
@@ -146,7 +147,7 @@ async fn test_analysis_calculation() -> buck2_error::Result<()> {
         .set_data(|data| {
             data.set_testing_io_provider(&fs);
             data.set_digest_config(DigestConfig::testing_default());
-            data.set_detailed_aggregated_metrics_event_handler(None);
+            data.set_detailed_aggregated_metrics_handle(DetailedAggregatedMetricsHandle::new());
         })
         .build({
             let mut data = UserComputationData::new();

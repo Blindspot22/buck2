@@ -14,6 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use buck2_core::execution_types::executor_config::ReGangWorker;
 use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
+use buck2_data::NetworkAccess;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use remote_execution as RE;
@@ -33,6 +34,7 @@ pub struct PreparedAction {
     pub remote_execution_dependencies: Vec<RemoteExecutorDependency>,
     pub re_gang_workers: Vec<ReGangWorker>,
     pub worker_tool_init_action: Option<ActionDigestAndBlobs>,
+    pub network_access: Option<NetworkAccess>,
 }
 
 impl PreparedAction {
@@ -65,6 +67,9 @@ pub trait PreparedCommandExecutor: Send + Sync {
     /// Checks if there is any possibility for a command with a given executor preference to
     /// be executed locally.
     fn is_local_execution_possible(&self, executor_preference: ExecutorPreference) -> bool;
+
+    /// Whether this executor is configured for full hybrid execution (racing local and remote).
+    fn is_full_hybrid_enabled(&self) -> bool;
 }
 
 #[async_trait]

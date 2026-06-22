@@ -33,3 +33,7 @@ shared_dir_dep_file(
     used_input_contents = read_config("test", "used_input_contents", "default"),
     unused_input_contents = read_config("test", "unused_input_contents", "default"),
 )
+
+dep_file_with_preceding_actions(
+    name = "dep_file_with_preceding_actions",
+)

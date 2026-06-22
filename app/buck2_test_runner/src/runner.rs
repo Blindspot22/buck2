@@ -129,6 +129,7 @@ impl Buck2TestRunner {
             suite: spec.target.target,
             testcases: Vec::new(),
             variant: None,
+            repeat_count: None,
         };
 
         let config_args = self.config.test_arg.iter().map(|arg| ArgValue {
@@ -197,6 +198,7 @@ impl Buck2TestRunner {
                 pre_create_dirs,
                 executor_override,
                 RequiredLocalResources { resources: vec![] },
+                false,
             )
             .await
     }

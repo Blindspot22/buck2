@@ -1,23 +1,42 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
+# License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
 """Custom rules for testing exec platform modifiers."""
 
 def get_labels():
     """Returns labels based on build_mode and compiler constraints."""
+    return (
+        select({
+            "//cfg:build_mode[debug]": ["build_mode:debug"],
+            "//cfg:build_mode[none]": ["build_mode:none"],
+            "//cfg:build_mode[release]": ["build_mode:release"],
+        })
+        + select({
+            "//cfg:compiler[clang]": ["compiler:clang"],
+            "//cfg:compiler[gcc]": ["compiler:gcc"],
+            "//cfg:compiler[none]": ["compiler:none"],
+        })
+        + select({
+            "//cfg:os[linux]": ["os:linux"],
+            "//cfg:os[macos]": ["os:macos"],
+            "//cfg:os[none]": ["os:none"],
+        })
+        + select({
+            "//cfg:cpu[arm64]": ["cpu:arm64"],
+            "//cfg:cpu[none]": ["cpu:none"],
+            "//cfg:cpu[x86_64]": ["cpu:x86_64"],
+        })
+    )
+
+def get_buckconfig_backed_label():
     return select({
-        "//cfg:build_mode[debug]": ["build_mode:debug"],
-        "//cfg:build_mode[none]": ["build_mode:none"],
-        "//cfg:build_mode[release]": ["build_mode:release"],
-    }) + select({
-        "//cfg:compiler[clang]": ["compiler:clang"],
-        "//cfg:compiler[gcc]": ["compiler:gcc"],
-        "//cfg:compiler[none]": ["compiler:none"],
-    }) + select({
-        "//cfg:os[linux]": ["os:linux"],
-        "//cfg:os[macos]": ["os:macos"],
-        "//cfg:os[none]": ["os:none"],
-    }) + select({
-        "//cfg:cpu[arm64]": ["cpu:arm64"],
-        "//cfg:cpu[none]": ["cpu:none"],
-        "//cfg:cpu[x86_64]": ["cpu:x86_64"],
+        "//cfg:buckconfig_backed[enabled]": "buckconfig_backed:enabled",
+        "//cfg:buckconfig_backed[none]": "buckconfig_backed:none",
     })
 
 def _dummy(ctx):
@@ -30,6 +49,7 @@ def _dummy(ctx):
 dummy = rule(
     impl = _dummy,
     attrs = {
+        "buckconfig_backed_label": attrs.string(default = ""),
         "configured_deps": attrs.list(attrs.configured_dep(), default = []),
         "deps": attrs.list(attrs.dep(), default = []),
         "exec_deps": attrs.list(attrs.exec_dep(), default = []),
@@ -52,14 +72,14 @@ def labeled_dummy(name, **kwargs):
     if "labels" not in kwargs:
         kwargs["labels"] = get_labels()
 
+    if "buckconfig_backed_label" not in kwargs:
+        kwargs["buckconfig_backed_label"] = get_buckconfig_backed_label()
+
     # Set default_target_platform if not provided
     if "default_target_platform" not in kwargs:
         kwargs["default_target_platform"] = "//cfg:debug_platform"
 
-    dummy(
-        name = name,
-        **kwargs
-    )
+    dummy(name = name, **kwargs)
 
 def labeled_tool(name, **kwargs):
     """
@@ -71,10 +91,7 @@ def labeled_tool(name, **kwargs):
     if "labels" not in kwargs:
         kwargs["labels"] = get_labels()
 
-    dummy(
-        name = name,
-        **kwargs
-    )
+    dummy(name = name, **kwargs)
 
 def _toolchain_impl(ctx):
     _ignore = ctx
@@ -102,7 +119,4 @@ def labeled_toolchain(name, **kwargs):
     if "labels" not in kwargs:
         kwargs["labels"] = get_labels()
 
-    toolchain(
-        name = name,
-        **kwargs
-    )
+    toolchain(name = name, **kwargs)

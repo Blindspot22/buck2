@@ -14,17 +14,16 @@ use std::sync::Arc;
 use allocative::Allocative;
 use dice_error::DiceResult;
 use dice_futures::cancellation::CancellationContext;
-use futures::FutureExt;
 use futures::future::BoxFuture;
 
 use crate::LinearRecomputeDiceComputations;
+use crate::OpaqueValue;
 use crate::ProjectionKey;
 use crate::api::computations::DiceComputations;
 use crate::api::computations::DiceComputationsData;
 use crate::api::data::DiceData;
 use crate::api::invalidation_tracking::DiceKeyTrackedInvalidationPaths;
 use crate::api::key::Key;
-use crate::api::opaque::OpaqueValue;
 use crate::api::user_data::UserComputationData;
 use crate::api::user_data::UserCycleDetectorGuard;
 use crate::impls::ctx::LinearRecomputeModern;
@@ -62,9 +61,7 @@ impl DiceComputationsImpl<'_> {
     where
         K: Key,
     {
-        self.0
-            .compute_opaque(key)
-            .map(|r| r.map(|x| OpaqueValue::new(x)))
+        self.0.compute_opaque(key)
     }
 
     pub fn projection<K: Key, P: ProjectionKey<DeriveFromKey = K>>(
@@ -72,15 +69,14 @@ impl DiceComputationsImpl<'_> {
         derive_from: &OpaqueValue<K>,
         projection_key: &P,
     ) -> DiceResult<P::Value> {
-        self.0
-            .projection(&derive_from.implementation, projection_key)
+        self.0.projection(derive_from, projection_key)
     }
 
     pub fn opaque_into_value<K: Key>(
         &mut self,
         derive_from: OpaqueValue<K>,
     ) -> DiceResult<K::Value> {
-        Ok(self.0.opaque_into_value(derive_from.implementation))
+        Ok(self.0.opaque_into_value(derive_from))
     }
 
     /// Computes all the given tasks in parallel, returning an unordered Stream

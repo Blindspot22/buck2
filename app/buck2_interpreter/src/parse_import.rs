@@ -107,7 +107,7 @@ pub fn parse_import_with_config(
                     } = opts.relative_import_option
                     {
                         current_dir_with_allowed_relative
-                            .join_normalized(RelativePath::from_path(import)?)
+                            .join_normalized(RelativePath::unchecked_new(import))
                     } else {
                         Err(ImportParseError::ProhibitedRelativeImport(import.to_owned()).into())
                     }
@@ -164,15 +164,14 @@ pub fn parse_bzl_path_with_config(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use buck2_core::cells::alias::NonEmptyCellAlias;
     use buck2_core::cells::name::CellName;
+    use buck2_hash::StdBuckHashMap;
 
     use super::*;
 
     fn resolver() -> CellAliasResolver {
-        let mut m = HashMap::new();
+        let mut m = StdBuckHashMap::default();
         m.insert(
             NonEmptyCellAlias::new("cell1".to_owned()).unwrap(),
             CellName::testing_new("cell1"),

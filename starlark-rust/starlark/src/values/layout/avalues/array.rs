@@ -15,17 +15,23 @@
  * limitations under the License.
  */
 
-use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::slice;
+use std::mem;
+use std::mem::MaybeUninit;
+use std::ptr;
+
+use allocative::Key;
+use allocative::Visitor;
+use pagable::PagableDeserialize;
+use pagable::PagableSerialize;
 
 use crate::cast;
 use crate::collections::maybe_uninit_backport::maybe_uninit_write_slice;
 use crate::collections::maybe_uninit_backport::maybe_uninit_write_slice_cloned;
+use crate::pagable::StarlarkPagable;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
 use crate::values::FrozenHeap;
-use crate::values::FrozenRef;
 use crate::values::FrozenValue;
 use crate::values::Heap;
 use crate::values::Trace;
@@ -40,6 +46,8 @@ use crate::values::layout::heap::repr::AValueHeader;
 use crate::values::layout::heap::repr::AValueRepr;
 use crate::values::layout::heap::repr::ForwardPtr;
 use crate::values::types::any_array::AnyArray;
+use crate::values::types::any_array::AnyArrayRegistered;
+use crate::values::types::any_array::FrozenAnyArray;
 use crate::values::types::array::Array;
 
 fn array_avalue<'v>(
@@ -48,7 +56,7 @@ fn array_avalue<'v>(
     AValueImpl::<AValueArray>::new(unsafe { Array::new(0, cap) })
 }
 
-fn any_array_avalue<T: Debug + 'static>(
+fn any_array_avalue<T: AnyArrayRegistered + StarlarkPagable>(
     cap: usize,
 ) -> AValueImpl<'static, impl AValue<'static, StarlarkValue = AnyArray<T>, ExtraElem = T>> {
     AValueImpl::<AValueAnyArray<T>>::new(unsafe { AnyArray::new(cap) })
@@ -68,6 +76,17 @@ impl<'v> AValue<'v> for AValueArray {
 
     fn offset_of_extra() -> usize {
         Array::offset_of_content()
+    }
+
+    fn visit_extra_allocative<'a, 'b: 'a>(
+        value: &Self::StarlarkValue,
+        visitor: &'a mut Visitor<'b>,
+    ) {
+        visitor.visit_simple(Key::new("content"), mem::size_of::<Value>() * value.len());
+        visitor.visit_simple(
+            Key::new("unused_capacity"),
+            mem::size_of::<Value>() * (value.capacity() - value.len()),
+        );
     }
 
     unsafe fn heap_freeze(
@@ -113,9 +132,11 @@ impl<'v> AValue<'v> for AValueArray {
     }
 }
 
-pub(crate) struct AValueAnyArray<T>(PhantomData<T>);
+/// `AValue` impl for `AnyArray<T>`: stored on the frozen heap with a
+/// trailing slice of `T` (see `alloc_any_array_value`).
+pub struct AValueAnyArray<T>(PhantomData<T>);
 
-impl<'v, T: Debug + 'static> AValue<'v> for AValueAnyArray<T> {
+impl<'v, T: AnyArrayRegistered + StarlarkPagable> AValue<'v> for AValueAnyArray<T> {
     type StarlarkValue = AnyArray<T>;
     type ExtraElem = T;
 
@@ -125,6 +146,13 @@ impl<'v, T: Debug + 'static> AValue<'v> for AValueAnyArray<T> {
 
     fn offset_of_extra() -> usize {
         AnyArray::<T>::offset_of_content()
+    }
+
+    fn visit_extra_allocative<'a, 'b: 'a>(
+        value: &Self::StarlarkValue,
+        visitor: &'a mut Visitor<'b>,
+    ) {
+        visitor.visit_simple(Key::new("content"), mem::size_of::<T>() * value.len);
     }
 
     unsafe fn heap_freeze(
@@ -140,33 +168,73 @@ impl<'v, T: Debug + 'static> AValue<'v> for AValueAnyArray<T> {
     ) -> Value<'v> {
         panic!("AnyArray for now can only be allocated in FrozenHeap");
     }
+
+    /// Wire format: `len: usize` followed by `len` elements serialized via
+    /// `T::starlark_serialize`. Mirrors `AValueList::starlark_serialize`.
+    fn starlark_serialize(
+        me: *const AValueRepr<Self::StarlarkValue>,
+        ctx: &mut dyn crate::pagable::StarlarkSerializeContext,
+    ) -> crate::Result<()> {
+        let any_array = unsafe { &(*me).payload };
+        any_array.len.pagable_serialize(ctx.pagable())?;
+        for elem in any_array.as_slice() {
+            elem.starlark_serialize(ctx)?;
+        }
+        Ok(())
+    }
+
+    /// Reconstruct into pre-allocated memory. Layout at `me`:
+    ///
+    /// ```text
+    ///        ┌─────────────────────────────┐  ← me
+    ///        │ AValueHeader                │
+    ///        ├─────────────────────────────┤  ← + offset_of_payload()
+    ///   (1)  │ AnyArray<T> { len }         │  payload
+    ///        ├─────────────────────────────┤  ← + offset_of_extra()
+    ///   (2)  │ T[0], T[1], ..., T[len-1]   │  trailing element slots
+    ///        └─────────────────────────────┘
+    /// ```
+    ///
+    /// 1. Write the `AnyArray<T>` payload (with `len`) into `me.payload`.
+    /// 2. Deserialize each of `len` elements into its trailing slot.
+    fn starlark_deserialize(
+        me: *mut AValueRepr<Self::StarlarkValue>,
+        ctx: &mut dyn crate::pagable::StarlarkDeserializeContext<'_>,
+    ) -> crate::Result<()> {
+        let len = usize::pagable_deserialize(ctx.pagable())?;
+        unsafe {
+            // Initialize the `AnyArray<T>` shell with the correct len.
+            ptr::write(&mut (*me).payload, AnyArray::new(len));
+
+            // The trailing `T`s live at `offset_of_payload + offset_of_extra`.
+            let extra_offset = AValueRepr::<Self::StarlarkValue>::offset_of_payload()
+                + <Self as AValue>::offset_of_extra();
+            let extra_ptr = (me as *mut u8).add(extra_offset) as *mut MaybeUninit<T>;
+            for i in 0..len {
+                let elem = T::starlark_deserialize(ctx)?;
+                (*extra_ptr.add(i)).write(elem);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl FrozenHeap {
-    fn do_alloc_any_slice<T: Debug + Send + Sync + Clone>(
+    /// Allocate a slice in the frozen heap, returning a [`FrozenAnyArray`].
+    pub(crate) fn alloc_any_array_value<
+        T: AnyArrayRegistered + StarlarkPagable + Send + Sync + Clone,
+    >(
         &self,
         values: &[T],
-    ) -> FrozenRef<'static, [T]> {
+    ) -> FrozenAnyArray<T> {
+        // Always allocate via AnyArray, even for empty/single elements.
+        // This ensures the reverse calculation to FrozenValue is valid.
         // SAFETY: Not.
         let this: &'static FrozenHeap = unsafe { cast::ptr_lifetime(self) };
-        let (_any_array, content) = this.alloc_raw_extra(any_array_avalue(values.len()));
+        let (any_array, content) = this.alloc_raw_extra(any_array_avalue(values.len()));
         let content = unsafe { &mut *content };
-        FrozenRef::new(&*maybe_uninit_write_slice_cloned(content, values))
-    }
-
-    /// Allocate a slice in the frozen heap.
-    pub(crate) fn alloc_any_slice<T: Debug + Send + Sync + Clone>(
-        &self,
-        values: &[T],
-    ) -> FrozenRef<'static, [T]> {
-        if values.is_empty() {
-            FrozenRef::new(&[])
-        } else if values.len() == 1 {
-            self.alloc_any(values[0].clone())
-                .map(|r| slice::from_ref(r))
-        } else {
-            self.do_alloc_any_slice(values)
-        }
+        maybe_uninit_write_slice_cloned(content, values);
+        any_array
     }
 }
 

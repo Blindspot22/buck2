@@ -90,15 +90,30 @@ mod tests {
     use allocative::Allocative;
     use async_trait::async_trait;
     use dice_futures::cancellation::CancellationContext;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
 
     use crate::Demand;
     use crate::DiceComputations;
+    use crate::DiceKeyDyn;
     use crate::DynKey;
     use crate::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
 
     #[test]
     fn test_request() {
-        #[derive(derive_more::Display, Eq, PartialEq, Hash, Allocative, Clone, Debug)]
+        #[derive(
+            derive_more::Display,
+            Eq,
+            PartialEq,
+            Hash,
+            Allocative,
+            Clone,
+            Debug,
+            Pagable
+        )]
+        #[pagable_typetag(DiceKeyDyn)]
         struct MKey(u32);
 
         #[async_trait]
@@ -120,6 +135,10 @@ mod tests {
             fn provide<'a>(&'a self, demand: &mut Demand<'a>) {
                 demand.provide_value(self.0);
                 demand.provide_ref::<dyn Foo>(self);
+            }
+
+            fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+                NoValueSerialize::<Self::Value>::new()
             }
         }
 

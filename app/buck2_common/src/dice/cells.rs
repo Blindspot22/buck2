@@ -23,7 +23,12 @@ use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
 use dice::InvalidationSourcePriority;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::PagableValueSerialize;
+use dice::ValueSerialize;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::legacy_configs::cells::BuckConfigBasedCells;
 use crate::legacy_configs::dice::HasLegacyConfigs;
@@ -51,8 +56,9 @@ pub trait SetCellResolver {
     fn set_none_cell_resolver(&mut self) -> buck2_error::Result<()>;
 }
 
-#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct CellResolverKey;
 
 impl InjectedKey for CellResolverKey {
@@ -68,6 +74,10 @@ impl InjectedKey for CellResolverKey {
 
     fn invalidation_source_priority() -> InvalidationSourcePriority {
         InvalidationSourcePriority::Ignored
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        PagableValueSerialize::<Self::Value>::new()
     }
 }
 
@@ -100,7 +110,8 @@ impl HasCellResolver for DiceComputations<'_> {
 }
 
 /// Only used for cell alias resolvers parsed within dice, currently those for external cells
-#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct CellAliasResolverKey(CellName);
 
 #[async_trait]
@@ -131,6 +142,10 @@ impl Key for CellAliasResolverKey {
             (Ok(x), Ok(y)) => x == y,
             (_, _) => false,
         }
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
     }
 }
 

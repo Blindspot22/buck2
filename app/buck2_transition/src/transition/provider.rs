@@ -13,6 +13,7 @@ use std::fmt::Debug;
 use allocative::Allocative;
 use buck2_build_api_derive::internal_provider;
 use dupe::Dupe;
+use pagable::Pagable;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
@@ -22,6 +23,7 @@ use starlark::typing::ParamIsRequired;
 use starlark::typing::ParamSpec;
 use starlark::util::ArcStr;
 use starlark::values::Freeze;
+use starlark::values::StarlarkPagable;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLifetimeless;
@@ -61,7 +63,17 @@ impl StarlarkCallableParamSpec for TransitionImplParams {
 }
 
 #[internal_provider(transition_info_creator)]
-#[derive(Clone, Debug, Trace, Coerce, Freeze, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Trace,
+    Coerce,
+    Freeze,
+    ProvidesStaticType,
+    Allocative,
+    Pagable,
+    StarlarkPagable
+)]
 #[repr(C)]
 pub(crate) struct TransitionInfoGen<V: ValueLifetimeless> {
     pub(crate) r#impl: ValueOfUncheckedGeneric<V, StarlarkCallable<'static>>,

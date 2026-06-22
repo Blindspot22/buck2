@@ -53,6 +53,7 @@ use crate::execute::blobs::ActionBlobs;
 use crate::execute::manager::CommandExecutionManager;
 use crate::knobs::ExecutorGlobalKnobs;
 use crate::materialize::materializer::Materializer;
+use crate::materialize::utils::dynamic_priority_handle::DynamicPriorityHandle;
 use crate::re::action_identity::ReActionIdentity;
 use crate::re::client::ActionCacheWriteType;
 use crate::re::client::ExecuteResponseOrCancelled;
@@ -103,7 +104,7 @@ pub struct RemoteExecutionConfig {
 
 impl RemoteExecutionConfig {
     async fn connect_now(&self) -> buck2_error::Result<RemoteExecutionClient> {
-        RemoteExecutionClient::new_retry(&self).await
+        RemoteExecutionClient::new_retry(self).await
     }
 }
 
@@ -363,12 +364,13 @@ impl ManagedRemoteExecutionClient {
     pub async fn action_cache(
         &self,
         action_digest: ActionDigest,
+        platform: &RE::Platform,
     ) -> buck2_error::Result<Option<ActionResultResponse>> {
         Ok(self
             .lock()?
             .get()
             .await?
-            .action_cache(action_digest, self.use_case)
+            .action_cache(action_digest, self.use_case, platform)
             .await
             .ok()
             .flatten())
@@ -463,11 +465,12 @@ impl ManagedRemoteExecutionClient {
     pub async fn materialize_files(
         &self,
         files: Vec<NamedDigestWithPermissions>,
+        priority_control: DynamicPriorityHandle,
     ) -> buck2_error::Result<()> {
         self.lock()?
             .get()
             .await?
-            .materialize_files(files, self.use_case)
+            .materialize_files(files, self.use_case, priority_control)
             .await
     }
 

@@ -47,20 +47,27 @@ assert_eq(y, str(x))
     );
 }
 
+#[derive(
+    Default,
+    Debug,
+    Display,
+    starlark::any::ProvidesStaticType,
+    starlark_derive::StarlarkPagablePanic
+)]
+struct Dealloc;
+
+impl Drop for Dealloc {
+    fn drop(&mut self) {
+        DEALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+crate::register_starlark_any!(Dealloc);
+
+static DEALLOC_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+
 #[test]
 fn test_deallocation() {
-    // Check that we really do deallocate values we create
-    static COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
-
-    #[derive(Default, Debug, Display)]
-    struct Dealloc;
-
-    impl Drop for Dealloc {
-        fn drop(&mut self) {
-            COUNT.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
     #[starlark_module]
     fn globals(builder: &mut GlobalsBuilder) {
         fn mk() -> anyhow::Result<StarlarkAny<Dealloc>> {
@@ -68,7 +75,7 @@ fn test_deallocation() {
         }
     }
 
-    COUNT.store(0, Ordering::SeqCst);
+    DEALLOC_COUNT.store(0, Ordering::SeqCst);
     let mut a = Assert::new();
     a.disable_gc();
     a.globals_add(globals);
@@ -82,10 +89,10 @@ r = [y(), mk()]
 "#,
     );
     // The three that were run in pass should have gone
-    assert_eq!(COUNT.load(Ordering::SeqCst), 3);
+    assert_eq!(DEALLOC_COUNT.load(Ordering::SeqCst), 3);
     mem::drop(a);
     // Now the frozen ones should have gone too
-    assert_eq!(COUNT.load(Ordering::SeqCst), 5);
+    assert_eq!(DEALLOC_COUNT.load(Ordering::SeqCst), 5);
 }
 
 // This test relies on stack behavior which does not hold when

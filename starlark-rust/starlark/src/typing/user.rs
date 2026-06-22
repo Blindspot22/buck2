@@ -21,6 +21,8 @@ use std::hash::Hasher;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark_map::sorted_map::SortedMap;
 use starlark_syntax::codemap::Span;
 
@@ -29,6 +31,7 @@ use crate::typing::TyBasic;
 use crate::typing::TypingOracleCtx;
 use crate::typing::call_args::TyCallArgs;
 use crate::typing::callable::TyCallable;
+use crate::typing::custom::TyCustomDyn;
 use crate::typing::custom::TyCustomImpl;
 use crate::typing::error::TypingNoContextError;
 use crate::typing::error::TypingNoContextOrInternalError;
@@ -51,7 +54,7 @@ enum TyUserError {
 }
 
 /// Types of `[]` operator.
-#[derive(Allocative, Debug)]
+#[derive(Allocative, Debug, Pagable)]
 pub struct TyUserIndex {
     /// Type of index argument.
     pub(crate) index: Ty,
@@ -60,7 +63,7 @@ pub struct TyUserIndex {
 }
 
 /// Fields of the struct.
-#[derive(Allocative, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Allocative, Debug, Ord, PartialOrd, Eq, PartialEq, Hash, Pagable)]
 pub struct TyUserFields {
     /// Known fields.
     pub known: SortedMap<String, Ty>,
@@ -116,8 +119,9 @@ pub struct TyUserParams {
 }
 
 /// Type description for arbitrary type.
-#[derive(Allocative, Debug, derive_more::Display)]
+#[derive(Allocative, Debug, derive_more::Display, Pagable)]
 #[display("{}", name)]
+#[pagable_typetag(TyCustomDyn)]
 pub struct TyUser {
     name: String,
     /// Base type for this custom type, e.g. generic record for record with known fields.
@@ -197,7 +201,7 @@ impl PartialOrd for TyUser {
 
 impl Ord for TyUser {
     fn cmp(&self, other: &Self) -> Ordering {
-        (&self.name, &self.fields, self.id).cmp(&(&other.name, &self.fields, other.id))
+        (&self.name, &self.fields, self.id).cmp(&(&other.name, &other.fields, other.id))
     }
 }
 
@@ -300,6 +304,8 @@ mod tests {
     use dupe::Dupe;
     use starlark_derive::NoSerialize;
     use starlark_derive::ProvidesStaticType;
+    use starlark_derive::StarlarkPagable;
+    use starlark_derive::StarlarkPagablePanic;
     use starlark_derive::starlark_module;
     use starlark_derive::starlark_value;
 
@@ -318,7 +324,6 @@ mod tests {
     use crate::values::Heap;
     use crate::values::StarlarkValue;
     use crate::values::Value;
-    use crate::values::starlark_value_as_type::StarlarkValueAsType;
     use crate::values::typing::TypeInstanceId;
 
     #[derive(
@@ -326,7 +331,8 @@ mod tests {
         derive_more::Display,
         ProvidesStaticType,
         Allocative,
-        NoSerialize
+        NoSerialize,
+        StarlarkPagablePanic
     )]
     #[display("plant")]
     enum AbstractPlant {}
@@ -343,12 +349,15 @@ mod tests {
         derive_more::Display,
         ProvidesStaticType,
         Allocative,
-        NoSerialize
+        NoSerialize,
+        StarlarkPagable
     )]
     #[display("fruit_callable")]
     struct FruitCallable {
         name: String,
+        #[starlark_pagable(pagable)]
         ty_fruit_callable: Ty,
+        #[starlark_pagable(pagable)]
         ty_fruit: Ty,
     }
 
@@ -387,7 +396,8 @@ mod tests {
         derive_more::Display,
         ProvidesStaticType,
         Allocative,
-        NoSerialize
+        NoSerialize,
+        StarlarkPagable
     )]
     struct Fruit {
         name: String,
@@ -407,6 +417,7 @@ mod tests {
     }
 
     #[starlark_module]
+    #[starlark_types(AbstractPlant as Plant)]
     fn globals(globals: &mut GlobalsBuilder) {
         fn fruit(name: String) -> starlark::Result<FruitCallable> {
             let ty_fruit = Ty::custom(TyUser::new(
@@ -432,16 +443,14 @@ mod tests {
             )?);
             Ok(FruitCallable {
                 name,
-                ty_fruit,
                 ty_fruit_callable,
+                ty_fruit,
             })
         }
 
         fn mk_fruit() -> anyhow::Result<Fruit> {
             panic!("not needed in test")
         }
-
-        const Plant: StarlarkValueAsType<AbstractPlant> = StarlarkValueAsType::new();
     }
 
     #[test]

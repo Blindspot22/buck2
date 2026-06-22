@@ -3,3 +3,4 @@
 # AnalysisResult
 ## AnalysisResult.as\_dependency
 ## AnalysisResult.providers
+## AnalysisResult.providers\_info

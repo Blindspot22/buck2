@@ -27,7 +27,6 @@ use buck2_util::indent::indent;
 use buck2_util::process::async_background_command;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
-use rand::Rng;
 
 use crate::client_ctx::ClientCommandContext;
 use crate::path_arg::PathArg;
@@ -92,7 +91,7 @@ impl EventLogOptions {
     fn random_string() -> String {
         let mut s = String::with_capacity(10);
         for _ in 0..10 {
-            s.push(rand::rng().random_range('a'..='z'));
+            s.push(rand::random_range('a'..='z'));
         }
         s
     }

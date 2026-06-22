@@ -25,7 +25,12 @@
 //!     use dice::{Key, InjectedKey, DiceComputations, DiceDataBuilder, DiceData, DiceTransactionUpdater};
 //!     use std::sync::Arc;
 //!     use allocative::Allocative;
-//! use dice_futures::cancellation::CancellationContext;
+//!     use dice_futures::cancellation::CancellationContext;
+//!     use dice::DiceKeyDyn;
+//!     use dice::ValueSerialize;
+//!     use dice::NoValueSerialize;
+//!     use pagable::Pagable;
+//!     use pagable::pagable_typetag;
 //!
 //!     /// A configuration computation that consists of values that are pre-computed outside of DICE
 //!     pub struct InjectConfigs<'compute, 'd>(&'compute mut DiceComputations<'d>);
@@ -36,8 +41,9 @@
 //!         }
 //!     }
 //!
-//!     #[derive(Clone, Debug, Display, Eq, Hash, PartialEq, Allocative)]
+//!     #[derive(Clone, Debug, Display, Eq, Hash, PartialEq, Allocative, Pagable)]
 //!     #[display("{:?}", self)]
+//!     #[pagable_typetag(DiceKeyDyn)]
 //!     struct ConfigKey;
 //!
 //!     #[async_trait]
@@ -47,6 +53,10 @@
 //!         fn equality(x: &Self::Value,y: &Self::Value) -> bool {
 //!             x == y
 //!         }
+//!
+//!         fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+//!             NoValueSerialize::<Self::Value>::new()
+//!         }
 //!     }
 //!
 //!     pub struct MyComputation<'compute, 'd>(pub &'compute mut DiceComputations<'d>);
@@ -54,8 +64,9 @@
 //!     impl<'compute, 'd> MyComputation<'compute, 'd> {
 //!         // declaring a computation function
 //!         pub async fn compute_a(&mut self, a: usize, s: String) -> Arc<String> {
-//!             #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+//!             #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 //!             #[display("{:?}", self)]
+//!             #[pagable_typetag(DiceKeyDyn)]
 //!             struct ComputeA(usize, String);
 //!
 //!             #[async_trait]
@@ -71,6 +82,10 @@
 //!                 fn equality(x: &Self::Value,y: &Self::Value) -> bool {
 //!                     x == y
 //!                 }
+//!
+//!                 fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+//!                     NoValueSerialize::<Self::Value>::new()
+//!                 }
 //!             }
 //!
 //!             self.0.compute(&ComputeA(a, s)).await.unwrap()
@@ -82,8 +97,9 @@
 //!         }
 //!     }
 //!
-//!     #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+//!     #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 //!     #[display("{:?}", self)]
+//!     #[pagable_typetag(DiceKeyDyn)]
 //!     struct ComputeB(usize);
 //!
 //!     #[async_trait]
@@ -96,6 +112,10 @@
 //!
 //!         fn equality(x: &Self::Value,y: &Self::Value) -> bool {
 //!             x == y
+//!         }
+//!
+//!         fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+//!             NoValueSerialize::<Self::Value>::new()
 //!         }
 //!     }
 //!
@@ -163,9 +183,6 @@
 //! });
 //! ```
 
-#![feature(fn_traits)]
-#![feature(test)]
-#![feature(map_try_insert)]
 // This sometimes flag false positives where proc-macros expand pass by value into pass by refs
 #![allow(clippy::trivially_copy_pass_by_ref)]
 
@@ -181,9 +198,7 @@ mod ctx;
 pub(crate) mod future;
 mod impls;
 pub mod introspection;
-mod legacy;
 pub(crate) mod metrics;
-pub(crate) mod owned;
 pub(crate) mod stats;
 mod transaction;
 mod transaction_update;
@@ -193,8 +208,8 @@ pub use dice_futures::cancellation::CancellationContext; // expose cancellation 
 pub use dice_futures::cancellation::CancellationHandle; // expose cancellation handle as api
 pub use dice_futures::spawn::CancellableJoinHandle; // expose cancellation context as api
 pub use dice_futures::spawn::WeakFutureError; // expose future errors as api
-pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, fxhash::FxBuildHasher>;
-pub(crate) type HashSet<K> = std::collections::HashSet<K, fxhash::FxBuildHasher>;
+pub(crate) type HashMap<K, V> = buck2_hash::BuckHashMap<K, V>;
+pub(crate) type HashSet<K> = buck2_hash::BuckHashSet<K>;
 
 pub use crate::api::activation_tracker::ActivationData;
 pub use crate::api::activation_tracker::ActivationTracker;
@@ -214,7 +229,11 @@ pub use crate::api::invalidation_tracking::DiceTrackedInvalidationPath;
 pub use crate::api::invalidation_tracking::InvalidationPathEntry;
 pub use crate::api::key::InvalidationSourcePriority;
 pub use crate::api::key::Key;
-pub use crate::api::opaque::OpaqueValue;
+pub use crate::api::key::NoValueSerialize;
+pub use crate::api::key::OkPagableValueSerialize;
+pub use crate::api::key::PagableValueSerialize;
+pub use crate::api::key::TodoValueSerialize;
+pub use crate::api::key::ValueSerialize;
 pub use crate::api::projection::DiceProjectionComputations;
 pub use crate::api::projection::ProjectionKey;
 pub use crate::api::transaction::DiceEquality;
@@ -225,6 +244,11 @@ pub use crate::api::user_data::UserCycleDetector;
 pub use crate::api::user_data::UserCycleDetectorGuard;
 pub use crate::impls::dice::Dice;
 pub use crate::impls::dice::DiceDataBuilder;
+pub use crate::impls::key::DiceKeyDyn;
+pub use crate::impls::key::DiceProjectionDyn;
+pub use crate::impls::opaque::OpaqueValue;
+pub use crate::impls::storage::DiceStorage;
+pub use crate::impls::value::DiceValueDyn;
 pub use crate::introspection::serialize_dense_graph;
 pub use crate::introspection::serialize_graph;
 pub use crate::stats::GlobalStats;
@@ -232,4 +256,46 @@ use crate::transaction_update::DiceTransactionUpdaterImpl;
 
 pub mod testing {
     pub use crate::api::dice::testing::DiceBuilder;
+}
+
+#[cfg(test)]
+pub(crate) mod testing_helpers {
+    use std::any::Any;
+
+    use dice_futures::spawner::TokioSpawner;
+    use futures::FutureExt;
+
+    use crate::api::key::Key;
+    use crate::arc::Arc;
+    use crate::impls::key::DiceKey;
+    use crate::impls::key::ParentKey;
+    use crate::impls::task::dice::DiceTask;
+    use crate::impls::task::spawn_dice_task;
+    use crate::impls::value::DiceComputedValue;
+    use crate::impls::value::DiceKeyValue;
+    use crate::impls::value::DiceValidValue;
+    use crate::impls::value::MaybeValidDiceValue;
+    use crate::impls::value::TrackedInvalidationPaths;
+    use crate::versions::VersionRanges;
+
+    pub(crate) async fn make_completed_task<K: Key>(key: DiceKey, val: K::Value) -> DiceTask {
+        let task = spawn_dice_task(key, &TokioSpawner, &(), |handle| {
+            async move {
+                handle.finished(DiceComputedValue::new(
+                    MaybeValidDiceValue::valid(DiceValidValue::testing_new(
+                        DiceKeyValue::<K>::new(val),
+                    )),
+                    Arc::new(VersionRanges::new()),
+                    TrackedInvalidationPaths::clean(),
+                ));
+
+                Box::new(()) as Box<dyn Any + Send>
+            }
+            .boxed()
+        });
+
+        task.depended_on_by(ParentKey::None).unwrap().await.unwrap();
+
+        task
+    }
 }

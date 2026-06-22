@@ -8,7 +8,7 @@
  * above-listed licenses.
  */
 
-use buck2_critical_path::TopoSortError;
+use tokio::task::JoinError;
 
 /// We consider buck's critical path computation to be a core feature of buck and so
 /// treat failures severely, but logically the command results don't really depend on it and
@@ -17,16 +17,12 @@ use buck2_critical_path::TopoSortError;
 /// Because of this, we are careful about exactly what errors may be produced from the critical
 /// path build listeners rather than just propagating buck2_error::Results around.
 #[derive(buck2_error::Error, Debug)]
-#[buck2(tier0)]
+#[buck2(tag = CriticalPathError)]
 pub enum CriticalPathError {
     #[error("Overflow building critical path graph graph")]
     GraphBuildOverflow,
-    #[error("Critical path graph has a cycle")]
-    TopoSortError(TopoSortError),
-}
-
-impl From<TopoSortError> for CriticalPathError {
-    fn from(value: TopoSortError) -> Self {
-        Self::TopoSortError(value)
-    }
+    #[error("Critical path graph has a cycle: {0}")]
+    CycleDetected(String),
+    #[error("Critical path task was cancelled (e.g. daemon shutdown or command preemption): {0:?}")]
+    JoinError(JoinError),
 }

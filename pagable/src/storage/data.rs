@@ -38,7 +38,7 @@ use dupe::Dupe;
     bytemuck::AnyBitPattern
 )]
 #[repr(transparent)]
-pub struct DataKey(u128);
+pub struct DataKey(pub u128);
 
 static_assertions::assert_eq_size!(DataKey, OptionalDataKey);
 
@@ -116,7 +116,7 @@ impl PagableData {
     /// Computes the content-addressable key for this pagable data.
     ///
     /// The key is computed from the serialized data and nested arc keys.
-    pub(crate) fn compute_key(&self) -> DataKey {
+    pub fn compute_key(&self) -> DataKey {
         DataKey::compute(
             self.arcs.len(),
             &self.data,

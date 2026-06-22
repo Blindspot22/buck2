@@ -11,6 +11,7 @@ load("@prelude//apple:apple_resource_types.bzl", "AppleResourceDestination", "Ap
 load("@prelude//apple:resource_groups.bzl", "ResourceGraphInfo", "create_resource_graph")  # @unused `ResourceGraphInfo` used as a type
 load("@prelude//js:js_providers.bzl", "JsBundleInfo")
 load("@prelude//utils:argfile.bzl", "at_argfile")
+load("@prelude//utils:arglike.bzl", "ArgLike")  # @unused Used as a type
 load("@prelude//utils:expect.bzl", "expect")
 load(":worker_tool.bzl", "WorkerToolInfo")
 
@@ -52,12 +53,16 @@ ASSET_EXTENSIONS = [
     # Archives (virtual files)
     "zip",
     "lottie",
+    # 3D models
+    "glb",
 ]
 
 # Matches the default value for resolver.platforms in metro-config
 ASSET_PLATFORMS = ["ios", "android", "windows", "macos", "web"]
 
-def get_apple_resource_providers_for_js_bundle(ctx: AnalysisContext, js_bundle_info: JsBundleInfo, platform: str, skip_resources: bool) -> list[ResourceGraphInfo]:
+def get_apple_resource_providers_for_js_bundle(
+    ctx: AnalysisContext, js_bundle_info: JsBundleInfo, platform: str, skip_resources: bool
+) -> list[ResourceGraphInfo]:
     if platform != "ios" and platform != "macos":
         return []
 
@@ -67,16 +72,19 @@ def get_apple_resource_providers_for_js_bundle(ctx: AnalysisContext, js_bundle_i
     resource_spec = AppleResourceSpec(
         content_dirs = [
             js_bundle_info.built_js,
-        ] + resources_content_dirs,
+        ]
+        + resources_content_dirs,
         destination = AppleResourceDestination("resources"),
     )
-    return [create_resource_graph(
-        ctx = ctx,
-        labels = ctx.attrs.labels,
-        deps = [],
-        exported_deps = [],
-        resource_spec = resource_spec,
-    )]
+    return [
+        create_resource_graph(
+            ctx = ctx,
+            labels = ctx.attrs.labels,
+            deps = [],
+            exported_deps = [],
+            resource_spec = resource_spec,
+        )
+    ]
 
 def _strip_platform_from_asset_name(name: str) -> str:
     name_without_extension, extension = paths.split_extension(name)
@@ -88,7 +96,7 @@ def _strip_scale_from_asset_name(name: str) -> str:
         char = name[i]
         if scale_start != -1:
             if char == "x":
-                return name[:scale_start] + name[i + 1:]
+                return name[:scale_start] + name[i + 1 :]
             if char.isdigit() or char == ".":
                 continue
             fail("Invalid format for scale of asset {}!".format(name))
@@ -134,13 +142,8 @@ def get_bundle_name(ctx: AnalysisContext, default_bundle_name: str) -> str:
         return ctx.attrs.bundle_name if ctx.attrs.bundle_name else default_bundle_name
 
 def run_worker_commands(
-        ctx: AnalysisContext,
-        worker_tool: Dependency,
-        command_args_files: list[Artifact],
-        identifier: str,
-        category: str,
-        hidden_artifacts = [cmd_args],
-        has_content_based_path: bool = False):
+    ctx: AnalysisContext, worker_tool: Dependency, command_args_files: list[ArgLike], identifier: str, category: str, has_content_based_path: bool = False
+):
     worker_args = cmd_args(
         "--command-args-file",
         command_args_files,
@@ -156,10 +159,7 @@ def run_worker_commands(
             args = worker_args,
             has_content_based_path = has_content_based_path,
         ),
-        hidden = [
-            hidden_artifacts,
-            command_args_files,
-        ],
+        hidden = command_args_files,
     )
 
     ctx.actions.run(

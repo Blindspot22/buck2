@@ -15,16 +15,20 @@ use std::num::ParseIntError;
 use buck2_common::init::ResourceControlConfig;
 use buck2_common::init::ResourceControlInit;
 use buck2_common::init::ResourceControlStatus;
+use buck2_core::soft_error;
 use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use buck2_util::process;
 use buck2_util::process::async_background_command;
 
+use crate::buck_cgroup_tree::read_current_cgroup;
 #[cfg(unix)]
 use crate::cgroup::Cgroup;
 #[cfg(unix)]
 use crate::cgroup::CgroupKindInternal;
 #[cfg(unix)]
 use crate::cgroup::NoMemoryMonitoring;
+
+const DAEMON_ORIGINATING_CGROUP_FLAG: &str = "--daemon-originating-cgroup";
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Environment)]
@@ -43,6 +47,8 @@ enum SystemdNotAvailableReason {
     SystemctlCommandNotFound,
     #[error("Resource control with systemd is only supported on Linux.")]
     UnsupportedPlatform,
+    #[error("systemd-run --user probe failed (exit code {code}): {stderr}")]
+    SystemdRunUserProbeFailure { code: String, stderr: String },
 }
 
 enum DaemonSpawner {
@@ -105,7 +111,15 @@ pub async fn create_daemon_spawn_command(
                 (ResourceControlStatus::Off, _) => unreachable!("Checked above"),
                 (_, Ok(s)) => s,
                 (ResourceControlStatus::Required, Err(e)) => return Err(e),
-                (ResourceControlStatus::IfAvailable, Err(_)) => DaemonSpawner::None,
+                (ResourceControlStatus::IfAvailable, Err(e)) => {
+                    soft_error!(
+                        "daemon_spawner_resource_control_unavailable",
+                        e,
+                        quiet: true
+                    )
+                    .ok();
+                    DaemonSpawner::None
+                }
             }
         }
     };
@@ -117,7 +131,7 @@ pub async fn create_daemon_spawn_command(
         DaemonSpawner::None => Ok((process::background_command(program), Vec::new())),
         DaemonSpawner::Systemd => Ok((
             systemd_run_command(program, &unit_name, working_directory),
-            vec!["--has-cgroup".to_owned()],
+            daemon_resource_control_args(),
         )),
         #[cfg(unix)]
         DaemonSpawner::Cgroup(parent) => {
@@ -134,9 +148,20 @@ pub async fn create_daemon_spawn_command(
             let mut cmd = process::background_command(program);
             child.setup_command(&mut cmd);
 
-            Ok((cmd, vec!["--has-cgroup".to_owned()]))
+            Ok((cmd, daemon_resource_control_args()))
         }
     }
+}
+
+fn daemon_resource_control_args() -> Vec<String> {
+    let mut args = vec!["--has-cgroup".to_owned()];
+
+    if let Some(originating_cgroup) = read_current_cgroup() {
+        args.push(DAEMON_ORIGINATING_CGROUP_FLAG.to_owned());
+        args.push(originating_cgroup);
+    }
+
+    args
 }
 
 fn systemd_run_command(
@@ -150,6 +175,9 @@ fn systemd_run_command(
     cmd.arg("--quiet");
     cmd.arg("--collect");
     cmd.arg("--property=Delegate=yes");
+    // N.B. the slice name here is used by BPFJailer to assign the `buck` Role
+    // ID to the daemon process, which is what gives the daemon permission to
+    // exit the jail.
     cmd.arg("--slice=buck2");
     cmd.arg(format!("--working-directory={working_directory}"));
     cmd.arg(format!("--unit={unit_name}"));
@@ -192,18 +220,44 @@ async fn systemd_check_available() -> buck2_error::Result<()> {
     {
         Ok(output) => {
             if output.status.success() {
-                validate_systemd_version(&output.stdout).map_err(|e| e.into())
+                validate_systemd_version(&output.stdout)?;
             } else {
-                Err(SystemdNotAvailableReason::SystemctlCommandReturnedNonZero(
+                return Err(SystemdNotAvailableReason::SystemctlCommandReturnedNonZero(
                     String::from_utf8_lossy(&output.stderr).to_string(),
                 )
-                .into())
+                .into());
             }
         }
         Err(e) => match e.kind() {
-            ErrorKind::NotFound => Err(SystemdNotAvailableReason::SystemctlCommandNotFound.into()),
-            _ => Err(SystemdNotAvailableReason::SystemctlCommandLaunchFailed(e).into()),
+            ErrorKind::NotFound => {
+                return Err(SystemdNotAvailableReason::SystemctlCommandNotFound.into());
+            }
+            _ => return Err(SystemdNotAvailableReason::SystemctlCommandLaunchFailed(e).into()),
         },
+    }
+
+    // Verify that `systemd-run --user` can actually connect to the user's
+    // systemd instance. `systemctl --version` only checks that systemd is
+    // installed, but `systemd-run --user` needs a D-Bus session bus
+    // ($DBUS_SESSION_BUS_ADDRESS or $XDG_RUNTIME_DIR) to talk to the user's
+    // systemd. In sandboxed environments (e.g. VS Code 3p extension sandbox)
+    // these env vars are stripped, causing `systemd-run --user` to fail at
+    // runtime. This probe catches that upfront so `if_available` can fall back.
+    match async_background_command("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--", "/bin/true"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let code = output
+                .status
+                .code()
+                .map_or("unknown".to_owned(), |c| c.to_string());
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            Err(SystemdNotAvailableReason::SystemdRunUserProbeFailure { code, stderr }.into())
+        }
+        Err(e) => Err(SystemdNotAvailableReason::SystemctlCommandLaunchFailed(e).into()),
     }
 }
 

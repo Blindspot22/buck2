@@ -4,6 +4,7 @@
 ## ConfiguredTargetNode.attrs\_eager
 ## ConfiguredTargetNode.attrs\_lazy
 ## ConfiguredTargetNode.buildfile\_path
+## ConfiguredTargetNode.configuration\_info
 ## ConfiguredTargetNode.deps
 ## ConfiguredTargetNode.get\_attr
 ## ConfiguredTargetNode.get\_attrs

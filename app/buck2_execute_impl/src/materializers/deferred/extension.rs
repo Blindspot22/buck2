@@ -15,16 +15,23 @@ use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
+use allocative::Allocative;
+use allocative::FlameGraphBuilder;
+use allocative::Visitor;
+use allocative::ident_key;
 use async_trait::async_trait;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_error::BuckErrorContext;
+use buck2_events::dispatch::EventDispatcher;
 use buck2_events::dispatch::get_dispatcher;
+use buck2_execute::materialize::materializer::CleanStaleArtifactsArgs;
 use buck2_execute::materialize::materializer::DeferredMaterializerEntry;
 use buck2_execute::materialize::materializer::DeferredMaterializerExtensions;
 use buck2_execute::materialize::materializer::DeferredMaterializerIterItem;
 use buck2_execute::materialize::materializer::DeferredMaterializerSubscription;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
+use buck2_fs::paths::abs_path::AbsPath;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::TimeZone;
@@ -45,8 +52,9 @@ use crate::materializers::deferred::ArtifactMaterializationStage;
 use crate::materializers::deferred::DeferredMaterializerAccessor;
 use crate::materializers::deferred::DeferredMaterializerCommandProcessor;
 use crate::materializers::deferred::MaterializerCommand;
-use crate::materializers::deferred::Processing;
 use crate::materializers::deferred::ProcessingFuture;
+use crate::materializers::deferred::artifact_tree::ArtifactTree;
+use crate::materializers::deferred::artifact_tree::artifact_metadata_size;
 use crate::materializers::deferred::clean_stale::CleanStaleArtifactsCommand;
 use crate::materializers::deferred::clean_stale::CleanStaleArtifactsExtensionCommand;
 use crate::materializers::deferred::io_handler::IoHandler;
@@ -55,6 +63,21 @@ use crate::materializers::deferred::subscriptions::MaterializerSubscriptionOpera
 
 pub(super) trait ExtensionCommand<T>: Debug + Sync + Send + 'static {
     fn execute(self: Box<Self>, processor: &mut DeferredMaterializerCommandProcessor<T>);
+}
+
+struct AllocativeProfileRoot<'a> {
+    artifact_tree: &'a ArtifactTree,
+}
+
+impl Allocative for AllocativeProfileRoot<'_> {
+    fn visit<'a, 'b: 'a>(&self, visitor: &'a mut Visitor<'b>) {
+        let mut visitor = visitor.enter_self_sized::<Self>();
+        visitor.visit_field(
+            ident_key!(artifact_tree),
+            &self.artifact_tree.allocative_dfs(),
+        );
+        visitor.exit();
+    }
 }
 
 #[derive(Debug)]
@@ -140,21 +163,17 @@ impl<T: IoHandler> ExtensionCommand<T> for Iterate {
                         .unwrap();
                     PathStage::Materialized {
                         ts,
-                        size: Some(metadata.size()),
+                        size: Some(artifact_metadata_size(metadata)),
                     }
                 }
             };
 
-            let processing = match &data.processing {
-                Processing::Done(..) => PathProcessing::Done,
-                Processing::Active {
-                    future: ProcessingFuture::Materializing(..),
-                    ..
-                } => PathProcessing::Materializing,
-                Processing::Active {
-                    future: ProcessingFuture::Cleaning(..),
-                    ..
-                } => PathProcessing::Cleaning,
+            let processing = match data.processing.active_ref() {
+                None => PathProcessing::Done,
+                Some(active) => match &active.future {
+                    ProcessingFuture::Materializing(..) => PathProcessing::Materializing,
+                    ProcessingFuture::Cleaning(..) => PathProcessing::Cleaning,
+                },
             };
 
             let path_data = PathData { stage, processing };
@@ -193,6 +212,23 @@ impl<T> ExtensionCommand<T> for ListSubscriptions {
                 Err(..) => break, // No use sending more if the client disconnected.
             }
         }
+    }
+}
+
+#[derive(Derivative)]
+#[derivative(Debug)]
+struct AllocativeProfile {
+    #[derivative(Debug = "ignore")]
+    sender: Sender<allocative::FlameGraphOutput>,
+}
+
+impl<T> ExtensionCommand<T> for AllocativeProfile {
+    fn execute(self: Box<Self>, processor: &mut DeferredMaterializerCommandProcessor<T>) {
+        let mut graph = FlameGraphBuilder::default();
+        graph.visit_root(&AllocativeProfileRoot {
+            artifact_tree: &processor.tree,
+        });
+        let _ignored = self.sender.send(graph.finish());
     }
 }
 
@@ -247,7 +283,7 @@ impl<T: IoHandler> ExtensionCommand<T> for RefreshTtls {
             Duration::seconds(self.min_ttl),
             processor.io.digest_config(),
         )
-        .map(|f| processor.spawn(f));
+        .map(|f| processor.spawn(&EventDispatcher::error_on_event(), f));
         let _ignored = self.sender.send(task);
     }
 }
@@ -371,6 +407,17 @@ impl<T: IoHandler> DeferredMaterializerExtensions for DeferredMaterializerAccess
         Ok(UnboundedReceiverStream::new(receiver).boxed())
     }
 
+    async fn allocative(&self) -> buck2_error::Result<allocative::FlameGraphOutput> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender
+            .send(MaterializerCommand::Extension(
+                Box::new(AllocativeProfile { sender }) as _,
+            ))?;
+        receiver
+            .await
+            .buck_error_context("No response from materializer")
+    }
+
     fn fsck(
         &self,
     ) -> buck2_error::Result<BoxStream<'static, (ProjectRelativePathBuf, buck2_error::Error)>> {
@@ -387,16 +434,14 @@ impl<T: IoHandler> DeferredMaterializerExtensions for DeferredMaterializerAccess
             .send(MaterializerCommand::Extension(
                 Box::new(RefreshTtls { sender, min_ttl }) as _,
             ))?;
-        match receiver
+        if let Some(task) = receiver
             .await
             .buck_error_context("No response from materializer")?
         {
-            Some(task) => task
-                .await
+            task.await
                 .buck_error_context("Refresh task aborted")?
-                .buck_error_context("Refresh failed")?,
-            None => {}
-        };
+                .buck_error_context("Refresh failed")?;
+        }
         Ok(())
     }
 
@@ -413,20 +458,31 @@ impl<T: IoHandler> DeferredMaterializerExtensions for DeferredMaterializerAccess
 
     async fn clean_stale_artifacts(
         &self,
-        keep_since_time: DateTime<Utc>,
-        dry_run: bool,
-        tracked_only: bool,
+        args: CleanStaleArtifactsArgs,
     ) -> buck2_error::Result<buck2_cli_proto::CleanStaleResponse> {
         let dispatcher = get_dispatcher();
+        let adaptive_low_disk = args.adaptive_low_disk_threshold.map(|threshold_percent| {
+            // Default min-TTL matches the buckconfig default of 12h.
+            let min_ttl = args
+                .adaptive_min_ttl
+                .unwrap_or_else(|| std::time::Duration::from_secs(12 * 60 * 60));
+            let min_ttl_chrono = Duration::from_std(min_ttl).unwrap_or_else(|_| Duration::zero());
+            crate::materializers::deferred::clean_stale::AdaptiveLowDiskParams {
+                threshold_percent,
+                min_access_time: Utc::now() - min_ttl_chrono,
+            }
+        });
         let (sender, recv) = oneshot::channel();
         self.command_sender
             .send(MaterializerCommand::Extension(Box::new(
                 CleanStaleArtifactsExtensionCommand {
                     cmd: CleanStaleArtifactsCommand {
-                        keep_since_time,
-                        dry_run,
-                        tracked_only,
+                        keep_since_time: args.keep_since_time,
+                        dry_run: args.dry_run,
+                        tracked_only: args.tracked_only,
                         dispatcher,
+                        adaptive_low_disk,
+                        root_abs_path: AbsPath::new("/").ok().map(|p| Arc::new(p.to_owned())),
                     },
                     sender,
                 },

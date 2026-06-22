@@ -40,10 +40,9 @@ async def test_cfg_modifiers_attr_ctargets(buck: Buck) -> None:
 
 
 @buck_test(inplace=False)
-async def test_cfg_modifiers_attr_and_metadata_together_fails(buck: Buck) -> None:
-    await expect_failure(
-        buck.ctargets(
-            "root//:test3",
-        ),
-        stderr_regex="Usage of both `modifiers` attribute and modifiers in metadata is not allowed for target `root//:test3`",
+async def test_metadata_modifiers_is_hard_error(buck: Buck) -> None:
+    result = await expect_failure(buck.ctargets("root//:test_metadata_modifiers"))
+    assert (
+        'sets `metadata["buck.cfg_modifiers"]` which is no longer supported'
+        in result.stderr
     )

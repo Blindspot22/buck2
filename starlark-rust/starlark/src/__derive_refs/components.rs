@@ -43,7 +43,7 @@ impl NativeCallableComponents {
         fn doc_param(p: &NativeCallableParam) -> DocParam {
             let NativeCallableParam { name, ty, required } = p;
             DocParam {
-                name: (*name).to_owned(),
+                name: name.as_str().to_owned(),
                 docs: None,
                 typ: ty.dupe(),
                 default_value: match required {
@@ -78,6 +78,17 @@ impl NativeCallableComponents {
                 ..ty_docs
             }),
             None => DocItem::Member(DocMember::Function(func_docs)),
+        }
+    }
+
+    pub(crate) fn make_type(&self, as_type: Option<Ty>) -> Ty {
+        let result = self.return_type.clone();
+
+        let params = self.param_spec.param_spec();
+
+        match as_type {
+            None => Ty::function(params, result),
+            Some(type_attr) => Ty::ctor_function(type_attr, params, result),
         }
     }
 }

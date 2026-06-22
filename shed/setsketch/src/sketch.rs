@@ -12,13 +12,13 @@
 // (https://github.com/jean-pierreBoth/probminhash).
 
 //! implementation of the paper :
-//! *SetSkectch : filling the gap between MinHash and HyperLogLog*  
+//! *SetSkectch : filling the gap between MinHash and HyperLogLog*
 //! See  <https://arxiv.org/abs/2101.00314> or <https://vldb.org/pvldb/vol14/p2244-ertl.pdf>.
 //!
 //! We implement Setsketch1 algorithm which supposes that the size of the data set
 //! to sketch is large compared to the size of sketch.
 //! The purpose of this implementation is to provide Local Sensitive sketching of a set
-//! adapted to the Jaccard distance with some precaution, see function [get_jaccard_bounds](SetSketchParams::get_jaccard_bounds).   
+//! adapted to the Jaccard distance with some precaution, see function [get_jaccard_bounds](SetSketchParams::get_jaccard_bounds).
 //! Moreover the sketches produced are mergeable see function [merge](SetSketcher::merge).
 //!
 //! The cardinal of the set can be estimated with the basic (unoptimized) function [get_cardinal_stats](SetSketcher::get_cardinal_stats)
@@ -32,7 +32,8 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::LazyLock;
 
-use rand::Rng;
+use base64::Engine;
+use rand::RngExt as _;
 use rand_distr::Exp1;
 use rand_distr::StandardUniform;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -90,7 +91,7 @@ type I = u16;
 ///
 /// This cannot be used to sketch any new values (but can be merged). In exchange, it doesn't
 /// require a `T` or a hasher, unlike `SetSketcher`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SetSketch {
     params: &'static SetSketchParams,
     k_vec: Vec<I>,
@@ -118,7 +119,7 @@ impl SetSketch {
         self.params
     }
 
-    /// The function returns an approximation of the cardinality of the sketched set.  
+    /// The function returns an approximation of the cardinality of the sketched set.
     ///
     /// It is a relatively cpu costly function (the computed logs are not cached in the SetSketcher
     /// structure) that involves log and exp calls on the whole sketch vector.
@@ -162,10 +163,190 @@ impl SetSketch {
     pub fn get_registers(&self) -> &[I] {
         &self.k_vec
     }
+
+    /// Computes a fast approximant of the proportion of the elements in `self` not found in
+    /// `other`, returned as a confidence interval `(low, high)`.
+    ///
+    /// Uses only a prefix of registers, making the comparison O(1) — fast enough to run over a
+    /// large candidate set as a first-pass filter before computing exact overlaps with
+    /// [`SetSketch::absolute_overlap`].
+    ///
+    /// **Important:** This method relies on the locality-sensitive property of the sketch
+    /// registers (i.e. that the register value for an element is independent of which set it
+    /// belongs to). It must **not** be used with non-locality-sensitive weighting schemes.
+    pub fn approx_proportion_not_included(&self, other: &SetSketch) -> (f64, f64) {
+        // Implementation notes:
+        //
+        // Elements across the two sets fall into three categories: unique to `self` (proportion
+        // `p_a`), unique to `other` (`p_b`), or in the intersection (`p_i`), with
+        // `p_a + p_b + p_i = 1`.
+        //
+        // For each register, the stored value is the max hash over all sketched elements.
+        // Because hashes are independent, the "winning" element falls into each subset with
+        // probability proportional to its size:
+        //   `Pr(S > O) = p_a,  Pr(S < O) = p_b,  Pr(S == O) = p_i`
+        // where S and O are register values from `self` and `other` respectively.
+        //
+        // Counting `S > O` and `S == O` occurrences over a register prefix gives a Bernoulli
+        // estimate of `p_a` and `p_i`. The desired return value is `p_a / (p_a + p_i)`,
+        // wrapped in a Wilson confidence interval.
+        const PREFIX_SIZE: usize = 48;
+
+        let mut p_a = 0usize;
+        let mut p_i = 0usize;
+        for i in 0..PREFIX_SIZE {
+            if self.k_vec[i] == other.k_vec[i] {
+                p_i += 1;
+            }
+            if self.k_vec[i] > other.k_vec[i] {
+                p_a += 1;
+            }
+        }
+        static CONF_INTERVALS: LazyLock<[[(f64, f64); PREFIX_SIZE + 1]; PREFIX_SIZE + 1]> =
+            LazyLock::new(|| {
+                std::array::from_fn(|i| std::array::from_fn(|j| wilson_confidence_interval(i, j)))
+            });
+        CONF_INTERVALS[p_a][p_i]
+    }
+
+    /// Decode a base64-encoded sketch string into a `SetSketch`.
+    ///
+    /// The string is expected to be a base64-encoded sequence of native-endian
+    /// `u16` register values. Both padded and unpadded base64 are accepted.
+    pub fn from_base64(base64_str: &str) -> Result<Self, SetSketchDecodeError> {
+        let params = SetSketchParams::recommended();
+        let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(base64_str.trim())
+            .map_err(SetSketchDecodeError::Base64)?;
+
+        if bytes.len() % 2 != 0 {
+            return Err(SetSketchDecodeError::OddByteCount(bytes.len()));
+        }
+
+        let registers: Vec<I> = bytes
+            .chunks_exact(2)
+            .map(|chunk| I::from_ne_bytes([chunk[0], chunk[1]]))
+            .collect();
+
+        if registers.len() != params.m {
+            return Err(SetSketchDecodeError::WrongRegisterCount {
+                expected: params.m,
+                actual: registers.len(),
+            });
+        }
+
+        Ok(Self {
+            params,
+            k_vec: registers,
+        })
+    }
+
+    /// Decode a versioned, base64-encoded sketch string into a `SetSketch`.
+    ///
+    /// The input format is `"<version>:<base64_data>"` (e.g. `"v1:AAAA..."`).  The version
+    /// prefix is returned alongside the decoded sketch so callers can act on it if needed.
+    pub fn from_base64_versioned(
+        versioned_str: &str,
+    ) -> Result<(&str, Self), SetSketchDecodeError> {
+        let (version, base64_str) = versioned_str
+            .split_once(':')
+            .ok_or(SetSketchDecodeError::MissingVersionPrefix)?;
+        let sketch = Self::from_base64(base64_str)?;
+        Ok((version, sketch))
+    }
+
+    /// Like [`from_base64_versioned`](Self::from_base64_versioned), but discards the version
+    /// prefix and returns only the decoded sketch.
+    pub fn decode_base64_versioned(versioned_str: &str) -> Result<Self, SetSketchDecodeError> {
+        let (_version, sketch) = Self::from_base64_versioned(versioned_str)?;
+        Ok(sketch)
+    }
+
+    /// Decode a base64-encoded sketch that may or may not have a version prefix.
+    ///
+    /// If the string contains a `':'`, the portion before it is treated as a version prefix
+    /// and stripped.  Otherwise the entire string is decoded as raw base64.
+    pub fn from_base64_maybe_versioned(s: &str) -> Result<Self, SetSketchDecodeError> {
+        match s.split_once(':') {
+            Some((_version, base64_str)) => Self::from_base64(base64_str),
+            None => Self::from_base64(s),
+        }
+    }
+
+    /// Convenience constructor that pairs [`from_registers`](Self::from_registers) with
+    /// [`SetSketchParams::recommended`].
+    pub fn from_recommended_registers(registers: Vec<I>) -> Self {
+        Self::from_registers(SetSketchParams::recommended(), registers)
+    }
+
+    /// Returns the cardinality estimate as an `i64`, truncating toward zero.
+    pub fn get_size_approx(&self) -> i64 {
+        self.cardinality() as i64
+    }
+}
+
+/// Errors that can occur when decoding a `SetSketch` from base64.
+#[derive(Debug)]
+pub enum SetSketchDecodeError {
+    Base64(base64::DecodeError),
+    OddByteCount(usize),
+    WrongRegisterCount { expected: usize, actual: usize },
+    MissingVersionPrefix,
+}
+
+impl std::fmt::Display for SetSketchDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Base64(e) => write!(f, "base64 decode error: {}", e),
+            Self::OddByteCount(n) => {
+                write!(f, "invalid sketch data: byte count {} must be even", n)
+            }
+            Self::WrongRegisterCount { expected, actual } => {
+                write!(
+                    f,
+                    "wrong number of registers: expected {}, got {}",
+                    expected, actual
+                )
+            }
+            Self::MissingVersionPrefix => {
+                write!(f, "expected versioned format \"<version>:<base64_data>\"")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SetSketchDecodeError {}
+
+/// For a set of Bernoulli samples with `s` successes and `f` failures, returns a confidence
+/// interval for the underlying Bernoulli parameter.
+///
+/// This uses the Wilson confidence interval which is ~good enough most of the time; importantly it
+/// does return reasonable results for `s==0`, `f==0`, or small `s+f`.
+fn wilson_confidence_interval(s: usize, f: usize) -> (f64, f64) {
+    // Desired z-score; 1.96 gives a 95% confidence interval
+    const Z: f64 = 1.96;
+
+    let s = s as f64;
+    let f = f as f64;
+    let n = s + f;
+    if n == 0. {
+        return (0.0, 1.0);
+    }
+
+    let zsq = Z * Z;
+    let mid = (s + zsq / 2.) / (n + zsq);
+    let wid = Z / (n + zsq) * (s * f / n + zsq / 4.).sqrt();
+    (mid - wid, mid + wid)
+}
+
+impl Default for SetSketch {
+    fn default() -> Self {
+        Self::new(SetSketchParams::recommended())
+    }
 }
 
 /// This structure implements Setsketch1 algorithm
-///   
+///
 /// The default parameters ensure capacity to represent a set up to 10^28 elements.
 pub struct SetSketcher<T, H: Hasher + Default> {
     data: SetSketch,
@@ -208,6 +389,10 @@ where
             b_hasher,
             t_marker: PhantomData,
         }
+    }
+
+    pub fn into_sketch(self) -> SetSketch {
+        self.data
     }
 
     pub fn sketch(&mut self, to_sketch: &T) {
@@ -512,5 +697,30 @@ mod tests {
         let expected_matches = a.params.m * 2 / 3;
         assert!(matches > expected_matches - 100);
         assert!(matches < expected_matches + 100);
+    }
+
+    #[test]
+    fn test_approx_proportion_not_included() {
+        let a_vals: Vec<usize> = (0..100).collect();
+        let b_vals: Vec<usize> = (70..150).collect();
+
+        let mut a = usize_sketcher();
+        for v in &a_vals {
+            a.sketch(v);
+        }
+        let mut b = usize_sketcher();
+        for v in &b_vals {
+            b.sketch(v);
+        }
+
+        check_cardinality_is_about(&a, 100);
+        check_cardinality_is_about(&b, 80);
+
+        let merged = a.clone().union(&b);
+        check_cardinality_is_about(&merged, 150);
+
+        let (low, high) = a.approx_proportion_not_included(&b);
+        assert!(low > 0.5, "low bound {low} should be > 0.5");
+        assert!(high < 0.9, "high bound {high} should be < 0.9");
     }
 }

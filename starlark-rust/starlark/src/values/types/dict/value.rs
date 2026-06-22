@@ -31,6 +31,7 @@ use allocative::Allocative;
 use display_container::fmt_keyed_container;
 use serde::Serialize;
 use starlark::register_avalue_simple_frozen;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_value;
 use starlark_map::Equivalent;
 
@@ -42,12 +43,11 @@ use crate::coerce::coerce;
 use crate::collections::Hashed;
 use crate::collections::SmallMap;
 use crate::environment::Methods;
-use crate::environment::MethodsStatic;
 use crate::hint::unlikely;
+use crate::static_starlark_value;
 use crate::typing::Ty;
 use crate::util::refcell::unleak_borrow;
 use crate::values::AllocFrozenValue;
-use crate::values::AllocStaticSimple;
 use crate::values::AllocValue;
 use crate::values::Freeze;
 use crate::values::FreezeResult;
@@ -68,7 +68,15 @@ use crate::values::string::str_type::hash_string_value;
 use crate::values::type_repr::StarlarkTypeRepr;
 use crate::values::types::dict::dict_type::DictType;
 
-#[derive(Clone, Default, Trace, Debug, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Default,
+    Trace,
+    Debug,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 pub(crate) struct DictGen<T>(pub(crate) T);
 
 impl<'v, T: DictLike<'v>> Display for DictGen<T> {
@@ -99,7 +107,7 @@ impl<'v> StarlarkTypeRepr for Dict<'v> {
     }
 }
 
-#[derive(Clone, Default, Debug, ProvidesStaticType, Allocative)]
+#[derive(Clone, Default, Debug, ProvidesStaticType, Allocative, StarlarkPagable)]
 #[repr(transparent)]
 pub(crate) struct FrozenDictData {
     /// The data stored by the dictionary. The keys must all be hashable values.
@@ -111,10 +119,11 @@ pub(crate) type FrozenDict = DictGen<FrozenDictData>;
 
 pub(crate) type MutableDict<'v> = DictGen<RefCell<Dict<'v>>>;
 
-pub(crate) static VALUE_EMPTY_FROZEN_DICT: AllocStaticSimple<DictGen<FrozenDictData>> =
-    AllocStaticSimple::alloc(DictGen(FrozenDictData {
+static_starlark_value!(
+    pub(crate) VALUE_EMPTY_FROZEN_DICT: DictGen<FrozenDictData> = DictGen(FrozenDictData {
         content: SmallMap::new(),
-    }));
+    })
+);
 
 unsafe impl<'v> Coerce<Dict<'v>> for FrozenDictData {}
 
@@ -397,13 +406,10 @@ impl<'v> DictLike<'v> for FrozenDictData {
     }
 }
 
-pub(crate) fn dict_methods() -> Option<&'static Methods> {
-    static RES: MethodsStatic = MethodsStatic::new();
-    RES.methods(crate::values::types::dict::methods::dict_methods)
-}
-
 // Register vtable for FrozenDict (special type not handled by #[starlark_value] macro, because V is not ValueLike).
 register_avalue_simple_frozen!(FrozenDict);
+
+starlark::methods_static!(DICT_METHODS = crate::values::types::dict::methods::dict_methods);
 
 #[starlark_value(type = Dict::TYPE)]
 impl<'v, T: DictLike<'v> + 'v> StarlarkValue<'v> for DictGen<T>
@@ -413,7 +419,7 @@ where
     type Canonical = FrozenDict;
 
     fn get_methods() -> Option<&'static Methods> {
-        dict_methods()
+        Some(DICT_METHODS.methods())
     }
 
     fn collect_repr(&self, r: &mut String) {

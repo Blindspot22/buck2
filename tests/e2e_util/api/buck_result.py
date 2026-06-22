@@ -6,7 +6,6 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
-# pyre-unsafe
 
 import json
 import textwrap
@@ -60,7 +59,9 @@ class AutoName(str, Enum):
     """Makes the value of the Enum its name"""
 
     @staticmethod
-    def _generate_next_value_(name, start, count, last_values):
+    def _generate_next_value_(
+        name: str, start: int, count: int, last_values: list
+    ) -> str:
         return name
 
 
@@ -111,11 +112,11 @@ class BuckResult(Result):
         stderr: str,
         buck_build_id: str,
         invocation_record_path: Optional[Path] = None,
-        args: str = "",
+        buck_args: str = "",
     ) -> None:
         super().__init__(process, stdout, stderr)
         self.buck_build_id = buck_build_id
-        self.args = args
+        self.buck_args = buck_args
         self.invocation_record_path = invocation_record_path
 
     def invocation_record(self) -> InvocationRecord:
@@ -248,19 +249,32 @@ LOG_COMPUTE_KEY = "build_api::actions::calculation: compute"
 
 
 class TargetsResult(BuckResult):
-    """Represents a Buck process  of a targets command that has finished running"""
+    """Represents a Buck process of a targets command that has finished running"""
 
     def __init__(self, base: BuckResult) -> None:
         self.__dict__.update(base.__dict__)
+
+    def get_target_list(self) -> List[str]:
+        """
+        Returns a list of sorted target labels
+        """
+        assert "--json-lines" in self.buck_args, (
+            "Must add --json-lines arg to get targets"
+        )
+        targets = []
+        for line in self.stdout.splitlines():
+            js = json.loads(line)
+            targets.append(js["buck.package"] + ":" + js["name"])
+        return sorted(targets)
 
     def get_target_to_build_output(self) -> Dict[str, str]:
         """
         Returns a dict of the target and its output file in buck-out
         """
         target_to_output = {}
-        assert "--show-output" in self.args or "--show-full-output" in self.args, (
-            "Must add --show-output or --show-full-output arg to get targets output"
-        )
+        assert (
+            "--show-output" in self.buck_args or "--show-full-output" in self.buck_args
+        ), "Must add --show-output or --show-full-output arg to get targets output"
         show_output = self.stdout.strip().splitlines()
         for line in show_output:
             output_mapping = line.split()
@@ -274,7 +288,7 @@ class TargetsResult(BuckResult):
 
 
 class BuildResult(BuckResult):
-    """Represents a Buck process  of a build command that has finished running"""
+    """Represents a Buck process of a build command that has finished running"""
 
     def __init__(self, base: BuckResult) -> None:
         self.__dict__.update(base.__dict__)
@@ -285,11 +299,11 @@ class BuildResult(BuckResult):
         Prints to build target followed by path to buck-out file to stdout
         """
         target_to_output = {}
-        assert "--show-output" in self.args or "--show-full-output" in self.args, (
-            "Must add --show-output or --show-full-output arg to get build output"
-        )
+        assert (
+            "--show-output" in self.buck_args or "--show-full-output" in self.buck_args
+        ), "Must add --show-output or --show-full-output arg to get build output"
         show_output = self.stdout.strip().splitlines()
-        if "--build-report=-" in self.args:
+        if "--build-report=-" in self.buck_args:
             # When mixing --show-output with --build-report=-, the first line is
             # the build report, and the remaining ones are the results, we only
             # want the results for the purpose of this function so we skip the report
@@ -414,7 +428,7 @@ class AuditConfigResult(BuckResult):
 
     def get_json(self) -> Dict[str, str]:
         """Returns a dict of the json sent back by buck"""
-        assert "--style=json" in self.args or "--style json" in self.args, (
+        assert "--style=json" in self.buck_args or "--style json" in self.buck_args, (
             "Must add --style=json or `--style json` arg to get json output"
         )
         try:

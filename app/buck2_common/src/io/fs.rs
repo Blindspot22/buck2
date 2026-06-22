@@ -29,6 +29,7 @@ use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use compact_str::CompactString;
 use dupe::Dupe;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
 use tokio::sync::Semaphore;
 
 use crate::cas_digest::CasDigestConfig;
@@ -42,18 +43,21 @@ use crate::file_ops::metadata::RawSymlink;
 use crate::file_ops::metadata::Symlink;
 use crate::file_ops::metadata::TrackedFileDigest;
 use crate::io::IoProvider;
+use crate::io::ReadDirOutcome;
 
-#[derive(Clone, Dupe, Allocative)]
+#[derive(Clone, Dupe, Allocative, Pagable)]
 pub struct FsIoProvider {
     fs: ProjectRoot,
     cas_digest_config: CasDigestConfig,
+    is_eden: bool,
 }
 
 impl FsIoProvider {
-    pub fn new(fs: ProjectRoot, cas_digest_config: CasDigestConfig) -> Self {
+    pub fn new(fs: ProjectRoot, cas_digest_config: CasDigestConfig, is_eden: bool) -> Self {
         Self {
             fs,
             cas_digest_config,
+            is_eden,
         }
     }
 
@@ -123,7 +127,7 @@ impl IoProvider for FsIoProvider {
     async fn read_dir_impl(
         &self,
         path: ProjectRelativePathBuf,
-    ) -> buck2_error::Result<Vec<RawDirEntry>> {
+    ) -> buck2_error::Result<ReadDirOutcome> {
         // Don't want to totally saturate the executor with these so that some other work can progress.
         // For normal fs (or warm eden), something smaller would probably be fine, for eden couple hundred is probably
         // good (current plan in that impl is to allow multiple batches of 128 dirs at a time).
@@ -131,9 +135,20 @@ impl IoProvider for FsIoProvider {
         let _permit = SEMAPHORE.acquire().await.unwrap();
 
         let path = self.fs.resolve(&path);
+        let is_eden = self.is_eden;
 
         tokio::task::spawn_blocking(move || {
-            let dir_entries = fs_util::read_dir(path).categorize_input()?;
+            let dir_entries = match fs_util::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(e) if is_eden && e.io_error_kind() == Some(std::io::ErrorKind::PermissionDenied) => {
+                    tracing::debug!(
+                        "read_dir({}): permission denied on Eden repo, treating as restricted directory",
+                        path.display()
+                    );
+                    return Ok(ReadDirOutcome::EdenPermissionDenied);
+                }
+                Err(e) => return Err(e.categorize_input()),
+            };
 
             let mut entries = Vec::new();
 
@@ -149,7 +164,7 @@ impl IoProvider for FsIoProvider {
                 });
             }
 
-            buck2_error::Ok(entries)
+            buck2_error::Ok(ReadDirOutcome::Entries(entries))
         })
         .await?
         .buck_error_context("Error listing directory")
@@ -162,7 +177,6 @@ impl IoProvider for FsIoProvider {
         let fs = self.fs.dupe();
         let path = path.into_forward_relative_path_buf();
         let file_digest_config = FileDigestConfig::source(self.cas_digest_config);
-
         tokio::task::spawn_blocking(move || {
             let meta = read_path_metadata(fs.root(), &path, file_digest_config)?.map(
                 |raw_meta_or_redirection| raw_meta_or_redirection.map(ProjectRelativePathBuf::from),
@@ -191,6 +205,10 @@ impl IoProvider for FsIoProvider {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn is_eden_repo(&self) -> bool {
+        self.is_eden
     }
 }
 
@@ -240,7 +258,7 @@ fn read_path_metadata<P: AsRef<AbsPath>>(
             ExactPathMetadata::DoesNotExist => return Ok(None),
             ExactPathMetadata::Symlink(symlink) => {
                 let rest: ForwardRelativePathBuf = relpath_components.collect();
-                return Ok(Some(symlink.to_raw_path_metadata(curr, rest)?));
+                return Ok(Some(symlink.into_raw_path_metadata(curr, rest)?));
             }
             ExactPathMetadata::FileOrDirectory(path_meta) => {
                 meta = Some(path_meta);
@@ -294,7 +312,7 @@ impl ExactPathMetadata {
             Some(meta) if meta.file_type().is_symlink() => {
                 let dest = fs_util::read_link(&curr.abspath).categorize_input()?;
 
-                let out = if dest.is_absolute() {
+                let out = if dest.has_root() {
                     ExactPathSymlinkMetadata::ExternalSymlink(dest)
                 } else {
                     // Remove the symlink name.
@@ -307,10 +325,10 @@ impl ExactPathMetadata {
                             format!("Invalid symlink at `{}`: `{}`", curr.path, dest.display())
                         })?;
 
-                    // FIXME(JakobDegen): Remove the `unwrap` after we fork `relative_path`
+                    // FIXME(JakobDegen): Remove the `unwrap`.
                     ExactPathSymlinkMetadata::InternalSymlink(
                         link_path,
-                        RelativePathBuf::from_path(dest).unwrap(),
+                        RelativePathBuf::from_system_path(dest).unwrap(),
                     )
                 };
 
@@ -330,7 +348,7 @@ enum ExactPathSymlinkMetadata {
 }
 
 impl ExactPathSymlinkMetadata {
-    fn to_raw_path_metadata(
+    fn into_raw_path_metadata(
         self,
         curr: PathAndAbsPath,
         rest: ForwardRelativePathBuf,
@@ -385,7 +403,7 @@ fn read_unchecked<P: AsRef<AbsPath>>(
             ReadUncheckedOptions::Anything => convert_metadata(&curr, meta, file_digest_config),
         },
         ExactPathMetadata::Symlink(link) => {
-            link.to_raw_path_metadata(curr, ForwardRelativePathBuf::default())
+            link.into_raw_path_metadata(curr, ForwardRelativePathBuf::default())
         }
     }
 }
@@ -441,8 +459,8 @@ mod tests {
         assert_matches!(
             read_path_metadata(AbsPath::new(t.path())?, ForwardRelativePath::new("x")?, FileDigestConfig::source(CasDigestConfig::testing_default())),
             Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r, r_rel)})) => {
-                assert_eq!(r, "y/z");
-                assert_eq!(r_rel.target(), "y/z");
+                assert_eq!(r.as_str(), "y/z");
+                assert_eq!(r_rel.target().as_str(), "y/z");
             }
         );
 
@@ -460,8 +478,8 @@ mod tests {
         assert_matches!(
             read_path_metadata(AbsPath::new(t)?, ForwardRelativePath::new("x/xx/xxx")?, FileDigestConfig::source(CasDigestConfig::testing_default())),
             Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r, r_rel)})) => {
-                assert_eq!(r, "x/y");
-                assert_eq!(r_rel.target(), "../y");
+                assert_eq!(r.as_str(), "x/y");
+                assert_eq!(r_rel.target().as_str(), "../y");
             }
         );
 
@@ -477,8 +495,8 @@ mod tests {
         assert_matches!(
             read_path_metadata(AbsPath::new(t.path())?, ForwardRelativePath::new("x/z/zz")?, FileDigestConfig::source(CasDigestConfig::testing_default())),
             Ok(Some(RawPathMetadata::Symlink{at:_, to: RawSymlink::Relative(r, r_rel)})) => {
-                assert_eq!(r, "y/z/zz");
-                assert_eq!(r_rel.target(), "y/z/zz");
+                assert_eq!(r.as_str(), "y/z/zz");
+                assert_eq!(r_rel.target().as_str(), "y/z/zz");
             }
         );
 

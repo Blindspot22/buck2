@@ -16,6 +16,15 @@ use allocative::Allocative;
 use async_trait::async_trait;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+// Re-exported so existing `dice::*ValueSerialize` paths (and `crate::api::key::*`)
+// keep resolving after the definitions moved to the `pagable` crate.
+pub use pagable::NoValueSerialize;
+pub use pagable::OkPagableValueSerialize;
+use pagable::Pagable;
+use pagable::PagableTagged;
+pub use pagable::PagableValueSerialize;
+pub use pagable::TodoValueSerialize;
+pub use pagable::ValueSerialize;
 
 use crate::Demand;
 use crate::api::computations::DiceComputations;
@@ -32,7 +41,9 @@ use crate::introspection::graph::short_type_name;
 /// The result also needs to be cloned whenever it is requested from DICE.
 /// Cloning therefore should be cheap.
 #[async_trait]
-pub trait Key: Allocative + Debug + Display + Clone + Eq + Hash + Send + Sync + 'static {
+pub trait Key:
+    Allocative + Debug + Display + Clone + Eq + Hash + Send + Sync + Pagable + PagableTagged + 'static
+{
     type Value: Allocative + Dupe + Send + Sync + 'static;
 
     /// Provides a short informative name for this key type.
@@ -78,6 +89,8 @@ pub trait Key: Allocative + Debug + Display + Clone + Eq + Hash + Send + Sync + 
     fn invalidation_source_priority() -> InvalidationSourcePriority {
         InvalidationSourcePriority::Normal
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value>;
 }
 
 /// Dice tracks up to two invalidation paths for each node, a normal priority and a

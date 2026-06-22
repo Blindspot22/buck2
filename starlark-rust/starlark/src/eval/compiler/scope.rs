@@ -25,6 +25,7 @@ use std::marker::PhantomData;
 use std::mem;
 
 use dupe::Dupe;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::VisitSpanMut;
 use starlark_map::small_map;
 use starlark_map::small_map::SmallMap;
@@ -47,6 +48,7 @@ use starlark_syntax::syntax::ast::Visibility;
 use starlark_syntax::syntax::top_level_stmts::top_level_stmts_mut;
 use starlark_syntax::syntax::uniplate::VisitMut;
 
+use crate as starlark;
 use crate::codemap::CodeMap;
 use crate::codemap::Span;
 use crate::environment::Module;
@@ -69,9 +71,9 @@ use crate::syntax::Dialect;
 use crate::typing::Interface;
 use crate::typing::error::InternalError;
 use crate::values::FrozenHeap;
-use crate::values::FrozenRef;
 use crate::values::FrozenStringValue;
 use crate::values::FrozenValue;
+use crate::values::any::FrozenAnyValue;
 
 #[derive(Debug, thiserror::Error)]
 enum ScopeError {
@@ -99,7 +101,7 @@ struct ModuleScopeBuilder<'a> {
     // The rest are scopes for functions (which include their comprehensions).
     locals: Vec<ScopeId>,
     unscopes: Vec<Unscope>,
-    codemap: FrozenRef<'static, CodeMap>,
+    codemap: FrozenAnyValue<CodeMap>,
     globals: ScopeResolverGlobals,
     errors: Vec<EvalException>,
     top_level_stmt_count: usize,
@@ -273,7 +275,7 @@ impl<'f> ModuleScopeBuilder<'f> {
         loads: &HashMap<String, Interface>,
         stmt: AstStmt,
         globals: ScopeResolverGlobals,
-        codemap: FrozenRef<'static, CodeMap>,
+        codemap: FrozenAnyValue<CodeMap>,
         dialect: &Dialect,
     ) -> (CstStmt, ModuleScopeBuilder<'f>) {
         let mut scope_data = ModuleScopeData::new();
@@ -379,7 +381,7 @@ impl<'f> ModuleScopes<'f> {
         loads: &HashMap<String, Interface>,
         stmt: AstStmt,
         globals: ScopeResolverGlobals,
-        codemap: FrozenRef<'static, CodeMap>,
+        codemap: FrozenAnyValue<CodeMap>,
         dialect: &Dialect,
     ) -> crate::Result<ModuleScopes<'f>> {
         let (errors, scopes) =
@@ -396,7 +398,7 @@ impl<'f> ModuleScopes<'f> {
         loads: &HashMap<String, Interface>,
         stmt: AstStmt,
         globals: ScopeResolverGlobals,
-        codemap: FrozenRef<'static, CodeMap>,
+        codemap: FrozenAnyValue<CodeMap>,
         dialect: &Dialect,
     ) -> (Vec<EvalException>, ModuleScopes<'f>) {
         let (stmt, mut scope) = ModuleScopeBuilder::enter_module(
@@ -1051,7 +1053,7 @@ pub(crate) enum AssignCount {
 }
 
 /// Was a binding captured by nested def or lambda scopes?
-#[derive(Debug, Copy, Clone, Dupe, Eq, PartialEq, VisitSpanMut)]
+#[derive(Debug, Copy, Clone, Dupe, Eq, PartialEq, VisitSpanMut, StarlarkPagable)]
 pub(crate) enum Captured {
     Yes,
     No,

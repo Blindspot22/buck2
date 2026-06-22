@@ -261,7 +261,7 @@ def _get_default_rustc_warnings() -> list[str]:
     return lints
 
 
-def clippy(package_args: list[str], fix: bool) -> None:
+def clippy(package_args: list[str], fix: bool, target_args: list[str]) -> None:
     """
     Run cargo clippy.
     Also fails on any rustc warnings or build errors.
@@ -275,11 +275,7 @@ def clippy(package_args: list[str], fix: bool) -> None:
     clippy_fix_args = ["--fix"] if fix else []
 
     clippy_deny_lints = [*lint_levels.CLIPPY_DENY, *rustc_default_warnings]
-    clippy_allow_lints = lint_levels.CLIPPY_ALLOW
-    if fix:
-        clippy_deny_lints.extend(lint_levels.CLIPPY_AUTOFIX)
-    else:
-        clippy_allow_lints.extend(lint_levels.CLIPPY_AUTOFIX)
+    clippy_allow_lints = lint_levels.CLIPPY_ALLOW + lint_levels.CLIPPY_AUTOFIX
 
     clippy_deny_args = [f"--deny={c}" for c in clippy_deny_lints]
     clippy_allow_args = [f"--allow={c}" for c in clippy_allow_lints]
@@ -289,6 +285,7 @@ def clippy(package_args: list[str], fix: bool) -> None:
             "cargo",
             "clippy",
             *package_args,
+            *target_args,
             *clippy_fix_args,
             "-Z=unstable-options",
             "--profile=test",
@@ -332,15 +329,22 @@ def _lookup(d, *keys):
     return d
 
 
-def rustdoc(package_args: list[str]) -> None:
+def rustdoc(package_args: list[str], target_args: list[str]) -> None:
     print_running("cargo doc")
     # We have to chose between showing the output, or capturing it.
     # We have to capture it to figure out if there were warnings.
     # We would strongly like to show it, because it might take a while.
     # Cheat and do it twice, as we know Rust caches it, so the second time is quick.
-    run(["cargo", "doc", "--no-deps", *package_args])
+    run(["cargo", "doc", "--no-deps", *package_args, *target_args])
     output = run(
-        ["cargo", "doc", "--message-format=json", "--no-deps", *package_args],
+        [
+            "cargo",
+            "doc",
+            "--message-format=json",
+            "--no-deps",
+            *package_args,
+            *target_args,
+        ],
         capture_output=True,
     )
 
@@ -383,7 +387,7 @@ def rustdoc(package_args: list[str]) -> None:
         sys.exit(1)
 
 
-def test(package_args: list[str]) -> None:
+def test(package_args: list[str], target_args: list[str]) -> None:
     print_running("cargo test --lib")
     extra_args = []
     # Limit number of parallel jobs to prevent OOMs
@@ -391,9 +395,15 @@ def test(package_args: list[str]) -> None:
         extra_args = ["--jobs", str(os.cpu_count() // 2)]
     # Hour should be enough for all tests to run
     timeout_sec = 60 * 60
-    run(["cargo", "test", "--lib", *extra_args, *package_args], timeout=timeout_sec)
+    run(
+        ["cargo", "test", "--lib", *extra_args, *package_args, *target_args],
+        timeout=timeout_sec,
+    )
     print_running("cargo test --doc")
-    run(["cargo", "test", "--doc", *extra_args, *package_args], timeout=timeout_sec)
+    run(
+        ["cargo", "test", "--doc", *extra_args, *package_args, *target_args],
+        timeout=timeout_sec,
+    )
 
 
 def main() -> None:
@@ -447,6 +457,12 @@ def main() -> None:
         help="Perform rustdoc generation only. Do not run lints or tests.",
     )
     parser.add_argument(
+        "--test-only",
+        action="store_true",
+        default=False,
+        help="Run tests only. Do not run formatting, lints, or rustdoc.",
+    )
+    parser.add_argument(
         "--exclude",
         action="append",
         help="Packages excluded from linting.",
@@ -456,6 +472,12 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Apply Clippy suggestions",
+    )
+    parser.add_argument(
+        "--toolchain-target",
+        action="store",
+        default=None,
+        help="Target triple passed to cargo via --target (e.g. x86_64-pc-windows-gnu)",
     )
     parser.add_argument(
         "packages",
@@ -474,17 +496,24 @@ def main() -> None:
         package_args.append("--workspace")
         package_args.extend([f"--exclude={p.rstrip('/')}" for p in args.exclude])
 
+    target_args = ["--target", args.toolchain_target] if args.toolchain_target else []
+
     if package_args == [] and not (
-        args.lint_rust_only or args.rustfmt_only or args.rustdoc_only
+        args.lint_rust_only or args.rustfmt_only or args.rustdoc_only or args.test_only
     ):
         with timing():
             starlark_linter(args.buck2, args.git)
 
-    if not (args.rustfmt_only or args.lint_starlark_only or args.rustdoc_only):
+    if not (
+        args.rustfmt_only
+        or args.lint_starlark_only
+        or args.rustdoc_only
+        or args.test_only
+    ):
         with timing():
-            clippy(package_args, args.clippy_fix)
+            clippy(package_args, args.clippy_fix, target_args)
 
-    if not (args.lint_starlark_only or args.rustdoc_only):
+    if not (args.lint_starlark_only or args.rustdoc_only or args.test_only):
         with timing():
             rustfmt(buck2_dir, args.ci, args.git)
 
@@ -493,9 +522,10 @@ def main() -> None:
         or args.lint_rust_only
         or args.lint_starlark_only
         or args.rustfmt_only
+        or args.test_only
     ):
         with timing():
-            rustdoc(package_args)
+            rustdoc(package_args, target_args)
 
     if not (
         args.lint_only
@@ -505,7 +535,7 @@ def main() -> None:
         or args.rustdoc_only
     ):
         with timing():
-            test(package_args)
+            test(package_args, target_args)
 
     # On CI, check to make sure our test doesn't overwrite existing files
     if args.ci:

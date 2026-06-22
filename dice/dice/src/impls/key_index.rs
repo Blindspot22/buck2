@@ -219,9 +219,14 @@ mod tests {
     use derive_more::Display;
     use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
 
+    use crate::DiceKeyDyn;
     use crate::api::computations::DiceComputations;
     use crate::api::key::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
     use crate::impls::key_index::DiceKeyIndex;
     use crate::impls::key_index::DiceKeyUnpacked;
 
@@ -240,7 +245,10 @@ mod tests {
 
     #[test]
     fn test() {
-        #[derive(Hash, Clone, Copy, Dupe, Eq, PartialEq, Allocative, Display, Debug)]
+        #[derive(
+            Hash, Clone, Copy, Dupe, Eq, PartialEq, Allocative, Display, Debug, Pagable
+        )]
+        #[pagable_typetag(DiceKeyDyn)]
         struct TestKey(u64);
 
         #[async_trait]
@@ -257,6 +265,10 @@ mod tests {
 
             fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
                 unimplemented!("not needed")
+            }
+
+            fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+                NoValueSerialize::<Self::Value>::new()
             }
         }
 

@@ -38,10 +38,10 @@ use dice::DiceComputations;
 use dupe::Dupe;
 use futures::FutureExt;
 use gazebo::prelude::SliceExt;
+use pagable::Pagable;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
 use starlark::values::FrozenHeap;
@@ -131,7 +131,7 @@ pub(crate) async fn resolve_bxl_execution_platform(
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Allocative)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Allocative, Pagable)]
 pub(crate) struct BxlExecutionResolution {
     pub(crate) resolved_execution: ExecutionPlatformResolution,
     pub(crate) exec_deps_configured: Vec<ConfiguredProvidersLabel>,
@@ -229,11 +229,11 @@ impl<'v> BxlActions<'v> {
     }
 }
 
-async fn alloc_deps<'v, 'c>(
+async fn alloc_deps<'v>(
     deps: Vec<ConfiguredProvidersLabel>,
     heap: Heap<'v>,
     frozen_heap: &FrozenHeap,
-    ctx: &'c mut DiceComputations<'_>,
+    ctx: &mut DiceComputations<'_>,
 ) -> buck2_error::Result<ValueOfUnchecked<'v, DictType<StarlarkProvidersLabel, Dependency<'v>>>> {
     let analysis_results: Vec<_> = ctx
         .try_compute_join(deps, |ctx, target| {
@@ -268,11 +268,12 @@ async fn alloc_deps<'v, 'c>(
     Ok(heap.alloc_typed_unchecked(AllocDict(deps)).cast())
 }
 
+starlark::methods_static!(BXL_ACTIONS_METHODS = bxl_actions_methods);
+
 #[starlark_value(type = "bxl.Actions", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for BxlActions<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(bxl_actions_methods)
+        Some(BXL_ACTIONS_METHODS.methods())
     }
 }
 
@@ -306,7 +307,8 @@ fn bxl_actions_methods(builder: &mut MethodsBuilder) {
             soft_error!(
                 "bxl_acessing_exec_platform",
                 buck2_error!(buck2_error::ErrorTag::Input, "Anon target or dynamic action accesses bxl.Actions.exec_deps."),
-                quiet: true
+                quiet: true,
+                error_on_oss: true
             )?;
         }
 
@@ -323,7 +325,8 @@ fn bxl_actions_methods(builder: &mut MethodsBuilder) {
             soft_error!(
                 "bxl_acessing_exec_platform",
                 buck2_error!(buck2_error::ErrorTag::Input, "Anon target or dynamic action accesses bxl.Actions.toolchains."),
-                quiet: true
+                quiet: true,
+                error_on_oss: true
             )?;
         }
         Ok(this.toolchains)

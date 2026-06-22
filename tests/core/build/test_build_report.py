@@ -11,11 +11,27 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test
 from buck2.tests.e2e_util.helper.golden import golden
 from buck2.tests.e2e_util.helper.utils import replace_digest, replace_hash
+
+
+def _sanitize_timing_fields(obj: Any) -> None:
+    """Replace timing-dependent fields with a placeholder to avoid flaky tests."""
+    if isinstance(obj, dict):
+        for key in list(obj.keys()):
+            if key == "compute_time_ms":
+                obj[key] = "<COMPUTE_TIME_MS>"
+            elif key == "wall_clock_completion_ms":
+                obj[key] = "<WALL_CLOCK_COMPLETION_MS>"
+            else:
+                _sanitize_timing_fields(obj[key])
+    elif isinstance(obj, list):
+        for item in obj:
+            _sanitize_timing_fields(item)
 
 
 def build_report_test(name: str, command: list[str]) -> None:
@@ -27,6 +43,7 @@ def build_report_test(name: str, command: list[str]) -> None:
             report = json.loads(file.read())
         del report["trace_id"]
         del report["project_root"]
+        _sanitize_timing_fields(report)
 
         # Build report errors can change based on minor test changes such as
         # 1. Adding a target in TARGETS.fixture
@@ -109,6 +126,17 @@ build_report_test(
 )
 
 build_report_test(
+    "test_build_report_format_action_graph_sketch",
+    [
+        "//:rule1",
+        "//:dir1",
+        "//subdir:rule",
+        "-c",
+        "buck2.log_action_graph_sketch=true",
+    ],
+)
+
+build_report_test(
     "test_build_report_format_all_sketches",
     [
         "//:rule1",
@@ -120,6 +148,8 @@ build_report_test(
         "buck2.log_configured_graph_sketch=true",
         "-c",
         "buck2.log_total_configured_graph_sketch=true",
+        "-c",
+        "buck2.log_action_graph_sketch=true",
     ],
 )
 
@@ -186,12 +216,20 @@ async def test_build_report_contains_per_target_build_metrics(
         assert rule1_metrics["metrics"]["declared_actions"] == 2
         assert rule1_metrics["amortized_metrics"]["declared_actions"] == 1
 
+        # re_platform_names should be absent for local-only actions (skip_serializing_if empty)
+        assert "re_platform_names" not in rule1_metrics
+
+        # wall_clock_completion_ms should be present for completed targets
+        assert "wall_clock_completion_ms" in rule1_metrics
+        assert rule1_metrics["wall_clock_completion_ms"] > 0
+
         rule2_metrics = report["results"]["root//:rule2"]["configured"][
             "<unspecified>"
         ]["build_metrics"]
         assert rule2_metrics["action_graph_size"] == 1
         assert rule2_metrics["metrics"]["declared_actions"] == 4
         assert rule2_metrics["amortized_metrics"]["declared_actions"] == 3
+        assert "re_platform_names" not in rule2_metrics
         assert report["build_metrics"]
 
 
@@ -214,6 +252,7 @@ def streaming_build_report_test(name: str, command: list[str]) -> None:
 
         del report["trace_id"]
         del report["project_root"]
+        _sanitize_timing_fields(report)
 
         # Build report errors can change based on minor test changes such as
         # 1. Adding a target in TARGETS.fixture
@@ -340,3 +379,24 @@ async def test_streaming_build_report_overwrites_existing_file(
             assert "success" in report_data
             assert "results" in report_data
             assert "project_root" in report_data
+
+
+@buck_test(data_dir="re_platform_names")
+async def test_build_report_re_platform_names(buck: Buck, tmp_path: Path) -> None:
+    report = tmp_path / "build-report.json"
+
+    await buck.build(
+        "//:run_action",
+        "-c",
+        "buck2.detailed_aggregated_metrics=true",
+        "--build-report",
+        str(report),
+    )
+
+    with open(report) as file:
+        report_data = json.load(file)
+        metrics = report_data["results"]["root//:run_action"]["configured"][
+            "<unspecified>"
+        ]["build_metrics"]
+        assert "re_platform_names" in metrics
+        assert "linux-remote-execution" in metrics["re_platform_names"]

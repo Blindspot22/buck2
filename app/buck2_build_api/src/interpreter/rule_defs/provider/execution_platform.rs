@@ -16,11 +16,14 @@ use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use starlark::any::ProvidesStaticType;
 use starlark::starlark_simple_value;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::starlark_value;
 
-#[derive(ProvidesStaticType, Debug, NoSerialize, Allocative)]
-pub struct StarlarkExecutionPlatformResolution(pub ExecutionPlatformResolution);
+#[derive(ProvidesStaticType, Debug, NoSerialize, Allocative, StarlarkPagable)]
+pub struct StarlarkExecutionPlatformResolution(
+    #[starlark_pagable(pagable)] pub ExecutionPlatformResolution,
+);
 
 starlark_simple_value!(StarlarkExecutionPlatformResolution);
 

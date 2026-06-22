@@ -97,13 +97,14 @@ impl<A: UnpackValueErrorInfallible, B: UnpackValueErrorInfallible> UnpackValueEr
 /// ```
 /// # use allocative::Allocative;
 /// # use starlark::any::ProvidesStaticType;
-/// # use starlark::values::{NoSerialize, StarlarkValue, starlark_value};
+/// # use starlark::values::{NoSerialize, StarlarkPagable, StarlarkValue, starlark_value};
 ///
 /// #[derive(
 ///     Debug,
 ///     derive_more::Display,
 ///     Allocative,
 ///     NoSerialize,
+///     StarlarkPagable,
 ///     ProvidesStaticType
 /// )]
 /// struct MySimpleValue;

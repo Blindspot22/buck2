@@ -23,6 +23,7 @@ use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 use serde::Deserialize;
 use tracing::Level;
+use tracing::debug;
 use tracing::enabled;
 use tracing::info;
 use tracing::instrument;
@@ -98,7 +99,7 @@ pub(crate) fn to_project_json(
 
     let mut crates: Vec<Crate> = Vec::with_capacity(targets_vec.len());
     for target in &targets_vec {
-        let info = target_index.get(&target).unwrap();
+        let info = target_index.get(target).unwrap();
 
         let dep_targets = resolve_aliases(&info.deps, &aliases, &proc_macros);
         let deps = as_deps(&dep_targets, info, &targets_to_ids, &target_index);
@@ -171,6 +172,22 @@ pub(crate) fn to_project_json(
             include_dirs.push(parent.to_owned());
         }
 
+        // If an include directory ends with __srcs, use its parent directory.
+        // Buck generates __srcs directories that mirror the source layout,
+        // and rust-analyzer should resolve to the real source directory.
+        include_dirs = include_dirs
+            .into_iter()
+            .map(|p| {
+                if p.file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with("__srcs"))
+                {
+                    p.parent().unwrap_or(&p).to_owned()
+                } else {
+                    p
+                }
+            })
+            .collect();
+
         include_dirs = remove_duplicates_preserve_order(include_dirs);
 
         let build = if include_all_buildfiles || info.in_workspace {
@@ -189,7 +206,7 @@ pub(crate) fn to_project_json(
             root_module,
             edition,
             deps,
-            is_workspace_member: info.in_workspace,
+            is_workspace_member: info.is_workspace_member(),
             source: Some(Source {
                 include_dirs,
                 exclude_dirs: vec![],
@@ -320,15 +337,16 @@ fn resolve_aliases(
     let mut resolved_targets = vec![];
 
     for target in targets {
-        let destination_target = match aliases.get(target) {
-            Some(actual) => &actual.actual,
-            None => {
-                // we fall back to check the proc macros for aliases
-                // (these should exist in the aliases map, but they don't. yolo.)
-                match proc_macros.get(target) {
-                    Some(MacroOutput { actual, .. }) => actual,
-                    None => target,
-                }
+        let destination_target = if let Some(alias_target) = aliases.get(target)
+            && let Some(actual) = &alias_target.actual
+        {
+            actual
+        } else {
+            // we fall back to check the proc macros for aliases
+            // (these should exist in the aliases map, but they don't. yolo.)
+            match proc_macros.get(target) {
+                Some(MacroOutput { actual, .. }) => actual,
+                None => target,
             }
         };
 
@@ -438,13 +456,21 @@ fn merge_unit_test_targets(
 pub(crate) struct Buck {
     command: String,
     mode: Option<String>,
+    project_root: Option<PathBuf>,
 }
 
 impl Buck {
-    pub(crate) fn new(command: Option<String>, mode: Option<String>) -> Self {
+    pub(crate) fn new(
+        command: Option<String>,
+        mode: Option<String>,
+        project_root: Option<PathBuf>,
+    ) -> Self {
+        tracing::info!(?project_root, "Project root was set");
+
         Buck {
             command: command.unwrap_or_else(|| "buck2".into()),
             mode,
+            project_root,
         }
     }
 
@@ -459,7 +485,6 @@ impl Buck {
     {
         let mut cmd = self.command_without_config(subcommands);
         cmd.args([
-            CLIENT_METADATA_RUST_PROJECT,
             "-c=rust.rust_project_build=true",
             // Buck owner() queries stop at the innermost BUCK file unless
             // package_boundary_exceptions is set.
@@ -503,8 +528,13 @@ impl Buck {
             .env_remove("RUST_LIB_BACKTRACE");
 
         cmd.args(["--isolation-dir", ".rust-analyzer"]);
+        cmd.arg(CLIENT_METADATA_RUST_PROJECT);
         cmd.args(subcommands);
         cmd.args(["--oncall", "rust_devx"]);
+
+        if let Some(root) = &self.project_root {
+            cmd.current_dir(root);
+        }
 
         cmd
     }
@@ -638,7 +668,7 @@ impl Buck {
         for _ in 0..5 {
             let mut alias_destinations = alias_map
                 .values()
-                .map(|info| info.actual.clone())
+                .filter_map(|info| info.actual.clone())
                 .collect::<FxHashSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -646,7 +676,7 @@ impl Buck {
             alias_destinations.sort();
 
             let new_aliases =
-                match self.query_aliased_targets(&alias_destinations, &universe_targets) {
+                match self.query_aliased_targets(&alias_destinations, universe_targets) {
                     Ok(new_aliases) => new_aliases,
                     Err(_) => {
                         warn!("buck cquery failed, falling back to best-effort uquery");
@@ -659,7 +689,9 @@ impl Buck {
             }
 
             for destination in alias_map.values_mut() {
-                if let Some(new_destination) = new_aliases.get(&destination.actual) {
+                if let Some(actual) = &destination.actual
+                    && let Some(new_destination) = new_aliases.get(actual)
+                {
                     destination.actual = new_destination.actual.clone();
                 }
             }
@@ -689,13 +721,19 @@ impl Buck {
             .join(",");
         command.args(["--target-universe", &universe_arg]);
 
-        match deserialize_output::<Vec<Target>>(command.output(), &command) {
-            Ok(targets) => targets,
-            Err(e) => {
-                tracing::warn!("Failed to query sysroot targets: {e:?}");
-                vec![Target::new(sysroot_package)]
-            }
-        }
+        let mut sysroot_targets =
+            match deserialize_output::<Vec<Target>>(command.output(), &command) {
+                Ok(targets) => targets,
+                Err(e) => {
+                    tracing::warn!("Failed to query sysroot targets: {e:?}");
+                    vec![Target::new(sysroot_package)]
+                }
+            };
+
+        sysroot_targets.sort();
+        sysroot_targets.dedup();
+
+        sysroot_targets
     }
 
     /// Given a list of targets, for all targets that are aliases, return the targets
@@ -828,7 +866,12 @@ impl Buck {
         let out: FxHashMap<PathBuf, Vec<Target>> = deserialize_output(command.output(), &command)?;
 
         for (k, v) in out.iter() {
-            info!("Found {} with {} targets", k.display(), v.len());
+            debug!(
+                "Found {} with {} target{}",
+                k.display(),
+                v.len(),
+                if v.len() == 1 { "" } else { "s" }
+            );
         }
 
         Ok(out)
@@ -1041,7 +1084,12 @@ fn deserialize_uquery_alias_info(v: serde_json::Value) -> FxHashMap<Target, Alia
             continue;
         };
         let actual = Target::new(actual_str);
-        map.insert(Target::new(target_str), AliasedTargetInfo { actual });
+        map.insert(
+            Target::new(target_str),
+            AliasedTargetInfo {
+                actual: Some(actual),
+            },
+        );
     }
 
     map
@@ -1098,6 +1146,7 @@ fn merge_tests_no_cycles() {
         TargetInfo {
             name: "foo".to_owned(),
             label: "foo".to_owned(),
+            labels: vec![],
             kind: Kind::Library,
             edition: None,
             srcs: vec![],
@@ -1123,6 +1172,7 @@ fn merge_tests_no_cycles() {
         TargetInfo {
             name: "foo-unittest".to_owned(),
             label: "foo-unittest".to_owned(),
+            labels: vec![],
             kind: Kind::Test,
             edition: None,
             srcs: vec![],
@@ -1157,6 +1207,7 @@ fn merge_target_multiple_tests_no_cycles() {
         TargetInfo {
             name: "foo".to_owned(),
             label: "foo".to_owned(),
+            labels: vec![],
             kind: Kind::Library,
             edition: None,
             srcs: vec![],
@@ -1185,6 +1236,7 @@ fn merge_target_multiple_tests_no_cycles() {
         TargetInfo {
             name: "foo@rust".to_owned(),
             label: "foo@rust".to_owned(),
+            labels: vec![],
             kind: Kind::Library,
             edition: None,
             srcs: vec![],
@@ -1213,6 +1265,7 @@ fn merge_target_multiple_tests_no_cycles() {
         TargetInfo {
             name: "foo_test".to_owned(),
             label: "foo_test".to_owned(),
+            labels: vec![],
             kind: Kind::Test,
             edition: None,
             srcs: vec![],
@@ -1241,6 +1294,7 @@ fn merge_target_multiple_tests_no_cycles() {
         TargetInfo {
             name: "foo@rust-unittest".to_owned(),
             label: "foo@rust-unittest".to_owned(),
+            labels: vec![],
             kind: Kind::Test,
             edition: None,
             srcs: vec![],
@@ -1286,6 +1340,7 @@ fn integration_tests_preserved() {
         TargetInfo {
             name: "foo".to_owned(),
             label: "foo".to_owned(),
+            labels: vec![],
             kind: Kind::Library,
             edition: None,
             srcs: vec![],
@@ -1311,6 +1366,7 @@ fn integration_tests_preserved() {
         TargetInfo {
             name: "foo-integration-test".to_owned(),
             label: "foo-integration-test".to_owned(),
+            labels: vec![],
             kind: Kind::Test,
             edition: None,
             srcs: vec![],
@@ -1343,6 +1399,7 @@ fn named_deps_underscores() {
         TargetInfo {
             name: "bar".to_owned(),
             label: "bar".to_owned(),
+            labels: vec![],
             kind: Kind::Library,
             edition: None,
             srcs: vec![],
@@ -1369,6 +1426,7 @@ fn named_deps_underscores() {
     let info = TargetInfo {
         name: "foo".to_owned(),
         label: "foo".to_owned(),
+        labels: vec![],
         kind: Kind::Library,
         edition: None,
         srcs: vec![],
@@ -1416,7 +1474,7 @@ fn alias_of_existing_target() {
     aliases.insert(
         Target::new("//foo-alias"),
         AliasedTargetInfo {
-            actual: Target::new("//foo"),
+            actual: Some(Target::new("//foo")),
         },
     );
 

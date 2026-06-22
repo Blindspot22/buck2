@@ -82,6 +82,7 @@ message StatusResponse {
   optional bool valid_buck_out_mount = 15;
   optional string io_provider = 16;
   optional TokioRuntimeMetrics tokio_runtime_metrics = 17;
+  optional string allprocs_cgroup_path = 18;
 }
 
 message TokioRuntimeMetrics {
@@ -113,6 +114,7 @@ message RepresentativeConfigFlag {
     string mode_file = 3;
     string modifier = 4;
     string target_platforms = 5;
+    string target_universe = 6;
   }
 }
 
@@ -154,6 +156,9 @@ message ClientContext {
   /// Contents of `BUCK2_HARD_ERROR` environment variable.
   string buck2_hard_error = 20;
 
+  /// Contents of `BUCK2_SHOW_SOFT_ERRORS` environment variable.
+  string buck2_show_soft_errors = 26;
+
   enum PreemptibleWhen {
     /// Default
     NEVER = 0;
@@ -185,6 +190,9 @@ message ClientContext {
   /// Options for starlark profiling via --profile-patterns and related
   /// arguments.
   optional ProfilePatternOptions profile_pattern_opts = 25;
+
+  // Agent context key=value pairs passed via --agent-context.
+  repeated buck.data.AgentContextEntry agent_context = 27;
 }
 
 message TargetsRequest {
@@ -643,7 +651,7 @@ message CounterWithExamples {
 
 message TestResponse {
   reserved 101;
-  optional int32 exit_code = 1;
+  int32 executor_exit_code = 1;
   optional string serialized_build_report = 100;
   repeated buck.data.ErrorReport errors = 102;
   message TestStatuses {
@@ -657,6 +665,7 @@ message TestResponse {
     uint64 build_errors = 16;
     CounterWithExamples infra_failure = 17;
     CounterWithExamples omitted = 18;
+    CounterWithExamples timed_out = 19;
   }
   TestStatuses test_statuses = 3;
   string executor_stdout = 4;
@@ -667,7 +676,9 @@ message TestResponse {
   repeated string target_rule_type_names = 7;
 }
 
-message InstallResponse {}
+message InstallResponse {
+  repeated string target_rule_type_names = 1;
+}
 
 message GenericRequest {
   ClientContext context = 1;
@@ -691,11 +702,13 @@ message UnstableCrashRequest {
   enum CrashType {
     PANIC = 0;
     ABORT = 2;
+    OOM = 3;
   }
   CrashType crash_type = 1;
+  // Number of bytes to allocate to trigger OOM killing (only used with OOM
+  // crash type).
+  uint64 bytes = 2;
 }
-
-message UnstableCrashResponse {}
 
 message CommandResult {
   reserved 10;
@@ -793,6 +806,12 @@ message UnstableHeapDumpRequest {
 }
 
 message UnstableHeapDumpResponse {}
+
+message UnstableFlushPgoProfileRequest {}
+
+message UnstableFlushPgoProfileResponse {
+  bool pgo_active = 1;
+}
 
 message UnstableAllocatorStatsRequest {
   // Options to pass to the allocator stats backend (JEMalloc's
@@ -910,6 +929,14 @@ message CleanStaleRequest {
   int64 keep_since_time = 2;
   bool dry_run = 3;
   bool tracked_only = 4;
+  // When set, after the keep_since_time scan, promote retained, non-active
+  // artifacts (oldest-access first) to stale until projected free disk %
+  // rises above this threshold. Presence enables adaptive promotion.
+  optional double adaptive_low_disk_threshold = 5;
+  // Adaptive min-TTL floor in seconds. Retained artifacts younger than this
+  // are protected even under disk pressure. Ignored unless
+  // adaptive_low_disk_threshold is set.
+  optional int64 adaptive_min_ttl_seconds = 6;
 }
 
 message CleanStaleResponse {
@@ -927,6 +954,16 @@ message FileStatusRequest {
 
 message FlushDepFilesRequest {
   bool retain_locally_produced_dep_files = 1;
+}
+
+enum HydrationSubcommand {
+  PAGE_OUT = 0;
+  PAGE_IN = 1;
+}
+
+message HydrationRequest {
+  ClientContext context = 1;
+  HydrationSubcommand subcommand = 2;
 }
 
 message SetLogFilterRequest {
@@ -988,7 +1025,6 @@ service DaemonApi {
   rpc Status(StatusRequest) returns (CommandResult);
   rpc Ping(PingRequest) returns (CommandResult);
   rpc FlushDepFiles(FlushDepFilesRequest) returns (CommandResult);
-
   // All streaming request types should have a ClientContext.
   rpc Build(BuildRequest) returns (stream MultiCommandProgress);
   rpc Bxl(BxlRequest) returns (stream MultiCommandProgress);
@@ -1004,6 +1040,7 @@ service DaemonApi {
   rpc Install(InstallRequest) returns (stream MultiCommandProgress);
   rpc CleanStale(CleanStaleRequest) returns (stream MultiCommandProgress);
   rpc FileStatus(FileStatusRequest) returns (stream MultiCommandProgress);
+  rpc Hydration(HydrationRequest) returns (stream MultiCommandProgress);
   rpc Profile2(ProfileRequest) returns (stream MultiCommandProgress);
 
   rpc NewGenericImpl(NewGenericRequestMessage)
@@ -1016,6 +1053,11 @@ service DaemonApi {
   // Requests the daemon to perform a heap dump and save the dump to a file.
   rpc Unstable_HeapDump(UnstableHeapDumpRequest)
       returns (UnstableHeapDumpResponse);
+
+  // Flushes PGO profile data to disk. Only useful when the daemon was built
+  // with -Cprofile-generate.
+  rpc Unstable_FlushPgoProfile(UnstableFlushPgoProfileRequest)
+      returns (UnstableFlushPgoProfileResponse);
 
   // Requests allocator stats from the daemon.
   rpc Unstable_AllocatorStats(UnstableAllocatorStatsRequest)

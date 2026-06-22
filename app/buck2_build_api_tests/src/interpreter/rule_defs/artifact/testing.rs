@@ -22,7 +22,7 @@ use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::Starla
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_declared_artifact::StarlarkDeclaredArtifact;
 use buck2_build_api::interpreter::rule_defs::artifact::unpack_artifact::UnpackNonPromiseInputArtifact;
-use buck2_build_api::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
+use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use buck2_core::category::CategoryRef;
 use buck2_core::cells::paths::CellRelativePath;
 use buck2_core::configuration::data::ConfigurationData;
@@ -46,12 +46,12 @@ use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::execute::request::OutputType;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::BuckHashMap;
+use buck2_hash::buck_indexset;
 use buck2_interpreter_for_build::interpreter::build_context::BuildContext;
 use buck2_interpreter_for_build::interpreter::testing::cells;
 use buck2_util::arc_str::ArcS;
 use dupe::Dupe;
-use fxhash::FxHashMap;
-use indexmap::indexset;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -145,12 +145,12 @@ pub(crate) fn artifactory(builder: &mut GlobalsBuilder) {
             BuckOutPathKind::default(),
             eval.heap(),
         )?;
-        let outputs = indexset![artifact.as_output()];
+        let outputs = buck_indexset![artifact.as_output()];
         registry.register(
             &DeferredHolderKey::Base(BaseDeferredKey::TargetLabel(target_label.dupe())),
             outputs,
             SimpleUnregisteredAction::new(
-                indexset![],
+                buck_indexset![],
                 vec![],
                 CategoryRef::new("fake_action").unwrap().to_owned(),
                 None,
@@ -177,11 +177,12 @@ pub(crate) fn artifactory(builder: &mut GlobalsBuilder) {
         );
         let executor_fs = ExecutorFs::new(&fs, PathSeparatorKind::Unix);
         let mut cli = Vec::<String>::new();
-        let mut ctx = DefaultCommandLineContext::new(&executor_fs);
+        let artifact_path_mapping = BuckHashMap::default();
+        let mut fmt = CommandLineBuilder::new(&mut cli, &artifact_path_mapping, &executor_fs);
         artifact
             .0
             .as_command_line_like()
-            .add_to_command_line(&mut cli, &mut ctx, &FxHashMap::default())
+            .add_to_command_line(&mut fmt)
             .unwrap();
         assert_eq!(1, cli.len());
         Ok(cli.first().unwrap().to_owned())
@@ -216,9 +217,9 @@ pub(crate) fn artifactory(builder: &mut GlobalsBuilder) {
 
         actions_registry.register(
             &DeferredHolderKey::Base(BaseDeferredKey::TargetLabel(target_label.dupe())),
-            indexset![output_artifact],
+            buck_indexset![output_artifact],
             SimpleUnregisteredAction::new(
-                indexset![],
+                buck_indexset![],
                 vec![],
                 CategoryRef::new("fake_action").unwrap().to_owned(),
                 None,

@@ -8,8 +8,8 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::artifact_type::ArtifactErrors;
@@ -35,6 +35,8 @@ use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::StdBuckHashMap;
+use buck2_util::thin_box::ThinBoxSlice;
 use dupe::Dupe;
 use either::Either;
 use host_sharing::WeightClass;
@@ -70,7 +72,9 @@ pub(crate) enum RunActionError {
     #[error("expected at least one output artifact, did not get any")]
     NoOutputsSpecified,
     #[error("`weight` must be a positive integer, got `{0}`")]
-    InvalidWeight(i32),
+    InvalidWeight(u32),
+    #[error("`timeout_seconds` must be a positive integer, got `{0}`")]
+    InvalidTimeout(u32),
     #[error("`weight` and `weight_percentage` cannot both be passed")]
     DuplicateWeightsSpecified,
     #[error("`dep_files` value with key `{}` has an invalid count of associated outputs. Expected 1, got {}.", .key, .count)]
@@ -188,6 +192,16 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
     ///     * `drop_host_mount_globs`: list of strings containing file
     ///     globs. Any mounts globs specified will not be bind mounted
     ///     from the host.
+    /// * `timeout_seconds`: an optional timeout for the action, in seconds. If
+    ///   the action takes longer than this, it will be cancelled and behave as if
+    ///   it has failed. Must be a positive number. The default is no timeout.
+    ///     * Use this to abort misbehaving actions (e.g. if an action sometimes
+    ///     deadlock). In other words, use this when the build will fail either
+    ///     way, and you want to just make it fail faster.
+    ///     * Do NOT use  this to attempt to enforce e.g. a runtime policy on a
+    ///     specific set of actions: action runtime is often variable so setting
+    ///     a timeout to try and enforce a specific runtime goal will inevitably
+    ///     result in flaky failures for end users running builds.
     ///  * `meta_internal_extra_params`: a dictionary to pass extra parameters to RE, can add more keys in the future:
     ///     * `remote_execution_policy`: refer to TExecutionPolicy.
     ///  * `error_handler`: an optional function that analyzes action failures and produces structured error information.
@@ -242,8 +256,8 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] prefer_remote: bool,
         #[starlark(require = named, default = true)] low_pass_filter: bool,
         #[starlark(require = named, default = false)] always_print_stderr: bool,
-        #[starlark(require = named)] weight: Option<i32>,
-        #[starlark(require = named)] weight_percentage: Option<i32>,
+        #[starlark(require = named)] weight: Option<u32>,
+        #[starlark(require = named)] weight_percentage: Option<u32>,
         #[starlark(require = named)] dep_files: Option<SmallMap<&'v str, &'v ArtifactTag>>,
         #[starlark(require = named)] metadata_env_var: Option<String>,
         #[starlark(require = named)] metadata_path: Option<String>,
@@ -270,6 +284,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             SmallMap<&'v str, &'v str>,
         >,
         #[starlark(default = NoneType, require = named)] remote_execution_dynamic_image: Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] timeout_seconds: NoneOr<u32>,
         #[starlark(require = named, default = NoneOr::None)] meta_internal_extra_params: NoneOr<
             DictRef<'v>,
         >,
@@ -281,6 +296,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] expect_eligible_for_dedupe: NoneOr<
             bool,
         >,
+        #[starlark(require = named, default = false)] eager_materialization_enabled: bool,
     ) -> starlark::Result<NoneType> {
         if incremental_remote_outputs && !no_outputs_cleanup {
             // Precaution to make sure content-based paths are not involved.
@@ -292,7 +308,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
 
         struct RunCommandArtifactVisitor<'v> {
             inner: SimpleCommandLineArtifactVisitor<'v>,
-            tagged_outputs: HashMap<ArtifactTag, Vec<OutputArtifact<'v>>>,
+            tagged_outputs: StdBuckHashMap<ArtifactTag, Vec<OutputArtifact<'v>>>,
             depth: u64,
             dep_file_artifact_tags: Option<SmallSet<&'v ArtifactTag>>,
             inputs_with_multiple_tags_for_dep_files: Vec<(ArtifactGroup, Vec<ArtifactTag>)>,
@@ -311,7 +327,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
                 };
                 Self {
                     inner: SimpleCommandLineArtifactVisitor::new(),
-                    tagged_outputs: HashMap::new(),
+                    tagged_outputs: StdBuckHashMap::default(),
                     depth: 0,
                     dep_file_artifact_tags,
                     inputs_with_multiple_tags_for_dep_files: Vec::new(),
@@ -403,11 +419,10 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         let weight = match (weight, weight_percentage) {
             (None, None) => WeightClass::Permits(1),
             (Some(v), None) => {
-                if v < 1 {
+                if v == 0 {
                     return Err(buck2_error::Error::from(RunActionError::InvalidWeight(v)).into());
-                } else {
-                    WeightClass::Permits(v as usize)
                 }
+                WeightClass::Permits(v.try_into().unwrap()) // We don't support < 32 bit platforms.
             }
             (None, Some(v)) => WeightClass::Percentage(
                 WeightPercentage::try_new(v)
@@ -493,14 +508,14 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             (Some(env_var), Some(path)) => {
                 let path: ForwardRelativePathBuf = path.try_into()?;
                 this.state()?.claim_output_path(eval, &path)?;
-                buck2_error::Ok(Some(MetadataParameter {
+                buck2_error::Ok(Some(Box::new(MetadataParameter {
                     env_var,
                     path,
                     ignore_tags: incremental_metadata_ignore_tags
                         .into_iter()
                         .map(|x| x.dupe())
                         .collect(),
-                }))
+                })))
             }
             (Some(_), None) => Err(RunActionError::MetadataPathMissing.into()),
             (None, Some(_)) => Err(RunActionError::MetadataEnvVarMissing.into()),
@@ -541,12 +556,12 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         let re_dependencies = remote_execution_dependencies
             .into_iter()
             .map(RemoteExecutorDependency::parse)
-            .collect::<buck2_error::Result<Vec<RemoteExecutorDependency>>>()?;
+            .collect::<buck2_error::Result<ThinBoxSlice<RemoteExecutorDependency>>>()?;
 
         let re_gang_workers = re_gang_workers
             .into_iter()
             .map(ReGangWorker::parse)
-            .collect::<buck2_error::Result<Vec<ReGangWorker>>>()?;
+            .collect::<buck2_error::Result<ThinBoxSlice<ReGangWorker>>>()?;
 
         let re_custom_image = parse_custom_re_image(
             "remote_execution_dynamic_image",
@@ -555,6 +570,16 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
 
         let extra_params =
             parse_meta_internal_extra_params(meta_internal_extra_params.into_option())?;
+
+        let timeout = match timeout_seconds.into_option() {
+            Some(t) => {
+                if t == 0 {
+                    return Err(buck2_error::Error::from(RunActionError::InvalidTimeout(t)).into());
+                }
+                Some(Duration::from_secs(t.into()))
+            }
+            None => None,
+        };
 
         if incremental_remote_outputs {
             for o in artifacts.declared_outputs.iter() {
@@ -572,6 +597,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         let action = UnregisteredRunAction {
             executor_preference,
             always_print_stderr,
+            eager_materialization_enabled,
             weight,
             low_pass_filter,
             dep_files: dep_files_configuration,
@@ -588,9 +614,19 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             remote_execution_custom_image: re_custom_image,
             meta_internal_extra_params: extra_params,
             expected_eligible_for_dedupe: expect_eligible_for_dedupe.into_option(),
+            timeout,
         };
 
-        if expect_eligible_for_dedupe.into_option().unwrap_or(false) {
+        let expect_eligible_for_dedupe = expect_eligible_for_dedupe.into_option().unwrap_or(false);
+        if expect_eligible_for_dedupe {
+            let deferred_holder_key = &this.state()?.analysis_value_storage.self_key;
+            let target_platform = if let BaseDeferredKey::TargetLabel(configured_label) =
+                deferred_holder_key.owner()
+            {
+                Some(configured_label.cfg())
+            } else {
+                None
+            };
             for o in artifacts.declared_outputs.iter() {
                 if !o.has_content_based_path() {
                     return Err(buck2_error::Error::from(
@@ -601,17 +637,11 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
                     .into());
                 }
             }
-            let deferred_holder_key = &this.state()?.analysis_value_storage.self_key;
-            let target_platform = if let BaseDeferredKey::TargetLabel(configured_label) =
-                deferred_holder_key.owner()
-            {
-                Some(configured_label.cfg())
-            } else {
-                None
-            };
 
             for i in artifacts.inputs.iter() {
-                if !i.is_eligible_for_dedupe(target_platform) {
+                if i.is_eligible_for_dedupe(target_platform)
+                    == buck2_data::EligibleForDedupe::IneligibleInput
+                {
                     return Err(buck2_error::Error::from(
                         RunActionError::ExpectEligibleForDedupeWithIneligibleInput {
                             input: i.dupe(),

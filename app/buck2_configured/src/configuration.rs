@@ -35,9 +35,13 @@ use buck2_node::nodes::unconfigured::TargetNodeRef;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use ref_cast::RefCast;
 use starlark_map::ordered_map::OrderedMap;
 use starlark_map::unordered_map::UnorderedMap;
@@ -113,21 +117,23 @@ async fn configuration_matches(
     Ok(true)
 }
 
-#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("ConfigurationNode({}, {})", cfg_target, target_cfg)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct ConfigurationNodeKey {
     target_cfg: ConfigurationData,
     target_cell: CellNameForConfigurationResolution,
     cfg_target: ConfigurationSettingKey,
 }
 
-#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display(
     "ResolvedConfigurationKey(target_cfg: {}, cell: {}, configuration_deps size {})",
     target_cfg,
     target_cell,
     configuration_deps.len()
 )]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct MatchedConfigurationSettingKeysKey {
     target_cfg: ConfigurationData,
     target_cell: CellNameForConfigurationResolution,
@@ -145,7 +151,7 @@ async fn compute_platform_configuration_no_label_check(
         .provider_collection()
         .builtin_provider::<FrozenPlatformInfo>()
         .ok_or_else(|| ConfigurationError::MissingPlatformInfo(target.dupe()))?
-        .to_configuration()
+        .to_configuration(false)
 }
 
 /// Basically, evaluate `platform()` rule.
@@ -229,6 +235,10 @@ impl Key for MatchedConfigurationSettingKeysKey {
     fn equality(_: &Self::Value, _: &Self::Value) -> bool {
         false
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
 async fn get_configuration_node(
@@ -290,13 +300,27 @@ impl Key for ConfigurationNodeKey {
             _ => false,
         }
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
 pub(crate) async fn get_platform_configuration(
     ctx: &mut DiceComputations<'_>,
     target: &TargetLabel,
 ) -> buck2_error::Result<ConfigurationData> {
-    #[derive(derive_more::Display, Debug, Eq, Hash, PartialEq, Clone, Allocative)]
+    #[derive(
+        derive_more::Display,
+        Debug,
+        Eq,
+        Hash,
+        PartialEq,
+        Clone,
+        Allocative,
+        Pagable
+    )]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct PlatformConfigurationKey(TargetLabel);
 
     #[async_trait]
@@ -316,6 +340,10 @@ pub(crate) async fn get_platform_configuration(
                 (Ok(x), Ok(y)) => x == y,
                 _ => false,
             }
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            OkPagableValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -372,11 +400,12 @@ pub(crate) async fn get_matched_cfg_keys_for_node(
                 ConfigurationDepKind::SelectKey => true,
                 ConfigurationDepKind::ConfiguredDepPlatform => false,
                 ConfigurationDepKind::Transition => false,
+                ConfigurationDepKind::DefaultTargetPlatform => false,
             }
             .then_some(d)
         })
         .map(ConfigurationSettingKey::ref_cast);
-    get_matched_cfg_keys(ctx, &target_cfg, target_cell, d).await
+    get_matched_cfg_keys(ctx, target_cfg, target_cell, d).await
 }
 
 struct ConfigurationCalculationDynImpl;

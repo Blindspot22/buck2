@@ -32,8 +32,12 @@ use buck2_node::target_calculation::ConfiguredTargetCalculationImpl;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::configuration::get_platform_configuration;
 use crate::execution::get_execution_platform_toolchain_dep;
@@ -43,8 +47,9 @@ async fn get_target_platform_detector(
 ) -> buck2_error::Result<Arc<TargetPlatformDetector>> {
     // This requires a bit of computation so cache it on the graph.
     // TODO(cjhopman): Should we construct this (and similar buckconfig-derived objects) as part of the buck config itself?
-    #[derive(Clone, Display, Debug, Dupe, Eq, Hash, PartialEq, Allocative)]
+    #[derive(Clone, Display, Debug, Dupe, Eq, Hash, PartialEq, Allocative, Pagable)]
     #[display("TargetPlatformDetectorKey")]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct TargetPlatformDetectorKey;
 
     #[async_trait]
@@ -88,6 +93,10 @@ async fn get_target_platform_detector(
                 (Ok(x), Ok(y)) => x == y,
                 _ => false,
             }
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            OkPagableValueSerialize::<Self::Value>::new()
         }
     }
 

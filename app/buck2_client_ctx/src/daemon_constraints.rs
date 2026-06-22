@@ -34,7 +34,7 @@ pub fn gen_daemon_constraints(
     daemon_id: &DaemonId,
 ) -> buck2_error::Result<buck2_cli_proto::DaemonConstraints> {
     Ok(buck2_cli_proto::DaemonConstraints {
-        version: version(),
+        version: version()?,
         user_version: user_version()?,
         daemon_id: daemon_id.to_string(),
         daemon_startup_config: Some(daemon_startup_config.serialize()?),
@@ -42,8 +42,8 @@ pub fn gen_daemon_constraints(
     })
 }
 
-pub fn version() -> String {
-    BuckVersion::get_unique_id().to_owned()
+pub fn version() -> buck2_error::Result<String> {
+    Ok(BuckVersion::get_unique_id()?.to_owned())
 }
 
 /// Used to make sure that daemons are restarted between CI jobs if they don't properly clean up

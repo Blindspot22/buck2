@@ -32,7 +32,7 @@
 //! use buck2_fs::paths::abs_norm_path::AbsNormPath;
 //! use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 //! use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
-//! use relative_path::RelativePath;
+//! use buck2_fs::paths::relative_path::RelativePath;
 //!
 //! let root = if cfg!(not(windows)) {
 //!     AbsNormPathBuf::from("/usr/local/fbsource/".into())?
@@ -54,7 +54,7 @@
 //! );
 //! assert_eq!(some_path.to_buf(), fs.resolve(project_rel.as_ref()));
 //!
-//! let rel_path = RelativePath::new("../src");
+//! let rel_path = RelativePath::unchecked_new("../src");
 //! let project_rel_2 = project_rel.join_normalized(rel_path)?;
 //! assert_eq!(
 //!     ProjectRelativePathBuf::try_from("buck/src".to_owned())?,
@@ -82,15 +82,16 @@ use buck2_fs::paths::fmt::quoted_display;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathIter;
+use buck2_fs::paths::relative_path::RelativePath;
+use buck2_fs::paths::relative_path::RelativePathBuf;
 use buck2_util::arc_str::StringInside;
 use derivative::Derivative;
 use gazebo::prelude::IterOwned;
 use pagable::Pagable;
 use ref_cast::RefCast;
-use relative_path::RelativePath;
-use relative_path::RelativePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
+use strong_hash::StrongHash;
 
 /// A un-owned forward pointing, fully normalized path that is relative to the
 /// project root.
@@ -102,7 +103,8 @@ use serde::Serialize;
     Eq,
     PartialOrd,
     Ord,
-    RefCast
+    RefCast,
+    StrongHash
 )]
 #[derivative(Debug)]
 #[repr(transparent)]
@@ -124,7 +126,8 @@ pub struct ProjectRelativePath(
     Serialize,
     Deserialize,
     Pagable,
-    Allocative
+    Allocative,
+    StrongHash
 )]
 #[derivative(Debug)]
 pub struct ProjectRelativePathBuf(
@@ -602,10 +605,14 @@ impl<'a> TryFrom<&'a RelativePath> for &'a ProjectRelativePath {
     /// use buck2_core::fs::project_rel_path::ProjectRelativePath;
     /// use buck2_fs::paths::RelativePath;
     ///
-    /// assert!(<&ProjectRelativePath>::try_from(RelativePath::new("foo/bar")).is_ok());
-    /// assert!(<&ProjectRelativePath>::try_from(RelativePath::new("")).is_ok());
-    /// assert!(<&ProjectRelativePath>::try_from(RelativePath::new("normalize/./bar")).is_err());
-    /// assert!(<&ProjectRelativePath>::try_from(RelativePath::new("normalize/../bar")).is_err());
+    /// assert!(<&ProjectRelativePath>::try_from(RelativePath::unchecked_new("foo/bar")).is_ok());
+    /// assert!(<&ProjectRelativePath>::try_from(RelativePath::unchecked_new("")).is_ok());
+    /// assert!(
+    ///     <&ProjectRelativePath>::try_from(RelativePath::unchecked_new("normalize/./bar")).is_err()
+    /// );
+    /// assert!(
+    ///     <&ProjectRelativePath>::try_from(RelativePath::unchecked_new("normalize/../bar")).is_err()
+    /// );
     /// ```
     fn try_from(s: &'a RelativePath) -> buck2_error::Result<&'a ProjectRelativePath> {
         Ok(ProjectRelativePath::ref_cast(ForwardRelativePath::new(
@@ -735,9 +742,8 @@ impl<'a> IntoFileNameBufIterator for &'a ProjectRelativePathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+    use buck2_hash::StdBuckHashMap;
 
     use crate::fs::project_rel_path::ProjectRelativePath;
     use crate::fs::project_rel_path::ProjectRelativePathBuf;
@@ -764,14 +770,6 @@ mod tests {
         let path2 = ProjectRelativePath::new("foo")?;
         let path3 = ProjectRelativePath::new("bar")?;
 
-        let str2 = "foo";
-        let str3 = "bar";
-        let str_abs = "/ble";
-
-        let string2 = "foo".to_owned();
-        let string3 = "bar".to_owned();
-        let string_abs = "/ble".to_owned();
-
         assert_eq!(path1_buf, path2_buf);
         assert_ne!(path1_buf, path3_buf);
 
@@ -780,22 +778,6 @@ mod tests {
 
         assert_eq!(path1_buf, path2);
         assert_ne!(path1, path3_buf);
-
-        assert_eq!(path1_buf, str2);
-        assert_ne!(path1_buf, str3);
-        assert_ne!(path1_buf, str_abs);
-
-        assert_eq!(path1, str2);
-        assert_ne!(path1, str3);
-        assert_ne!(path1, str_abs);
-
-        assert_eq!(path1_buf, string2);
-        assert_ne!(path1_buf, string3);
-        assert_ne!(path1_buf, string_abs);
-
-        assert_eq!(path1, string2);
-        assert_ne!(path1, string3);
-        assert_ne!(path1, string_abs);
 
         Ok(())
     }
@@ -818,12 +800,12 @@ mod tests {
         let err = serde_json::from_str::<ProjectRelativePathBuf>(r#""a//b""#)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("expected a normalized path"), "{}", err);
+        assert!(err.contains("contains an empty path component"), "{}", err);
     }
 
     #[test]
     fn wrapped_paths_work_in_maps() -> buck2_error::Result<()> {
-        let mut map = HashMap::new();
+        let mut map = StdBuckHashMap::default();
 
         let p1 = ForwardRelativePath::new("foo")?;
         let p2 = ProjectRelativePath::new("bar")?;

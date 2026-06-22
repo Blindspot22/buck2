@@ -14,7 +14,6 @@ use std::str::FromStr;
 use buck2_error::buck2_error;
 use dupe::Dupe;
 use os_str_bytes::OsStrBytes;
-use rand::Rng;
 
 /// Returns true or false for percentage-based feature rollouts based on a configuration string.
 /// Configurations supported today are random and hostname.
@@ -59,7 +58,7 @@ impl RolloutPercentage {
                     }
                 }
             }
-            Inner::Rate(pct) => rand::rng().random::<f64>() < pct,
+            Inner::Rate(pct) => rand::random::<f64>() < pct,
             Inner::Bool(b) => b,
         }
     }

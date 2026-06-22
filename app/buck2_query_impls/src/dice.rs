@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -45,6 +44,8 @@ use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_fs::paths::file_name::FileNameBuf;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::buck_indexset;
 use buck2_node::load_patterns::MissingTargetBehavior;
 use buck2_node::load_patterns::load_patterns;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
@@ -58,7 +59,6 @@ use dice::DiceComputations;
 use dice::LinearRecomputeDiceComputations;
 use futures::FutureExt;
 use gazebo::prelude::*;
-use indexmap::indexset;
 
 use crate::cquery::environment::CqueryDelegate;
 use crate::uquery::environment::QueryLiterals;
@@ -100,7 +100,8 @@ impl LiteralParser {
                         LiteralParserError::ExpectingTargetPatternWithoutProviders(
                             value.to_owned()
                         )
-                        .into()
+                        .into(),
+                        error_on_oss: true
                     )?;
                 }
                 ParsedPattern::Target(package, target_name, TargetPatternExtra)
@@ -251,7 +252,7 @@ impl UqueryDelegate for DiceQueryDelegate<'_, '_> {
     // get the list of potential buildfile names for each cell
     async fn get_buildfile_names_by_cell(
         &self,
-    ) -> buck2_error::Result<HashMap<CellName, Arc<[FileNameBuf]>>> {
+    ) -> buck2_error::Result<StdBuckHashMap<CellName, Arc<[FileNameBuf]>>> {
         let mut ctx = self.ctx.get();
         let resolver = ctx.get_cell_resolver().await?;
         let buildfiles = ctx
@@ -292,7 +293,7 @@ impl UqueryDelegate for DiceQueryDelegate<'_, '_> {
 
     async fn eval_file_literal(&self, literal: &str) -> buck2_error::Result<FileSet> {
         let cell_path = self.query_data.literal_parser.parse_file_literal(literal)?;
-        Ok(FileSet::new(indexset![FileNode(cell_path)]))
+        Ok(FileSet::new(buck_indexset![FileNode(cell_path)]))
     }
 
     fn linear_dice_computations(&self) -> &LinearRecomputeDiceComputations<'_> {
@@ -318,7 +319,7 @@ impl CqueryDelegate for DiceQueryDelegate<'_, '_> {
             .ctx
             .get()
             .get_configured_target_node(target)
-            .await?
+            .await
             .require_compatible()?)
     }
 
@@ -327,7 +328,11 @@ impl CqueryDelegate for DiceQueryDelegate<'_, '_> {
         target: &TargetLabel,
     ) -> buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>> {
         let target = self.ctx.get().get_default_configured_target(target).await?;
-        self.ctx.get().get_configured_target_node(&target).await
+        self.ctx
+            .get()
+            .get_configured_target_node(&target)
+            .await
+            .ok()
     }
 
     fn ctx(&self) -> DiceComputations<'_> {

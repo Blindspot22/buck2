@@ -138,11 +138,19 @@ macro_rules! starlark_complex_values {
 /// use starlark::values::Heap;
 /// use starlark::values::NoSerialize;
 /// use starlark::values::ProvidesStaticType;
+/// use starlark::values::StarlarkPagable;
 /// use starlark::values::StarlarkValue;
 /// use starlark::values::Value;
 /// use starlark_derive::starlark_value;
 ///
-/// #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+/// #[derive(
+///     Debug,
+///     Display,
+///     ProvidesStaticType,
+///     NoSerialize,
+///     StarlarkPagable,
+///     Allocative
+/// )]
 /// struct MyObject(String);
 /// starlark_simple_value!(MyObject);
 ///

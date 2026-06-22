@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt;
 use std::fmt::Debug;
@@ -33,6 +32,8 @@ use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_error::internal_error;
+use buck2_hash::BuckIndexMap;
+use buck2_hash::StdBuckHashSet;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::configured_node_ref::ConfiguredTargetNodeRefNode;
 use buck2_node::nodes::configured_node_ref::ConfiguredTargetNodeRefNodeDeps;
@@ -47,6 +48,7 @@ use buck2_query::query::syntax::simple::eval::error::QueryError;
 use buck2_query::query::syntax::simple::eval::file_set::FileSet;
 use buck2_query::query::syntax::simple::eval::set::TargetSet;
 use buck2_query::query::syntax::simple::eval::values::QueryValue;
+use buck2_query::query::syntax::simple::eval::values::QueryValueDepth;
 use buck2_query::query::syntax::simple::functions::DefaultQueryFunctionsModule;
 use buck2_query::query::syntax::simple::functions::QueryFunctions;
 use buck2_query::query::syntax::simple::functions::helpers::QueryBinaryOp;
@@ -60,7 +62,7 @@ use dice::DiceComputations;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use futures::FutureExt;
-use indexmap::IndexMap;
+use pagable::StaticStr;
 use starlark::values::UnpackValue;
 
 #[derive(Debug, buck2_error::Error)]
@@ -80,7 +82,7 @@ pub(crate) trait ConfiguredGraphQueryEnvironmentDelegate: Send + Sync {
 
     async fn get_targets_from_template_placeholder_info(
         &self,
-        template_name: &'static str,
+        template_name: StaticStr,
         targets: TargetSet<ConfiguredGraphNodeRef>,
     ) -> buck2_error::Result<TargetSet<ConfiguredGraphNodeRef>>;
 }
@@ -88,6 +90,12 @@ pub(crate) trait ConfiguredGraphQueryEnvironmentDelegate: Send + Sync {
 pub(crate) struct ConfiguredGraphQueryEnvironment<'a> {
     delegate: &'a dyn ConfiguredGraphQueryEnvironmentDelegate,
 }
+
+pagable::static_str!(TEMPLATE_FIRST_ORDER_CLASSPATH = "first_order_classpath");
+pagable::static_str!(
+    TEMPLATE_CLASSPATH_INCLUDING_TARGETS_WITH_NO_OUTPUT =
+        "classpath_including_targets_with_no_output"
+);
 
 #[derive(Debug)]
 struct ConfiguredGraphFunctions<'a>(PhantomData<&'a ()>);
@@ -97,11 +105,11 @@ impl<'a> ConfiguredGraphFunctions<'a> {
         &self,
         env: &ConfiguredGraphQueryEnvironment<'a>,
         targets: TargetSet<ConfiguredGraphNodeRef>,
-        depth: Option<u64>,
+        depth: QueryValueDepth,
     ) -> Result<QueryValue<ConfiguredGraphNodeRef>, QueryError> {
         // if depth param is provided and it is not equal to 1, then it's not supported
         let mut run_first_order_classpath = false;
-        if let Some(depth_int) = depth.map(|v| v as i32) {
+        if let Some(depth_int) = depth.bound() {
             run_first_order_classpath = depth_int == 1;
             if !run_first_order_classpath {
                 return Err(QueryError::InvalidDepth(depth_int));
@@ -109,9 +117,9 @@ impl<'a> ConfiguredGraphFunctions<'a> {
         }
 
         let template_name = if run_first_order_classpath {
-            "first_order_classpath"
+            TEMPLATE_FIRST_ORDER_CLASSPATH
         } else {
-            "classpath_including_targets_with_no_output"
+            TEMPLATE_CLASSPATH_INCLUDING_TARGETS_WITH_NO_OUTPUT
         };
 
         let targets = env
@@ -171,7 +179,7 @@ impl<'a> ConfiguredGraphQueryEnvironment<'a> {
 
     async fn get_targets_from_template_placeholder_info(
         &self,
-        template_name: &'static str,
+        template_name: StaticStr,
         targets: TargetSet<ConfiguredGraphNodeRef>,
     ) -> buck2_error::Result<TargetSet<ConfiguredGraphNodeRef>> {
         self.delegate
@@ -261,10 +269,10 @@ impl QueryEnvironment for ConfiguredGraphQueryEnvironment<'_> {
     async fn deps(
         &self,
         targets: &TargetSet<Self::Target>,
-        depth: Option<i32>,
+        depth: QueryValueDepth,
         filter: Option<&dyn TraversalFilter<Self::Target>>,
     ) -> buck2_error::Result<TargetSet<Self::Target>> {
-        if depth.is_none() && filter.is_none() {
+        if depth.is_unbounded() && filter.is_none() {
             // TODO(nga): fast lookup with depth too.
             let mut deps: TargetSet<Self::Target> = TargetSet::new();
             dfs_postorder::<ConfiguredTargetNodeRefNode>(
@@ -334,12 +342,13 @@ async fn get_template_info_provider_artifacts(
     Ok(artifacts)
 }
 
-pub(crate) async fn get_from_template_placeholder_info<'x>(
-    ctx: &'x mut DiceComputations<'_>,
-    template_name: &'static str,
+pub(crate) async fn get_from_template_placeholder_info(
+    ctx: &mut DiceComputations<'_>,
+    template_name: StaticStr,
     targets: impl IntoIterator<Item = ConfiguredTargetLabel>,
-) -> buck2_error::Result<IndexMap<ConfiguredTargetLabel, Artifact>> {
-    let mut label_to_artifact: IndexMap<ConfiguredTargetLabel, Artifact> = IndexMap::new();
+) -> buck2_error::Result<BuckIndexMap<ConfiguredTargetLabel, Artifact>> {
+    let mut label_to_artifact: BuckIndexMap<ConfiguredTargetLabel, Artifact> =
+        BuckIndexMap::default();
 
     // Traversing tsets adds complexity here. Ideally, we could just do a normal traversal of these starlark values
     // we get from the template_info provider, but the cmdlinearglike interface only gives us access via ArtifactGroup
@@ -362,7 +371,8 @@ pub(crate) async fn get_from_template_placeholder_info<'x>(
         .try_compute_join(targets, |ctx, target| {
             async move {
                 let artifacts =
-                    get_template_info_provider_artifacts(ctx, &target, template_name).await?;
+                    get_template_info_provider_artifacts(ctx, &target, template_name.as_str())
+                        .await?;
                 buck2_error::Ok(
                     artifacts
                         .into_iter()
@@ -378,17 +388,17 @@ pub(crate) async fn get_from_template_placeholder_info<'x>(
     // for all the tset nodes that we encounter during our traversal of those top-level nodes. We don't need to track artifacts because
     // we just extract the targetlabel and put that in the output set and that can dedupe them (and we don't need to further
     // traverse artifacts).
-    let mut seen = HashSet::new();
+    let mut seen = StdBuckHashSet::default();
 
     while let Some((target, artifact)) = artifacts.pop_front() {
         let handle_artifact =
-            |label_to_artifact: &mut IndexMap<ConfiguredTargetLabel, Artifact>,
+            |label_to_artifact: &mut BuckIndexMap<ConfiguredTargetLabel, Artifact>,
              artifact: &Artifact|
              -> buck2_error::Result<()> {
                 if let Some(owner) = artifact.owner() {
                     let target_label = owner.unpack_target_label().ok_or_else(|| {
                         AnalysisQueryError::NonTargetBoundArtifact(
-                            template_name.to_owned(),
+                            (*template_name).to_owned(),
                             target.dupe(),
                             artifact.dupe(),
                         )

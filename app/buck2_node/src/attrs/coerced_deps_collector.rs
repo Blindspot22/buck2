@@ -18,12 +18,14 @@ use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::target::label::label::TargetLabel;
 use buck2_util::thin_box::ThinBoxSlice;
 use dupe::Dupe;
+use pagable::Pagable;
 use starlark_map::ordered_set::OrderedSet;
+use starlark_map::vec2::Vec2;
 
 use crate::attrs::attr_type::configuration_dep::ConfigurationDepKind;
 use crate::attrs::traversal::CoercedAttrTraversal;
 
-#[derive(Default, Debug, PartialEq, Eq, Hash, Allocative)]
+#[derive(Default, Debug, PartialEq, Eq, Hash, Allocative, Pagable)]
 pub struct CoercedDeps {
     /// Contains the deps derived from the attributes.
     /// Does not include the transition, exec or configuration deps.
@@ -40,7 +42,7 @@ pub struct CoercedDeps {
     pub toolchain_deps: ThinBoxSlice<TargetLabel>,
 
     /// Contains the configuration deps
-    pub configuration_deps: ThinBoxSlice<(ProvidersLabel, ConfigurationDepKind)>,
+    pub configuration_deps: Vec2<ProvidersLabel, ConfigurationDepKind>,
 
     /// Contains the plugin deps
     pub plugin_deps: ThinBoxSlice<TargetLabel>,

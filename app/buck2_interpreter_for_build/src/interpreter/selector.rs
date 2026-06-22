@@ -14,13 +14,16 @@ use std::fmt::Display;
 use allocative::Allocative;
 use buck2_error::BuckErrorContext;
 use buck2_interpreter::types::select_fail::StarlarkSelectFail;
+use buck2_interpreter::types::select_incompatible::StarlarkSelectIncompatible;
+use serde::Serialize;
+use serde::Serializer;
+use serde::ser::SerializeMap;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_complex_value;
 use starlark::starlark_module;
@@ -30,7 +33,7 @@ use starlark::values::Freezer;
 use starlark::values::FrozenStringValue;
 use starlark::values::FrozenValue;
 use starlark::values::Heap;
-use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
@@ -46,10 +49,9 @@ use starlark::values::dict::DictRef;
 use starlark::values::dict::DictType;
 use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 /// Representation of `select()` in Starlark.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)] // TODO selector should probably support serializing
+#[derive(Debug, ProvidesStaticType, Allocative, StarlarkPagable)]
 #[repr(C)]
 pub enum StarlarkSelectorGen<V: ValueLifetimeless> {
     /// Simplest form, backed by dictionary representation
@@ -78,6 +80,28 @@ impl<V: ValueLifetimeless> Display for StarlarkSelectorGen<V> {
 unsafe impl<From: Coerce<To> + ValueLifetimeless, To: ValueLifetimeless>
     Coerce<StarlarkSelectorGen<To>> for StarlarkSelectorGen<From>
 {
+}
+
+impl<'v, V: ValueLike<'v>> Serialize for StarlarkSelectorGen<V>
+where
+    Self: StarlarkValue<'v>,
+{
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            StarlarkSelectorGen::Primary(dict_value) => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("__type", "selector")?;
+                map.serialize_entry("entries", &dict_value.get().to_value())?;
+                map.end()
+            }
+            StarlarkSelectorGen::Sum(left, right) => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("__type", "concat")?;
+                map.serialize_entry("items", &[left.to_value(), right.to_value()])?;
+                map.end()
+            }
+        }
+    }
 }
 
 starlark_complex_value!(pub StarlarkSelector);
@@ -150,8 +174,10 @@ impl<'v> StarlarkSelector<'v> {
                     let selector = DictRef::from_value(selector.get()).unwrap();
                     let mut mapped = SmallMap::with_capacity(selector.len());
                     for (k, v) in selector.iter_hashed() {
-                        if StarlarkSelectFail::from_value(v).is_some() {
-                            // mappings don't get applied to SelectFail values.
+                        if StarlarkSelectFail::from_value(v).is_some()
+                            || StarlarkSelectIncompatible::from_value(v).is_some()
+                        {
+                            // mappings don't get applied to SelectFail/SelectIncompatible values.
                             mapped.insert_hashed(k, v);
                         } else {
                             mapped.insert_hashed(
@@ -207,8 +233,10 @@ impl<'v> StarlarkSelector<'v> {
                 StarlarkSelectorGen::Primary(selector) => {
                     let selector = DictRef::from_value(selector.get()).unwrap();
                     for v in selector.values() {
-                        // select_test only applies the test to non-SelectFail values.
-                        if StarlarkSelectFail::from_value(v).is_none() {
+                        // select_test only applies the test to non-SelectFail/SelectIncompatible values.
+                        if StarlarkSelectFail::from_value(v).is_none()
+                            && StarlarkSelectIncompatible::from_value(v).is_none()
+                        {
                             let result = invoke(eval, func, v)?;
                             if result {
                                 return Ok(true);
@@ -299,15 +327,15 @@ where
 
     // used to provide the type documentation here
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(selector_methods)
+        Some(SELECTOR_METHODS.methods())
     }
 }
 
-#[starlark_module]
-pub fn register_select(globals: &mut GlobalsBuilder) {
-    const Select: StarlarkValueAsType<StarlarkSelector> = StarlarkValueAsType::new();
+starlark::methods_static!(SELECTOR_METHODS = selector_methods);
 
+#[starlark_module]
+#[starlark_types(StarlarkSelector<'_> as Select)]
+pub fn register_select(globals: &mut GlobalsBuilder) {
     fn select<'v>(
         #[starlark(require = pos)] d: ValueOf<'v, DictType<StringValue<'v>, Value<'v>>>,
     ) -> starlark::Result<StarlarkSelector<'v>> {
@@ -338,6 +366,33 @@ pub fn register_select(globals: &mut GlobalsBuilder) {
         Ok(StarlarkSelectFail::new(msg))
     }
 
+    /// Create a value to be used in select() statements to mark a target as incompatible.
+    ///
+    /// This function is used within a `select()` statement to indicate that the target is
+    /// incompatible with the platform when a particular configuration condition is selected.
+    /// The target will be skipped gracefully, just like targets with unsatisfied
+    /// `target_compatible_with` constraints.
+    ///
+    /// # Example
+    /// ```python
+    /// # Mark the target as incompatible when building for iOS
+    /// some_attr = select({
+    ///     "//conditions:is_android": "android_value",
+    ///     "//conditions:is_ios": select_incompatible("This target is not supported on iOS"),
+    ///     "DEFAULT": "default_value",
+    /// })
+    /// ```
+    ///
+    /// During configuration, if the iOS case is selected, the target will be skipped as
+    /// incompatible rather than causing a build error. If the target is loaded but never
+    /// configured, it's not an error, and if the target is configured such that the iOS case
+    /// is not selected, the target will build normally.
+    fn select_incompatible<'v>(
+        #[starlark(require = pos)] msg: StringValue<'v>,
+    ) -> starlark::Result<StarlarkSelectIncompatible<'v>> {
+        Ok(StarlarkSelectIncompatible::new(msg))
+    }
+
     /// Maps a selector.
     ///
     /// For selector additions values:
@@ -363,7 +418,7 @@ pub fn register_select(globals: &mut GlobalsBuilder) {
     /// structure. In either case the mapping function can return a selector for
     /// a non-selector input, causing the selector structure to get deeper.
     ///
-    /// The mapping is not applied to `select_fail()` values.
+    /// The mapping is not applied to `select_fail()` or `select_incompatible()` values.
     ///
     /// Ex:
     /// ```python
@@ -390,7 +445,7 @@ pub fn register_select(globals: &mut GlobalsBuilder) {
 
     /// Test values in the select expression using the given function.
     ///
-    /// Returns True, if any value in the select passes, else False. The function is not tested against select_fail values.
+    /// Returns True, if any value in the select passes, else False. The function is not tested against select_fail or select_incompatible values.
     ///
     /// Ex:
     /// ```python

@@ -54,10 +54,7 @@ def make_apple_ipa_package_target(apple_ipa_package_rule, **kwargs) -> [None, st
         ipa_package_kwargs[field_name] = kwargs.get(field_name)
 
     ipa_package_target_name = kwargs["name"] + "__IPA_Package_Private"
-    apple_ipa_package_rule(
-        name = ipa_package_target_name,
-        **ipa_package_kwargs
-    )
+    apple_ipa_package_rule(name = ipa_package_target_name, **ipa_package_kwargs)
 
     return ":{}".format(ipa_package_target_name)
 
@@ -80,10 +77,11 @@ def _get_ipa_contents(ctx: AnalysisContext) -> Artifact:
     return ctx.actions.copied_dir(
         "__unzipped_ipa_contents__",
         contents,
+        has_content_based_path = False,
     )
 
 def _build_symbols_dir(ctx) -> Artifact:
-    symbols_dir = ctx.actions.declare_output("__symbols__", dir = True)
+    symbols_dir = ctx.actions.declare_output("__symbols__", dir = True, has_content_based_path = False)
     ctx.actions.run(
         cmd_args(["mkdir", "-p", symbols_dir.as_output()]),
         category = "watchos_symbols_dir",
@@ -98,7 +96,7 @@ def _get_swift_support_dir(ctx, bundle_output: Artifact, bundle_info: AppleBundl
     # .app -> app
     # This is the way the input is expected.
     extension = bundle_output.extension[1:]
-    swift_support_dir = ctx.actions.declare_output("__swift_dylibs__", dir = True)
+    swift_support_dir = ctx.actions.declare_output("__swift_dylibs__", dir = True, has_content_based_path = False)
     script, _ = ctx.actions.write(
         "build_swift_support.sh",
         [
@@ -130,6 +128,7 @@ def _get_swift_support_dir(ctx, bundle_output: Artifact, bundle_info: AppleBundl
             ),
         ],
         allow_args = True,
+        has_content_based_path = False,
     )
     ctx.actions.run(
         cmd_args(["/bin/sh", script], hidden = [stdlib_tool, bundle_output, swift_support_dir.as_output()]),

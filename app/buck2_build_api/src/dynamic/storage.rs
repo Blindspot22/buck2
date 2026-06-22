@@ -14,7 +14,9 @@ use allocative::Allocative;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_util::late_binding::LateBinding;
+use pagable::PagableTagged;
 use starlark::any::AnyLifetime;
+use starlark::starlark_pagable_typetag;
 use starlark::values::DynStarlark;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
@@ -32,7 +34,10 @@ pub trait DynamicLambdaParamsStorage<'v>:
     ) -> FreezeResult<Box<dyn FrozenDynamicLambdaParamsStorage>>;
 }
 
-pub trait FrozenDynamicLambdaParamsStorage: Debug + Allocative + Send + Sync + 'static {
+#[starlark_pagable_typetag]
+pub trait FrozenDynamicLambdaParamsStorage:
+    Debug + Allocative + PagableTagged + Send + Sync + 'static
+{
     fn as_any(&self) -> &dyn AnyLifetime<'static>;
 
     fn iter_dynamic_lambda_outputs(&self) -> Box<dyn Iterator<Item = BuildArtifact> + Send + '_>;

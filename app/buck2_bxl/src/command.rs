@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,7 +21,6 @@ use buck2_build_api::bxl::result::BxlResult;
 use buck2_build_api::bxl::result::PendingStreamingOutput;
 use buck2_build_api::bxl::types::BxlFunctionLabel;
 use buck2_build_api::materialize::HasMaterializationQueueTracker;
-use buck2_build_api::materialize::HasMaterializerFastRolloutConfig;
 use buck2_build_api::materialize::MaterializationAndUploadContext;
 use buck2_build_api::materialize::materialize_and_upload_artifact_group;
 use buck2_cli_proto::BxlRequest;
@@ -46,6 +44,7 @@ use buck2_data::BxlEnsureArtifactsStart;
 use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
 use buck2_events::dispatch::get_dispatcher;
+use buck2_hash::StdBuckHashMap;
 use buck2_interpreter::load_module::InterpreterCalculation;
 use buck2_interpreter::parse_import::ParseImportOptions;
 use buck2_interpreter::parse_import::RelativeImports;
@@ -360,10 +359,6 @@ impl BxlServerCommand {
         output: &mut (impl Write + Send),
     ) -> Result<(), Vec<buck2_error::Error>> {
         let artifacts_to_materialize: Vec<_> = bxl_result.artifacts().iter().duped().collect();
-        let unconstrained = ctx
-            .per_transaction_data()
-            .get_materializer_fast_rollout_config()
-            .unconstrained;
 
         let mut futs: FuturesUnordered<_> = ctx
             .compute_many(artifacts_to_materialize.into_iter().map(|artifact| {
@@ -393,11 +388,7 @@ impl BxlServerCommand {
 
         let mut errors: Vec<buck2_error::Error> = Vec::new();
 
-        while let Some(res) = if unconstrained {
-            tokio::task::unconstrained(futs.next()).await
-        } else {
-            futs.next().await
-        } {
+        while let Some(res) = tokio::task::unconstrained(futs.next()).await {
             match res {
                 Ok(artifact) => {
                     let outputs = pending_streaming.next_outputs(&artifact);
@@ -494,6 +485,8 @@ impl BxlServerCommand {
                 &ctx.bxl_label,
                 &ensured_artifact_errors,
                 None,
+                None,
+                None,
             )?
         } else {
             None
@@ -589,7 +582,8 @@ pub(crate) fn parse_bxl_label_from_cli(
                 got: bxl_path.to_owned(),
                 wanted: reformed_path,
             }
-            .into()
+            .into(),
+            error_on_oss: true
         )?;
     }
 
@@ -601,13 +595,13 @@ pub(crate) fn parse_bxl_label_from_cli(
 
 #[derive(Debug)]
 struct PendingStreaming {
-    indexes: HashMap<ArtifactGroup, Vec<Arc<Mutex<PendingStreamingOutput>>>>,
+    indexes: StdBuckHashMap<ArtifactGroup, Vec<Arc<Mutex<PendingStreamingOutput>>>>,
 }
 
 impl PendingStreaming {
     fn new(pending_streaming_outputs: impl Iterator<Item = PendingStreamingOutput>) -> Self {
-        let mut indexes: HashMap<ArtifactGroup, Vec<Arc<Mutex<PendingStreamingOutput>>>> =
-            HashMap::new();
+        let mut indexes: StdBuckHashMap<ArtifactGroup, Vec<Arc<Mutex<PendingStreamingOutput>>>> =
+            StdBuckHashMap::default();
 
         let pending_streaming_outputs = pending_streaming_outputs
             .into_iter()
@@ -619,7 +613,7 @@ impl PendingStreaming {
             for wait_on in waits_on {
                 indexes
                     .entry(wait_on.dupe())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(pending_streaming_output.dupe())
             }
         }
@@ -650,7 +644,7 @@ mod tests {
     use buck2_artifact::artifact::build_artifact::BuildArtifact;
     use buck2_core::configuration::data::ConfigurationData;
     use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
-    use indexmap::IndexSet;
+    use buck2_hash::BuckIndexSet;
 
     use super::*;
 
@@ -670,12 +664,12 @@ mod tests {
         let a2 = new_test_artifact_group(2);
         let a3 = new_test_artifact_group(3);
         let p1 = PendingStreamingOutput::new(
-            IndexSet::from([a1.dupe(), a2.dupe()]),
+            BuckIndexSet::from([a1.dupe(), a2.dupe()]),
             b"output1".to_vec(),
         );
-        let p2 = PendingStreamingOutput::new(IndexSet::from([a1.dupe()]), b"output2".to_vec());
+        let p2 = PendingStreamingOutput::new(BuckIndexSet::from([a1.dupe()]), b"output2".to_vec());
         let p3 = PendingStreamingOutput::new(
-            IndexSet::from([a2.dupe(), a3.dupe()]),
+            BuckIndexSet::from([a2.dupe(), a3.dupe()]),
             b"output3".to_vec(),
         );
 

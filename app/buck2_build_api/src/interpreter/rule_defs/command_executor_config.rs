@@ -16,11 +16,14 @@ use buck2_core::execution_types::executor_config::CacheUploadBehavior;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
 use buck2_core::execution_types::executor_config::CommandGenerationOptions;
 use buck2_core::execution_types::executor_config::Executor;
+use buck2_core::execution_types::executor_config::ExecutorNetworkAccess;
 use buck2_core::execution_types::executor_config::HybridExecutionLevel;
 use buck2_core::execution_types::executor_config::ImagePackageIdentifier;
 use buck2_core::execution_types::executor_config::LocalExecutorOptions;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
 use buck2_core::execution_types::executor_config::PathSeparatorKind;
+use buck2_core::execution_types::executor_config::ReGang;
+use buck2_core::execution_types::executor_config::ReGangLocality;
 use buck2_core::execution_types::executor_config::ReGangWorker;
 use buck2_core::execution_types::executor_config::RePlatformFields;
 use buck2_core::execution_types::executor_config::RemoteEnabledExecutor;
@@ -31,6 +34,7 @@ use buck2_core::execution_types::executor_config::RemoteExecutorCustomImage;
 use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
 use buck2_core::execution_types::executor_config::RemoteExecutorOptions;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
+use buck2_core::execution_types::executor_config::parse_network_access;
 use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
 use derive_more::Display;
@@ -38,6 +42,7 @@ use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
@@ -47,6 +52,7 @@ use starlark::values::list::UnpackList;
 use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
 use starlark::values::starlark_value;
+use starlark_map::sorted_map::SortedMap;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
@@ -63,11 +69,30 @@ enum CommandExecutorConfigErrors {
     ReCafFbpkgsNotAList(String, String),
     #[error("expected an dict, got `{0}` (type `{1}`)")]
     ReCafFbpkgNotADict(String, String),
+    #[error("`remote_execution_gang` and `remote_execution_gang_workers` are mutually exclusive")]
+    GangAndGangWorkersExclusive,
+    #[error(
+        "expected a dict for `capabilities` in `remote_execution_gang`, got `{0}` (type `{1}`)"
+    )]
+    ReGangCapabilitiesNotADict(String, String),
+    #[error("expected an integer for `num_of_workers` in `remote_execution_gang`, got `{0}`")]
+    ReGangNumOfWorkersNotAnInt(String),
+    #[error("expected an integer for `num_sub_groups` in `remote_execution_gang`, got `{0}`")]
+    ReGangNumSubGroupsNotAnInt(String),
 }
 
-#[derive(Debug, Display, NoSerialize, ProvidesStaticType, Allocative)]
+#[derive(
+    Debug,
+    Display,
+    NoSerialize,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[display("{:?}", _0)]
-pub struct StarlarkCommandExecutorConfig(pub Arc<CommandExecutorConfig>);
+pub struct StarlarkCommandExecutorConfig(
+    #[starlark_pagable(pagable)] pub Arc<CommandExecutorConfig>,
+);
 
 starlark_simple_value!(StarlarkCommandExecutorConfig);
 
@@ -100,11 +125,20 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
     /// * `max_cache_upload_mebibytes`: Maximum size to upload in cache uploads
     /// * `experimental_low_pass_filter`: Whether to use the experimental low pass filter
     /// * `remote_output_paths`: How to express output paths to RE
+    /// * `network_access`: Network access policy for commands using this executor. Supports `all`, `none`, `loopback`, `strict`, and `private`.
     /// * `remote_execution_resource_units`: The resources (eg. GPUs) to use for remote execution
     /// * `remote_execution_dependencies`: Dependencies for remote execution for this platform
-    /// * `remote_execution_gang_workers`: Gang workers for gang scheduling in remote execution
+    /// * `remote_execution_gang_workers`: Gang workers for gang scheduling in remote execution (enumerated gang spec)
     /// * `remote_execution_custom_image`: Custom Tupperware image for remote execution for this platform
     /// * `meta_internal_extra_params`: Json dict of extra params to pass to RE related to Meta internal infra.
+    ///   Supports the following keys:
+    ///   - `remote_execution_policy`: Policy settings for remote execution
+    ///   - `remote_execution_caf_fbpkgs`: CAF fbpkgs configuration
+    ///   - `remote_execution_gang`: Constrained gang for gang scheduling in remote execution. A dict with keys:
+    ///     - `capabilities`: A dict of capability key-value pairs (required)
+    ///     - `num_of_workers`: Number of workers in the gang (required, integer)
+    ///     - `locality`: Optional locality constraint ("region", "datacenter", or "network_domain")
+    ///     Note: mutually exclusive with `remote_execution_gang_workers`
     /// * `priority`: The priority for remote execution requests. The exact interpretation is up
     ///   to the RE server. See the Bazel Remote Execution API for recommended interpretation:
     ///   https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/execution/v2/remote_execution.proto#L1499
@@ -133,6 +167,7 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
         >,
         #[starlark(default = false, require = named)] experimental_low_pass_filter: bool,
         #[starlark(default = NoneOr::None, require = named)] remote_output_paths: NoneOr<&str>,
+        #[starlark(default = NoneOr::None, require = named)] network_access: NoneOr<&str>,
         #[starlark(default = NoneOr::None, require = named)]
         remote_execution_resource_units: NoneOr<i64>,
         #[starlark(default=UnpackList::default(), require = named)]
@@ -194,6 +229,13 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
 
             let extra_params =
                 parse_meta_internal_extra_params(meta_internal_extra_params.into_option())?;
+
+            if extra_params.gang.is_some() && !re_gang_workers.is_empty() {
+                return Err(buck2_error::Error::from(
+                    CommandExecutorConfigErrors::GangAndGangWorkersExclusive,
+                )
+                .into());
+            }
 
             let priority = priority.into_option();
 
@@ -344,6 +386,13 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
                 .buck_error_context("Invalid remote_output_paths")?
                 .unwrap_or_default();
 
+            let network_access = network_access
+                .into_option()
+                .map(parse_network_access)
+                .transpose()
+                .buck_error_context("Invalid network_access")?
+                .map(ExecutorNetworkAccess::from);
+
             CommandExecutorConfig {
                 executor,
                 options: CommandGenerationOptions {
@@ -354,6 +403,7 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
                     },
                     output_paths_behavior,
                     use_bazel_protocol_remote_persistent_workers,
+                    network_access,
                 },
             }
         };
@@ -518,17 +568,97 @@ fn parse_remote_execution_caf_fbpkgs(
 
 pub fn parse_meta_internal_extra_params<'v>(
     params: Option<DictRef<'v>>,
-) -> buck2_error::Result<MetaInternalExtraParams> {
-    if let Some(params) = params {
-        Ok(MetaInternalExtraParams {
-            remote_execution_policy: parse_remote_execution_policy(
-                params.get_str("remote_execution_policy"),
-            )?,
-            remote_execution_caf_fbpkgs: parse_remote_execution_caf_fbpkgs(
-                params.get_str("remote_execution_caf_fbpkgs"),
-            )?,
-        })
+) -> buck2_error::Result<Arc<MetaInternalExtraParams>> {
+    let Some(params) = params else {
+        return Ok(MetaInternalExtraParams::default_arc());
+    };
+
+    let gang = params
+        .get_str("remote_execution_gang")
+        .and_then(DictRef::from_value)
+        .map(|dict| parse_remote_execution_gang(Some(dict)))
+        .transpose()?
+        .flatten();
+
+    let allow_unsandboxed_action_cache_uploads = params
+        .get_str("allow_unsandboxed_action_cache_uploads")
+        .and_then(|v| v.unpack_bool())
+        .unwrap_or(false);
+
+    let result = MetaInternalExtraParams {
+        remote_execution_policy: parse_remote_execution_policy(
+            params.get_str("remote_execution_policy"),
+        )?,
+        remote_execution_caf_fbpkgs: parse_remote_execution_caf_fbpkgs(
+            params.get_str("remote_execution_caf_fbpkgs"),
+        )?,
+        gang,
+        allow_unsandboxed_action_cache_uploads,
+    };
+
+    if result == MetaInternalExtraParams::default() {
+        Ok(MetaInternalExtraParams::default_arc())
     } else {
-        Ok(MetaInternalExtraParams::default())
+        Ok(Arc::new(result))
     }
+}
+fn parse_remote_execution_gang<'v>(
+    gang: Option<DictRef<'v>>,
+) -> buck2_error::Result<Option<ReGang>> {
+    let Some(gang) = gang else {
+        return Ok(None);
+    };
+
+    // Parse capabilities as a nested dict
+    let capabilities_value = gang
+        .get_str("capabilities")
+        .ok_or(CommandExecutorConfigErrors::MissingField("capabilities"))?;
+    let capabilities_dict = DictRef::from_value(capabilities_value).ok_or_else(|| {
+        buck2_error::Error::from(CommandExecutorConfigErrors::ReGangCapabilitiesNotADict(
+            capabilities_value.to_repr(),
+            capabilities_value.get_type().to_owned(),
+        ))
+    })?;
+
+    let capabilities: SortedMap<String, String> = capabilities_dict
+        .iter()
+        .map(|(k, v)| (k.to_str(), v.to_str()))
+        .collect();
+
+    if capabilities.is_empty() {
+        return Err(CommandExecutorConfigErrors::MissingField("capabilities").into());
+    }
+
+    let num_of_workers_value = gang
+        .get_str("num_of_workers")
+        .ok_or(CommandExecutorConfigErrors::MissingField("num_of_workers"))?;
+    let num_of_workers: i32 = num_of_workers_value.unpack_i32().ok_or_else(|| {
+        buck2_error::Error::from(CommandExecutorConfigErrors::ReGangNumOfWorkersNotAnInt(
+            num_of_workers_value.to_repr(),
+        ))
+    })?;
+
+    let locality = gang
+        .get_str("locality")
+        .and_then(|v| v.unpack_str())
+        .map(ReGangLocality::parse)
+        .transpose()?;
+
+    let num_sub_groups = gang
+        .get_str("num_sub_groups")
+        .map(|v| {
+            v.unpack_i32().ok_or_else(|| {
+                buck2_error::Error::from(CommandExecutorConfigErrors::ReGangNumSubGroupsNotAnInt(
+                    v.to_repr(),
+                ))
+            })
+        })
+        .transpose()?;
+
+    Ok(Some(ReGang::parse(
+        capabilities,
+        num_of_workers,
+        locality,
+        num_sub_groups,
+    )?))
 }

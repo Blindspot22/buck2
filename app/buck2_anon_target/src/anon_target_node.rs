@@ -9,7 +9,6 @@
  */
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -40,12 +39,16 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_data::ToProtoMessage;
 use buck2_data::action_key_owner::BaseDeferredKeyProto;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_hash::BuckHasher;
+use buck2_hash::StdBuckHashMap;
+use buck2_interpreter::dice::starlark_provider::DynEvalKindKey;
 use buck2_interpreter::dice::starlark_provider::StarlarkEvalKind;
 use buck2_node::rule_type::StarlarkRuleType;
 use buck2_util::strong_hasher::Blake3StrongHasher;
 use cmp_any::PartialEqAny;
 use dupe::Dupe;
-use fxhash::FxHasher;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark::collections::SmallMap;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
@@ -61,7 +64,7 @@ use crate::anon_target_attr::AnonTargetAttr;
 use crate::anon_target_attr_resolve::AnonTargetAttrResolution;
 use crate::anon_target_attr_resolve::AnonTargetAttrResolutionContext;
 
-#[derive(Eq, PartialEq, Clone, Debug, Allocative)]
+#[derive(Eq, PartialEq, Clone, Debug, Allocative, Pagable)]
 pub(crate) struct AnonTarget {
     /// Not necessarily a "real" target label that actually exists, but could be.
     name: TargetLabel,
@@ -81,7 +84,7 @@ pub(crate) struct AnonTarget {
     hash: u64,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Debug, Allocative, StrongHash)]
+#[derive(Hash, Eq, PartialEq, Clone, Debug, Allocative, StrongHash, Pagable)]
 pub(crate) enum AnonTargetVariant {
     Bzl,
     Bxl(GlobalCfgOptions),
@@ -105,6 +108,14 @@ impl Hash for AnonTarget {
     }
 }
 
+impl StrongHash for AnonTarget {
+    fn strong_hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.strong_hash);
+    }
+}
+
+pagable::register_typetag!(AnonTarget as dyn DynEvalKindKey);
+
 impl AnonTarget {
     pub(crate) fn as_proto(&self) -> buck2_data::AnonTarget {
         buck2_data::AnonTarget {
@@ -121,7 +132,7 @@ impl AnonTarget {
         exec_cfg: ConfigurationNoExec,
         variant: AnonTargetVariant,
     ) -> Self {
-        let mut full_hash = FxHasher::default();
+        let mut full_hash = BuckHasher::default();
         rule_type.hash(&mut full_hash);
         name.hash(&mut full_hash);
         attrs.hash(&mut full_hash);
@@ -200,7 +211,7 @@ impl AnonTargetDyn for AnonTarget {
         let rule_analysis_attr_resolution_ctx = RuleAnalysisAttrResolutionContext {
             module: env,
             dep_analysis_results,
-            query_results: HashMap::new(),
+            query_results: StdBuckHashMap::default(),
             execution_platform_resolution: exec_resolution,
         };
 
@@ -228,8 +239,8 @@ impl AnonTargetDyn for AnonTarget {
         promise_artifact_mappings: SmallMap<String, Value<'v>>,
         anon_target_result: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
-    ) -> buck2_error::Result<HashMap<PromiseArtifactId, Artifact>> {
-        let mut fulfilled_artifact_mappings = HashMap::new();
+    ) -> buck2_error::Result<StdBuckHashMap<PromiseArtifactId, Artifact>> {
+        let mut fulfilled_artifact_mappings = StdBuckHashMap::default();
 
         for (id, func) in promise_artifact_mappings.values().enumerate() {
             let artifact = eval.eval_function(*func, &[anon_target_result], &[])?;
@@ -257,6 +268,7 @@ impl AnonTargetDyn for AnonTarget {
     }
 }
 
+#[pagable_typetag]
 impl BaseDeferredKeyDyn for AnonTarget {
     fn eq_token(&self) -> PartialEqAny<'_> {
         PartialEqAny::new(self)
@@ -344,26 +356,5 @@ impl BaseDeferredKeyDyn for AnonTarget {
             AnonTargetVariant::Bzl => None,
             AnonTargetVariant::Bxl(global_cfg_options) => Some(global_cfg_options.dupe()),
         }
-    }
-}
-
-impl buck2_interpreter::dice::starlark_provider::DynEvalKindKey for AnonTarget {
-    fn hash(&self, state: &mut dyn Hasher) {
-        state.write_u64(self.hash);
-    }
-
-    fn strong_hash(&self, state: &mut dyn Hasher) {
-        state.write_u64(self.strong_hash);
-    }
-
-    fn eq(&self, other: &dyn buck2_interpreter::dice::starlark_provider::DynEvalKindKey) -> bool {
-        match other.as_any().downcast_ref::<Self>() {
-            None => false,
-            Some(v) => v == self,
-        }
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

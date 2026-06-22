@@ -23,6 +23,8 @@ use std::ptr::NonNull;
 use std::slice;
 
 use allocative::Allocative;
+use pagable::PagableDeserialize;
+use pagable::PagableSerialize;
 
 #[repr(C)]
 struct ThinBoxSliceLayout<T> {
@@ -197,6 +199,12 @@ impl<T: 'static> DerefMut for ThinBoxSlice<T> {
 }
 
 impl<T> ThinBoxSlice<MaybeUninit<T>> {
+    /// Converts the `ThinBoxSlice<MaybeUninit<T>>` to `ThinBoxSlice<T>`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that all elements in the slice have been properly initialized
+    /// before calling this method. Reading uninitialized memory is undefined behavior.
     #[inline]
     pub unsafe fn assume_init(self) -> ThinBoxSlice<T> {
         let result = ThinBoxSlice {
@@ -323,6 +331,34 @@ impl<T: Allocative> Allocative for ThinBoxSlice<T> {
             }
         }
         visitor.exit();
+    }
+}
+
+impl<T: PagableSerialize> PagableSerialize for ThinBoxSlice<T> {
+    fn pagable_serialize(
+        &self,
+        serializer: &mut dyn pagable::PagableSerializer,
+    ) -> pagable::Result<()> {
+        use serde::Serialize;
+        usize::serialize(&self.read_len(), serializer.serde())?;
+        for item in self.iter() {
+            item.pagable_serialize(serializer)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'de, T: PagableDeserialize<'de>> PagableDeserialize<'de> for ThinBoxSlice<T> {
+    fn pagable_deserialize<D: pagable::PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Self> {
+        use serde::Deserialize;
+        let len = usize::deserialize(deserializer.serde())?;
+        let mut items = Vec::with_capacity(len);
+        for _ in 0..len {
+            items.push(T::pagable_deserialize(deserializer)?);
+        }
+        Ok(ThinBoxSlice::from_iter(items))
     }
 }
 

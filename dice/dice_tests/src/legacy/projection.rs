@@ -19,12 +19,16 @@ use dice::DetectCycles;
 use dice::Dice;
 use dice::DiceComputations;
 use dice::DiceData;
+use dice::DiceKeyDyn;
 use dice::DiceProjectionComputations;
+use dice::DiceProjectionDyn;
 use dice::Key;
 use dice::ProjectionKey;
 use dice::UserComputationData;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use parking_lot::Mutex;
 
 /// We have three keys in this test:
@@ -52,8 +56,18 @@ struct GlobalConfig {
 }
 
 /// "Evaluate" a file.
-#[derive(Debug, derive_more::Display, Clone, Hash, PartialEq, Eq, Allocative)]
+#[derive(
+    Debug,
+    derive_more::Display,
+    Clone,
+    Hash,
+    PartialEq,
+    Eq,
+    Allocative,
+    Pagable
+)]
 #[display("{}", name)]
+#[pagable_typetag(DiceKeyDyn)]
 struct FileKey {
     name: String,
 }
@@ -61,6 +75,10 @@ struct FileKey {
 #[async_trait]
 impl Key for FileKey {
     type Value = Result<Arc<String>, Arc<anyhow::Error>>;
+
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     async fn compute(
         &self,
@@ -108,14 +126,20 @@ impl Key for FileKey {
     Hash,
     PartialEq,
     Eq,
-    Allocative
+    Allocative,
+    Pagable
 )]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct ConfigKey;
 
 #[async_trait]
 impl Key for ConfigKey {
     type Value = Arc<HashMap<String, String>>;
+
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     async fn compute(
         &self,
@@ -146,8 +170,18 @@ impl Key for ConfigKey {
 }
 
 /// One "property" of the "configuration".
-#[derive(Debug, derive_more::Display, Clone, Hash, PartialEq, Eq, Allocative)]
+#[derive(
+    Debug,
+    derive_more::Display,
+    Clone,
+    Hash,
+    PartialEq,
+    Eq,
+    Allocative,
+    Pagable
+)]
 #[display("{}", key)]
+#[pagable_typetag(DiceProjectionDyn)]
 struct ConfigPropertyKey {
     key: String,
 }
@@ -157,6 +191,10 @@ impl ProjectionKey for ConfigPropertyKey {
     type DeriveFromKey = ConfigKey;
     /// And produce a string.
     type Value = Arc<String>;
+
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     fn compute(
         &self,

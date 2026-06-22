@@ -21,10 +21,13 @@ use std::marker::PhantomData;
 use std::mem;
 
 use allocative::Allocative;
+use allocative::Visitor;
 use derive_more::Display;
 
 use crate as starlark;
 use crate::any::ProvidesStaticType;
+use crate::pagable::starlark_deserialize::StarlarkDeserializeContext;
+use crate::pagable::starlark_serialize::StarlarkSerializeContext;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
 use crate::values::FrozenValue;
@@ -39,6 +42,37 @@ use crate::values::layout::heap::repr::AValueRepr;
 use crate::values::layout::heap::repr::ForwardPtr;
 use crate::values::layout::heap::send::HeapSyncable;
 use crate::values::layout::value_alloc_size::ValueAllocSize;
+
+/// Bound for the payload type `T` of `AValueSimple<T>`.
+///
+/// Bundles `StarlarkValue` + send/sync (always required), plus
+/// `StarlarkPagable` and `VtableRegistered` under the `pagable` feature.
+#[cfg(feature = "pagable")]
+pub trait AValueSimpleBound<'v>:
+    StarlarkValue<'v>
+    + HeapSendable<'v>
+    + HeapSyncable<'v>
+    + crate::pagable::StarlarkPagable
+    + crate::pagable::vtable_register::VtableRegistered
+{
+}
+#[cfg(feature = "pagable")]
+impl<'v, T> AValueSimpleBound<'v> for T where
+    T: StarlarkValue<'v>
+        + HeapSendable<'v>
+        + HeapSyncable<'v>
+        + crate::pagable::StarlarkPagable
+        + crate::pagable::vtable_register::VtableRegistered
+{
+}
+
+#[cfg(not(feature = "pagable"))]
+pub trait AValueSimpleBound<'v>: StarlarkValue<'v> + HeapSendable<'v> + HeapSyncable<'v> {}
+#[cfg(not(feature = "pagable"))]
+impl<'v, T> AValueSimpleBound<'v> for T where
+    T: StarlarkValue<'v> + HeapSendable<'v> + HeapSyncable<'v>
+{
+}
 
 /// Extended vtable methods (those not covered by `StarlarkValue`).
 pub(crate) trait AValue<'v>: Sized + 'v {
@@ -89,6 +123,16 @@ pub(crate) trait AValue<'v>: Sized + 'v {
             + allocative::size_of_unique_allocated_data(value)
     }
 
+    /// Report inline extra payload that lives in the arena after the value.
+    ///
+    /// This is not visible to the value's normal `Allocative` implementation because it is not
+    /// represented as a Rust field on the payload.
+    fn visit_extra_allocative<'a, 'b: 'a>(
+        _value: &Self::StarlarkValue,
+        _visitor: &'a mut Visitor<'b>,
+    ) {
+    }
+
     unsafe fn heap_freeze<'fv>(
         me: *mut AValueRepr<Self::StarlarkValue>,
         freezer: &Freezer<'fv>,
@@ -96,6 +140,34 @@ pub(crate) trait AValue<'v>: Sized + 'v {
 
     unsafe fn heap_copy(me: *mut AValueRepr<Self::StarlarkValue>, tracer: &Tracer<'v>)
     -> Value<'v>;
+
+    /// Serialize this value using the provided context.
+    /// Default implementation returns an error — override for types that support serialization.
+    fn starlark_serialize(
+        _me: *const AValueRepr<Self::StarlarkValue>,
+        _ctx: &mut dyn StarlarkSerializeContext,
+    ) -> crate::Result<()> {
+        Err(crate::Error::new_kind(crate::ErrorKind::Other(
+            anyhow::anyhow!(
+                "Type `{}` does not support starlark serialization",
+                Self::StarlarkValue::TYPE
+            ),
+        )))
+    }
+
+    /// Deserialize this value into pre-allocated memory using the provided context.
+    /// Default implementation returns an error — override for types that support deserialization.
+    fn starlark_deserialize(
+        _me: *mut AValueRepr<Self::StarlarkValue>,
+        _ctx: &mut dyn StarlarkDeserializeContext<'_>,
+    ) -> crate::Result<()> {
+        Err(crate::Error::new_kind(crate::ErrorKind::Other(
+            anyhow::anyhow!(
+                "Type `{}` does not support starlark deserialization",
+                Self::StarlarkValue::TYPE
+            ),
+        )))
+    }
 }
 
 /// A value with extended (`AValue`) vtable methods.
@@ -184,6 +256,7 @@ mod tests {
     use crate::values::UnpackValue;
     use crate::values::Value;
     use crate::values::dict::AllocDict;
+    use crate::values::layout::heap::heap_type::StarlarkTestHeapName;
     use crate::values::types::list::value::ListData;
 
     #[test]
@@ -195,7 +268,7 @@ mod tests {
                 .unwrap()
                 .push(tuple, module.heap());
             module.set("t", tuple);
-            module.freeze()?;
+            module.freeze_named(StarlarkTestHeapName::frozen_heap_name())?;
             crate::Result::Ok(())
         })
         .unwrap();
@@ -214,7 +287,7 @@ mod tests {
 
             module.set_extra_value(module.heap().alloc((d0, d1)));
 
-            let module = module.freeze()?;
+            let module = module.freeze_named(StarlarkTestHeapName::frozen_heap_name())?;
             let (d0, d1) =
                 <(Value, Value)>::unpack_value_err(module.extra_value().unwrap().to_value())
                     .unwrap();

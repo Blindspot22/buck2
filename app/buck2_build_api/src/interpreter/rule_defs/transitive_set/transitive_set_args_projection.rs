@@ -23,11 +23,11 @@ use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::values::Demand;
 use starlark::values::Freeze;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
@@ -49,7 +49,6 @@ use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
-use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
 use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
@@ -63,7 +62,16 @@ use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetProje
 /// The projected values are all stored on the TransitiveSet itself and this value will reference back to that. The main
 /// point of this object is to provide the implementation of CommandLineArgLike so that the args projection
 /// can be used in places that accept command lines.
-#[derive(Debug, Clone, Trace, Coerce, Freeze, ProvidesStaticType, Allocative)]
+#[derive(
+    Debug,
+    Clone,
+    Trace,
+    Coerce,
+    Freeze,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[derive(NoSerialize)] // TODO we should probably have a serialization for transitive set
 #[repr(C)]
 pub struct TransitiveSetArgsProjectionGen<V: ValueLifetimeless> {
@@ -117,17 +125,15 @@ impl<'v, V: ValueLike<'v>> TransitiveSetArgsProjectionGen<V> {
 
             fn add_to_command_line(
                 &self,
-                cli: &mut dyn CommandLineBuilder,
-                context: &mut dyn CommandLineContext,
-                artifact_path_mapping: &dyn ArtifactPathMapper,
+                fmt: &mut CommandLineBuilder<'v, '_>,
             ) -> buck2_error::Result<()> {
                 match self {
-                    Impl::Item(v) => v.add_to_command_line(cli, context, artifact_path_mapping),
+                    Impl::Item(v) => v.add_to_command_line(fmt),
                     Impl::List(items) => {
                         for v in *items {
                             ValueAsCommandLineLike::unpack_value_err(*v)?
                                 .0
-                                .add_to_command_line(cli, context, artifact_path_mapping)?;
+                                .add_to_command_line(fmt)?;
                         }
                         Ok(())
                     }
@@ -204,14 +210,17 @@ impl<'v, V: ValueLike<'v>> TransitiveSetArgsProjectionGen<V> {
 
 starlark_complex_value!(pub TransitiveSetArgsProjection);
 
+starlark::methods_static!(
+    TRANSITIVE_SET_ARGS_PROJECTION_METHODS = transitive_set_args_projection_methods
+);
+
 #[starlark_value(type = "TransitiveSetArgsProjection")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for TransitiveSetArgsProjectionGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(transitive_set_args_projection_methods)
+        Some(TRANSITIVE_SET_ARGS_PROJECTION_METHODS.methods())
     }
 
     fn provide(&'v self, demand: &mut Demand<'_, 'v>) {
@@ -224,12 +233,7 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for TransitiveSetArgsProjectio
         command_line_arg_like_impl!(TransitiveSetArgsProjection::starlark_type_repr());
     }
 
-    fn add_to_command_line(
-        &self,
-        builder: &mut dyn CommandLineBuilder,
-        context: &mut dyn CommandLineContext,
-        artifact_path_mapping: &dyn ArtifactPathMapper,
-    ) -> buck2_error::Result<()> {
+    fn add_to_command_line(&self, fmt: &mut CommandLineBuilder<'v, '_>) -> buck2_error::Result<()> {
         let set = TransitiveSet::from_value(self.transitive_set.get().to_value())
             .ok_or_else(|| internal_error!("Invalid transitive_set"))?;
 
@@ -239,11 +243,7 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for TransitiveSetArgsProjectio
                 .get(self.projection)
                 .ok_or_else(|| internal_error!("Invalid projection id"))?;
 
-            TransitiveSetArgsProjection::as_command_line(*projection)?.add_to_command_line(
-                builder,
-                context,
-                artifact_path_mapping,
-            )?;
+            TransitiveSetArgsProjection::as_command_line(*projection)?.add_to_command_line(fmt)?;
         }
 
         Ok(())
@@ -262,12 +262,9 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for TransitiveSetArgsProjectio
                     key: set.key().dupe(),
                     projection: self.projection,
                 },
-                *set.projection_path_resolution_may_require_artifact_value
-                    .get(self.projection)
-                    .expect("by construction"),
-                *set.projection_is_eligible_for_dedupe
-                    .get(self.projection)
-                    .expect("by construction"),
+                set.projection_path_resolution_may_require_artifact_value
+                    .get(self.projection)?,
+                set.projection_is_eligible_for_dedupe.get(self.projection)?,
             ))),
             vec![],
         );

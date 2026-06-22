@@ -21,6 +21,18 @@ Options:
           actions - State getting deleted (e.g., new buckversion that changes the on-disk state
           format) - Writing to `buck-out` without being expected by Buck
 
+      --adaptive-low-disk-threshold <PERCENT>
+          Enable adaptive low-disk promotion: after the regular stale scan, promote retained,
+          non-active artifacts (oldest-access first) to stale until projected free disk % rises
+          above this threshold (0.0 - 100.0)
+
+      --adaptive-min-ttl <DURATION>
+          Minimum TTL floor for adaptive low-disk promotion: retained artifacts accessed within this
+          duration of now are never promoted, even under disk pressure. Ignored unless
+          `--adaptive-low-disk-threshold` is set
+
+          [default: 12h]
+
       --background
           Run the clean operation in the background
 
@@ -227,3 +239,9 @@ Universal Options:
           Metadata key-value pairs to inject into Buck2's logging. Client metadata must be of the
           form `key=value`, where `key` is a snake_case identifier, and will be sent to backend
           datasets
+
+      --agent-context <AGENT_CONTEXT>
+          Agent context key=value pairs for telemetry. Used by AI agents to pass structured
+          metadata. Schema is defined via buckconfig. Entries can be comma-separated or passed as
+          separate flags. Examples: --agent-context intent=fix,attempt=2,prior_error=missing_target
+          --agent-context intent=build --agent-context attempt=1

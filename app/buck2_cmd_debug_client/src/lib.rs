@@ -25,7 +25,9 @@ use crate::eval::EvalCommand;
 use crate::exe::ExeCommand;
 use crate::file_status::FileStatusCommand;
 use crate::flush_dep_files::FlushDepFilesCommand;
+use crate::flush_pgo_profile::FlushPgoProfileCommand;
 use crate::heap_dump::HeapDumpCommand;
+use crate::hydration::HydrationCommand;
 use crate::internal_version::InternalVersionCommand;
 use crate::log_perf::LogPerfCommand;
 use crate::materialize::MaterializeCommand;
@@ -46,7 +48,9 @@ mod eval;
 mod exe;
 mod file_status;
 mod flush_dep_files;
+mod flush_pgo_profile;
 mod heap_dump;
+mod hydration;
 mod internal_version;
 mod log_perf;
 mod materialize;
@@ -73,6 +77,8 @@ pub enum DebugCommand {
     ChromeTrace(ChromeTraceCommand),
     /// Flushes all dep files known to Buck2.
     FlushDepFiles(FlushDepFilesCommand),
+    /// Flush PGO profile data from the daemon to disk.
+    FlushPgoProfile(FlushPgoProfileCommand),
     /// Forces materialization of a path, even on the deferred materializer
     Materialize(MaterializeCommand),
     // Upload RE logs given an RE session ID
@@ -95,6 +101,9 @@ pub enum DebugCommand {
     Paranoid(ParanoidCommand),
     Eval(EvalCommand),
     ThreadDump(ThreadDumpCommand),
+    /// Control DICE node value page-out / page-in.
+    #[clap(subcommand)]
+    Hydration(HydrationCommand),
 }
 
 impl DebugCommand {
@@ -113,6 +122,7 @@ impl DebugCommand {
             DebugCommand::InternalVersion(cmd) => cmd.exec(matches, ctx),
             DebugCommand::ChromeTrace(cmd) => ctx.exec(cmd, matches, events_ctx),
             DebugCommand::FlushDepFiles(cmd) => ctx.exec(cmd, matches, events_ctx),
+            DebugCommand::FlushPgoProfile(cmd) => ctx.exec(cmd, matches, events_ctx),
             DebugCommand::Materialize(cmd) => ctx.exec(cmd, matches, events_ctx),
             DebugCommand::UploadReLogs(cmd) => ctx.exec(cmd, matches, events_ctx),
             DebugCommand::DaemonDir(cmd) => cmd.exec(matches, ctx),
@@ -126,6 +136,7 @@ impl DebugCommand {
             DebugCommand::Paranoid(cmd) => cmd.exec(matches, ctx),
             DebugCommand::Eval(cmd) => ctx.exec(cmd, matches, events_ctx),
             DebugCommand::ThreadDump(cmd) => cmd.exec(matches, ctx),
+            DebugCommand::Hydration(cmd) => ctx.exec(cmd, matches, events_ctx),
         }
     }
 

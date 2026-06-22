@@ -9,8 +9,6 @@
  */
 
 use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::io::BufWriter;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -25,6 +23,7 @@ use buck2_build_api::actions::execute::dice_data::set_fallback_executor_config;
 use buck2_build_api::actions::impls::run_action_knobs::HasRunActionKnobs;
 use buck2_build_api::actions::impls::run_action_knobs::RunActionKnobs;
 use buck2_build_api::build::HasCreateUnhashedSymlinkLock;
+use buck2_build_api::build::detailed_aggregated_metrics::dice::HasDetailedAggregatedMetrics;
 use buck2_build_api::build::detailed_aggregated_metrics::dice::SetDetailedAggregatedMetricsEventsHolder;
 use buck2_build_api::build_signals::BuildSignalsInstaller;
 use buck2_build_api::build_signals::SetBuildSignals;
@@ -32,8 +31,6 @@ use buck2_build_api::build_signals::create_build_signals;
 use buck2_build_api::context::SetBuildContextData;
 use buck2_build_api::keep_going::HasKeepGoing;
 use buck2_build_api::materialize::HasMaterializationQueueTracker;
-use buck2_build_api::materialize::HasMaterializerFastRolloutConfig;
-use buck2_build_api::materialize::MaterializerFastRolloutConfig;
 use buck2_build_api::spawner::BuckSpawner;
 use buck2_build_signals::env::CriticalPathBackendName;
 use buck2_build_signals::env::EarlyCommandTimingBuilder;
@@ -86,6 +83,7 @@ use buck2_execute::re::manager::ReConnectionObserver;
 use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
 use buck2_execute_impl::executors::worker::WorkerPool;
 use buck2_execute_impl::low_pass_filter::LowPassFilter;
+use buck2_execute_impl::materializers::deferred::clean_stale::CleanStaleConfig;
 use buck2_file_watcher::mergebase::SetMergebase;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
@@ -94,6 +92,8 @@ use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_fs::paths::file_name::FileName;
 use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_fs::working_dir::AbsWorkingDir;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use buck2_interpreter::dice::starlark_debug::SetStarlarkDebugger;
 use buck2_interpreter::extra::InterpreterHostArchitecture;
 use buck2_interpreter::extra::InterpreterHostPlatform;
@@ -131,6 +131,9 @@ use host_sharing::HostSharingStrategy;
 use tracing::warn;
 
 use crate::active_commands::ActiveCommandDropGuard;
+use crate::agent_context_validation::AgentContextSchema;
+use crate::agent_context_validation::validate_agent_context;
+use crate::agent_host_guard::check_agent_host_guard;
 use crate::daemon::common::CommandExecutorFactory;
 use crate::daemon::common::get_default_executor_config;
 use crate::daemon::state::DaemonStateData;
@@ -236,6 +239,9 @@ pub struct ServerCommandContext<'a> {
 
     /// Sanitized argument vector from the CLI from the client side.
     pub(crate) sanitized_argv: Vec<String>,
+
+    /// Agent context key=value pairs from --agent-context.
+    pub(crate) agent_context: Vec<buck2_data::AgentContextEntry>,
 
     cancellations: &'a CancellationContext,
 
@@ -357,6 +363,7 @@ impl<'a> ServerCommandContext<'a> {
             daemon_uuid_from_client: client_context.daemon_uuid.clone(),
             command_name: client_context.command_name.clone(),
             sanitized_argv: client_context.sanitized_argv.clone(),
+            agent_context: client_context.agent_context.clone(),
             debugger_handle,
             cancellations,
             preemptible: client_context.preemptible(),
@@ -404,7 +411,6 @@ impl<'a> ServerCommandContext<'a> {
             default_allow_cache_upload: false,
             action_paths_interner: None,
             deduplicate_get_digests_ttl_calls: false,
-            re_outputs_required: false,
         };
 
         let concurrency = self
@@ -470,7 +476,9 @@ impl<'a> ServerCommandContext<'a> {
 
     // Called at the end of the command to perform any necessary final actions or cleanup.
     pub(crate) async fn finalize(mut self) -> buck2_error::Result<()> {
-        self.starlark_profiling_manager.finalize()?;
+        self.starlark_profiling_manager
+            .finalize(&self.base_context.events)
+            .await?;
         self.heartbeat_guard_handle.take().unwrap().finalize().await;
         Ok(())
     }
@@ -514,7 +522,7 @@ impl ServerCommandContext<'_> {
                 Ok(BuckConfigBasedCells {
                     cell_resolver: new_configs.cell_resolver,
                     root_config: new_configs.root_config,
-                    config_paths: HashSet::new(),
+                    config_paths: StdBuckHashSet::default(),
                     external_data: (*dice_ctx.get_injected_external_buckconfig_data().await?)
                         .clone(),
                 })
@@ -531,7 +539,10 @@ impl ServerCommandContext<'_> {
         }
     }
 
-    fn report_traced_config_paths(&self, paths: &HashSet<ConfigPath>) -> buck2_error::Result<()> {
+    fn report_traced_config_paths(
+        &self,
+        paths: &StdBuckHashSet<ConfigPath>,
+    ) -> buck2_error::Result<()> {
         if let Some(tracing_provider) = TracingIoProvider::from_io(&*self.base_context.daemon.io) {
             for config_path in paths {
                 match config_path {
@@ -587,6 +598,26 @@ impl DiceUpdater for DiceCommandUpdater<'_, '_> {
     ) -> buck2_error::Result<(DiceTransactionUpdater, UserComputationData)> {
         let existing_state = &mut ctx.existing_state().await.clone();
         let cells_and_configs = self.cmd_ctx.load_new_configs(existing_state).await?;
+
+        // Validate agent context against buckconfig schema if entries were provided.
+        if !self.cmd_ctx.agent_context.is_empty() {
+            let schema = AgentContextSchema::from_config(&cells_and_configs.root_config);
+            validate_agent_context(
+                &schema,
+                self.cmd_ctx.client_id_from_client_metadata.as_deref(),
+                &self.cmd_ctx.agent_context,
+            )?;
+        }
+
+        check_agent_host_guard(
+            &cells_and_configs.root_config,
+            &self.cmd_ctx.base_context.daemon,
+            &self.cmd_ctx.base_context.project_root,
+            self.cmd_ctx.isolation_prefix.as_str(),
+        )?;
+
+        existing_state.maybe_enable_detailed_aggregated_metrics(&cells_and_configs.root_config)?;
+
         let cell_resolver = cells_and_configs.cell_resolver;
 
         let configuror = BuildInterpreterConfiguror::new(
@@ -784,13 +815,6 @@ impl DiceCommandUpdater<'_, '_> {
             })?
             .unwrap_or(false);
 
-        run_action_knobs.re_outputs_required |= root_config
-            .parse::<bool>(BuckconfigKeyRef {
-                section: "buck2",
-                property: "re_outputs_required",
-            })?
-            .unwrap_or(false);
-
         let output_trees_download_semaphore_size = root_config.parse::<u32>(BuckconfigKeyRef {
             section: "buck2",
             property: "output_trees_download_semaphore_size",
@@ -808,7 +832,7 @@ impl DiceCommandUpdater<'_, '_> {
             fingerprint_re_output_trees_eagerly,
         );
 
-        _ = buck2_core::faster_directories::VALUE.store(
+        buck2_core::faster_directories::VALUE.store(
             root_config
                 .parse::<bool>(BuckconfigKeyRef {
                     section: "buck2",
@@ -818,9 +842,19 @@ impl DiceCommandUpdater<'_, '_> {
             std::sync::atomic::Ordering::Relaxed,
         );
 
+        let dice = self
+            .cmd_ctx
+            .base_context
+            .daemon
+            .dice_manager
+            .unsafe_dice()
+            .dupe();
         let mut data = UserComputationData {
             data,
-            tracker: Arc::new(BuckDiceTracker::new(self.cmd_ctx.events().dupe())?),
+            tracker: Arc::new(BuckDiceTracker::new(
+                self.cmd_ctx.events().dupe(),
+                Box::new(move || dice.core_state_queue_depth() as u64),
+            )?),
             cycle_detector,
             activation_tracker: Some(self.build_signals.activation_tracker.dupe()),
             ..Default::default()
@@ -840,43 +874,6 @@ impl DiceCommandUpdater<'_, '_> {
             section: "buck2_re_client",
             property: "override_use_case",
         })?;
-
-        let (materializer_fast_rollout_tag, materializer_fast_rollout_config) = {
-            let spawn_cfg: Option<bool> = root_config.parse(BuckconfigKeyRef {
-                section: "buck2",
-                property: "materializer_fast_rollout_spawn_override",
-            })?;
-            let unconstrained_cfg: Option<bool> = root_config.parse(BuckconfigKeyRef {
-                section: "buck2",
-                property: "materializer_fast_rollout_unconstrained_override",
-            })?;
-            let materializer_fast_rollout_cfg = root_config.parse(BuckconfigKeyRef {
-                section: "buck2",
-                property: "materializer_fast_rollout",
-            })?;
-
-            let materializer_fast_enabled = materializer_fast_rollout_cfg.unwrap_or(false);
-            let spawn = spawn_cfg.unwrap_or(materializer_fast_enabled);
-            let unconstrained = unconstrained_cfg.unwrap_or(materializer_fast_enabled);
-
-            let tag = if spawn_cfg.is_some() || unconstrained_cfg.is_some() {
-                "materializer_fast_rollout=custom"
-            } else if materializer_fast_enabled {
-                "materializer_fast_rollout=enabled"
-            } else {
-                "materializer_fast_rollout=disabled"
-            };
-
-            (
-                tag,
-                MaterializerFastRolloutConfig {
-                    spawn,
-                    unconstrained,
-                },
-            )
-        };
-
-        data.set_materializer_fast_rollout_config(materializer_fast_rollout_config);
 
         set_fallback_executor_config(&mut data.data, self.executor_config.dupe());
         // This client is only used in places that do not use the RE use case specified in the executor config.
@@ -936,12 +933,15 @@ impl DiceCommandUpdater<'_, '_> {
         initialize_read_dir_cache(&mut data);
         data.spawner = self.cmd_ctx.base_context.daemon.spawner.dupe();
 
-        let tags = vec![
+        let clean_stale_config = CleanStaleConfig::from_buck_config(root_config)?;
+        let mut tags = vec![
             format!("lazy-cycle-detector:{}", has_cycle_detector),
             format!("miniperf:{}", enable_miniperf),
             format!("log-configured-graph-size:{}", log_configured_graph_size),
-            materializer_fast_rollout_tag.to_owned(),
         ];
+        tags.extend(CleanStaleConfig::adaptive_telemetry_tags(
+            clean_stale_config.as_ref(),
+        ));
         self.cmd_ctx
             .events()
             .instant_event(buck2_data::TagEvent { tags });
@@ -959,14 +959,14 @@ impl DiceCommandUpdater<'_, '_> {
     }
 }
 
-struct ConfigMetadataHolder(HashMap<String, String>);
+struct ConfigMetadataHolder(StdBuckHashMap<String, String>);
 
 fn collect_config_metadata_into(config: &LegacyBuckConfig, data: &mut UserComputationData) {
     // Facebook only: metadata collection for Scribe writes
     facebook_only();
 
     fn add_config(
-        map: &mut HashMap<String, String>,
+        map: &mut StdBuckHashMap<String, String>,
         cfg: &LegacyBuckConfig,
         key: BuckconfigKeyRef<'static>,
         field_name: &'static str,
@@ -988,11 +988,11 @@ fn collect_config_metadata_into(config: &LegacyBuckConfig, data: &mut UserComput
         sample_json.get("normals")?.as_object().cloned()
     }
 
-    let mut metadata = HashMap::new();
+    let mut metadata = StdBuckHashMap::default();
 
     add_config(
         &mut metadata,
-        &config,
+        config,
         BuckconfigKeyRef {
             section: "log",
             property: "repository",
@@ -1018,7 +1018,7 @@ fn collect_config_metadata_into(config: &LegacyBuckConfig, data: &mut UserComput
     // metadata. Depending on what sort of things we're missing by dropping int default columns, we might want
     // to consider adding support to the protocol for integer metadata.
 
-    if let Some(normals_obj) = extract_scuba_defaults(&config) {
+    if let Some(normals_obj) = extract_scuba_defaults(config) {
         for (key, value) in normals_obj.iter() {
             if let Some(value) = value.as_str() {
                 metadata.insert(key.clone(), value.to_owned());
@@ -1029,7 +1029,7 @@ fn collect_config_metadata_into(config: &LegacyBuckConfig, data: &mut UserComput
     // TODO(pbergen): Remove this when we desupport client.id in config.
     add_config(
         &mut metadata,
-        &config,
+        config,
         BuckconfigKeyRef {
             section: "client",
             property: "id",
@@ -1058,6 +1058,7 @@ fn collect_config_metadata_into(config: &LegacyBuckConfig, data: &mut UserComput
             ),
             quiet: false,
             deprecation: true,
+            error_on_oss: true,
         ).ok();
     }
 
@@ -1160,12 +1161,11 @@ impl ServerCommandContextTrait for ServerCommandContext<'_> {
             data: Some(data),
             cli_args: self.sanitized_argv.clone(),
             tags: self.base_context.daemon.tags.clone(),
-            ..Default::default()
         })
     }
 
     /// Gathers metadata to attach to events for when a command starts and stops.
-    async fn request_metadata(&self) -> buck2_error::Result<HashMap<String, String>> {
+    async fn request_metadata(&self) -> buck2_error::Result<StdBuckHashMap<String, String>> {
         // Facebook only: metadata collection for Scribe writes
         facebook_only();
 
@@ -1180,6 +1180,13 @@ impl ServerCommandContextTrait for ServerCommandContext<'_> {
             "materializer".to_owned(),
             self.base_context.daemon.materializer.name().to_owned(),
         );
+
+        if let Some(originating_cgroup) = &self.base_context.daemon.daemon_originating_cgroup {
+            metadata.insert(
+                "daemon_originating_cgroup".to_owned(),
+                originating_cgroup.clone(),
+            );
+        }
 
         if let Some(oncall) = &self.oncall {
             metadata.insert("oncall".to_owned(), oncall.clone());
@@ -1215,7 +1222,7 @@ impl ServerCommandContextTrait for ServerCommandContext<'_> {
     async fn config_metadata(
         &self,
         ctx: &mut DiceComputations<'_>,
-    ) -> buck2_error::Result<HashMap<String, String>> {
+    ) -> buck2_error::Result<StdBuckHashMap<String, String>> {
         ctx.per_transaction_data()
             .data
             .get::<ConfigMetadataHolder>()

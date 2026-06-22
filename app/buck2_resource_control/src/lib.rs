@@ -34,9 +34,23 @@ pub mod spawn_daemon;
 
 pub struct HasResourceControl(pub bool);
 
+/// Info about an orphan process that was killed via cgroup cleanup.
+#[derive(Debug, Clone)]
+pub struct OrphanProcessInfo {
+    /// The process ID.
+    pub pid: u32,
+    /// The process name from `/proc/<pid>/comm`.
+    pub comm: String,
+}
+
 #[cfg(not(unix))]
 pub mod buck_cgroup_tree {
     use buck2_common::init::ResourceControlConfig;
+
+    /// Return the current cgroup path for logging, if supported on this platform.
+    pub fn read_current_cgroup() -> Option<String> {
+        None
+    }
 
     pub struct PreppedBuckCgroups;
 

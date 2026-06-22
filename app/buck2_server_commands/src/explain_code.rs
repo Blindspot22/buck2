@@ -9,7 +9,6 @@
  */
 
 use core::iter::Iterator;
-use std::collections::HashMap;
 
 use buck2_build_api::query::oneshot::QUERY_FRONTEND;
 use buck2_cli_proto::new_generic::ExplainRequest;
@@ -28,6 +27,7 @@ use buck2_event_observer::what_ran::WhatRanRelevantAction;
 use buck2_events::span::SpanId;
 use buck2_explain::ActionEntryData;
 use buck2_explain::ChangedFilesEntryData;
+use buck2_hash::StdBuckHashMap;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_query::query::syntax::simple::eval::label_indexed::LabelIndexedSet;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
@@ -85,11 +85,11 @@ impl ActionEntry {
                         action_key::Owner::TargetLabel(target_label)
                         | action_key::Owner::TestTargetLabel(target_label)
                         | action_key::Owner::LocalResourceSetup(target_label) => {
-                            display_configured_target_label(&target_label, opts)
+                            display_configured_target_label(target_label, opts)
                         }
-                        action_key::Owner::BxlKey(bxl_key) => display_bxl_key(&bxl_key),
+                        action_key::Owner::BxlKey(bxl_key) => display_bxl_key(bxl_key),
                         action_key::Owner::AnonTarget(anon_target) => {
-                            display_anon_target(&anon_target)
+                            display_anon_target(anon_target)
                         }
                     }?,
                     None => return Ok(None),
@@ -132,59 +132,47 @@ pub(crate) async fn explain(
         emit_cache_queries: false,
         ..Default::default()
     };
-    let mut known_actions: HashMap<SpanId, ActionEntry> = Default::default();
+    let mut known_actions: StdBuckHashMap<SpanId, ActionEntry> = Default::default();
 
     let mut executed_actions = vec![];
     let mut changed_files = vec![];
 
     while let Some(event) = events.try_next().await? {
-        match event {
-            StreamValue::Event(event) => {
-                // TODO iguridi: deduplicate this from whatran code
-                if let Some(data) = event.data {
-                    if let Some(action) = WhatRanRelevantAction::from_buck_data(&data) {
-                        known_actions.insert(
-                            SpanId::from_u64(event.span_id)?,
-                            ActionEntry {
-                                action,
-                                reproducers: Default::default(),
-                            },
-                        );
-                    }
-                    if let Some(repro) = CommandReproducer::from_buck_data(&data, &options) {
-                        if let Some(parent_id) = SpanId::from_u64_opt(event.parent_id) {
-                            if let Some(entry) = known_actions.get_mut(&parent_id) {
-                                entry.reproducers.push(repro);
-                            }
-                        }
-                    }
+        if let StreamValue::Event(event) = event {
+            // TODO iguridi: deduplicate this from whatran code
+            if let Some(data) = event.data {
+                if let Some(action) = WhatRanRelevantAction::from_buck_data(&data) {
+                    known_actions.insert(
+                        SpanId::from_u64(event.span_id)?,
+                        ActionEntry {
+                            action,
+                            reproducers: Default::default(),
+                        },
+                    );
+                }
+                if let Some(repro) = CommandReproducer::from_buck_data(&data, &options)
+                    && let Some(parent_id) = SpanId::from_u64_opt(event.parent_id)
+                    && let Some(entry) = known_actions.get_mut(&parent_id)
+                {
+                    entry.reproducers.push(repro);
+                }
 
-                    match data {
-                        buck2_data::buck_event::Data::SpanEnd(span) => {
-                            if let Some(entry) =
-                                known_actions.remove(&SpanId::from_u64(event.span_id)?)
-                            {
-                                if let Some(entry) = entry.format_action(&span)? {
-                                    executed_actions.push(entry);
-                                }
-                            }
-                            match &span.data {
-                                Some(buck2_data::span_end_event::Data::FileWatcher(end)) => {
-                                    let events: &[FileWatcherEvent] =
-                                        end.stats.as_ref().expect("of source eh").events.as_ref();
-                                    for event in events {
-                                        let path = event.path.clone();
-                                        changed_files.push(path);
-                                    }
-                                }
-                                _ => {}
-                            }
+                if let buck2_data::buck_event::Data::SpanEnd(span) = data {
+                    if let Some(entry) = known_actions.remove(&SpanId::from_u64(event.span_id)?)
+                        && let Some(entry) = entry.format_action(&span)?
+                    {
+                        executed_actions.push(entry);
+                    }
+                    if let Some(buck2_data::span_end_event::Data::FileWatcher(end)) = &span.data {
+                        let events: &[FileWatcherEvent] =
+                            end.stats.as_ref().expect("of source eh").events.as_ref();
+                        for event in events {
+                            let path = event.path.clone();
+                            changed_files.push(path);
                         }
-                        _ => {}
                     }
                 }
             }
-            _ => {}
         }
     }
 

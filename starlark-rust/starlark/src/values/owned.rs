@@ -23,8 +23,16 @@ use allocative::Allocative;
 use dupe::Clone_;
 use dupe::Dupe;
 use dupe::Dupe_;
+use pagable::PagableDeserialize;
+use pagable::PagableDeserializer;
+use pagable::PagableSerialize;
+use pagable::PagableSerializer;
 
 use crate::cast::transmute;
+use crate::pagable::starlark_deserialize::StarlarkDeserializeContext;
+use crate::pagable::starlark_deserialize_context::StarlarkDeserializerImpl;
+use crate::pagable::starlark_serialize::StarlarkSerializeContext;
+use crate::pagable::starlark_serialize_context::StarlarkSerializerImpl;
 use crate::typing::Ty;
 use crate::values::AllocFrozenValue;
 use crate::values::FrozenHeap;
@@ -34,8 +42,6 @@ use crate::values::FrozenValueTyped;
 use crate::values::OwnedRefFrozenRef;
 use crate::values::StarlarkValue;
 use crate::values::Value;
-use crate::values::none::NoneType;
-use crate::values::owned_frozen_ref::OwnedFrozenRef;
 use crate::values::type_repr::StarlarkTypeRepr;
 
 #[derive(Debug, thiserror::Error)]
@@ -46,7 +52,7 @@ enum OwnedError {
 
 /// A [`FrozenValue`] along with a [`FrozenHeapRef`] that ensures it is kept alive.
 /// Obtained from [`FrozenModule::get`](crate::environment::FrozenModule::get) or
-/// [`OwnedFrozenValue::alloc`].
+/// [`OwnedFrozenValue::new`].
 ///
 /// While it is possible to obtain the underlying [`FrozenValue`] with
 /// [`unchecked_frozen_value`](OwnedFrozenValue::unchecked_frozen_value), that approach
@@ -57,12 +63,6 @@ pub struct OwnedFrozenValue {
     owner: FrozenHeapRef,
     // Invariant: this FrozenValue must be kept alive by the `owner` field.
     value: FrozenValue,
-}
-
-impl Default for OwnedFrozenValue {
-    fn default() -> Self {
-        OwnedFrozenValue::alloc(NoneType)
-    }
 }
 
 impl Display for OwnedFrozenValue {
@@ -95,21 +95,19 @@ impl OwnedFrozenValue {
     ///
     /// ```
     /// use starlark::values::FrozenHeap;
+    /// use starlark::values::FrozenHeapName;
     /// use starlark::values::OwnedFrozenValue;
     /// let heap = FrozenHeap::new();
     /// let value = heap.alloc("test");
-    /// unsafe { OwnedFrozenValue::new(heap.into_ref(), value) };
+    /// unsafe {
+    ///     OwnedFrozenValue::new(
+    ///         heap.into_ref_named(FrozenHeapName::User(Box::new("test"))),
+    ///         value,
+    ///     )
+    /// };
     /// ```
     pub unsafe fn new(owner: FrozenHeapRef, value: FrozenValue) -> Self {
         Self { owner, value }
-    }
-
-    /// Create an [`OwnedFrozenValue`] in a new heap.
-    pub fn alloc(x: impl AllocFrozenValue) -> Self {
-        let heap = FrozenHeap::new();
-        let val = heap.alloc(x);
-        // Safe because we just created the value on the heap
-        unsafe { Self::new(heap.into_ref(), val) }
     }
 
     /// Unpack the boolean contained in the underlying value, or [`None`] if it is not a boolean.
@@ -211,6 +209,49 @@ impl OwnedFrozenValue {
     }
 }
 
+impl PagableSerialize for OwnedFrozenValue {
+    fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> pagable::Result<()> {
+        // Serialize the owner heap ref (via pagable arc mechanism).
+        self.owner.pagable_serialize(serializer)?;
+
+        // Ensure offset maps are registered for the owner heap and its
+        // transitive dependencies. `serialize_arc` for
+        // `Arc<FrozenFrozenHeap>` can defer the actual heap
+        // serialization, so the offset maps may not exist yet when we
+        // need to serialize the FrozenValue.
+        let state = StarlarkSerializerImpl::get_or_create_state(serializer);
+        state.ensure_chunk_index_registered(&self.owner);
+
+        let mut ctx = StarlarkSerializerImpl::new(serializer, state);
+        ctx.serialize_frozen_value(self.value)
+            .map_err(|e| e.into_anyhow())?;
+
+        Ok(())
+    }
+}
+
+impl<'de> PagableDeserialize<'de> for OwnedFrozenValue {
+    fn pagable_deserialize<D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Self> {
+        // Deserialize the owner heap ref.
+        let owner = FrozenHeapRef::pagable_deserialize(deserializer)?;
+
+        // Get or create the shared deserialization state. The owner heap is
+        // already fully deserialized and registered, so cross-heap pointer
+        // resolution in `deserialize_frozen_value` will find it.
+        let state = StarlarkDeserializerImpl::get_or_create_state(deserializer.as_dyn());
+        let mut ctx = StarlarkDeserializerImpl::new(deserializer.as_dyn(), state);
+
+        // Deserialize the FrozenValue.
+        let value = ctx
+            .deserialize_frozen_value()
+            .map_err(|e| e.into_anyhow())?;
+
+        Ok(unsafe { OwnedFrozenValue::new(owner, value) })
+    }
+}
+
 /// Same as [`OwnedFrozenValue`] but it is known to contain `T`.
 #[derive(Debug, Clone_, Dupe_, Allocative)]
 pub struct OwnedFrozenValueTyped<T: StarlarkValue<'static>> {
@@ -235,10 +276,16 @@ impl<T: for<'a> StarlarkValue<'a>> OwnedFrozenValueTyped<T> {
     ///
     /// ```
     /// use starlark::values::FrozenHeap;
+    /// use starlark::values::FrozenHeapName;
     /// use starlark::values::OwnedFrozenValue;
     /// let heap = FrozenHeap::new();
     /// let value = heap.alloc("test");
-    /// unsafe { OwnedFrozenValue::new(heap.into_ref(), value) };
+    /// unsafe {
+    ///     OwnedFrozenValue::new(
+    ///         heap.into_ref_named(FrozenHeapName::User(Box::new("test"))),
+    ///         value,
+    ///     )
+    /// };
     /// ```
     pub unsafe fn new<'a>(owner: FrozenHeapRef, value: FrozenValueTyped<'a, T>) -> Self {
         // SAFETY: The caller has asserted that this heap ref keeps the value alive.
@@ -274,12 +321,6 @@ impl<T: for<'a> StarlarkValue<'a>> OwnedFrozenValueTyped<T> {
     /// Convert to borrowed ref.
     pub fn as_owned_ref_frozen_ref(&self) -> OwnedRefFrozenRef<'_, T> {
         unsafe { OwnedRefFrozenRef::new_unchecked(self.value.as_ref(), &self.owner) }
-    }
-
-    /// Convert to an owned ref.
-    pub fn into_owned_frozen_ref(self) -> OwnedFrozenRef<T> {
-        // SAFETY: Heap matches the value
-        unsafe { OwnedFrozenRef::new_unchecked(self.value.as_ref(), self.owner) }
     }
 
     /// Obtain a reference to the FrozenHeap that owns this value.
@@ -366,5 +407,28 @@ impl<T: for<'a> StarlarkValue<'a>> OwnedFrozenValueTyped<T> {
             owner: self.owner.dupe(),
             value: f(self.value)?,
         })
+    }
+}
+
+impl<T: for<'a> StarlarkValue<'a>> PagableSerialize for OwnedFrozenValueTyped<T> {
+    fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> pagable::Result<()> {
+        // Delegate to OwnedFrozenValue serialization (same wire format).
+        self.to_owned_frozen_value().pagable_serialize(serializer)
+    }
+}
+
+impl<'de, T: for<'a> StarlarkValue<'a>> PagableDeserialize<'de> for OwnedFrozenValueTyped<T> {
+    fn pagable_deserialize<D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Self> {
+        let owned = OwnedFrozenValue::pagable_deserialize(deserializer)?;
+        match owned.downcast::<T>() {
+            Ok(typed) => Ok(typed),
+            Err(owned) => Err(anyhow::anyhow!(
+                "OwnedFrozenValueTyped deserialization: expected type `{}`, got `{}`",
+                T::TYPE,
+                owned.value().to_string_for_type_error()
+            )),
+        }
     }
 }

@@ -8,8 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
@@ -27,6 +25,8 @@ use buck2_core::global_cfg_options::GlobalCfgOptions;
 use buck2_core::package::PackageLabelWithModifiers;
 use buck2_core::target::configured_or_unconfigured::ConfiguredOrUnconfiguredTargetLabel;
 use buck2_core::target::label::label::TargetLabel;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_node::nodes::unconfigured::TargetNode;
 use buck2_query::query::environment::QueryTarget;
@@ -71,6 +71,14 @@ impl BuckTargetHasher for siphasher::sip128::SipHasher24 {
 /// We use blake3 as our "strong" hash.
 struct Blake3Adapter(blake3::Hasher);
 
+// This `Hasher` impl only provides `write` and `finish` (not the full set of
+// `write_*` forwarding methods). That is acceptable here because blake3 is a
+// streaming hash — every `write_*` default implementation ultimately calls
+// `self.write()`, and blake3's `update` treats all byte sequences uniformly.
+// For hash functions where individual `write_u8` / `write_usize` / etc.
+// produce different results than the default byte-serialisation path (e.g.
+// FxHasher), all methods *must* be forwarded explicitly; see the comment on
+// `StarlarkHasherSmallPromote` in `buck2_build_api/.../provider/callable.rs`.
 impl Hasher for Blake3Adapter {
     fn finish(&self) -> u64 {
         unimplemented!()
@@ -91,7 +99,7 @@ impl BuckTargetHasher for Blake3Adapter {
 
 pub enum TargetHashesFileMode {
     /// The following files have changed in some way (don't do any IO)
-    PathsOnly(HashSet<CellPath>),
+    PathsOnly(StdBuckHashSet<CellPath>),
     /// Use IO operations to find the paths and their contents
     PathsAndContents,
     /// Don't hash any files
@@ -105,7 +113,7 @@ trait FileHasher: Send + Sync {
 }
 
 struct PathsOnlyFileHasher {
-    pseudo_changed_paths: HashSet<CellPath>,
+    pseudo_changed_paths: StdBuckHashSet<CellPath>,
 }
 
 #[async_trait]
@@ -248,7 +256,7 @@ impl TargetHashingTargetNode for TargetNode {
 }
 pub struct TargetHashes {
     // key is an unconfigured target label, but the hash is generated from the configured target label.
-    target_mapping: HashMap<TargetLabel, buck2_error::Result<BuckTargetHash>>,
+    target_mapping: StdBuckHashMap<TargetLabel, buck2_error::Result<BuckTargetHash>>,
 }
 
 #[derive(buck2_error::Error, Debug)]
@@ -275,10 +283,10 @@ impl TargetHashes {
     where
         T::Key: ConfiguredOrUnconfiguredTargetLabel,
     {
-        let mut hashes: HashMap<
+        let mut hashes: StdBuckHashMap<
             T::Key,
             Shared<DropcancelJoinHandle<buck2_error::Result<BuckTargetHash>>>,
-        > = HashMap::new();
+        > = StdBuckHashMap::default();
 
         let visit = |target: T| {
             // this is postorder, so guaranteed that all deps have futures already.
@@ -351,8 +359,8 @@ impl TargetHashes {
             .map(|(target, fut)| async move { (target, fut.await) })
             .collect();
 
-        let mut target_mapping: HashMap<TargetLabel, buck2_error::Result<BuckTargetHash>> =
-            HashMap::new();
+        let mut target_mapping: StdBuckHashMap<TargetLabel, buck2_error::Result<BuckTargetHash>> =
+            StdBuckHashMap::default();
 
         // TODO(cjhopman): FuturesOrdered/Unordered interacts poorly with tokio cooperative scheduling
         // (see https://github.com/rust-lang/futures-rs/issues/2053). Clean this up once a good
@@ -413,7 +421,7 @@ impl TargetHashes {
             })
             .collect();
 
-        let target_mapping: HashMap<TargetLabel, buck2_error::Result<BuckTargetHash>> =
+        let target_mapping: StdBuckHashMap<TargetLabel, buck2_error::Result<BuckTargetHash>> =
             join_all(hashing_futures).await.into_iter().collect();
         Ok(Self { target_mapping })
     }

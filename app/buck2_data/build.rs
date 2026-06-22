@@ -14,10 +14,11 @@ use std::io;
 fn main() -> io::Result<()> {
     let proto_files = &["data.proto", "error.proto"];
 
-    let includes = if let Ok(path) = env::var("BUCK_PROTO_SRCS") {
-        vec![path]
+    let buck_proto_srcs = env::var("BUCK_PROTO_SRCS");
+    let includes = if let Ok(path) = &buck_proto_srcs {
+        vec![path.as_str()]
     } else {
-        vec![".".to_owned(), "../buck2_host_sharing_proto".to_owned()]
+        vec![".", "../buck2_host_sharing_proto"]
     };
 
     let builder = buck2_protoc_dev::configure();
@@ -119,18 +120,9 @@ fn main() -> io::Result<()> {
             "buck.data.AnalysisEnd.target",
             "#[derive(::derive_more::From, ::gazebo::variants::VariantName)]",
         )
-        .type_attribute("buck.data.TargetLabel", "#[derive(Eq, Hash)]")
-        .type_attribute("buck.data.Configuration", "#[derive(Eq, Hash)]")
-        .type_attribute("buck.data.ConfiguredTargetLabel", "#[derive(Eq, Hash)]")
-        .type_attribute("buck.data.AnonTarget", "#[derive(Eq, Hash)]")
-        .type_attribute("buck.data.BxlFunctionLabel", "#[derive(Eq, Hash)]")
-        .type_attribute("buck.data.BxlFunctionKey", "#[derive(Eq, Hash)]")
-        .type_attribute("buck.data.ActionKey.owner", "#[derive(Eq, Hash)]")
-        .type_attribute("buck.data.ActionKey", "#[derive(Eq, Hash)]")
-        .type_attribute("buck.data.FileWatcherEvent", "#[derive(Eq, Hash)]")
         .type_attribute(
             "buck.data.ActionKind",
-            "#[derive(::gazebo::variants::VariantName)]",
+            "#[derive(::gazebo::variants::VariantName, ::pagable::Pagable)]",
         )
         .type_attribute(
             "buck.data.MaterializationMethod",
@@ -140,7 +132,6 @@ fn main() -> io::Result<()> {
         .type_attribute("buck.data.CommandExecutionStats", "#[derive(dupe::Dupe)]")
         .type_attribute(".", "#[derive(::serde::Serialize, ::serde::Deserialize)]")
         .type_attribute(".", "#[derive(::allocative::Allocative)]")
-        .type_attribute("buck.data.SoftError", "#[derive(Eq, Hash)]")
         .field_attribute(
             "timestamp",
             "#[serde(with = \"crate::serialize_timestamp\")]",

@@ -28,21 +28,10 @@ load(
     "cxx_merge_cpreprocessors",
 )
 load("@prelude//cxx:target_sdk_version.bzl", "get_target_sdk_version_flags")
-load(
-    "@prelude//linking:link_info.bzl",
-    "LinkStyle",
-)
 load("@prelude//linking:types.bzl", "Linkage")
 load("@prelude//os_lookup:defs.bzl", "OsLookup")
 load("@prelude//utils:cmd_script.bzl", "cmd_script")
 load(":toolchain.bzl", "GoToolchainInfo", "get_toolchain_env_vars")
-
-# A map of expected linkages for provided link style
-_LINKAGE_FOR_LINK_STYLE = {
-    LinkStyle("static"): Linkage("static"),
-    LinkStyle("static_pic"): Linkage("static"),
-    LinkStyle("shared"): Linkage("shared"),
-}
 
 CGoToolOut = record(
     cgo_gotypes = field(Artifact),  # _cgo_gotypes.go
@@ -58,17 +47,13 @@ CGoBuildContext = record(
     cxx_toolchain_info = field(CxxToolchainInfo),
     target_sdk_version_flags = field(list[str]),
     exec_os_type = field(OsLookup),
-
     # Values from explicit attrs
     header_namespace = field(str),
     headers_layout = field(CxxHeadersLayout),
     cxx_compiler_flags = field(list[typing.Any]),
     cxx_preprocessor_flags = field(list[typing.Any]),
-    link_style = field(str),
-
     # Deps info
     inherited_preprocessor_infos = field(list[CPreprocessorInfo]),
-
     # Store "_cxx_toolchain" as "Dependency" for use in "anon_target"
     _cxx_toolchain = field(Dependency | None, None),
 )
@@ -86,19 +71,28 @@ def get_cgo_build_context(ctx: AnalysisContext) -> CGoBuildContext | None:
         headers_layout = cxx_get_regular_cxx_headers_layout(ctx),
         cxx_compiler_flags = ctx.attrs.cxx_compiler_flags,
         cxx_preprocessor_flags = ctx.attrs.cxx_preprocessor_flags,
-        link_style = ctx.attrs.link_style or "static",
         inherited_preprocessor_infos = cxx_inherited_preprocessor_infos(ctx.attrs.deps),
         _cxx_toolchain = ctx.attrs._cxx_toolchain,
     )
 
+_syscall_import_exclude_list = set([
+    "runtime/asan",
+    "runtime/cgo",
+    "runtime/race",
+    "runtime/msan",
+])
+
 def _cgo(
-        actions: AnalysisActions,
-        go_toolchain: GoToolchainInfo,
-        cgo_build_context: CGoBuildContext,
-        srcs: list[Artifact],
-        own_pre: list[CPreprocessor],
-        cgo_c_flags: list[str],
-        cgo_cpp_flags: list[str]) -> (CGoToolOut, Artifact):
+    actions: AnalysisActions,
+    go_toolchain: GoToolchainInfo,
+    cgo_build_context: CGoBuildContext,
+    pkg_import_path: str,
+    standard: bool,
+    srcs: list[Artifact],
+    own_pre: list[CPreprocessor],
+    cgo_c_flags: list[str],
+    cgo_cpp_flags: list[str],
+) -> (CGoToolOut, Artifact):
     """
     Run `cgo` on `.go` sources to generate Go, C, and C-Header sources.
     """
@@ -106,12 +100,17 @@ def _cgo(
 
     # Return a `cmd_args` to use as the generated sources.
 
+    unimport_runtime_cgo = standard and pkg_import_path == "runtime/cgo"
+    unimport_syscall = standard and pkg_import_path in _syscall_import_exclude_list
+
     cmd = cmd_args(
         go_toolchain.go_wrapper,
         ["--go", go_toolchain.cgo],
         "--",
         cmd_args(gen_dir.as_output(), format = "-objdir={}"),
         ["-trimpath", "%cwd%"],
+        ["-import_runtime_cgo=false"] if unimport_runtime_cgo else [],
+        ["-import_syscall=false"] if unimport_syscall else [],
         "--",
         cgo_c_flags + cgo_cpp_flags,
         cgo_build_context.cxx_compiler_flags,
@@ -121,7 +120,7 @@ def _cgo(
     env = get_toolchain_env_vars(go_toolchain)
     env["CC"] = _cxx_wrapper(actions, go_toolchain, cgo_build_context, own_pre)
 
-    actions.run(cmd, env = env, category = "cgo")
+    actions.run(cmd, env = env, category = "go_cgo", identifier = pkg_import_path)
 
     return project_go_and_c_files(srcs, gen_dir), gen_dir
 
@@ -162,8 +161,8 @@ def _cxx_wrapper(actions: AnalysisActions, go_toolchain: GoToolchainInfo, cgo_bu
     )
 
 # build CPreprocessor similar as cxx_private_preprocessor_info does, but with our filtered headers
-def _own_pre(actions: AnalysisActions, cgo_build_context: CGoBuildContext, h_files: list[Artifact]) -> CPreprocessor:
-    header_map = {paths.join(cgo_build_context.header_namespace, h.short_path): h for h in h_files}
+def _own_pre(actions: AnalysisActions, cgo_build_context: CGoBuildContext, package_root: str, h_files: list[Artifact]) -> CPreprocessor:
+    header_map = {paths.join(cgo_build_context.header_namespace, paths.relativize(h.short_path, package_root)): h for h in h_files}
     header_root = prepare_headers(actions, cgo_build_context.cxx_toolchain_info, header_map, "h_files-private-headers", uses_content_based_paths = True)
 
     return CPreprocessor(
@@ -171,16 +170,20 @@ def _own_pre(actions: AnalysisActions, cgo_build_context: CGoBuildContext, h_fil
     )
 
 def build_cgo(
-        actions: AnalysisActions,
-        target_label: Label,
-        go_toolchain_info: GoToolchainInfo,
-        cgo_build_context: CGoBuildContext | None,
-        cgo_files: list[Artifact],
-        h_files: list[Artifact],
-        c_files: list[Artifact],
-        c_flags: list[str],
-        cpp_flags: list[str],
-        anon_targets_allowed: bool = True) -> (list[Artifact], list[Artifact], Artifact):
+    actions: AnalysisActions,
+    target_label: Label,
+    go_toolchain_info: GoToolchainInfo,
+    cgo_build_context: CGoBuildContext | None,
+    pkg_import_path: str,
+    package_root: str,
+    standard: bool,
+    cgo_files: list[Artifact],
+    h_files: list[Artifact],
+    c_files: list[Artifact],
+    c_flags: list[str],
+    cpp_flags: list[str],
+    anon_targets_allowed: bool = True,
+) -> (list[Artifact], list[Artifact], Artifact):
     """
     Arguments:
         anon_targets_allowed: Set to `True` if the execution context allows calls to the `AnalysisActions#anon_target` API.
@@ -193,27 +196,29 @@ def build_cgo(
         fail("cgo_build_context is None. This is likely because C++ toolchain is not available for the current target platform, but CGo files provided.")
 
     # Gather preprocessor inputs.
-    own_pre = _own_pre(actions, cgo_build_context, h_files)
+    own_pre = _own_pre(actions, cgo_build_context, package_root, h_files)
 
     # Separate sources into C++ and GO sources.
-    cgo_tool_out, gen_dir = _cgo(actions, go_toolchain_info, cgo_build_context, cgo_files, [own_pre], c_flags, cpp_flags)
+    cgo_tool_out, gen_dir = _cgo(actions, go_toolchain_info, cgo_build_context, pkg_import_path, standard, cgo_files, [own_pre], c_flags, cpp_flags)
     go_gen_srcs = [cgo_tool_out.cgo_gotypes] + cgo_tool_out.cgo1_go_files
     c_gen_headers = [cgo_tool_out.cgo_export_h]
     c_gen_srcs = [cgo_tool_out.cgo_export_c] + cgo_tool_out.cgo2_c_files
 
     # Wrap the generated CGO C headers in a CPreprocessor object for compiling.
-    cgo_headers_pre = CPreprocessor(args = CPreprocessorArgs(args = [
-        "-I",
-        prepare_headers(
-            actions,
-            cgo_build_context.cxx_toolchain_info,
-            {h.basename: h for h in c_gen_headers},
-            "cgo-private-headers",
-            uses_content_based_paths = True,
-        ).include_path,
-    ]))
-
-    linkage = _LINKAGE_FOR_LINK_STYLE[LinkStyle(cgo_build_context.link_style)]
+    cgo_headers_pre = CPreprocessor(
+        args = CPreprocessorArgs(
+            args = [
+                "-I",
+                prepare_headers(
+                    actions,
+                    cgo_build_context.cxx_toolchain_info,
+                    {h.basename: h for h in c_gen_headers},
+                    "cgo-private-headers",
+                    uses_content_based_paths = True,
+                ).include_path,
+            ]
+        )
+    )
 
     # Compile C++ sources into object files.
     c_compile_cmds = cxx_compile_srcs(
@@ -234,10 +239,13 @@ def build_cgo(
         [own_pre, cgo_headers_pre],
         cgo_build_context.inherited_preprocessor_infos,
         [],
-        linkage,
+        Linkage("any"),
         False,  # add_coverage_instrumentation_compiler_flags
     )
 
     compiled_objects = c_compile_cmds.pic.objects
 
-    return go_gen_srcs, compiled_objects, gen_dir
+    # Mark objects as requiring external linking since we're not currently supporting internal linking for CGo packages.
+    dynimportfail = actions.write("dynimportfail", "", has_content_based_path = True)
+
+    return go_gen_srcs, [dynimportfail] + compiled_objects, gen_dir

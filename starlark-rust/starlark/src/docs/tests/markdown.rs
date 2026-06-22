@@ -21,6 +21,7 @@ use itertools::Itertools;
 use serde::Serialize;
 use starlark::starlark_simple_value;
 use starlark_derive::NoSerialize;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_module;
 use starlark_derive::starlark_value;
 use starlark_map::small_map::SmallMap;
@@ -38,12 +39,10 @@ use crate::environment::Globals;
 use crate::environment::GlobalsBuilder;
 use crate::environment::Methods;
 use crate::environment::MethodsBuilder;
-use crate::environment::MethodsStatic;
 use crate::values::StarlarkValue;
 use crate::values::Value;
 use crate::values::list::UnpackList;
 use crate::values::none::NoneType;
-use crate::values::starlark_value_as_type::StarlarkValueAsType;
 use crate::values::tuple::UnpackTuple;
 
 fn docs_golden_test(test_file_name: &str, doc: DocItem) -> String {
@@ -107,7 +106,8 @@ def _do_not_export():
     derive_more::Display,
     ProvidesStaticType,
     Allocative,
-    NoSerialize
+    NoSerialize,
+    StarlarkPagable
 )]
 #[display("magic")]
 struct Magic;
@@ -119,10 +119,9 @@ impl<'v> StarlarkValue<'v> for Magic {}
 
 /// These are where the module docs go
 #[starlark_module]
+#[starlark_types(Obj as Obj)]
 fn module(builder: &mut GlobalsBuilder) {
     const MAGIC: i32 = 42;
-
-    const Obj: StarlarkValueAsType<Obj> = StarlarkValueAsType::new();
 
     /// Docs for func1
     ///
@@ -214,17 +213,25 @@ fn get_globals() -> Globals {
         .build()
 }
 
-#[derive(ProvidesStaticType, Debug, Display, Allocative, Serialize)]
+#[derive(
+    ProvidesStaticType,
+    Debug,
+    Display,
+    Allocative,
+    Serialize,
+    StarlarkPagable
+)]
 #[display("obj")]
 struct Obj;
 
 starlark_simple_value!(Obj);
 
+starlark::methods_static!(OBJ_METHODS = object);
+
 #[starlark_value(type = "obj")]
 impl<'v> StarlarkValue<'v> for Obj {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(object)
+        Some(OBJ_METHODS.methods())
     }
 }
 

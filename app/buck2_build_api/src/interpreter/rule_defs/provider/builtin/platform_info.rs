@@ -18,6 +18,7 @@ use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::values::Freeze;
 use starlark::values::Heap;
+use starlark::values::StarlarkPagable;
 use starlark::values::StringValue;
 use starlark::values::Trace;
 use starlark::values::ValueLifetimeless;
@@ -31,7 +32,16 @@ use crate::interpreter::rule_defs::provider::builtin::configuration_info::Config
 use crate::interpreter::rule_defs::provider::builtin::configuration_info::FrozenConfigurationInfo;
 
 #[internal_provider(platform_info_creator)]
-#[derive(Clone, Debug, Trace, Coerce, Freeze, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Trace,
+    Coerce,
+    Freeze,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[repr(C)]
 pub struct PlatformInfoGen<V: ValueLifetimeless> {
     label: ValueOfUncheckedGeneric<V, String>,
@@ -39,18 +49,21 @@ pub struct PlatformInfoGen<V: ValueLifetimeless> {
 }
 
 impl<'v, V: ValueLike<'v>> PlatformInfoGen<V> {
-    pub fn to_configuration(&self) -> buck2_error::Result<ConfigurationData> {
-        ConfigurationData::from_platform(
-            self.label
-                .to_value()
-                .get()
-                .unpack_str()
-                .expect("type checked during construction")
-                .to_owned(),
-            ConfigurationInfo::from_value(self.configuration.get().to_value())
-                .expect("type checked during construction")
-                .to_configuration_data()?,
-        )
+    pub fn to_configuration(
+        &self,
+        is_marked_as_exec_platform: bool,
+    ) -> buck2_error::Result<ConfigurationData> {
+        let label = self
+            .label
+            .to_value()
+            .get()
+            .unpack_str()
+            .expect("type checked during construction")
+            .to_owned();
+        let data = ConfigurationInfo::from_value(self.configuration.get().to_value())
+            .expect("type checked during construction")
+            .to_configuration_data()?;
+        ConfigurationData::from_platform(label, data, is_marked_as_exec_platform)
     }
 }
 

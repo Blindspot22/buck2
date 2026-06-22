@@ -22,13 +22,20 @@ use dice::DetectCycles;
 use dice::Dice;
 use dice::DiceComputations;
 use dice::DiceData;
+use dice::DiceKeyDyn;
 use dice::DiceProjectionComputations;
+use dice::DiceProjectionDyn;
 use dice::InjectedKey;
 use dice::Key;
+use dice::NoValueSerialize;
 use dice::ProjectionKey;
 use dice::UserComputationData;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::PagablePanic;
+use pagable::pagable_typetag;
 use parking_lot::Mutex;
 
 /// We have three keys in this test:
@@ -56,14 +63,28 @@ struct GlobalConfig {
 }
 
 /// "Evaluate" a file.
-#[derive(Debug, derive_more::Display, Clone, Hash, PartialEq, Eq, Allocative)]
+#[derive(
+    Debug,
+    derive_more::Display,
+    Clone,
+    Hash,
+    PartialEq,
+    Eq,
+    Allocative,
+    Pagable
+)]
 #[display("{}", name)]
+#[pagable_typetag(DiceKeyDyn)]
 struct FileKey {
     name: String,
 }
 
 #[async_trait]
 impl Key for FileKey {
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
+    }
+
     type Value = Result<Arc<String>, Arc<anyhow::Error>>;
 
     async fn compute(
@@ -115,14 +136,19 @@ impl Key for FileKey {
     Hash,
     PartialEq,
     Eq,
-    Allocative
+    Allocative,
+    Pagable
 )]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct ConfigKey;
 
 #[async_trait]
 impl Key for ConfigKey {
     type Value = Arc<HashMap<String, String>>;
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     async fn compute(
         &self,
@@ -153,8 +179,18 @@ impl Key for ConfigKey {
 }
 
 /// One "property" of the "configuration".
-#[derive(Debug, derive_more::Display, Clone, Hash, PartialEq, Eq, Allocative)]
+#[derive(
+    Debug,
+    derive_more::Display,
+    Clone,
+    Hash,
+    PartialEq,
+    Eq,
+    Allocative,
+    Pagable
+)]
 #[display("{}", key)]
+#[pagable_typetag(DiceProjectionDyn)]
 struct ConfigPropertyKey {
     key: String,
 }
@@ -164,6 +200,9 @@ impl ProjectionKey for ConfigPropertyKey {
     type DeriveFromKey = ConfigKey;
     /// And produce a string.
     type Value = Arc<String>;
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     fn compute(
         &self,
@@ -300,12 +339,16 @@ async fn projection_sync_and_then_recompute_incremental_reuses_key() -> anyhow::
     let dice = Dice::builder();
     let dice = dice.build(DetectCycles::Enabled);
 
-    #[derive(Allocative, Clone, Debug, Display)]
+    #[derive(Allocative, Clone, Debug, Display, Pagable)]
+    #[pagable_typetag(DiceProjectionDyn)]
     struct ProjectionEqualKey;
 
     #[async_trait]
     impl ProjectionKey for ProjectionEqualKey {
         type DeriveFromKey = BaseKey;
+        fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+            dice::NoValueSerialize::<Self::Value>::new()
+        }
         type Value = usize;
 
         fn compute(
@@ -330,11 +373,15 @@ async fn projection_sync_and_then_recompute_incremental_reuses_key() -> anyhow::
         fn hash<H: Hasher>(&self, _state: &mut H) {}
     }
 
-    #[derive(Allocative, Clone, Debug, Display)]
+    #[derive(Allocative, Clone, Debug, Display, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct BaseKey;
 
     #[async_trait]
     impl InjectedKey for BaseKey {
+        fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+            dice::NoValueSerialize::<Self::Value>::new()
+        }
         type Value = usize;
 
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
@@ -351,12 +398,16 @@ async fn projection_sync_and_then_recompute_incremental_reuses_key() -> anyhow::
         fn hash<H: Hasher>(&self, _state: &mut H) {}
     }
 
-    #[derive(Allocative, Clone, Debug, Display)]
+    #[derive(Allocative, Clone, Debug, Display, PagablePanic)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct DependsOnProjection(Arc<AtomicBool>);
 
     #[async_trait]
     impl Key for DependsOnProjection {
+        fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+            dice::NoValueSerialize::<Self::Value>::new()
+        }
         type Value = usize;
 
         async fn compute(

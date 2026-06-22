@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use buck2_common::sqlite::sqlite_db::SqliteDb;
@@ -22,6 +21,7 @@ use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_hash::StdBuckHashMap;
 use chrono::DateTime;
 use chrono::Utc;
 use dupe::Dupe;
@@ -34,7 +34,7 @@ use crate::sqlite::tables::materializer_state_table::MaterializerStateSqliteTabl
 /// materializer state sqlite db schema! If you forget to bump this version,
 /// then you can fix forward by bumping the `buck2.sqlite_materializer_state_version`
 /// buckconfig in the project root's .buckconfig.
-pub const MATERIALIZER_DB_SCHEMA_VERSION: u64 = 7;
+pub const MATERIALIZER_DB_SCHEMA_VERSION: u64 = 8;
 
 #[derive(Debug)]
 pub struct MaterializerStateEntry {
@@ -93,8 +93,8 @@ impl MaterializerStateSqliteDb {
     /// create a new one.
     pub async fn initialize(
         materializer_state_dir: AbsNormPathBuf,
-        versions: HashMap<String, String>,
-        current_instance_metadata: HashMap<String, String>,
+        versions: StdBuckHashMap<String, String>,
+        current_instance_metadata: StdBuckHashMap<String, String>,
         // Using `BlockingExecutor` out of convenience. This function should be called during startup
         // when there's not a lot of I/O so it shouldn't matter.
         io_executor: Arc<dyn BlockingExecutor>,
@@ -117,8 +117,8 @@ impl MaterializerStateSqliteDb {
     /// Internal implementation that handles digest config
     fn initialize_materializer_sqlite_db(
         materializer_state_dir: AbsNormPathBuf,
-        versions: HashMap<String, String>,
-        current_instance_metadata: HashMap<String, String>,
+        versions: StdBuckHashMap<String, String>,
+        current_instance_metadata: StdBuckHashMap<String, String>,
         digest_config: DigestConfig,
         reject_identity: Option<&SqliteIdentity>,
     ) -> buck2_error::Result<(Self, buck2_error::Result<MaterializerState>)> {
@@ -166,8 +166,8 @@ impl MaterializerStateSqliteDb {
 #[allow(unused)] // Used by test modules
 pub(crate) fn testing_materializer_state_sqlite_db(
     fs: &ProjectRoot,
-    versions: HashMap<String, String>,
-    metadata: HashMap<String, String>,
+    versions: StdBuckHashMap<String, String>,
+    metadata: StdBuckHashMap<String, String>,
     reject_identity: Option<&SqliteIdentity>,
 ) -> buck2_error::Result<(
     MaterializerStateSqliteDb,
@@ -206,7 +206,16 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
-    use crate::materializers::deferred::directory_metadata::DirectoryMetadata;
+
+    fn artifact_metadata_eq(a: &ArtifactMetadata, b: &ArtifactMetadata) -> bool {
+        match (a, b) {
+            (DirectoryEntry::Dir(d1), DirectoryEntry::Dir(d2)) => {
+                d1.fingerprint() == d2.fingerprint()
+            }
+            (DirectoryEntry::Leaf(l1), DirectoryEntry::Leaf(l2)) => l1 == l2,
+            _ => false,
+        }
+    }
 
     fn now_seconds() -> DateTime<Utc> {
         Utc.timestamp_opt(Utc::now().timestamp(), 0)
@@ -228,13 +237,6 @@ mod tests {
 
         table.create_table().unwrap();
 
-        let compact_dir_metadata = DirectoryMetadata::Compact {
-            fingerprint: TrackedFileDigest::from_content(
-                b"directory",
-                digest_config.cas_digest_config(),
-            ),
-            total_size: 32,
-        };
         let shared_directory = {
             let mut builder = DirectoryBuilder::empty();
             // Create the following directory:
@@ -300,33 +302,26 @@ mod tests {
         let artifacts = vec![
             MaterializerStateEntry {
                 path: ProjectRelativePath::unchecked_new("a").to_owned(),
-                metadata: ArtifactMetadata(DirectoryEntry::Dir(DirectoryMetadata::Full(
-                    shared_directory,
-                ))),
+                metadata: DirectoryEntry::Dir(shared_directory),
                 last_access_time: now_seconds(),
             },
             MaterializerStateEntry {
                 path: ProjectRelativePath::unchecked_new("b/c").to_owned(),
-                metadata: ArtifactMetadata(DirectoryEntry::Leaf(file)),
+                metadata: DirectoryEntry::Leaf(file),
                 last_access_time: now_seconds(),
             },
             MaterializerStateEntry {
                 path: ProjectRelativePath::unchecked_new("d").to_owned(),
-                metadata: ArtifactMetadata(DirectoryEntry::Leaf(symlink)),
+                metadata: DirectoryEntry::Leaf(symlink),
                 last_access_time: now_seconds(),
             },
             MaterializerStateEntry {
                 path: ProjectRelativePath::unchecked_new("e").to_owned(),
-                metadata: ArtifactMetadata(DirectoryEntry::Leaf(external_symlink)),
-                last_access_time: now_seconds(),
-            },
-            MaterializerStateEntry {
-                path: ProjectRelativePath::unchecked_new("f").to_owned(),
-                metadata: ArtifactMetadata(DirectoryEntry::Dir(compact_dir_metadata)),
+                metadata: DirectoryEntry::Leaf(external_symlink),
                 last_access_time: now_seconds(),
             },
         ];
-        let mut artifacts: HashMap<_, _> =
+        let mut artifacts: StdBuckHashMap<_, _> =
             artifacts.into_iter().map(|x| (x.path.clone(), x)).collect();
 
         for (path, entry) in artifacts.iter() {
@@ -335,13 +330,15 @@ mod tests {
                 .unwrap();
         }
 
-        let check_materializer_state_expected =
-            |state: &MaterializerState,
-             artifacts: &HashMap<ProjectRelativePathBuf, MaterializerStateEntry>| {
-                let expected_values = artifacts.values().sorted_by_key(|x| x.path.as_str());
-                let result_values = state.iter().sorted_by_key(|x| x.path.as_str());
-                assert!(expected_values.eq(result_values));
-            };
+        let check_materializer_state_expected = |state: &MaterializerState,
+                                                 artifacts: &StdBuckHashMap<
+            ProjectRelativePathBuf,
+            MaterializerStateEntry,
+        >| {
+            let expected_values = artifacts.values().sorted_by_key(|x| x.path.as_str());
+            let result_values = state.iter().sorted_by_key(|x| x.path.as_str());
+            assert!(expected_values.eq(result_values));
+        };
 
         let state = table.read_materializer_state(digest_config).unwrap();
         check_materializer_state_expected(&state, &artifacts);
@@ -361,40 +358,17 @@ mod tests {
         check_materializer_state_expected(&state, &artifacts);
     }
 
-    impl PartialEq for ArtifactMetadata {
-        fn eq(&self, other: &ArtifactMetadata) -> bool {
-            match (&self.0, &other.0) {
-                (
-                    DirectoryEntry::Dir(DirectoryMetadata::Compact {
-                        fingerprint: fingerprint1,
-                        total_size: total_size1,
-                    }),
-                    DirectoryEntry::Dir(DirectoryMetadata::Compact {
-                        fingerprint: fingerprint2,
-                        total_size: total_size2,
-                    }),
-                ) => fingerprint1 == fingerprint2 && total_size1 == total_size2,
-                (
-                    DirectoryEntry::Dir(DirectoryMetadata::Full(d1)),
-                    DirectoryEntry::Dir(DirectoryMetadata::Full(d2)),
-                ) => d1 == d2,
-                (DirectoryEntry::Leaf(l1), DirectoryEntry::Leaf(l2)) => l1 == l2,
-                (_, _) => false,
-            }
-        }
-    }
-
     impl PartialEq for MaterializerStateEntry {
         fn eq(&self, other: &Self) -> bool {
             self.path == other.path
                 && self.last_access_time == other.last_access_time
-                && self.metadata == other.metadata
+                && artifact_metadata_eq(&self.metadata, &other.metadata)
         }
     }
 
     #[test]
     fn test_initialize_sqlite_db() -> buck2_error::Result<()> {
-        fn testing_metadatas() -> Vec<HashMap<String, String>> {
+        fn testing_metadatas() -> Vec<StdBuckHashMap<String, String>> {
             let metadata = buck2_events::metadata::collect(&DaemonId::new());
             let mut metadatas = vec![metadata; 5];
             for (i, metadata) in metadatas.iter_mut().enumerate() {
@@ -404,8 +378,8 @@ mod tests {
         }
 
         fn assert_metadata_matches(
-            mut have: HashMap<String, String>,
-            want: &HashMap<String, String>,
+            mut have: StdBuckHashMap<String, String>,
+            want: &StdBuckHashMap<String, String>,
         ) {
             // Remove the key we inject (and check it's there).
             have.remove("timestamp_on_initialization").unwrap();
@@ -417,17 +391,15 @@ mod tests {
         let fs = ProjectRootTemp::new()?;
 
         let path = ProjectRelativePath::unchecked_new("foo").to_owned();
-        let artifact_metadata = ArtifactMetadata(DirectoryEntry::Leaf(
-            ActionDirectoryMember::File(FileMetadata {
-                digest: TrackedFileDigest::from_content(b"file", digest_config.cas_digest_config()),
-                is_executable: false,
-            }),
-        ));
+        let artifact_metadata = DirectoryEntry::Leaf(ActionDirectoryMember::File(FileMetadata {
+            digest: TrackedFileDigest::from_content(b"file", digest_config.cas_digest_config()),
+            is_executable: false,
+        }));
         let timestamp = now_seconds();
         let metadatas = testing_metadatas();
 
-        let v0 = HashMap::from([("version".to_owned(), "0".to_owned())]);
-        let v1 = HashMap::from([("version".to_owned(), "1".to_owned())]);
+        let v0 = StdBuckHashMap::from([("version".to_owned(), "0".to_owned())]);
+        let v1 = StdBuckHashMap::from([("version".to_owned(), "1".to_owned())]);
 
         {
             let (mut db, loaded_state) = testing_materializer_state_sqlite_db(

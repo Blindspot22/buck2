@@ -55,10 +55,7 @@ def merge_extra_linker_args(arg_dicts: list[dict[str, typing.Any]]) -> dict[str,
         "extra_linker_outputs_flags_factory": combined_flags_factory,
     }
 
-def package_validators_decorator(
-        ctx: AnalysisContext,
-        build_func,
-        extension: str):
+def package_validators_decorator(ctx: AnalysisContext, build_func, extension: str):
     package_validators = ctx.attrs.package_validators
     if not package_validators:
         return build_func
@@ -75,6 +72,7 @@ def package_validators_decorator(
         )
         final_output = ctx.actions.declare_output(
             final_filename + extension,
+            has_content_based_path = False,
         )
         ctx.actions.run(
             cmd_args(
@@ -93,10 +91,7 @@ def package_validators_decorator(
 
     return wrapped_build_func
 
-def _get_package_validation_outputs(
-        actions: AnalysisActions,
-        package_validators: list,
-        package_output: Artifact) -> list[Artifact]:
+def _get_package_validation_outputs(actions: AnalysisActions, package_validators: list, package_output: Artifact) -> list[Artifact]:
     if not package_validators:
         return []
 
@@ -104,7 +99,7 @@ def _get_package_validation_outputs(
     for idx, validator in enumerate(package_validators):
         validator, validator_args = validator
 
-        output = actions.declare_output(validator.label.name + "_package_validator_{}".format(idx))
+        output = actions.declare_output(validator.label.name + "_package_validator_{}".format(idx), has_content_based_path = False)
         outputs.append(output)
 
         actions.run(
@@ -129,7 +124,6 @@ EnhancementContext = record(
     actions = AnalysisActions,
     attrs = typing.Any,
     label = Label,
-
     # methods
     debug_output = typing.Callable,
     get_sub_targets = typing.Callable,

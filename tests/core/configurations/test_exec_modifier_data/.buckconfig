@@ -16,3 +16,6 @@ prelude = bundled
 
 [build]
 execution_platforms = root//cfg:execution_platforms
+
+[test]
+enable_buckconfig_backed = true

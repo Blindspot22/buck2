@@ -16,7 +16,6 @@ use buck2_fs::fs_util;
 use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_fs::paths::file_name::FileNameBuf;
-use rand::Rng;
 
 /// Temporary path.
 ///
@@ -38,7 +37,7 @@ impl TempPath {
     pub fn new_in(temp_dir: &AbsNormPath) -> buck2_error::Result<TempPath> {
         let mut name = String::with_capacity(10);
         for _ in 0..10 {
-            name.push(rand::rng().random_range('a'..='z'));
+            name.push(rand::random_range('a'..='z'));
         }
         let path = temp_dir.join(FileNameBuf::try_from(name)?);
         Ok(TempPath { path: Some(path) })

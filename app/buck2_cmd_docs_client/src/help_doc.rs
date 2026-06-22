@@ -188,9 +188,9 @@ fn cmd_content_markdown(
     let mut template = String::new();
 
     let about = cmd.get_long_about().or_else(|| cmd.get_about());
-    let about = about
-        .map(|about| escape_angle_brackets_for_mdx(&about.to_string()))
-        .unwrap_or("".to_owned());
+    let about = about.map_or("".to_owned(), |about| {
+        escape_angle_brackets_for_mdx(&about.to_string())
+    });
 
     // header
     writeln!(

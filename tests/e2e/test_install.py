@@ -95,7 +95,7 @@ if linux_only():
             buck.install(
                 "fbcode//buck2/tests/targets/rules/install:installer_server_sends_error",
             ),
-            stderr_regex=r"Failed to send artifacts to installer",
+            stderr_regex=r"Interaction with installer failed",
         )
         record = res.invocation_record()
         errors = record["errors"]
@@ -104,6 +104,11 @@ if linux_only():
         assert "Mocking failing to install" in error["message"]
         assert error["category"] == "INFRA"
         assert "INSTALLER_TAG" in error["category_key"]
+
+        # Verify unified error context includes both stderr output and log location
+        assert "Installer stderr output:" in error["message"]
+        assert "Installer error: Mocking failing to install" in error["message"]
+        assert "See installer logs at:" in error["message"]
 
         install_duration_ms = record["install_duration_us"] / 1000
 
@@ -184,6 +189,18 @@ if linux_only():
             "--uninstall",
             "--keep",
             "fbcode//buck2/tests/targets/rules/install:installer_server_requires_forwarded_params",
+        )
+
+    @buck_test(inplace=True)
+    async def test_install_extra_args_ordered_after_builtin_args(
+        buck: Buck,
+    ) -> None:
+        await buck.install(
+            "-r",
+            "fbcode//buck2/tests/targets/rules/install:installer_validates_extra_args_order",
+            "--",
+            "--",
+            "--expected-extra-arg",
         )
 
 

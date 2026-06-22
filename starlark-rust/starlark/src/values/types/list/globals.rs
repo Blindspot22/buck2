@@ -18,6 +18,7 @@
 use allocative::Allocative;
 use dupe::Dupe;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
 use starlark_derive::starlark_module;
 
 use crate as starlark;
@@ -30,7 +31,9 @@ use crate::typing::TyFunction;
 use crate::typing::TypingOracleCtx;
 use crate::typing::call_args::TyCallArgs;
 use crate::typing::callable::TyCallable;
+use crate::typing::custom::TyCustomDyn;
 use crate::typing::error::TypingOrInternalError;
+use crate::typing::function::TyCustomFunction;
 use crate::typing::function::TyCustomFunctionImpl;
 use crate::values::Heap;
 use crate::values::Value;
@@ -41,7 +44,9 @@ use crate::values::list::ListRef;
 use crate::values::list::value::FrozenList;
 use crate::values::typing::StarlarkIter;
 
-#[derive(Allocative, Hash, Eq, PartialEq, Ord, PartialOrd, Clone, Debug)]
+#[derive(
+    Allocative, Hash, Eq, PartialEq, Ord, PartialOrd, Clone, Debug, Pagable
+)]
 struct ListType;
 
 static LIST: Lazy<TyFunction> = Lazy::new(|| {
@@ -51,6 +56,8 @@ static LIST: Lazy<TyFunction> = Lazy::new(|| {
         Ty::any_list(),
     )
 });
+
+pagable::register_typetag!(TyCustomFunction<ListType> as dyn TyCustomDyn);
 
 impl TyCustomFunctionImpl for ListType {
     fn is_type(&self) -> bool {

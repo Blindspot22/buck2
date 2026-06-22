@@ -20,8 +20,11 @@ use derive_more::Display;
 use dice::DiceComputations;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
+use dice::PagableValueSerialize;
+use dice::ValueSerialize;
 use dupe::Dupe;
 use pagable::Pagable;
+use pagable::pagable_typetag;
 
 #[async_trait]
 pub trait HasBuildContextData {
@@ -40,8 +43,9 @@ pub struct BuildData {
     buck_out_path: ProjectRelativePathBuf,
 }
 
-#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct BuildDataKey;
 
 impl InjectedKey for BuildDataKey {
@@ -49,6 +53,10 @@ impl InjectedKey for BuildDataKey {
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        PagableValueSerialize::<Self::Value>::new()
     }
 }
 

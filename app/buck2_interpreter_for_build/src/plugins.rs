@@ -17,6 +17,7 @@ use buck2_interpreter::plugins::PLUGIN_KIND_FROM_VALUE;
 use derive_more::Display;
 use dupe::Dupe;
 use either::Either;
+use pagable::Pagable;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -30,18 +31,24 @@ use starlark::values::Freezer;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueTypedComplex;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
 use crate::interpreter::build_context::BuildContext;
 
-#[derive(Debug, derive_more::Display, Allocative)]
+#[derive(
+    Debug,
+    derive_more::Display,
+    Allocative,
+    Pagable,
+    starlark::StarlarkPagableViaPagable
+)]
 enum InnerStarlarkPluginKind {
     #[display("<plugin_kind <unbound>>")]
     Unbound(CellPath),
@@ -58,13 +65,16 @@ enum InnerStarlarkPluginKind {
     ProvidesStaticType,
     NoSerialize,
     Trace,
-    Allocative
+    Allocative,
+    starlark::StarlarkPagable
 )]
 #[display("{}", RefCell::borrow(_0))]
 pub struct StarlarkPluginKind(RefCell<InnerStarlarkPluginKind>);
 
-#[starlark_value(type = "PluginKind")]
+#[starlark_value(type = "PluginKind", skip_vtable)]
 impl<'v> StarlarkValue<'v> for StarlarkPluginKind {
+    type Canonical = FrozenStarlarkPluginKind;
+
     fn export_as(
         &self,
         variable_name: &str,
@@ -111,15 +121,16 @@ impl<'v> AllocValue<'v> for StarlarkPluginKind {
     Debug,
     ProvidesStaticType,
     NoSerialize,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[display("{_0}")]
-pub struct FrozenStarlarkPluginKind(PluginKind);
+pub struct FrozenStarlarkPluginKind(#[starlark_pagable(pagable)] PluginKind);
 starlark_simple_value!(FrozenStarlarkPluginKind);
 
 #[starlark_value(type = "PluginKind")]
 impl<'v> StarlarkValue<'v> for FrozenStarlarkPluginKind {
-    type Canonical = StarlarkPluginKind;
+    type Canonical = FrozenStarlarkPluginKind;
 }
 
 impl Freeze for StarlarkPluginKind {
@@ -174,7 +185,14 @@ impl<'v> UnpackValue<'v> for PluginKindArg {
 }
 
 /// The value yielded by `plugins.ALL`
-#[derive(Display, Debug, Allocative, ProvidesStaticType, NoSerialize)]
+#[derive(
+    Display,
+    Debug,
+    Allocative,
+    ProvidesStaticType,
+    NoSerialize,
+    StarlarkPagable
+)]
 #[display("<all_plugins>")]
 pub struct AllPlugins;
 starlark_simple_value!(AllPlugins);
@@ -239,6 +257,7 @@ impl<'v> StarlarkValue<'v> for AllPlugins {}
 /// # Result: Both :lib and :bin get :my_derive_impl configured for their own exec platforms
 /// ```
 #[starlark_module]
+#[starlark_types(StarlarkPluginKind as PluginKind)]
 fn register_plugins_methods(r: &mut GlobalsBuilder) {
     /// Create a new plugin kind.
     ///
@@ -277,9 +296,6 @@ fn register_plugins_methods(r: &mut GlobalsBuilder) {
     /// This value is not supported on `uses_plugins` at this time, and hence it is not useful on
     /// `pulls_plugins` either.
     const All: AllPlugins = AllPlugins;
-
-    /// Type symbol for `PluginKind`.
-    const PluginKind: StarlarkValueAsType<StarlarkPluginKind> = StarlarkValueAsType::new();
 }
 
 pub(crate) fn register_plugins(globals: &mut GlobalsBuilder) {

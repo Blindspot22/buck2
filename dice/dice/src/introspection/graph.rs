@@ -29,8 +29,8 @@ use crate::HashSet;
 use crate::impls::core::graph::introspection::VersionedGraphIntrospectable;
 use crate::impls::core::versions::introspection::VersionIntrospectable;
 use crate::impls::key::DiceKey;
+use crate::impls::task::DiceTaskState;
 use crate::introspection::serialize_dense_graph;
-use crate::legacy::dice_futures::dice_task::DiceTaskStateForDebugging;
 
 pub struct GraphIntrospectable {
     pub(crate) graph: VersionedGraphIntrospectable,
@@ -59,9 +59,7 @@ impl GraphIntrospectable {
         }))
     }
 
-    pub fn keys_currently_running(
-        &self,
-    ) -> Vec<(AnyKey, VersionNumber, DiceTaskStateForDebugging)> {
+    pub fn keys_currently_running(&self) -> Vec<(AnyKey, VersionNumber, DiceTaskState)> {
         self.version_data.keys_currently_running(&self.key_map)
     }
 
@@ -74,7 +72,7 @@ impl GraphIntrospectable {
         _keys: &'a mut HashMap<AnyKey, KeyID>,
     ) -> Box<dyn Iterator<Item = SerializedGraphNodeForKey> + 'a> {
         Box::new(self.graph.nodes.iter().map(|(key, node)| {
-            let any_k = self.key_map.get(&key).expect("key should be present");
+            let any_k = self.key_map.get(key).expect("key should be present");
             SerializedGraphNodeForKey {
                 id: KeyID(node.node_id.0),
                 key: any_k.to_string(),

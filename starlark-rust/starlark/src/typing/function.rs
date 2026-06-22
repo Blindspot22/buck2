@@ -20,6 +20,9 @@ use std::hash::Hash;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::PagableRegisteredFor;
+use pagable::pagable_tagged;
 
 use crate::codemap::Span;
 use crate::typing::ParamSpec;
@@ -29,6 +32,7 @@ use crate::typing::TypingBinOp;
 use crate::typing::TypingOracleCtx;
 use crate::typing::call_args::TyCallArgs;
 use crate::typing::callable::TyCallable;
+use crate::typing::custom::TyCustomDyn;
 use crate::typing::custom::TyCustomImpl;
 use crate::typing::error::TypingNoContextError;
 use crate::typing::error::TypingNoContextOrInternalError;
@@ -37,12 +41,14 @@ use crate::values::typing::type_compiled::alloc::TypeMatcherAlloc;
 
 /// Custom function typechecker.
 pub trait TyCustomFunctionImpl:
-    Debug + Eq + Ord + Hash + Allocative + Send + Sync + 'static
+    Debug + Eq + Ord + Hash + Allocative + Send + Sync + Pagable + 'static
 {
+    /// Whether this function acts as a type constructor (e.g., for `|` syntax).
     fn is_type(&self) -> bool {
         false
     }
 
+    /// Type-check a call expression, returning the result type.
     fn validate_call(
         &self,
         span: Span,
@@ -50,8 +56,10 @@ pub trait TyCustomFunctionImpl:
         oracle: TypingOracleCtx,
     ) -> Result<Ty, TypingOrInternalError>;
 
+    /// The callable signature (parameter types and return type).
     fn as_callable(&self) -> TyCallable;
 
+    /// Underlying `TyFunction`, if this is a regular function.
     fn as_function(&self) -> Option<&TyFunction> {
         None
     }
@@ -65,16 +73,21 @@ pub trait TyCustomFunctionImpl:
     Ord,
     PartialOrd,
     Debug,
-    derive_more::Display
+    derive_more::Display,
+    Pagable
 )]
 #[display(
     "def({}) -> {}",
     self.0.as_callable().params(),
     self.0.as_callable().result(),
 )]
+#[pagable_tagged(TyCustomDyn)]
 pub struct TyCustomFunction<F: TyCustomFunctionImpl>(pub F);
 
-impl<F: TyCustomFunctionImpl> TyCustomImpl for TyCustomFunction<F> {
+impl<F: TyCustomFunctionImpl> TyCustomImpl for TyCustomFunction<F>
+where
+    Self: PagableRegisteredFor<dyn TyCustomDyn>,
+{
     fn as_name(&self) -> Option<&str> {
         Some("function")
     }
@@ -129,7 +142,9 @@ impl<F: TyCustomFunctionImpl> TyCustomImpl for TyCustomFunction<F> {
 }
 
 /// A function.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Allocative)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Allocative, Pagable
+)]
 pub struct TyFunction {
     /// The `.type` property of the function, often `""`.
     pub(crate) type_attr: Option<Ty>,
@@ -159,6 +174,8 @@ impl TyFunction {
         &self.callable
     }
 }
+
+pagable::register_typetag!(TyCustomFunction<TyFunction> as dyn TyCustomDyn);
 
 impl TyCustomFunctionImpl for TyFunction {
     fn is_type(&self) -> bool {

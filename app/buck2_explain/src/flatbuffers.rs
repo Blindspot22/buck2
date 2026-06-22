@@ -8,8 +8,7 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
-
+use buck2_hash::StdBuckHashMap;
 use buck2_node::attrs::configured_attr::ConfiguredAttr;
 use buck2_node::attrs::display::AttrDisplayWithContextExt;
 use buck2_node::attrs::inspect_options::AttrInspectOptions;
@@ -66,7 +65,7 @@ pub(crate) fn gen_fbs(
             })
             .collect();
 
-        let mut node_map: HashMap<String, &mut TargetData> = HashMap::new();
+        let mut node_map: StdBuckHashMap<String, &mut TargetData> = StdBuckHashMap::default();
         for node in data.iter_mut() {
             let key = node.node.label().to_string();
             node_map.insert(key, node);
@@ -214,15 +213,15 @@ fn action_to_fbs<'a>(
     let category = action
         .category
         .as_ref()
-        .map(|c| builder.create_shared_string(&c));
+        .map(|c| builder.create_shared_string(c));
     let identifier = action
         .identifier
         .as_ref()
-        .map(|c| builder.create_shared_string(&c));
+        .map(|c| builder.create_shared_string(c));
     let execution_kind = action
         .execution_kind
         .as_ref()
-        .map(|c| builder.create_shared_string(&c));
+        .map(|c| builder.create_shared_string(c));
     let repros = {
         let list = action
             .repros
@@ -352,7 +351,7 @@ mod tests {
     fn test_srcs_count() {
         let data = gen_data(vec![(
             "srcs",
-            Attribute::new(None, "", AttrType::list(AttrType::source(false))),
+            Attribute::new_const(None, "", AttrType::list(AttrType::source(false))),
             CoercedAttr::List(ListLiteral(ArcSlice::new([
                 CoercedAttr::SourceFile(CoercedPath::File(
                     PackageRelativePath::new("foo/bar").unwrap().to_arc(),
@@ -414,7 +413,7 @@ mod tests {
                 ConfigurationData::testing_new(),
                 CommandExecutorConfig::testing_local(),
             );
-            ExecutionPlatformResolution::new(Some(platform), Vec::new())
+            ExecutionPlatformResolution::new_for_testing(Some(platform), Vec::new())
         };
 
         let target = ConfiguredTargetNode::testing_new(

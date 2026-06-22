@@ -50,13 +50,14 @@ use buck2_execute::re::manager::ManagedRemoteExecutionClient;
 use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
 use buck2_execute::re::remote_action_result::ExecuteResponseWithQueueStats;
 use buck2_execute::re::remote_action_result::RemoteActionResult;
+use buck2_hash::BuckIndexMap;
 use buck2_util::time_span::TimeSpan;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
-use indexmap::IndexMap;
 use remote_execution as RE;
 use remote_execution::TCode;
+use remote_execution::TCodeReasonGroup;
 use tracing::info;
 
 use crate::incremental_actions_helper::save_content_based_incremental_state;
@@ -185,7 +186,7 @@ impl ReExecutor {
             platform,
             dependencies,
             re_gang_workers,
-            &identity,
+            identity,
             &mut manager,
             self.skip_cache_read,
             self.skip_cache_write,
@@ -222,38 +223,55 @@ impl ReExecutor {
             None,
             self.re_client.get_session_id().await.ok(),
             self.re_client.use_case,
-            &platform,
+            platform,
             worker_tool_action_digest.is_some(),
         );
 
-        let response = match execute_response {
-            Ok(ExecuteResponseOrCancelled::Response(result)) => result,
-            Ok(ExecuteResponseOrCancelled::Cancelled(cancelled, queue_stats)) => {
-                let reason = cancelled
-                    .reason
-                    .map(|reason| match reason {
-                        CancellationReason::NotSpecified => CommandCancellationReason::NotSpecified,
-                        CancellationReason::ReQueueTimeout => {
-                            CommandCancellationReason::ReQueueTimeout
-                        }
-                    })
-                    .unwrap_or(CommandCancellationReason::NotSpecified);
-                return ControlFlow::Break(manager.cancel(
-                    CommandExecutionKind::Remote {
-                        details: remote_details,
-                        queue_time: queue_stats.cumulative_queue_duration,
-                        materialized_inputs_for_failed: None,
-                        materialized_outputs_for_failed_actions: None,
-                    },
-                    reason,
-                    CommandExecutionMetadata {
-                        queue_duration: Some(queue_stats.cumulative_queue_duration),
-                        ..CommandExecutionMetadata::empty(TimeSpan::empty_now())
-                    },
-                ));
-            }
-            Err(e) => return ControlFlow::Break(manager.error("remote_call_error", e)),
-        };
+        let response =
+            match execute_response {
+                Ok(ExecuteResponseOrCancelled::Response(result)) => result,
+                Ok(ExecuteResponseOrCancelled::Cancelled(cancelled, queue_stats, _)) => {
+                    let reason = cancelled.reason.map_or(
+                        CommandCancellationReason::NotSpecified,
+                        |reason| match reason {
+                            CancellationReason::NotSpecified => {
+                                CommandCancellationReason::NotSpecified
+                            }
+                            CancellationReason::ReQueueTimeout => {
+                                CommandCancellationReason::ReQueueTimeout
+                            }
+                        },
+                    );
+                    return ControlFlow::Break(manager.cancel(
+                        CommandExecutionKind::Remote {
+                            details: remote_details,
+                            queue_time: queue_stats.cumulative_queue_duration,
+                            materialized_inputs_for_failed: None,
+                            materialized_outputs_for_failed_actions: None,
+                        },
+                        reason,
+                        CommandExecutionMetadata {
+                            queue_duration: Some(queue_stats.cumulative_queue_duration),
+                            ..CommandExecutionMetadata::empty(TimeSpan::empty_now())
+                        },
+                    ));
+                }
+                Err(e) => {
+                    if is_re_queue_full(&e) {
+                        return ControlFlow::Break(manager.cancel(
+                            CommandExecutionKind::Remote {
+                                details: remote_details,
+                                queue_time: Duration::ZERO,
+                                materialized_inputs_for_failed: None,
+                                materialized_outputs_for_failed_actions: None,
+                            },
+                            CommandCancellationReason::ReQueueTimeout,
+                            CommandExecutionMetadata::empty(TimeSpan::empty_now()),
+                        ));
+                    }
+                    return ControlFlow::Break(manager.error("remote_call_error", e));
+                }
+            };
 
         let execution_kind = response.execution_kind(remote_details);
         let manager = manager.with_execution_kind(execution_kind.clone());
@@ -271,7 +289,7 @@ impl ReExecutor {
                 // do here is just pass on the error.
                 manager.failure(
                     execution_kind,
-                    IndexMap::new(),
+                    BuckIndexMap::default(),
                     CommandStdStreams::Local {
                         stdout: Vec::new(),
                         stderr: out.to_owned().into(),
@@ -286,7 +304,7 @@ impl ReExecutor {
             {
                 manager.timeout(
                     execution_kind,
-                    IndexMap::new(),
+                    BuckIndexMap::default(),
                     // Checked above: we fallthrough to the error path if we didn't set a timeout
                     // and yet received one.
                     request.timeout().unwrap(),
@@ -357,6 +375,7 @@ impl PreparedCommandExecutor for ReExecutor {
                     remote_execution_dependencies,
                     re_gang_workers,
                     worker_tool_init_action,
+                    network_access: _,
                 },
             digest_config,
         } = command;
@@ -366,7 +385,7 @@ impl PreparedCommandExecutor for ReExecutor {
             command.request.remote_dep_file_key,
             self.re_client.get_session_id().await.ok(),
             self.re_client.use_case,
-            &platform,
+            platform,
             request.remote_worker().is_some() && worker_tool_init_action.is_some(),
         );
         let manager = manager.with_execution_kind(CommandExecutionKind::Remote {
@@ -433,7 +452,7 @@ impl PreparedCommandExecutor for ReExecutor {
                     .iter()
                     .chain(remote_execution_dependencies.iter()),
                 &re_gang_workers,
-                &command.request.meta_internal_extra_params(),
+                command.request.meta_internal_extra_params(),
                 worker_tool_action_digest,
             )
             .await?;
@@ -493,6 +512,10 @@ impl PreparedCommandExecutor for ReExecutor {
     fn is_local_execution_possible(&self, _executor_preference: ExecutorPreference) -> bool {
         false
     }
+
+    fn is_full_hybrid_enabled(&self) -> bool {
+        false
+    }
 }
 
 #[derive(buck2_error::Error, Debug)]
@@ -502,7 +525,7 @@ impl PreparedCommandExecutor for ReExecutor {
     inner.code,
     inner.message
 )]
-#[buck2(tier0, tag = get_re_error_tag(&inner.code))]
+#[buck2(tag = get_re_error_tag(&inner.code))]
 struct ReErrorWrapper {
     action_digest: ActionDigest,
     inner: remote_execution::TStatus,
@@ -531,4 +554,24 @@ fn is_timeout_error(err: &remote_execution::TStatus) -> bool {
         let _ignored = err;
         false
     }
+}
+
+fn is_re_queue_full(e: &buck2_error::Error) -> bool {
+    #[cfg(all(fbcode_build, target_os = "linux"))]
+    let enabled = justknobs::eval(
+        "buck2/remote_execution:re_queue_full_as_cancelled",
+        None,
+        None,
+    )
+    .unwrap_or(false);
+
+    #[cfg(not(all(fbcode_build, target_os = "linux")))]
+    let enabled = true;
+
+    if !enabled {
+        return false;
+    }
+
+    e.find_typed_context::<RemoteExecutionError>()
+        .is_some_and(|re_err| re_err.group == TCodeReasonGroup::USER_QUEUE_FULL)
 }

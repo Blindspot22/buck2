@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
 #![feature(used_with_arg)]
 
 use std::thread;
@@ -36,6 +35,8 @@ use buck2_client::commands::status::StatusCommand;
 use buck2_client::commands::subscribe::SubscribeCommand;
 use buck2_client::commands::targets::TargetsCommand;
 use buck2_client::commands::test::TestCommand;
+use buck2_client_ctx::agent_context::AgentContextEntry;
+use buck2_client_ctx::agent_context::parse_agent_context;
 use buck2_client_ctx::argfiles::expand_argv;
 use buck2_client_ctx::client_ctx::BuckSubcommand;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
@@ -131,6 +132,15 @@ struct BeforeSubcommandOptions {
     #[clap(long, global = true, value_parser = buck_error_clap_parser(parse_client_metadata))]
     client_metadata: Vec<ClientMetadata>,
 
+    /// Agent context key=value pairs for telemetry.
+    /// Used by AI agents to pass structured metadata. Schema is defined via buckconfig.
+    /// Entries can be comma-separated or passed as separate flags.
+    /// Examples:
+    ///   --agent-context intent=fix,attempt=2,prior_error=missing_target
+    ///   --agent-context intent=build --agent-context attempt=1
+    #[clap(long, global = true, value_delimiter = ',', value_parser = buck_error_clap_parser(parse_agent_context))]
+    agent_context: Vec<AgentContextEntry>,
+
     /// Do not launch a daemon process, run buck server in client process.
     ///
     /// Note even when running in no-buckd mode, it still writes state files.
@@ -164,7 +174,7 @@ fn help() -> &'static str {
 #[clap(
     name = "buck2",
     about(Some(help())),
-    version(BuckVersion::get_version()),
+    version(BuckVersion::get_version_for_clap()),
     styles = cli_style::get_styles(),
 )]
 pub(crate) struct Opt {
@@ -237,6 +247,14 @@ pub fn exec(process: ProcessContext<'_>) -> ExitResult {
             .common_opts
             .client_metadata
             .splice(0..0, client_metadata);
+    }
+
+    let agent_env_metadata = AgentContextEntry::from_env()?;
+    if !agent_env_metadata.is_empty() {
+        opt.opt
+            .common_opts
+            .agent_context
+            .splice(0..0, agent_env_metadata);
     }
 
     // If --client-metadata=? was not set and from_env did not find "id", then
@@ -486,6 +504,7 @@ impl CommandKind {
             common_opts.oncall,
             common_opts.client_metadata,
             common_opts.isolation_dir,
+            common_opts.agent_context,
         );
         if let Some(recorder) = events_ctx.recorder.as_mut() {
             recorder.update_for_client_ctx(&command_ctx, self.command_name());

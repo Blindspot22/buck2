@@ -30,14 +30,13 @@ Both opt and link plans use indices to refer to other files because it allows th
 code to easily map back to other objects held in buck memory.
 """
 
-# pyre-unsafe
-
 import argparse
 import json
 import os
 import os.path
 import subprocess
 import sys
+import traceback
 from typing import List
 
 
@@ -213,6 +212,8 @@ def main(argv):
             imports_list = []
             archives_list = []
             for import_path in imports:
+                if import_path not in mapping:
+                    continue
                 entry = mapping[import_path]
                 if entry["archive_index"] is not None:
                     archives_list.append(int(entry["archive_index"]))
@@ -259,6 +260,8 @@ def main(argv):
                 imports_list = []
                 archives_list = []
                 for path in imports:
+                    if path not in mapping:
+                        continue
                     entry = mapping[path]
                     if entry["archive_index"] is not None:
                         archives_list.append(int(entry["archive_index"]))
@@ -313,7 +316,8 @@ def main(argv):
             line = line.strip()
             index_files_set.add(line)
             path = os.path.relpath(line, start=args.index)
-            index[mapping[path]["index"]] = 1
+            if path in mapping:
+                index[mapping[path]["index"]] = 1
 
     with open(args.link_plan, "w") as outfile:
         json.dump(
@@ -383,7 +387,10 @@ def main(argv):
             write_pre_flags(pre_flag_idx)
 
             if line in index_files_set:
-                if mapping[path]["output"]:
+                if path not in mapping:
+                    # handle objects from genrule archives (not tracked by dist_lto)
+                    final_link_index_output.write(line + "\n")
+                elif mapping[path]["output"]:
                     # handle files that were not extracted from archives
                     output = mapping[path]["output"].replace(
                         bitcode_suffix, opt_objects_suffix
@@ -411,4 +418,9 @@ def main(argv):
             write_post_flags(idx)
 
 
-sys.exit(main(sys.argv))
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except subprocess.CalledProcessError as e:
+        traceback.print_exc()
+        sys.exit(e.returncode)

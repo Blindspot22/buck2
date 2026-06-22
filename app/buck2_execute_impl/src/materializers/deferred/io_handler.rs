@@ -8,8 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -41,6 +39,7 @@ use buck2_execute::execute::clean_output_paths::cleanup_path;
 use buck2_execute::materialize::http::http_download;
 use buck2_execute::materialize::materializer::CasNotFoundError;
 use buck2_execute::materialize::materializer::WriteRequest;
+use buck2_execute::materialize::utils::dynamic_priority_handle::DynamicPriorityHandle;
 use buck2_execute::output_size::OutputSize;
 use buck2_execute::re::error::RemoteExecutionError;
 use buck2_execute::re::manager::ReConnectionManager;
@@ -48,6 +47,8 @@ use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::fs_util::ReadDir;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use buck2_http::HttpClient;
 use chrono::Duration;
 use chrono::Utc;
@@ -131,6 +132,7 @@ pub trait IoHandler: Sized + Sync + Send + 'static {
         path: ProjectRelativePathBuf,
         method: Arc<ArtifactMaterializationMethod>,
         entry: ActionDirectoryEntry<ActionSharedDirectory>,
+        priority_control: DynamicPriorityHandle,
         event_dispatcher: EventDispatcher,
         cancellations: &CancellationContext,
     ) -> Result<(), MaterializeEntryError>;
@@ -173,6 +175,7 @@ impl DefaultIoHandler {
         path: ProjectRelativePathBuf,
         method: Arc<ArtifactMaterializationMethod>,
         entry: ActionDirectoryEntry<ActionSharedDirectory>,
+        priority_control: DynamicPriorityHandle,
         stat: &mut MaterializationStat,
         cancellations: &CancellationContext,
     ) -> Result<(), MaterializeEntryError> {
@@ -229,7 +232,7 @@ impl DefaultIoHandler {
                 let re_client = connection.get_client().with_use_case(info.re_use_case);
 
                 re_client
-                    .materialize_files(files)
+                    .materialize_files(files, priority_control.dupe())
                     .await
                     .map_err(|e| match e.find_typed_context::<RemoteExecutionError>() {
                         Some(re_error) if re_error.code == TCode::NOT_FOUND => {
@@ -287,7 +290,7 @@ impl DefaultIoHandler {
                 self.io_executor
                     .execute_io_inline(|| {
                         for a in copied_artifacts {
-                            let count_and_bytes = a.dest_entry.calc_output_count_and_bytes();
+                            let count_and_bytes = a.dest_entry.calc_output_count_and_bytes(false);
                             stat.file_count += count_and_bytes.count;
                             stat.total_bytes += count_and_bytes.bytes;
 
@@ -396,6 +399,7 @@ impl IoHandler for DefaultIoHandler {
         path: ProjectRelativePathBuf,
         method: Arc<ArtifactMaterializationMethod>,
         entry: ActionDirectoryEntry<ActionSharedDirectory>,
+        priority_control: DynamicPriorityHandle,
         event_dispatcher: EventDispatcher,
         cancellations: &CancellationContext,
     ) -> Result<(), MaterializeEntryError> {
@@ -416,7 +420,14 @@ impl IoHandler for DefaultIoHandler {
                     total_bytes: 0,
                 };
                 let res = self
-                    .materialize_entry_span(path, method.dupe(), entry, &mut stat, cancellations)
+                    .materialize_entry_span(
+                        path,
+                        method.dupe(),
+                        entry,
+                        priority_control,
+                        &mut stat,
+                        cancellations,
+                    )
                     .await;
                 let error = res.as_ref().err().map(|e| format!("{e:#}"));
 
@@ -473,7 +484,7 @@ fn maybe_tombstone_digest(digest: &FileDigest) -> buck2_error::Result<&FileDiges
     // instead of a not-found error.
     static TOMBSTONE_DIGEST: Lazy<FileDigest> = Lazy::new(|| FileDigest::new_sha1([0; 20], 1));
 
-    fn convert_digests(val: &str) -> buck2_error::Result<HashSet<FileDigest>> {
+    fn convert_digests(val: &str) -> buck2_error::Result<StdBuckHashSet<FileDigest>> {
         val.split(' ')
             .map(|digest| {
                 let digest = TDigest::from_str(digest)
@@ -489,7 +500,7 @@ fn maybe_tombstone_digest(digest: &FileDigest) -> buck2_error::Result<&FileDiges
 
     let tombstoned_digests = buck2_env!(
         "BUCK2_TEST_TOMBSTONED_DIGESTS",
-        type=HashSet<FileDigest>,
+        type=StdBuckHashSet<FileDigest>,
         converter=convert_digests,
         applicability=testing,
     )?;
@@ -509,36 +520,27 @@ pub(super) fn create_ttl_refresh(
     min_ttl: Duration,
     digest_config: DigestConfig,
 ) -> Option<impl Future<Output = buck2_error::Result<()>> + use<>> {
-    let mut digests_to_refresh = HashMap::<_, HashSet<_>>::new();
+    let mut digests_to_refresh = StdBuckHashMap::<_, StdBuckHashSet<_>>::new();
 
     let ttl_deadline = Utc::now() + min_ttl;
 
     for data in tree.iter_without_paths() {
-        match &data.stage {
-            ArtifactMaterializationStage::Declared {
-                entry,
-                method,
-                persist_full_directory_structure: _,
-            } => match method.as_ref() {
-                ArtifactMaterializationMethod::CasDownload { info } => {
-                    let mut walk = unordered_entry_walk(entry.as_ref().map_dir(Directory::as_ref));
-                    while let Some((_entry_path, entry)) = walk.next() {
-                        if let DirectoryEntry::Leaf(ActionDirectoryMember::File(file)) = entry {
-                            let needs_refresh =
-                                file.digest.expires().unwrap_or_default() < ttl_deadline;
-                            tracing::trace!("{} needs_refresh: {}", file, needs_refresh);
-                            if needs_refresh {
-                                digests_to_refresh
-                                    .entry(info.re_use_case)
-                                    .or_default()
-                                    .insert(file.digest.dupe());
-                            }
-                        }
+        if let ArtifactMaterializationStage::Declared { entry, method } = &data.stage
+            && let ArtifactMaterializationMethod::CasDownload { info } = method.as_ref()
+        {
+            let mut walk = unordered_entry_walk(entry.as_ref().map_dir(Directory::as_ref));
+            while let Some((_entry_path, entry)) = walk.next() {
+                if let DirectoryEntry::Leaf(ActionDirectoryMember::File(file)) = entry {
+                    let needs_refresh = file.digest.expires().unwrap_or_default() < ttl_deadline;
+                    tracing::trace!("{} needs_refresh: {}", file, needs_refresh);
+                    if needs_refresh {
+                        digests_to_refresh
+                            .entry(info.re_use_case)
+                            .or_default()
+                            .insert(file.digest.dupe());
                     }
                 }
-                _ => {}
-            },
-            _ => {}
+            }
         }
     }
 

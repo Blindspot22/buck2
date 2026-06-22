@@ -17,22 +17,6 @@ syntax = "proto3";
 // elsewhere.
 package buck.data.error;
 
-// TODO(ctolliday) remove this
-enum ErrorTier {
-  // Same as above
-  UNUSED_DEFAULT_CATEGORY = 0;
-  // Unexpected errors in buck2 or core dependencies.
-  // It should be possible to eliminate these, in theory.
-  TIER0_TIER = 1;
-  // Errors that may be triggered by issues with the host,
-  // resource limits, non-explicit dependencies or potentially
-  // ambiguous input errors.
-  // These can be tracked but not eliminated.
-  ENVIRONMENT_TIER = 3;
-  // Expected errors in inputs explicitly tracked by buck.
-  INPUT_TIER = 2;
-}
-
 // Error types are - by design - restricted to being set exactly once at the
 // error definition site. While they are useful, that means that they are enough
 // on their own to represent all the error metadata we want. Until we figure out
@@ -103,7 +87,11 @@ enum ErrorTag {
   DAEMON_STATE_INIT_FAILED = 503;
   DAEMON_STATUS = 504;
   DAEMON_REDIRECT = 505;
+  // The buck2 daemon's executable has been deleted from disk.
+  BUCKD_EXE_DELETED = 506;
   DAEMON_STARTUP_FAILED = 507;
+  EXIT_STATUS = 517;
+  EXIT_STATUS_UNKNOWN = 519;
   DAEMON_LAUNCH_FAILED = 508;
   DAEMON_NESTED_CONSTRAINTS_MISMATCH = 509;
   DAEMON_CONSTRAINTS_WRONG_AFTER_START = 510;
@@ -113,6 +101,8 @@ enum ErrorTag {
   BUCKD_INFO_MISSING = 514;
   BUCKD_INFO_PARSE_ERROR = 515;
   DAEMON_DISCONNECT = 516;
+  // Could not determine the BuckVersion
+  BUCK_VERSION_ERROR = 518;
   // Too large gRPC message.
   GRPC_RESPONSE_MESSAGE_TOO_LARGE = 6;
   // `visibility`, `within_view`.
@@ -131,6 +121,7 @@ enum ErrorTag {
   SERVER_SIGBUS = 403;
   // Server disconnect with no error but memory pressure was detected.
   SERVER_MEMORY_PRESSURE = 401;
+  DAEMON_OOM_KILLED = 404;
   // Jemalloc assertion failure.
   SERVER_JEMALLOC_ASSERT = 15;
   // Server transport errors. Eg. Channel not open
@@ -147,12 +138,14 @@ enum ErrorTag {
   // A process couldn't be killed
   FAILED_TO_KILL = 8027;
 
-  // No valid internal or VPNless certs could be found
-  NO_VALID_CERTS = 25;
   // Build failed during materialization
   MATERIALIZATION_ERROR = 26;
+  // Materialization was cancelled
+  MATERIALIZATION_CANCELLED = 2600;
   // Could not find buck project root
   NO_BUCK_ROOT = 27;
+  // Project root directory no longer exists on disk
+  MISSING_PROJECT_ROOT = 2700;
 
   // Functionality not implemented in Buck2
   UNIMPLEMENTED = 29;
@@ -165,11 +158,15 @@ enum ErrorTag {
   MISSING_INPUT_PATH = 32;
   // Path not found for buck or system path not provided by user
   MISSING_INTERNAL_PATH = 33;
+  // NotADirectory for path found in input or source
+  INPUT_PATH_NOT_A_DIRECTORY = 34;
 
   ACTION_MISMATCHED_OUTPUTS = 601;
   ACTION_MISSING_OUTPUTS = 602;
   ACTION_WRONG_OUTPUT_TYPE = 603;
   ACTION_COMMAND_FAILURE = 604;
+  ACTION_COMMAND_INFRA_FAILURE = 605;
+  ACTION_OOM = 606;
 
   // Errors during buck2 install.
   INSTALL = 200;
@@ -195,6 +192,7 @@ enum ErrorTag {
   // The nature of the failure, designed after (but not identical to) Rust's
   // `io::ErrorKind`
   IO_NOT_FOUND = 1020;
+  IO_NOT_A_DIRECTORY = 1031;
   IO_PERMISSION_DENIED = 1021;
   IO_BROKEN_PIPE = 1022;
   IO_STORAGE_FULL = 1023;
@@ -202,10 +200,17 @@ enum ErrorTag {
   IO_CONNECTION_ABORTED = 1025;
   IO_NOT_CONNECTED = 1026;
   IO_TIMEOUT = 1027;
-  IO_WINDOWS_SHARING_VIOLATION = 1028;
   IO_READ_ONLY_FILESYSTEM = 1029;
   IO_INPUT_OUTPUT_ERROR = 1030;
+  IO_BAD_ADDRESS = 1033;
+  IO_STALE_NFS_HANDLE = 1034;
   IO_BLOCKING_EXECUTOR = 8033;
+
+  IO_WINDOWS_SHARING_VIOLATION = 1028;
+  IO_WINDOWS_VIRTUALIZATION_UNAVAILABLE = 1501;
+  IO_WINDOWS_INTERNAL_ERROR = 1502;
+  IO_WINDOWS_PRIVILEGE_NOT_HELD = 1503;
+  IO_WINDOWS_NO_SYSTEM_RESOURCES = 1504;
 
   //
   // Eden IO Section
@@ -280,6 +285,7 @@ enum ErrorTag {
   // TCodeReasonGroup values: https://fburl.com/code/pvsy2jgv
   RE_CONNECTION = 1340;
   RE_USER_QUOTA = 1341;
+  RE_USER_BAD_CERTS = 1342;
 
   // Dice Errors
   // Value: https://fburl.com/code/5dxzaw41
@@ -313,10 +319,19 @@ enum ErrorTag {
   TEST_STATUS = 5003;
   TEST_STATUS_INVALID = 5004;
   LOCAL_RESOURCE_SETUP = 5005;
+  TEST_FAILED = 5006;
+  TEST_LISTING_FAILED = 5007;
+  TEST_FATAL = 5008;
+  TEST_INFRA_FAILURE = 5009;
+  TEST_STATUS_UNKNOWN = 5010;
+  TEST_TIMEOUT = 5011;
 
   // Error from TestExecutor
   TPX = 5500;
   TestExecutor = 5501;
+
+  TEST_RUNNER_INTERNAL = 5502;
+  TEST_RUNNER_UNKNOWN_EXIT_CODE = 5504;
 
   // Errors while cleaning stale artifacts
   CLEAN_STALE = 280;
@@ -330,11 +345,15 @@ enum ErrorTag {
   INVALID_DURATION = 6006;
   INVALID_USERNAME = 6007;
   INVALID_ABS_PATH = 6008;
+  // Malformed buck-out path string
   INVALID_BUCK_OUT_PATH = 6009;
+  // Issue with buck-out dir on disk (ex. broken symlink, not a dir)
+  INVALID_BUCK_OUT = 6010;
 
   // Build errors.
   BUILD_DEADLINE_EXPIRED = 7001;
   BUILD_SKETCH_ERROR = 7002;
+  CRITICAL_PATH_ERROR = 7003;
 
   SUPER_CONSOLE = 8000;
   SUPER_CONSOLE_INVALID_WHITESPACE = 8001;
@@ -365,9 +384,14 @@ enum ErrorTag {
   MALLCTL = 8038;
   CPU_STATS = 8026;
 
+  // Cert related tags
+  CERTS = 22000;
+  // No valid internal or VPNless certs could be found
+  NO_VALID_CERTS = 25;
+  CERT_EXPIRED = 22001;
+
   // Misc phases/subsystem tags
   BXL = 11000;
-  CERTS = 22000;
   LOG_CMD = 13000;
   OFFLINE_ARCHIVE = 14000;
   PROFILE = 15000;
@@ -403,6 +427,16 @@ enum ErrorTag {
   STRING_UTF8 = 9015;
   STRING_CONVERSION = 9016;
   CSTRING_NUL = 9023;
+
+  THRIFT = 10000;
+  THRIFT_TIMEOUT = 10001;
+  THRIFT_LOADSHEDDING = 10002;
+
+  // errno.h values 9100 + errno
+  // codes from: https://en.wikipedia.org/wiki/Errno.h
+  // (underscore in names is to not break C codegen)
+  E_PERM = 9101;
+  E_AGAIN = 9111;
 
   // From `buck2 debug crash`
   CRASH_REQUESTED = 8022;

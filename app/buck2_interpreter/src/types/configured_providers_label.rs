@@ -25,18 +25,17 @@ use starlark::collections::StarlarkHasher;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::Freeze;
 use starlark::values::Heap;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 use crate::types::cell_path::StarlarkCellPath;
 use crate::types::cell_root::CellRoot;
@@ -52,11 +51,21 @@ impl StarlarkConfiguredProvidersLabel {
 }
 
 /// Container for `ConfiguredProvidersLabel` that gives users access to things like package, cell, etc. This can also be properly stringified by our forthcoming `CommandLine` object
-#[derive(Clone, Debug, Display, Trace, Freeze, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Display,
+    Trace,
+    Freeze,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[display("{}", label)]
 #[repr(C)]
 pub struct StarlarkConfiguredProvidersLabel {
     #[freeze(identity)]
+    #[starlark_pagable(pagable)]
     label: ConfiguredProvidersLabel,
 }
 
@@ -81,14 +90,15 @@ impl StarlarkConfiguredProvidersLabel {
     }
 }
 
+starlark::methods_static!(CONFIGURED_PROVIDERS_LABEL_METHODS = configured_label_methods);
+
 #[starlark_value(type = "Label")]
 impl<'v> StarlarkValue<'v> for StarlarkConfiguredProvidersLabel
 where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(configured_label_methods)
+        Some(CONFIGURED_PROVIDERS_LABEL_METHODS.methods())
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
@@ -213,13 +223,15 @@ impl StarlarkProvidersLabel {
     ProvidesStaticType,
     Allocative,
     Serialize,
-    Pagable
+    Pagable,
+    StarlarkPagable
 )]
 #[display("{}", label)]
 #[repr(C)]
 #[serde(transparent)]
 pub struct StarlarkProvidersLabel {
     #[freeze(identity)]
+    #[starlark_pagable(pagable)]
     label: ProvidersLabel,
 }
 
@@ -231,14 +243,15 @@ impl StarlarkProvidersLabel {
     }
 }
 
+starlark::methods_static!(PROVIDERS_LABEL_METHODS = label_methods);
+
 #[starlark_value(type = "ProvidersLabel")]
 impl<'v> StarlarkValue<'v> for StarlarkProvidersLabel
 where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(label_methods)
+        Some(PROVIDERS_LABEL_METHODS.methods())
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
@@ -311,14 +324,14 @@ fn label_methods(builder: &mut MethodsBuilder) {
     }
 }
 
+// TODO(nga): remove the `Label` alias. (T264813434)
 #[starlark_module]
-pub fn register_providers_label(globals: &mut GlobalsBuilder) {
-    // TODO(nga): remove this alias.
-    const Label: StarlarkValueAsType<StarlarkConfiguredProvidersLabel> = StarlarkValueAsType::new();
-    const ProvidersLabel: StarlarkValueAsType<StarlarkProvidersLabel> = StarlarkValueAsType::new();
-    const ConfiguredProvidersLabel: StarlarkValueAsType<StarlarkConfiguredProvidersLabel> =
-        StarlarkValueAsType::new();
-}
+#[starlark_types(
+    StarlarkConfiguredProvidersLabel as Label,
+    StarlarkProvidersLabel as ProvidersLabel,
+    StarlarkConfiguredProvidersLabel as ConfiguredProvidersLabel
+)]
+pub fn register_providers_label(globals: &mut GlobalsBuilder) {}
 
 #[cfg(test)]
 mod tests {

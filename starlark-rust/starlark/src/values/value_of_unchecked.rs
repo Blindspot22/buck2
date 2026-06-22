@@ -26,8 +26,11 @@ use allocative::Allocative;
 use dupe::Clone_;
 use dupe::Copy_;
 use dupe::Dupe_;
+use starlark_derive::StarlarkPagable;
 
+use crate as starlark;
 use crate::coerce::Coerce;
+use crate::pagable::StarlarkPagable;
 use crate::typing::Ty;
 use crate::values::AllocFrozenValue;
 use crate::values::AllocValue;
@@ -48,6 +51,8 @@ use crate::values::type_repr::StarlarkTypeRepr;
 /// Store value annotated with type, but do not check the type.
 #[derive(Clone_, Copy_, Dupe_, Allocative)]
 #[allocative(bound = "")]
+#[derive(pagable::PagablePanic, StarlarkPagable)]
+#[starlark_pagable(bound = "V: StarlarkPagable")]
 pub struct ValueOfUncheckedGeneric<V: ValueLifetimeless, T: StarlarkTypeRepr>(
     V,
     PhantomData<fn() -> T>,

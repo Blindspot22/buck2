@@ -38,15 +38,23 @@ def get_test_frameworks_bundle_parts(ctx: AnalysisContext, swift_support_needed:
         if xcode_version >= 2600:
             paths.append(_get_object_from_platform_path(ctx, "Developer/Library/Frameworks/_Testing_Foundation.framework"))
 
+        # Xcode 26.4 makes Testing.framework load lib_TestingInterop.dylib at runtime.
+        if xcode_version >= 2640:
+            paths.append(_get_object_from_platform_path(ctx, "Developer/usr/lib/lib_TestingInterop.dylib"))
+
     return paths
 
 def _get_object_from_platform_path(ctx: AnalysisContext, platform_relative_path: str) -> AppleBundlePart:
     toolchain = ctx.attrs._apple_toolchain[AppleToolchainInfo]
-    copied_framework = ctx.actions.declare_output(paths.basename(platform_relative_path))
+    copied_framework = ctx.actions.declare_output(paths.basename(platform_relative_path), has_content_based_path = False)
 
     # We have to copy because:
     # 1) Platform path might be a string (e.g. for Xcode toolchains)
     # 2) It's not possible to project artifact which is not produced by different target (and platform path is a separate target for distributed toolchains).
-    ctx.actions.run(["cp", "-PR", cmd_args(toolchain.platform_path, platform_relative_path, delimiter = "/"), copied_framework.as_output()], category = "extract_framework", identifier = platform_relative_path)
+    ctx.actions.run(
+        ["cp", "-PR", cmd_args(toolchain.platform_path, platform_relative_path, delimiter = "/"), copied_framework.as_output()],
+        category = "extract_framework",
+        identifier = platform_relative_path,
+    )
 
     return AppleBundlePart(source = copied_framework, destination = AppleBundleDestination("frameworks"), codesign_on_copy = True)

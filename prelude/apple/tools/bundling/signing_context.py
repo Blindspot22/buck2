@@ -7,6 +7,7 @@
 # above-listed licenses.
 
 import argparse
+import json
 import shlex
 from pathlib import Path
 from typing import Optional, Union
@@ -53,7 +54,8 @@ def add_args_for_signing_context(parser: argparse.ArgumentParser):
         metavar="</provisioning/profiles/directory>",
         type=Path,
         required=False,
-        help="Required if non-ad-hoc code signing is requested. Path to directory with provisioning profile files.",
+        action="append",
+        help="Required if non-ad-hoc code signing is requested. Path to directory with provisioning profile files. Can be specified multiple times.",
     )
     parser.add_argument(
         "--embed-provisioning-profile-when-signing-ad-hoc",
@@ -86,6 +88,27 @@ def add_args_for_signing_context(parser: argparse.ArgumentParser):
         help="Path to file with entitlements to be used during code signing. If it's not provided the minimal entitlements are going to be generated.",
     )
     parser.add_argument(
+        "--entitlements-suffixed-key-map",
+        type=json.loads,
+        required=False,
+        default={},
+        help="JSON map of entitlement key to suffix to append to its values.",
+    )
+    parser.add_argument(
+        "--entitlements-removed-keys",
+        type=json.loads,
+        required=False,
+        default=[],
+        help="JSON list of entitlement keys to remove from the entitlements.",
+    )
+    parser.add_argument(
+        "--entitlements-removed-values-map",
+        type=json.loads,
+        required=False,
+        default={},
+        help="JSON map of entitlement keys to list of values to remove from that key.",
+    )
+    parser.add_argument(
         "--info-plist-source",
         metavar="</prepared/Info.plist>",
         type=Path,
@@ -111,6 +134,17 @@ def add_args_for_signing_context(parser: argparse.ArgumentParser):
         type=Path,
         required=False,
         help="Path to a log file. If present logging will be directed to this file in addition to stderr.",
+    )
+    parser.add_argument(
+        "--verify-entitlements",
+        action="store_true",
+        help="Verify that the entitlements match the provisioning profile.",
+    )
+    parser.add_argument(
+        "--no-check-certificates",
+        action="store_true",
+        required=False,
+        help="Skip the check on code signing identities when selecting provisioning profile.",
     )
 
 
@@ -153,7 +187,7 @@ def signing_context_and_selected_identity_from_args(
                 profile_selection_context = signing_context_with_profile_selection(
                     info_plist_source=args.info_plist_source,
                     info_plist_destination=args.info_plist_destination,
-                    provisioning_profiles_dir=args.profiles_dir,
+                    provisioning_profiles_dirs=args.profiles_dir,
                     entitlements_path=args.entitlements,
                     platform=args.platform,
                     list_codesign_identities=AdHocListCodesignIdentities(
@@ -165,6 +199,7 @@ def signing_context_and_selected_identity_from_args(
                     strict_provisioning_profile_search=args.strict_provisioning_profile_search,
                     provisioning_profile_filter=args.provisioning_profile_filter,
                     should_verify_entitlements=args.verify_entitlements,
+                    no_check_certificates=args.no_check_certificates,
                 )
             else:
                 profile_selection_context = None
@@ -181,7 +216,7 @@ def signing_context_and_selected_identity_from_args(
             signing_context = signing_context_with_profile_selection(
                 info_plist_source=args.info_plist_source,
                 info_plist_destination=args.info_plist_destination,
-                provisioning_profiles_dir=args.profiles_dir,
+                provisioning_profiles_dirs=args.profiles_dir,
                 entitlements_path=args.entitlements,
                 platform=args.platform,
                 list_codesign_identities=list_codesign_identities,
@@ -190,6 +225,7 @@ def signing_context_and_selected_identity_from_args(
                 strict_provisioning_profile_search=args.strict_provisioning_profile_search,
                 provisioning_profile_filter=args.provisioning_profile_filter,
                 should_verify_entitlements=args.verify_entitlements,
+                no_check_certificates=args.no_check_certificates,
             )
             selected_identity_argument = (
                 signing_context.selected_profile_info.identity.fingerprint

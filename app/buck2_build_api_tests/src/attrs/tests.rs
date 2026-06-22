@@ -9,7 +9,7 @@
  */
 
 use buck2_analysis::attrs::resolve::configured_attr::ConfiguredAttrExt;
-use buck2_build_api::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
+use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_build_api::interpreter::rule_defs::provider::registration::register_builtin_providers;
 use buck2_common::package_listing::listing::PackageListing;
@@ -27,6 +27,7 @@ use buck2_core::package::PackageLabel;
 use buck2_core::plugins::PluginKindSet;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
+use buck2_hash::BuckHashMap;
 use buck2_interpreter_for_build::attrs::coerce::attr_type::AttrTypeExt;
 use buck2_interpreter_for_build::attrs::coerce::testing::coercion_ctx;
 use buck2_interpreter_for_build::attrs::coerce::testing::coercion_ctx_listing;
@@ -42,7 +43,6 @@ use buck2_node::attrs::fmt_context::AttrFmtContext;
 use buck2_node::attrs::testing::configuration_ctx;
 use buck2_node::provider_id_set::ProviderIdSet;
 use dupe::Dupe;
-use fxhash::FxHashMap;
 use gazebo::prelude::*;
 use indoc::indoc;
 use starlark::environment::GlobalsBuilder;
@@ -89,7 +89,9 @@ fn test() -> buck2_error::Result<()> {
             coerced.as_display_no_ctx().to_string()
         );
 
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             "[[[\"hello\", \"world!\", \"okay\", \"other\", \"...\", \"...\"]]]",
             configured.as_display_no_ctx().to_string()
@@ -114,7 +116,9 @@ fn test_string() -> buck2_error::Result<()> {
         let value = to_value(&env, &globals, r#""a" + select({"DEFAULT": "b"})"#);
 
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(r#""ab""#, configured.as_display_no_ctx().to_string());
 
         Ok(())
@@ -142,7 +146,8 @@ fn test_invalid_concat_coercion_into_one_of() -> buck2_error::Result<()> {
 
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
         let err = coerced
-            .configure(&attr, &configuration_ctx())
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()
             .expect_err("Should fail to concatenate configured lists");
         assert!(
             err.to_string()
@@ -176,7 +181,10 @@ fn test_concat_option_one_of() {
         let coerced = attr
             .coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)
             .unwrap();
-        let configured = coerced.configure(&attr, &configuration_ctx()).unwrap();
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()
+            .unwrap();
         assert_eq!(
             r#"["foo", "bar"]"#,
             configured.as_display_no_ctx().to_string()
@@ -197,7 +205,9 @@ fn test_any() -> buck2_error::Result<()> {
             "[\"//some:target\", \"cell1//named:target[foo]\"]",
             coerced.as_display_no_ctx().to_string()
         );
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             "[\"//some:target\", \"cell1//named:target[foo]\"]",
             configured.as_display_no_ctx().to_string()
@@ -206,19 +216,25 @@ fn test_any() -> buck2_error::Result<()> {
         let value = Value::new_none();
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
         assert_eq!("None", coerced.as_display_no_ctx().to_string());
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!("None", configured.as_display_no_ctx().to_string());
 
         let value = Value::new_bool(true);
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
         assert_eq!("True", coerced.as_display_no_ctx().to_string());
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!("True", configured.as_display_no_ctx().to_string());
 
         let value = heap.alloc(42);
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
         assert_eq!("42", coerced.as_display_no_ctx().to_string());
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!("42", configured.as_display_no_ctx().to_string());
 
         Ok(())
@@ -236,7 +252,9 @@ fn test_option() -> buck2_error::Result<()> {
             "[\"string1\", \"string2\"]",
             coerced.as_display_no_ctx().to_string()
         );
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             "[\"string1\", \"string2\"]",
             configured.as_display_no_ctx().to_string()
@@ -245,7 +263,9 @@ fn test_option() -> buck2_error::Result<()> {
         let value = Value::new_none();
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
         assert_eq!("None", coerced.as_display_no_ctx().to_string());
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!("None", configured.as_display_no_ctx().to_string());
 
         Ok(())
@@ -264,7 +284,9 @@ fn test_dict() -> buck2_error::Result<()> {
             "{\"a\": [], \"b\": [\"1\"]}",
             coerced.as_display_no_ctx().to_string()
         );
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             "{\"a\": [], \"b\": [\"1\"]}",
             configured.as_display_no_ctx().to_string()
@@ -280,7 +302,9 @@ fn test_dict() -> buck2_error::Result<()> {
             "{\"b\": [\"1\"], \"a\": []}",
             coerced.as_display_no_ctx().to_string()
         );
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             "{\"b\": [\"1\"], \"a\": []}",
             configured.as_display_no_ctx().to_string()
@@ -292,7 +316,9 @@ fn test_dict() -> buck2_error::Result<()> {
             r#"{"b":["1"], "a":[]} + select({"DEFAULT": { "c": []}})"#,
         );
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             r#"{"b": ["1"], "a": [], "c": []}"#,
             configured.as_display_no_ctx().to_string()
@@ -311,7 +337,9 @@ fn test_one_of() -> buck2_error::Result<()> {
         let attr = AttrType::one_of(vec![AttrType::string(), AttrType::list(AttrType::string())]);
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
         assert_eq!("\"one\"", coerced.as_display_no_ctx().to_string());
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!("\"one\"", configured.as_display_no_ctx().to_string());
 
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), values)?;
@@ -319,7 +347,9 @@ fn test_one_of() -> buck2_error::Result<()> {
             "[\"test\", \"extra\"]",
             coerced.as_display_no_ctx().to_string()
         );
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             "[\"test\", \"extra\"]",
             configured.as_display_no_ctx().to_string()
@@ -346,7 +376,9 @@ fn test_label() -> buck2_error::Result<()> {
             coerced.as_display_no_ctx().to_string()
         );
 
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             format!(
                 "[\"root//some:target ({})\", \"cell1//named:target[foo] ({})\"]",
@@ -383,7 +415,7 @@ fn test_coerced_deps() -> buck2_error::Result<()> {
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
 
         let mut visitor = CoercedDepsCollector::new();
-        coerced.traverse(&attr, PackageLabel::testing(), &mut visitor)?;
+        coerced.traverse(&attr, Some(PackageLabel::testing()), &mut visitor)?;
         let CoercedDepsCollector {
             deps,
             configuration_deps,
@@ -432,7 +464,9 @@ fn test_configured_deps() -> buck2_error::Result<()> {
 
         let attr = AttrType::list(AttrType::dep(ProviderIdSet::EMPTY, PluginKindSet::EMPTY));
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
 
         let mut info = ConfiguredAttrInfoForTests::new();
         configured.traverse(PackageLabel::testing(), &mut info)?;
@@ -459,7 +493,9 @@ fn test_configured_deps() -> buck2_error::Result<()> {
         // Check also that execution deps are handled slightly differently.
         let attr_exec = AttrType::list(AttrType::exec_dep(ProviderIdSet::EMPTY));
         let coerced_exec = attr_exec.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
-        let configured_exec = coerced_exec.configure(&attr_exec, &configuration_ctx())?;
+        let configured_exec = coerced_exec
+            .configure(&attr_exec, &configuration_ctx(), None)
+            .require_compatible()?;
         let mut info = ConfiguredAttrInfoForTests::new();
         configured_exec.traverse(PackageLabel::testing(), &mut info)?;
         eprintln!("{info:?}");
@@ -494,7 +530,9 @@ fn test_resolved_deps() -> buck2_error::Result<()> {
 
         let attr = AttrType::list(AttrType::dep(ProviderIdSet::EMPTY, PluginKindSet::EMPTY));
         let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         let mut resolution_ctx = resolution_ctx(&env);
         let resolved = configured.resolve_single(PackageLabel::testing(), &mut resolution_ctx)?;
 
@@ -536,7 +574,9 @@ fn test_dep_requires_providers() -> buck2_error::Result<()> {
 
             let attr = AttrType::dep(provider_ids.dupe(), PluginKindSet::EMPTY);
             let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), foo_only)?;
-            let configured = coerced.configure(&attr, &configuration_ctx())?;
+            let configured = coerced
+                .configure(&attr, &configuration_ctx(), None)
+                .require_compatible()?;
 
             let err = configured
                 .resolve_single(PackageLabel::testing(), &mut resolution_ctx)
@@ -550,7 +590,9 @@ fn test_dep_requires_providers() -> buck2_error::Result<()> {
 
             let attr = AttrType::dep(provider_ids, PluginKindSet::EMPTY);
             let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), foo_and_bar)?;
-            let configured = coerced.configure(&attr, &configuration_ctx())?;
+            let configured = coerced
+                .configure(&attr, &configuration_ctx(), None)
+                .require_compatible()?;
 
             // This dep has both FooInfo and BarInfo, so it should resolve properly
             configured.resolve_single(PackageLabel::testing(), &mut resolution_ctx)?;
@@ -606,7 +648,9 @@ fn test_source_label() -> buck2_error::Result<()> {
                 .to_string(),
         );
 
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             format!(
                 "[{}, {}, {}]",
@@ -666,7 +710,7 @@ fn test_source_label_deps() -> buck2_error::Result<()> {
         )?;
 
         let mut visitor = CoercedDepsCollector::new();
-        coerced.traverse(&attr, PackageLabel::testing(), &mut visitor)?;
+        coerced.traverse(&attr, Some(PackageLabel::testing()), &mut visitor)?;
         let CoercedDepsCollector {
             deps,
             configuration_deps,
@@ -715,7 +759,9 @@ fn test_source_label_resolution() -> buck2_error::Result<()> {
                 &coercion_ctx_listing(PackageListing::testing_files(files)),
                 value,
             )?;
-            let configured = coerced.configure(&attr, &configuration_ctx())?;
+            let configured = coerced
+                .configure(&attr, &configuration_ctx(), None)
+                .require_compatible()?;
             let mut resolution_ctx = resolution_ctx(&env);
             let resolved =
                 configured.resolve_single(PackageLabel::testing(), &mut resolution_ctx)?;
@@ -781,7 +827,9 @@ fn test_single_source_label_fails_if_multiple_returned() -> buck2_error::Result<
 
             let attr = AttrType::source(false);
             let coerced = attr.coerce(AttrIsConfigurable::Yes, &coercion_ctx(), value)?;
-            let configured = coerced.configure(&attr, &configuration_ctx())?;
+            let configured = coerced
+                .configure(&attr, &configuration_ctx(), None)
+                .require_compatible()?;
             let mut resolution_ctx = resolution_ctx(&env);
             let err = configured
                 .resolve_single(PackageLabel::testing(), &mut resolution_ctx)
@@ -807,7 +855,9 @@ fn test_arg() -> buck2_error::Result<()> {
             "\"$(exe root//some:exe) --file=$(location root//some:location)\"",
             coerced.as_display_no_ctx().to_string()
         );
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             format!(
                 "\"$(exe root//some:exe ({})) --file=$(location root//some:location ({}))\"",
@@ -818,7 +868,7 @@ fn test_arg() -> buck2_error::Result<()> {
         );
 
         let mut visitor = CoercedDepsCollector::new();
-        coerced.traverse(&attr, PackageLabel::testing(), &mut visitor)?;
+        coerced.traverse(&attr, Some(PackageLabel::testing()), &mut visitor)?;
         let CoercedDepsCollector {
             deps, exec_deps, ..
         } = visitor;
@@ -891,7 +941,9 @@ fn test_bool() -> buck2_error::Result<()> {
             coerced.as_display_no_ctx().to_string()
         );
 
-        let configured = coerced.configure(&attr, &configuration_ctx())?;
+        let configured = coerced
+            .configure(&attr, &configuration_ctx(), None)
+            .require_compatible()?;
         assert_eq!(
             "[True, False, False, True]",
             configured.as_display_no_ctx().to_string()
@@ -920,7 +972,9 @@ fn test_user_placeholders() -> buck2_error::Result<()> {
                 &coercion_ctx(),
                 to_value(&env, &globals, value),
             )?;
-            let configured = coerced.configure(&attr, &configuration_ctx())?;
+            let configured = coerced
+                .configure(&attr, &configuration_ctx(), None)
+                .require_compatible()?;
             let mut resolution_ctx = resolution_ctx(&env);
             configured
                 .resolve_single(PackageLabel::testing(), &mut resolution_ctx)
@@ -945,11 +999,13 @@ fn test_user_placeholders() -> buck2_error::Result<()> {
                     let executor_fs = ExecutorFs::new(&fs, PathSeparatorKind::Unix);
 
                     let mut cli = Vec::<String>::new();
-                    let mut ctx = DefaultCommandLineContext::new(&executor_fs);
+                    let artifact_path_mapping = BuckHashMap::default();
+                    let mut fmt =
+                        CommandLineBuilder::new(&mut cli, &artifact_path_mapping, &executor_fs);
                     ValueAsCommandLineLike::unpack_value_err(v)
                         .unwrap()
                         .0
-                        .add_to_command_line(&mut cli, &mut ctx, &FxHashMap::default())
+                        .add_to_command_line(&mut fmt)
                         .unwrap();
                     cli.join(" ")
                 })
@@ -997,4 +1053,24 @@ fn test_user_placeholders() -> buck2_error::Result<()> {
 
         Ok(())
     })
+}
+
+#[test]
+fn test_select_incompatible_configure() -> buck2_error::Result<()> {
+    let attr = AttrType::string();
+    let coerced = buck2_node::attrs::coerced_attr::CoercedAttr::SelectIncompatible(
+        buck2_util::arc_str::ArcStr::from("not supported on this platform"),
+    );
+    let result = coerced.configure(&attr, &configuration_ctx(), None);
+    assert!(
+        !result.is_compatible(),
+        "select_incompatible should produce Incompatible result"
+    );
+    let err = result.require_compatible().unwrap_err();
+    assert!(
+        err.to_string().contains("not supported on this platform"),
+        "Error message should contain the select_incompatible message, got: {}",
+        err
+    );
+    Ok(())
 }

@@ -41,6 +41,28 @@ mod inner {
     #[derive(crate::PagablePanic)]
     pub(super) struct TestPanic<T>(T);
 
+    #[derive(crate::Pagable, Clone, Eq, PartialEq, Debug)]
+    pub(super) struct WithStaticStr {
+        name: crate::StaticStr,
+        value: i32,
+    }
+
+    trait HasItem {
+        type Item;
+    }
+
+    struct StringItem;
+
+    impl HasItem for StringItem {
+        type Item = String;
+    }
+
+    #[derive(crate::Pagable)]
+    #[pagable(bound = "T::Item: crate::Pagable")]
+    struct WithAssociatedBound<T: HasItem> {
+        item: T::Item,
+    }
+
     #[cfg(test)]
     mod tests {
         use std::collections::HashMap;
@@ -99,6 +121,41 @@ mod inner {
         }
 
         #[test]
+        fn test_static_str_in_struct() -> crate::Result<()> {
+            // Register and create the test string const
+            crate::static_str!(TEST_NAME = "test_static_str_value");
+
+            let original = WithStaticStr {
+                name: TEST_NAME,
+                value: 42,
+            };
+
+            let mut serializer = TestingSerializer::new();
+            original.pagable_serialize(&mut serializer)?;
+            let bytes = serializer.finish();
+
+            let mut deserializer = TestingDeserializer::new(&bytes);
+            let restored = WithStaticStr::pagable_deserialize(&mut deserializer)?;
+
+            assert_eq!(original, restored);
+            Ok(())
+        }
+
+        #[test]
+        fn test_associated_type_bound() -> crate::Result<()> {
+            let t1 = WithAssociatedBound::<StringItem> {
+                item: "associated".to_owned(),
+            };
+            let mut serializer = TestingSerializer::new();
+            t1.pagable_serialize(&mut serializer)?;
+            let bytes = serializer.finish();
+            let mut deserializer = TestingDeserializer::new(&bytes);
+            let t2 = WithAssociatedBound::<StringItem>::pagable_deserialize(&mut deserializer)?;
+            assert_eq!(t2.item, "associated");
+            Ok(())
+        }
+
+        #[test]
         fn test_rt2() -> crate::Result<()> {
             static_assertions::assert_impl_all!(std::sync::Arc<String>: PagableSerialize, PagableDeserialize<'static>);
             static_assertions::assert_impl_all!(std::sync::Arc<std::sync::Arc<String>>: PagableSerialize, PagableDeserialize<'static>);
@@ -149,7 +206,8 @@ mod inner {
 
         #[tokio::test]
         async fn test_pagable_arc_refcounts() -> anyhow::Result<()> {
-            let storage = PagableStorageHandle::new(std::sync::Arc::new(EmptyPagableStorage));
+            let storage =
+                PagableStorageHandle::new(std::sync::Arc::new(EmptyPagableStorage::new()));
 
             let arc1 = PinnedPagableArc::new("hello world".to_owned(), storage.clone() as _);
             let weak1 = PinnedPagableArc::into_pagable(arc1.clone());

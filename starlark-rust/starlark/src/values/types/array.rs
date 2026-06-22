@@ -39,6 +39,7 @@ use crate::values::AllocStaticSimple;
 use crate::values::FrozenValueTyped;
 use crate::values::Heap;
 use crate::values::StarlarkValue;
+use crate::values::StaticValueRegistered;
 use crate::values::Value;
 use crate::values::types::list::value::display_list;
 
@@ -79,6 +80,10 @@ impl<'v> Debug for Array<'v> {
     }
 }
 
+// SAFETY: The empty array static (VALUE_EMPTY_ARRAY) is properly registered
+// for pagable serialization via inventory::submit!.
+unsafe impl StaticValueRegistered for Array<'static> {}
+
 /// `Array` is not `Sync`, so wrap it into this struct to store it in static variable.
 /// Empty `Array` is logically `Sync`.
 pub(crate) struct ValueEmptyArray(AllocStaticSimple<Array<'static>>);
@@ -86,6 +91,15 @@ unsafe impl Sync for ValueEmptyArray {}
 
 pub(crate) static VALUE_EMPTY_ARRAY: ValueEmptyArray =
     ValueEmptyArray(AllocStaticSimple::alloc(unsafe { Array::new(0, 0) }));
+
+// Manual registration for pagable serialization (can't use macro due to wrapper struct)
+inventory::submit! {
+    crate::__derive_refs::StaticValueEntry::new(
+        file!(),
+        line!(),
+        || VALUE_EMPTY_ARRAY.0.to_frozen_value()
+    )
+}
 
 impl ValueEmptyArray {
     pub(crate) fn unpack<'v>(&'static self) -> FrozenValueTyped<'v, Array<'v>> {

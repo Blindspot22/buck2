@@ -104,13 +104,13 @@ async fn query_action_cache_and_download_result(
             action_digest: digest.to_string(),
             cache_type: cache_type.to_proto().into(),
         },
-        re_client.action_cache(digest.dupe()),
+        re_client.action_cache(digest.dupe(), &command.prepared_action.platform),
     )
     .await;
 
     let identity = None; // TODO(#503): implement this
     if upload_all_actions {
-        match re_client
+        if let Err(e) = re_client
             .upload(
                 artifact_fs.fs(),
                 materializer,
@@ -123,11 +123,8 @@ async fn query_action_cache_and_download_result(
             )
             .await
         {
-            Err(e) => {
-                return ControlFlow::Break(manager.error("upload", e));
-            }
-            Ok(_) => {}
-        };
+            return ControlFlow::Break(manager.error("upload", e));
+        }
     }
 
     let response = match action_cache_response {
@@ -228,8 +225,8 @@ async fn query_action_cache_and_download_result(
     {
         save_content_based_incremental_state(
             run_action_key.clone(),
-            &incremental_db_state,
-            &artifact_fs,
+            incremental_db_state,
+            artifact_fs,
             &res,
         );
     }

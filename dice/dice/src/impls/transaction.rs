@@ -224,17 +224,23 @@ mod tests {
     use async_trait::async_trait;
     use derive_more::Display;
     use dice_futures::cancellation::CancellationContext;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
 
+    use crate::DiceKeyDyn;
     use crate::api::computations::DiceComputations;
     use crate::api::data::DiceData;
     use crate::api::key::InvalidationSourcePriority;
     use crate::api::key::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
     use crate::impls::dice::Dice;
     use crate::impls::key::CowDiceKeyHashed;
     use crate::impls::transaction::ChangeType;
     use crate::versions::VersionNumber;
 
-    #[derive(Allocative, Clone, PartialEq, Eq, Hash, Debug, Display)]
+    #[derive(Allocative, Clone, PartialEq, Eq, Hash, Debug, Display, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct K(usize);
 
     #[async_trait]
@@ -252,11 +258,15 @@ mod tests {
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             unimplemented!("test")
         }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
     }
 
     #[test]
     fn changes_are_recorded() -> anyhow::Result<()> {
-        let dice = Dice::new(DiceData::new());
+        let dice = Dice::new(DiceData::new(), None);
         let mut updater = dice.updater();
 
         updater.changed(vec![K(1), K(2)])?;
@@ -305,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn transaction_versions() -> anyhow::Result<()> {
-        let dice = Dice::new(DiceData::new());
+        let dice = Dice::new(DiceData::new(), None);
         let mut updater = dice.updater();
 
         updater.changed(vec![K(1), K(2)])?;

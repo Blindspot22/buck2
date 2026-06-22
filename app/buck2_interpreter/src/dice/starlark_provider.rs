@@ -8,86 +8,27 @@
  * above-listed licenses.
  */
 
-use std::any::Any;
-use std::fmt::Debug;
-use std::fmt::Display;
-use std::hash::Hash;
-use std::hash::Hasher;
 use std::sync::Arc;
 
 use allocative::Allocative;
 use buck2_core::configuration::transition::id::TransitionId;
+pub use buck2_core::deferred::dyn_eval_kind_key::DynEvalKindKey;
 use buck2_core::package::PackageLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_util::arc_str::ThinArcStr;
-use dice_futures::cancellation::CancellationContext;
-use dice_futures::cancellation::CancellationObserver;
 use dupe::Dupe;
+use pagable::Pagable;
 use strong_hash::StrongHash;
 
 use crate::paths::module::OwnedStarlarkModulePath;
 
-pub trait DynEvalKindKey: Display + Send + Sync + Debug + Allocative + 'static {
-    fn hash(&self, state: &mut dyn Hasher);
-    fn strong_hash(&self, state: &mut dyn Hasher);
-    fn eq(&self, other: &dyn DynEvalKindKey) -> bool;
-    fn as_any(&self) -> &dyn Any;
-
-    fn type_name(&self) -> &'static str {
-        std::any::type_name::<Self>()
-    }
-}
-
-impl<
-    T: Display + Send + Sync + Debug + StrongHash + Allocative + Hash + Eq + PartialEq + Any + 'static,
-> DynEvalKindKey for T
-{
-    fn hash(&self, mut state: &mut dyn Hasher) {
-        Hash::hash(self, &mut state)
-    }
-
-    fn strong_hash(&self, mut state: &mut dyn Hasher) {
-        StrongHash::strong_hash(self, &mut state)
-    }
-
-    fn eq(&self, other: &dyn DynEvalKindKey) -> bool {
-        match other.as_any().downcast_ref::<Self>() {
-            None => false,
-            Some(v) => v == self,
-        }
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl Hash for dyn DynEvalKindKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        DynEvalKindKey::hash(self, state)
-    }
-}
-
-impl StrongHash for dyn DynEvalKindKey {
-    fn strong_hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        StrongHash::strong_hash(self.type_name(), state);
-        DynEvalKindKey::strong_hash(self, state)
-    }
-}
-
-impl PartialEq for dyn DynEvalKindKey {
-    fn eq(&self, other: &Self) -> bool {
-        DynEvalKindKey::eq(self, other)
-    }
-}
-
-impl Eq for dyn DynEvalKindKey {}
-
 /// StarlarkEvalKind is used as an identifier for a particular starlark evaluation.
 ///
 /// It's used to selectively enable profiling and provides an identifier for the debugger.
-#[derive(Debug, Clone, Dupe, Hash, Eq, PartialEq, Allocative, StrongHash)]
+#[derive(
+    Debug, Clone, Dupe, Hash, Eq, PartialEq, Allocative, StrongHash, Pagable
+)]
 pub enum StarlarkEvalKind {
     Analysis(ConfiguredTargetLabel),
     Load(Arc<OwnedStarlarkModulePath>),
@@ -98,7 +39,7 @@ pub enum StarlarkEvalKind {
     AnonTarget(Arc<dyn DynEvalKindKey>),
     DynamicOutput(Arc<dyn DynEvalKindKey>),
     Bxl(Arc<dyn DynEvalKindKey>),
-    BxlDynamic(Arc<dyn DynEvalKindKey>),
+    BxlDynamic(ThinArcStr),
     Unknown(ThinArcStr),
 }
 impl StarlarkEvalKind {
@@ -158,36 +99,5 @@ impl std::fmt::Display for StarlarkEvalKind {
             StarlarkEvalKind::BxlDynamic(bxl_dynamic) => write!(f, "bxl_dynamic/{}", bxl_dynamic),
             StarlarkEvalKind::Unknown(label) => write!(f, "unknown/{}", label),
         }
-    }
-}
-
-#[derive(Clone, Dupe)]
-pub enum CancellationPoller<'a> {
-    None,
-    Context(&'a CancellationContext),
-    Observer(CancellationObserver),
-}
-
-impl<'a> From<&'a CancellationContext> for CancellationPoller<'a> {
-    fn from(v: &'a CancellationContext) -> Self {
-        Self::Context(v)
-    }
-}
-
-impl<'a> From<Option<&'a CancellationContext>> for CancellationPoller<'a> {
-    fn from(v: Option<&'a CancellationContext>) -> Self {
-        v.map_or(Self::None, |c| c.into())
-    }
-}
-
-impl<'a> From<Option<()>> for CancellationPoller<'a> {
-    fn from(_v: Option<()>) -> Self {
-        Self::None
-    }
-}
-
-impl<'a> From<CancellationObserver> for CancellationPoller<'a> {
-    fn from(v: CancellationObserver) -> Self {
-        Self::Observer(v)
     }
 }

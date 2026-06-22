@@ -8,13 +8,17 @@
  * above-listed licenses.
  */
 
+#[cfg(feature = "allocative")]
 use std::mem;
+#[cfg(feature = "allocative")]
 use std::mem::ManuallyDrop;
 use std::slice;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+#[cfg(feature = "allocative")]
 use allocative::Allocative;
+#[cfg(feature = "allocative")]
 use allocative::Visitor;
 use atomic::Atomic;
 
@@ -53,6 +57,7 @@ impl<T: AtomicValue> Iterator for IterPtrs<'_, T> {
     }
 }
 
+#[cfg(feature = "allocative")]
 impl<T: AtomicValue + Allocative> FixedCapTable<T> {
     pub(crate) fn visit<'a, 'b: 'a>(&self, visitor: &'a mut Visitor<'b>, current: bool) {
         let mut visitor = visitor.enter_self_sized::<Self>();
@@ -112,6 +117,54 @@ impl<'a, T: AtomicValue + 'a> Iterator for Iter<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().map(|ptr| unsafe { T::deref(ptr) })
+    }
+}
+
+/// Consuming iterator over entries in a `FixedCapTable`.
+pub(crate) struct IntoIter<T: AtomicValue> {
+    entries: Vec<Atomic<T::Raw>>,
+    index: usize,
+}
+
+impl<T: AtomicValue> IntoIter<T> {
+    /// Create an empty consuming iterator for the null-table case.
+    pub(crate) fn empty() -> IntoIter<T> {
+        IntoIter {
+            entries: Vec::new(),
+            index: 0,
+        }
+    }
+}
+
+impl<T: AtomicValue> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.entries.len() {
+            // We own the vec, so `get_mut()` is safe and avoids atomic overhead.
+            // `T::Raw` is `Copy`, so we can read it directly.
+            let raw = *self.entries[self.index].get_mut();
+            self.index += 1;
+            if !T::is_null(raw) {
+                return Some(unsafe { T::from_raw(raw) });
+            }
+        }
+        None
+    }
+}
+
+impl<T: AtomicValue> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        // Drop any remaining non-null entries that weren't yielded.
+        while self.index < self.entries.len() {
+            let raw = *self.entries[self.index].get_mut();
+            self.index += 1;
+            if !T::is_null(raw) {
+                unsafe {
+                    let _drop = T::from_raw(raw);
+                }
+            }
+        }
     }
 }
 
@@ -243,6 +296,17 @@ impl<T: AtomicValue> FixedCapTable<T> {
                 let _drop = T::from_raw(entry);
             }
         }
+    }
+
+    /// Consume the table and return a consuming iterator over entries.
+    /// After calling this, the caller is responsible for dropping all yielded entries.
+    /// Entries that are not yielded (e.g. if the iterator is dropped early) are
+    /// dropped by the `IntoIter::drop` implementation.
+    pub(crate) fn into_iter(self) -> IntoIter<T> {
+        // Prevent FixedCapTable's implicit drop from running (it doesn't drop entries,
+        // but we're taking ownership of the entries vec).
+        let entries: Vec<Atomic<T::Raw>> = self.entries.into_vec();
+        IntoIter { entries, index: 0 }
     }
 
     #[inline]

@@ -20,6 +20,7 @@ use once_cell::sync::Lazy;
 
 use crate::environment::Globals;
 use crate::values::FrozenValue;
+use crate::values::FrozenValueTyped;
 use crate::values::namespace::FrozenNamespace;
 
 #[derive(Copy, Clone, Dupe, Debug)]
@@ -47,7 +48,6 @@ pub(crate) struct Constants {
     pub(crate) fn_dict: BuiltinFn,
     pub(crate) fn_tuple: BuiltinFn,
     pub(crate) fn_isinstance: BuiltinFn,
-    pub(crate) fn_set: BuiltinFn,
     // Technically, this is not a function.
     pub(crate) typing_callable: BuiltinFn,
 }
@@ -63,13 +63,10 @@ impl Constants {
                 fn_dict: BuiltinFn(g.get_frozen("dict").unwrap()),
                 fn_tuple: BuiltinFn(g.get_frozen("tuple").unwrap()),
                 fn_isinstance: BuiltinFn(g.get_frozen("isinstance").unwrap()),
-                fn_set: BuiltinFn(g.get_frozen("set").unwrap()),
                 typing_callable: {
-                    let typing = g
-                        .get_frozen("typing")
-                        .unwrap()
-                        .downcast_frozen_ref::<FrozenNamespace>()
-                        .unwrap();
+                    let typing =
+                        FrozenValueTyped::<FrozenNamespace>::new(g.get_frozen("typing").unwrap())
+                            .unwrap();
                     BuiltinFn(typing.as_ref().get("Callable").unwrap())
                 },
             }

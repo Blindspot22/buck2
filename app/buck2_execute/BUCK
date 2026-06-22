@@ -7,9 +7,30 @@ rust_library(
     srcs = glob(
         ["src/**/*.rs"],
     ),
+    # `//buck2/remote_execution:remote_execution` is an alias selecting between
+    # the internal and OSS impls; autocargo doesn't follow aliases, so point at
+    # the OSS rust_library directly for cargo's sake.
+    autocargo = {
+        "cargo_toml_config": {
+            "dependencies_override": {
+                "dependencies": {
+                    "fbinit": {
+                        "path": None,
+                        "version": "0.2",
+                    },
+                },
+            },
+            "extra_buck_dependencies": {
+                "dependencies": [
+                    "fbcode//buck2/remote_execution/oss/re_grpc:remote_execution",
+                ],
+            },
+        },
+    },
     test_deps = [
         "fbsource//third-party/rust:assert_matches",
-        "fbsource//third-party/rust:prost-types-0-13-4",
+        "fbsource//third-party/rust:prost-types",
+        "fbsource//third-party/rust:tempfile",
     ],
     deps = [
         "fbsource//third-party/rust:anyhow",
@@ -18,6 +39,7 @@ rust_library(
         "fbsource//third-party/rust:bytes",
         "fbsource//third-party/rust:chrono",
         "fbsource//third-party/rust:crossbeam-channel",
+        "fbsource//third-party/rust:ctor",
         "fbsource//third-party/rust:derivative",
         "fbsource//third-party/rust:derive_more",
         "fbsource//third-party/rust:digest",
@@ -25,13 +47,12 @@ rust_library(
         "fbsource//third-party/rust:faccess",
         "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:hex",
-        "fbsource//third-party/rust:http-1",
+        "fbsource//third-party/rust:http",
         "fbsource//third-party/rust:hyper",
-        "fbsource//third-party/rust:indexmap",
         "fbsource//third-party/rust:itertools",
         "fbsource//third-party/rust:once_cell",
         "fbsource//third-party/rust:pathdiff",
-        "fbsource//third-party/rust:prost-0-13-4",
+        "fbsource//third-party/rust:prost",
         "fbsource//third-party/rust:ref-cast",
         "fbsource//third-party/rust:serde",
         "fbsource//third-party/rust:serde_json",
@@ -39,7 +60,9 @@ rust_library(
         "fbsource//third-party/rust:sha2",
         "fbsource//third-party/rust:slog",
         "fbsource//third-party/rust:smallvec",
+        "fbsource//third-party/rust:sorted_vector_map",
         "fbsource//third-party/rust:tokio",
+        "fbsource//third-party/rust:tokio-util",
         "fbsource//third-party/rust:tracing",
         "//buck2/allocative/allocative:allocative",
         "//buck2/app/buck2_action_metadata_proto:buck2_action_metadata_proto",
@@ -53,6 +76,7 @@ rust_library(
         "//buck2/app/buck2_error:buck2_error",
         "//buck2/app/buck2_events:buck2_events",
         "//buck2/app/buck2_fs:buck2_fs",
+        "//buck2/app/buck2_hash:buck2_hash",
         "//buck2/app/buck2_http:buck2_http",
         "//buck2/app/buck2_miniperf_proto:buck2_miniperf_proto",
         "//buck2/app/buck2_re_configuration:buck2_re_configuration",
@@ -65,9 +89,10 @@ rust_library(
         "//buck2/gazebo/gazebo:gazebo",
         "//buck2/gazebo/strong_hash:strong_hash",
         "//buck2/host_sharing:host_sharing",
+        "//buck2/pagable:pagable",
         "//buck2/remote_execution:remote_execution",
+        "//buck2/shed/static_interner:static_interner",
         "//buck2/starlark-rust/starlark_map:starlark_map",
         "//common/rust/shed/fbinit:fbinit",
-        "//common/rust/shed/sorted_vector_map:sorted_vector_map",
     ],
 )

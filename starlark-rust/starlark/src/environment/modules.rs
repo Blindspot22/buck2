@@ -28,8 +28,14 @@ use std::time::Instant;
 use allocative::Allocative;
 use dupe::Dupe;
 use itertools::Itertools;
+use pagable::PagableDeserialize;
+use pagable::PagableDeserializer;
+use pagable::PagableSerialize;
+use pagable::PagableSerializer;
+use starlark_derive::StarlarkPagable;
 use starlark_syntax::syntax::ast::Visibility;
 
+use crate as starlark;
 use crate::collections::Hashed;
 use crate::docs::DocModule;
 use crate::docs::DocString;
@@ -44,12 +50,17 @@ use crate::environment::slots::MutableSlots;
 use crate::errors::did_you_mean::did_you_mean;
 use crate::eval::ProfileData;
 use crate::eval::runtime::profile::heap::RetainedHeapProfileMode;
+use crate::pagable::StarlarkDeserialize;
+use crate::pagable::StarlarkDeserializerImpl;
+use crate::pagable::StarlarkSerialize;
+use crate::pagable::StarlarkSerializerImpl;
+use crate::register_starlark_any;
+use crate::singleton_heap_name;
 use crate::values::Freeze;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
 use crate::values::FrozenHeap;
 use crate::values::FrozenHeapRef;
-use crate::values::FrozenRef;
 use crate::values::FrozenStringValue;
 use crate::values::FrozenValue;
 use crate::values::Heap;
@@ -57,6 +68,7 @@ use crate::values::OwnedFrozenValue;
 use crate::values::Trace;
 use crate::values::Tracer;
 use crate::values::Value;
+use crate::values::any::FrozenAnyValue;
 use crate::values::layout::heap::heap_type::FrozenHeapName;
 use crate::values::layout::heap::heap_type::HeapKind;
 use crate::values::layout::heap::profile::aggregated::AggregateHeapProfileInfo;
@@ -82,7 +94,7 @@ enum ModuleError {
 // Two Arc's should still be plenty cheap enough to qualify for `Dupe`.
 pub struct FrozenModule {
     heap: FrozenHeapRef,
-    module: FrozenRef<'static, FrozenModuleData>,
+    module: FrozenAnyValue<FrozenModuleData>,
     extra_value: Option<FrozenValue>,
     /// Module evaluation duration:
     /// * evaluation of the top-level statements
@@ -92,12 +104,72 @@ pub struct FrozenModule {
     pub(crate) eval_duration: Duration,
 }
 
-#[derive(Debug, Allocative)]
+impl PagableSerialize for FrozenModule {
+    fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> pagable::Result<()> {
+        // Serialize the heap (via pagable arc — actual heap data may be deferred).
+        self.heap.pagable_serialize(serializer)?;
+
+        // Force-register chunk indices for the heap and its transitive deps. The
+        // pagable arc may not run heap serialization yet, but we need the
+        // chunk indices now so the upcoming starlark serializer can resolve
+        // FrozenValue pointers. Same trick as `OwnedFrozenValue`.
+        let state = StarlarkSerializerImpl::get_or_create_state(serializer);
+        state.ensure_chunk_index_registered(&self.heap);
+        let mut ctx = StarlarkSerializerImpl::new(serializer, state);
+
+        self.module
+            .starlark_serialize(&mut ctx)
+            .map_err(|e: crate::Error| e.into_anyhow())?;
+        self.extra_value
+            .starlark_serialize(&mut ctx)
+            .map_err(|e: crate::Error| e.into_anyhow())?;
+        drop(ctx);
+
+        // `eval_duration` is runtime telemetry, not content. Skipping it keeps the
+        // page-out `DataKey` stable across runs; restored as `ZERO` on page-in.
+
+        Ok(())
+    }
+}
+
+impl<'de> PagableDeserialize<'de> for FrozenModule {
+    fn pagable_deserialize<D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Self> {
+        let heap = FrozenHeapRef::pagable_deserialize(deserializer)?;
+
+        // The preceding heap deserialization registers its heap state in the
+        // session, so Starlark fields can resolve `FrozenValue` pointers.
+        let state = StarlarkDeserializerImpl::get_or_create_state(deserializer.as_dyn());
+        let mut ctx = StarlarkDeserializerImpl::new(deserializer.as_dyn(), state);
+
+        let module = <FrozenAnyValue<FrozenModuleData>>::starlark_deserialize(&mut ctx)
+            .map_err(|e: crate::Error| e.into_anyhow())?;
+        let extra_value = <Option<FrozenValue>>::starlark_deserialize(&mut ctx)
+            .map_err(|e: crate::Error| e.into_anyhow())?;
+        drop(ctx);
+
+        // Not serialized (see `pagable_serialize`); restore the default.
+        let eval_duration = Duration::ZERO;
+
+        Ok(Self {
+            heap,
+            module,
+            extra_value,
+            eval_duration,
+        })
+    }
+}
+
+#[derive(Debug, Allocative, StarlarkPagable)]
 pub(crate) struct FrozenModuleData {
     pub(crate) names: FrozenNames,
     pub(crate) slots: FrozenSlots,
     docstring: Option<String>,
     /// When heap profile enabled, this field stores retained memory info.
+    /// Runtime profiling data — not meaningful to round-trip, so we skip
+    /// serialization and restore as `None`.
+    #[starlark_pagable(skip)]
     heap_profile: Option<RetainedHeapProfile>,
 }
 
@@ -149,7 +221,7 @@ impl FrozenModule {
                 module.set_docstring(String::from(docstring));
             }
 
-            module.freeze()
+            module.freeze_named(FrozenHeapName::Singleton(singleton_heap_name!()))
         })
     }
 
@@ -425,14 +497,19 @@ impl<'v> Module<'v> {
     }
 
     /// Freeze the environment, all its value will become immutable afterwards.
+    ///
+    /// When the `pagable` feature is enabled, this method is hidden to enforce
+    /// that all heaps are named. Use [`freeze_named`](Self::freeze_named) instead.
+    #[cfg(not(feature = "pagable"))]
     pub fn freeze(self) -> FreezeResult<FrozenModule> {
         self.freeze_impl(None)
     }
 
     /// Freeze the environment and assign a name to the contained frozen heap.
     ///
-    /// See `FrozenHeapRef::name` for more details.
-    pub fn freeze_and_name(self, name: FrozenHeapName) -> FreezeResult<FrozenModule> {
+    /// The `name` identifies the contained frozen heap and should be unique.
+    /// See [`FrozenHeapRef::name`] for more details.
+    pub fn freeze_named(self, name: FrozenHeapName) -> FreezeResult<FrozenModule> {
         self.freeze_impl(Some(name))
     }
 
@@ -447,6 +524,7 @@ impl<'v> Module<'v> {
             extra_value,
             heap_profile_on_freeze,
         } = self;
+        #[cfg(not(target_arch = "wasm32"))]
         let start = Instant::now();
         // This is when we do the GC/freeze, using the module slots as roots
         // Note that we even freeze anonymous slots, since they are accessed by
@@ -476,16 +554,19 @@ impl<'v> Module<'v> {
             docstring: docstring.into_inner(),
             heap_profile: stacks,
         };
-        let frozen_module_ref = freezer.heap.alloc_any(rest);
+        let frozen_module_ref = freezer.heap.alloc_any_value(rest);
         for frozen_def in freezer.frozen_defs.borrow().as_slice() {
-            frozen_def.post_freeze(frozen_module_ref, heap, &freezer.heap);
+            frozen_def.post_freeze(frozen_module_ref, heap, freezer.heap);
         }
 
         Ok(FrozenModule {
-            heap: frozen_heap.into_ref_impl(name),
+            heap: frozen_heap.into_ref_impl(name, Some(heap.peak_allocated_bytes())),
             module: frozen_module_ref,
             extra_value,
+            #[cfg(not(target_arch = "wasm32"))]
             eval_duration: start.elapsed() + eval_duration.get(),
+            #[cfg(target_arch = "wasm32")]
+            eval_duration: eval_duration.get(),
         })
     }
 
@@ -608,6 +689,7 @@ mod tests {
     use crate::eval::runtime::profile::mode::ProfileMode;
     use crate::syntax::AstModule;
     use crate::syntax::Dialect;
+    use crate::values::layout::heap::heap_type::StarlarkTestHeapName;
     use crate::values::list::ListRef;
 
     #[test]
@@ -634,7 +716,7 @@ x = f(1)
                 )
                 .unwrap();
             }
-            let module = module.freeze()?;
+            let module = module.freeze_named(StarlarkTestHeapName::frozen_heap_name())?;
             let heap_summary = module.heap_profile().unwrap().gen_csv().unwrap();
             // Smoke test.
             assert!(heap_summary.contains("\"x.star.f\""), "{heap_summary:?}");
@@ -668,3 +750,5 @@ x = f(1)
         );
     }
 }
+
+register_starlark_any!(FrozenModuleData);

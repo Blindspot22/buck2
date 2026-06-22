@@ -23,6 +23,8 @@ use std::ptr::NonNull;
 use either::Either;
 use static_assertions::const_assert;
 
+use crate::pagable::StarlarkDeserialize;
+use crate::pagable::StarlarkSerialize;
 use crate::values::FrozenValue;
 use crate::values::thin_box_slice_frozen_value::thin_box::AllocatedThinBoxSlice;
 
@@ -80,6 +82,17 @@ impl PackedImpl {
     }
 }
 
+impl From<Either<FrozenValue, AllocatedThinBoxSlice<FrozenValue>>> for PackedImpl {
+    fn from(value: Either<FrozenValue, AllocatedThinBoxSlice<FrozenValue>>) -> Self {
+        match value {
+            Either::Left(value) => {
+                Self(unsafe { mem::transmute::<FrozenValue, NonNull<()>>(value) })
+            }
+            Either::Right(allocated) => Self::new_allocated(allocated),
+        }
+    }
+}
+
 impl Drop for PackedImpl {
     fn drop(&mut self) {
         match self.unpack() {
@@ -113,6 +126,28 @@ unsafe impl Sync for PackedImpl where FrozenValue: Sync {}
 /// 8 bytes in size, while being allocation free for lengths zero and one. It
 /// depends on the lower bit of a FrozenPointer always being unset.
 pub struct ThinBoxSliceFrozenValue<'v>(PackedImpl, PhantomData<&'v ()>);
+
+impl StarlarkSerialize for ThinBoxSliceFrozenValue<'_> {
+    fn starlark_serialize(
+        &self,
+        ctx: &mut dyn crate::pagable::StarlarkSerializeContext,
+    ) -> crate::Result<()> {
+        <Either<&FrozenValue, AllocatedThinBoxSlice<FrozenValue>>>::starlark_serialize(
+            &self.0.unpack(),
+            ctx,
+        )
+    }
+}
+
+impl StarlarkDeserialize for ThinBoxSliceFrozenValue<'_> {
+    fn starlark_deserialize(
+        ctx: &mut dyn crate::pagable::StarlarkDeserializeContext<'_>,
+    ) -> crate::Result<Self> {
+        let packed =
+            <Either<FrozenValue, AllocatedThinBoxSlice<FrozenValue>>>::starlark_deserialize(ctx)?;
+        Ok(Self(packed.into(), PhantomData))
+    }
+}
 
 impl<'v> ThinBoxSliceFrozenValue<'v> {
     /// Produces an empty list
@@ -157,7 +192,7 @@ impl<'v> Default for ThinBoxSliceFrozenValue<'v> {
 impl<'v> std::fmt::Debug for ThinBoxSliceFrozenValue<'v> {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <[_] as std::fmt::Debug>::fmt(&self, f)
+        <[_] as std::fmt::Debug>::fmt(self, f)
     }
 }
 

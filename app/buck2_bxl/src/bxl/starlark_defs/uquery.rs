@@ -26,7 +26,6 @@ use gazebo::prelude::OptionExt;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
@@ -67,11 +66,12 @@ pub(crate) struct StarlarkUQueryCtx<'v> {
     ctx: ValueTyped<'v, BxlContext<'v>>,
 }
 
+starlark::methods_static!(UQUERY_METHODS = uquery_methods);
+
 #[starlark_value(type = "bxl.UqueryContext", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkUQueryCtx<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(uquery_methods)
+        Some(UQUERY_METHODS.methods())
     }
 }
 
@@ -285,7 +285,7 @@ fn uquery_methods(builder: &mut MethodsBuilder) {
                             .deps(
                                 dice,
                                 &targets,
-                                depth.into_option(),
+                                depth.into_option().into(),
                                 filter.as_ref().map(|expr| CapturedExpr { expr }).as_ref(),
                             )
                             .await
@@ -330,7 +330,7 @@ fn uquery_methods(builder: &mut MethodsBuilder) {
                                 dice,
                                 &universe,
                                 &targets,
-                                depth.into_option(),
+                                depth.into_option().into(),
                                 filter.as_ref().map(|expr| CapturedExpr { expr }).as_ref(),
                             )
                             .await

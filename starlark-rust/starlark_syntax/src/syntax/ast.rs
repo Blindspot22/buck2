@@ -21,6 +21,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Formatter;
+use std::fmt::Write;
 
 use allocative::Allocative;
 use dupe::Dupe;
@@ -87,6 +88,7 @@ pub type AstAssignIdent = AstAssignIdentP<AstNoPayload>;
 pub type AstIdent = AstIdentP<AstNoPayload>;
 pub type AstArgument = AstArgumentP<AstNoPayload>;
 pub type AstString = Spanned<String>;
+pub type AstBytes = Spanned<Vec<u8>>;
 pub type AstParameter = AstParameterP<AstNoPayload>;
 pub type AstInt = Spanned<TokenInt>;
 pub type AstFloat = Spanned<f64>;
@@ -147,6 +149,7 @@ pub enum AstLiteral {
     Int(AstInt),
     Float(AstFloat),
     String(AstString),
+    Bytes(AstBytes),
     Ellipsis,
 }
 
@@ -322,7 +325,7 @@ pub enum BinOp {
     RightShift,
 }
 
-#[derive(Debug, Clone, Copy, Dupe, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Dupe, PartialEq, Eq, pagable::Pagable)]
 pub enum AssignOp {
     Add,         // +=
     Subtract,    // -=
@@ -337,7 +340,7 @@ pub enum AssignOp {
     RightShift,  // >>=
 }
 
-#[derive(Debug, Copy, Clone, Dupe, Eq, PartialEq, Allocative)]
+#[derive(Debug, Copy, Clone, Dupe, Eq, PartialEq, Allocative, pagable::Pagable)]
 pub enum Visibility {
     Private,
     Public,
@@ -509,9 +512,24 @@ fn fmt_string_literal(f: &mut Formatter<'_>, s: &str) -> fmt::Result {
 impl Display for AstLiteral {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            AstLiteral::Int(i) => write!(f, "{}", &i.node),
-            AstLiteral::Float(n) => write!(f, "{}", &n.node),
+            AstLiteral::Int(i) => write!(f, "{}", i.node),
+            AstLiteral::Float(n) => write!(f, "{}", n.node),
             AstLiteral::String(s) => fmt_string_literal(f, &s.node),
+            AstLiteral::Bytes(b) => {
+                f.write_str("b\"")?;
+                for &byte in &b.node {
+                    match byte {
+                        b'"' => f.write_str("\\\"")?,
+                        b'\\' => f.write_str("\\\\")?,
+                        b'\n' => f.write_str("\\n")?,
+                        b'\r' => f.write_str("\\r")?,
+                        b'\t' => f.write_str("\\t")?,
+                        0x20..=0x7e => f.write_char(byte as char)?,
+                        _ => write!(f, "\\x{:02x}", byte)?,
+                    }
+                }
+                f.write_str("\"")
+            }
             AstLiteral::Ellipsis => f.write_str("..."),
         }
     }

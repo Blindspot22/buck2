@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use allocative::Allocative;
@@ -16,6 +15,7 @@ use buck2_core::buck2_env;
 use buck2_data::*;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_events::dispatch::with_dispatcher_async;
+use buck2_hash::StdBuckHashMap;
 use buck2_util::threads::thread_spawn;
 use dice::DiceEvent;
 use dice::DiceEventListener;
@@ -24,6 +24,10 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
+
+/// Closure used to sample the dice core-state queue depth at each snapshot
+/// tick. Boxed so that BuckDiceTracker doesn't need a generic parameter.
+type QueueDepthFn = Box<dyn Fn() -> u64 + Send + Sync + 'static>;
 
 /// The BuckDiceTracker keeps track of the started/finished events for a dice computation and periodically sends a snapshot to the client.
 ///
@@ -40,7 +44,7 @@ pub struct BuckDiceTracker {
 }
 
 impl BuckDiceTracker {
-    pub fn new(events: EventDispatcher) -> buck2_error::Result<Self> {
+    pub fn new(events: EventDispatcher, queue_depth_fn: QueueDepthFn) -> buck2_error::Result<Self> {
         let (event_forwarder, receiver) = mpsc::unbounded();
         let snapshot_interval =
             buck2_env!("BUCK2_DICE_SNAPSHOT_INTERVAL_MS", type=u64, default = 500)
@@ -53,7 +57,7 @@ impl BuckDiceTracker {
                 .unwrap();
             runtime.block_on(with_dispatcher_async(
                 events.dupe(),
-                Self::run_task(events, receiver, snapshot_interval),
+                Self::run_task(events, receiver, snapshot_interval, queue_depth_fn),
             ))
         })
         .unwrap();
@@ -65,9 +69,10 @@ impl BuckDiceTracker {
         events: EventDispatcher,
         mut receiver: UnboundedReceiver<DiceEvent>,
         snapshot_interval: Duration,
+        queue_depth_fn: QueueDepthFn,
     ) {
         let mut needs_update = false;
-        let mut states = HashMap::new();
+        let mut states = StdBuckHashMap::default();
         let mut interval = tokio::time::interval(snapshot_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // This will loop until the sender side of the channel is dropped.
@@ -108,6 +113,7 @@ impl BuckDiceTracker {
                                 .iter()
                                 .map(|(k, v)| ((*k).to_owned(), *v))
                                 .collect(),
+                            core_state_queue_depth: queue_depth_fn(),
                         });
                     }
                 }

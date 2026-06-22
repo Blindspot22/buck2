@@ -20,18 +20,27 @@ use derive_more::Display;
 use dice::DetectCycles;
 use dice::Dice;
 use dice::DiceComputations;
+use dice::DiceKeyDyn;
 use dice::DiceProjectionComputations;
+use dice::DiceProjectionDyn;
 use dice::Key;
 use dice::ProjectionKey;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
-#[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash)]
+#[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash, Pagable)]
+#[pagable_typetag(DiceKeyDyn)]
 struct BaseK;
 
 #[async_trait]
 impl Key for BaseK {
     type Value = ();
+
+    fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+        dice::NoValueSerialize::<Self::Value>::new()
+    }
 
     async fn compute(
         &self,
@@ -47,9 +56,14 @@ impl Key for BaseK {
 
 #[tokio::test]
 async fn concurrent_identical_requests_are_reused() -> anyhow::Result<()> {
-    #[derive(Allocative, Clone, Debug, Display)]
+    #[derive(Allocative, Clone, Debug, Display, Pagable)]
     #[display("{:?}", self)]
-    struct ComputeOnce(#[allocative(skip)] Arc<AtomicU8>);
+    #[pagable_typetag(DiceProjectionDyn)]
+    struct ComputeOnce(
+        #[allocative(skip)]
+        #[pagable(discard = "(|| unimplemented!())()")]
+        Arc<AtomicU8>,
+    );
 
     impl PartialEq for ComputeOnce {
         fn eq(&self, _other: &Self) -> bool {
@@ -66,6 +80,10 @@ async fn concurrent_identical_requests_are_reused() -> anyhow::Result<()> {
     impl ProjectionKey for ComputeOnce {
         type DeriveFromKey = BaseK;
         type Value = ();
+
+        fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+            dice::NoValueSerialize::<Self::Value>::new()
+        }
 
         fn compute(
             &self,

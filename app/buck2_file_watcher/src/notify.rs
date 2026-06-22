@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -27,6 +26,7 @@ use buck2_data::FileWatcherKind;
 use buck2_error::conversion::from_any_with_tag;
 use buck2_events::dispatch::span_async;
 use buck2_fs::paths::abs_norm_path::AbsNormPath;
+use buck2_hash::StdBuckHashMap;
 use dice::DiceTransactionUpdater;
 use dupe::Dupe;
 use notify::EventKind;
@@ -79,7 +79,7 @@ impl NotifyFileData {
         event: notify::Result<notify::Event>,
         root: &ProjectRoot,
         cells: &CellResolver,
-        ignore_specs: &HashMap<CellName, IgnoreSet>,
+        ignore_specs: &StdBuckHashMap<CellName, IgnoreSet>,
     ) -> buck2_error::Result<()> {
         let event =
             event.map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::NotifyWatcher))?;
@@ -127,7 +127,26 @@ impl NotifyFileData {
     fn sync(self) -> (buck2_data::FileWatcherStats, Option<FileChangeTracker>) {
         // The changes that go into the DICE transaction
         let mut changed = FileChangeTracker::new();
-        let mut stats = FileWatcherStats::new(Default::default(), self.events.len());
+        // If we missed events, sync2() will drop the entire DICE graph. Surface that to
+        // telemetry/UI by reusing the fresh-instance fields the watchman path uses for
+        // the equivalent wipe.
+        let base = if self.missed_events {
+            buck2_data::FileWatcherStats {
+                fresh_instance: true,
+                fresh_instance_data: Some(buck2_data::FreshInstance {
+                    new_mergebase: false,
+                    cleared_dice: true,
+                    cleared_dep_files: false,
+                }),
+                incomplete_events_reason: Some(
+                    "notify dropped events (kernel queue overflow)".to_owned(),
+                ),
+                ..Default::default()
+            }
+        } else {
+            Default::default()
+        };
+        let mut stats = FileWatcherStats::new(base, self.events.len());
         stats.add_ignored(self.ignored);
 
         for (cell_path, event_kind) in self.events {
@@ -259,7 +278,7 @@ impl NotifyFileWatcher {
     pub fn new(
         root: &ProjectRoot,
         cells: CellResolver,
-        ignore_specs: HashMap<CellName, IgnoreSet>,
+        ignore_specs: StdBuckHashMap<CellName, IgnoreSet>,
     ) -> buck2_error::Result<Self> {
         let data = Arc::new(Mutex::new(Ok(NotifyFileData::new())));
         let data2 = data.dupe();
@@ -283,8 +302,10 @@ impl NotifyFileWatcher {
         &self,
         mut dice: DiceTransactionUpdater,
     ) -> buck2_error::Result<(buck2_data::FileWatcherStats, DiceTransactionUpdater)> {
-        let mut guard = self.data.lock().unwrap();
-        let old = mem::replace(&mut *guard, Ok(NotifyFileData::new()));
+        let old = {
+            let mut guard = self.data.lock().unwrap();
+            mem::replace(&mut *guard, Ok(NotifyFileData::new()))
+        };
         let (stats, changes) = old?.sync();
         if let Some(changes) = changes {
             changes.write_to_dice(&mut dice)?;

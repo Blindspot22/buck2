@@ -183,7 +183,28 @@ async def test_unconfigured_target_node_attrs(buck: Buck) -> None:
 
 
 @buck_test(inplace=False, data_dir="bxl/simple")
+async def test_bxl_node_constraints(buck: Buck) -> None:
+    await buck.bxl(
+        "//bxl/node_constraints.bxl:constraints_test",
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_bxl_node_empty_constraints(buck: Buck) -> None:
+    await buck.bxl(
+        "//bxl/node_constraints.bxl:empty_constraints_test",
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
 async def test_configured_target_node_attrs(buck: Buck) -> None:
     await buck.bxl(
         "//bxl:configured_target_node_attrs.bxl:attrs_test",
+    )
+
+
+@buck_test(inplace=False, data_dir="bxl/simple")
+async def test_bxl_providers_info(buck: Buck) -> None:
+    await buck.bxl(
+        "//bxl/providers_info.bxl:providers_info_test",
     )

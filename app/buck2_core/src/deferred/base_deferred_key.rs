@@ -10,7 +10,6 @@
 
 use std::any::Any;
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -22,8 +21,12 @@ use buck2_data::ToProtoMessage;
 use buck2_data::action_key_owner::BaseDeferredKeyProto;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::BuckDefaultHasher;
 use cmp_any::PartialEqAny;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
+use pagable::typetag::PagableTagged;
 use static_assertions::assert_eq_size;
 use strong_hash::StrongHash;
 
@@ -35,7 +38,10 @@ use crate::global_cfg_options::GlobalCfgOptions;
 use crate::target::configured_target_label::ConfiguredTargetLabel;
 use crate::target::name::EQ_SIGN_SUBST;
 
-pub trait BaseDeferredKeyDyn: Debug + Display + Any + Allocative + Send + Sync + 'static {
+#[pagable_typetag]
+pub trait BaseDeferredKeyDyn:
+    PagableTagged + Debug + Display + Any + Allocative + Send + Sync + 'static
+{
     fn eq_token(&self) -> PartialEqAny<'_>;
     fn hash(&self) -> u64;
     fn strong_hash(&self) -> u64;
@@ -56,7 +62,7 @@ pub trait BaseDeferredKeyDyn: Debug + Display + Any + Allocative + Send + Sync +
     fn global_cfg_options(&self) -> Option<GlobalCfgOptions>;
 }
 
-#[derive(Debug, derive_more::Display, Dupe, Clone, Allocative)]
+#[derive(Debug, derive_more::Display, Dupe, Clone, Allocative, Pagable)]
 pub struct BaseDeferredKeyBxl(pub Arc<dyn BaseDeferredKeyDyn>);
 
 impl PartialEq for BaseDeferredKeyBxl {
@@ -72,7 +78,7 @@ pub enum PathResolutionError {
     ContentBasedPathWithNoContentHash(ForwardRelativePathBuf),
 }
 
-#[derive(Debug, derive_more::Display, Dupe, Clone, Allocative)]
+#[derive(Debug, derive_more::Display, Dupe, Clone, Allocative, Pagable)]
 pub enum BaseDeferredKey {
     TargetLabel(ConfiguredTargetLabel),
     AnonTarget(Arc<dyn BaseDeferredKeyDyn>),
@@ -97,6 +103,38 @@ impl PartialEq for BaseDeferredKey {
 }
 
 impl Eq for BaseDeferredKey {}
+
+impl PartialOrd for BaseDeferredKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// `Ord` is only needed so page-out can serialize `HashMap`s keyed by
+// `BaseDeferredKey` in a deterministic (process-stable) order.
+impl Ord for BaseDeferredKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        fn rank(k: &BaseDeferredKey) -> u8 {
+            match k {
+                BaseDeferredKey::TargetLabel(_) => 0,
+                BaseDeferredKey::AnonTarget(_) => 1,
+                BaseDeferredKey::BxlLabel(_) => 2,
+            }
+        }
+        match (self, other) {
+            (BaseDeferredKey::TargetLabel(a), BaseDeferredKey::TargetLabel(b)) => a.cmp(b),
+            // `dyn BaseDeferredKeyDyn` is not `Ord`; order by its content `strong_hash`
+            // (a blake3 hash over all identity fields, stable across processes).
+            (BaseDeferredKey::AnonTarget(a), BaseDeferredKey::AnonTarget(b)) => {
+                a.strong_hash().cmp(&b.strong_hash())
+            }
+            (BaseDeferredKey::BxlLabel(a), BaseDeferredKey::BxlLabel(b)) => {
+                a.0.strong_hash().cmp(&b.0.strong_hash())
+            }
+            _ => rank(self).cmp(&rank(other)),
+        }
+    }
+}
 
 impl Hash for BaseDeferredKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -216,7 +254,7 @@ impl BaseDeferredKey {
                     }
                 };
                 let path_or_hash = if fully_hash_path {
-                    let mut hasher = DefaultHasher::new();
+                    let mut hasher = BuckDefaultHasher::new();
                     path_identifier.hash(&mut hasher);
 
                     format!("{:016x}/", hasher.finish())

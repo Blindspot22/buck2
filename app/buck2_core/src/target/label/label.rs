@@ -19,7 +19,7 @@ use std::str;
 use allocative::Allocative;
 use buck2_data::ToProtoMessage;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
-use buck2_util::hash::BuckHasher;
+use buck2_hash::BuckHasher;
 use dupe::Dupe;
 use lock_free_hashtable::atomic_value::AtomicValue;
 use pagable::Pagable;
@@ -119,8 +119,6 @@ impl PartialOrd for TargetLabel {
 
 impl TargetLabel {
     pub fn new(pkg: PackageLabel, name: &TargetNameRef) -> Self {
-        // TODO(nga): unnecessary to take `TargetName` by value.
-
         // Hash should be stable because it is used to generate the configuration hash.
         let key = &(pkg.dupe(), &name);
         let mut hasher = BuckHasher::default();

@@ -97,8 +97,8 @@ impl HttpConfig {
             connect_timeout_ms,
             read_timeout_ms,
             write_timeout_ms,
-            max_redirects,
             http2,
+            max_redirects,
             max_concurrent_requests,
         })
     }
@@ -248,6 +248,7 @@ pub struct ResourceControlConfig {
     pub memory_max_actions: Option<String>,
     /// Enable suspension when memory pressure is high.
     pub enable_suspension: bool,
+    pub experimental_suspension_algo_variant: Option<u8>,
     pub preferred_action_suspend_strategy: ActionSuspendStrategy,
 }
 
@@ -348,7 +349,13 @@ impl FromStr for ResourceControlInit {
 /// algo that fixes a bug. Incrementing this to `N + 1` and setting the
 /// `buck2_resource_control.enable_suspension_if_min_algo_version` buckconfig to `N + 1` enables
 /// suspension only if your bug fix is actually included in the version of buck in use
-const RESOURCE_CONTROL_ALGO_VERSION: u32 = 4;
+const RESOURCE_CONTROL_ALGO_VERSION: u32 = 6;
+
+/// The current version of the daemon cgroup wrapping logic. Incrementing this to `N + 1` and
+/// setting `buck2_resource_control.status_if_min_daemon_cgroup_version` buckconfig to `N + 1`
+/// enables daemon cgroup wrapping (status = if_available) only if the bug fix is included in the
+/// version of buck in use.
+const DAEMON_CGROUP_VERSION: u32 = 1;
 
 impl ResourceControlConfig {
     pub fn from_config(config: &LegacyBuckConfig) -> buck2_error::Result<Self> {
@@ -364,6 +371,18 @@ impl ResourceControlConfig {
                     property: "status",
                 })?
                 .unwrap_or(ResourceControlStatus::Off);
+            let status_if_min_daemon_cgroup_version: Option<u32> =
+                config.parse(BuckconfigKeyRef {
+                    section: "buck2_resource_control",
+                    property: "status_if_min_daemon_cgroup_version",
+                })?;
+            let status = if status_if_min_daemon_cgroup_version
+                .is_some_and(|min_version| DAEMON_CGROUP_VERSION >= min_version)
+            {
+                ResourceControlStatus::IfAvailable
+            } else {
+                status
+            };
             let init = config
                 .parse(BuckconfigKeyRef {
                     section: "buck2_resource_control",
@@ -406,6 +425,10 @@ impl ResourceControlConfig {
             let enable_suspension = enable_suspension.unwrap_or(false)
                 || enable_suspension_if_min_algo_version
                     .is_some_and(|min_version| RESOURCE_CONTROL_ALGO_VERSION >= min_version);
+            let experimental_suspension_algo_variant = config.parse(BuckconfigKeyRef {
+                section: "buck2_resource_control",
+                property: "experimental_suspension_algo_variant",
+            })?;
             let preferred_action_suspend_strategy = config
                 .parse(BuckconfigKeyRef {
                     section: "buck2_resource_control",
@@ -422,6 +445,7 @@ impl ResourceControlConfig {
                 memory_high_actions,
                 memory_max_actions,
                 enable_suspension,
+                experimental_suspension_algo_variant,
                 preferred_action_suspend_strategy,
             })
         }
@@ -501,6 +525,8 @@ pub struct DaemonStartupConfig {
     pub log_download_method: LogDownloadMethod,
     pub health_check_config: HealthCheckConfig,
     pub retained_event_logs: usize,
+    pub macos_qos_class: Option<String>,
+    pub daemon_idle_timeout_s: Option<u64>,
 }
 
 impl DaemonStartupConfig {
@@ -583,6 +609,35 @@ impl DaemonStartupConfig {
                 })
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(DEFAULT_RETAINED_EVENT_LOGS),
+            macos_qos_class: {
+                let from_config = config
+                    .get(BuckconfigKeyRef {
+                        section: "buck2",
+                        property: "macos_qos_class",
+                    })
+                    .map(ToOwned::to_owned);
+                if buck2_env!("BUCK2_DISABLE_MACOS_QOS", bool)? {
+                    buck2_core::soft_error!(
+                        "disable_macos_qos_env_var",
+                        buck2_error::buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "BUCK2_DISABLE_MACOS_QOS is deprecated. \
+                             Use `[buck2] macos_qos_class = skip_lowering` in buckconfig instead. \
+                             This will be the default very soon."
+                        ),
+                        deprecation: true,
+                        quiet: false,
+                        error_on_oss: true
+                    )?;
+                    Some(from_config.unwrap_or_else(|| "skip_lowering".to_owned()))
+                } else {
+                    from_config
+                }
+            },
+            daemon_idle_timeout_s: config.parse(BuckconfigKeyRef {
+                section: "buck2",
+                property: "daemon_idle_timeout_s",
+            })?,
         })
     }
 
@@ -612,6 +667,43 @@ impl DaemonStartupConfig {
             },
             health_check_config: HealthCheckConfig::default(),
             retained_event_logs: DEFAULT_RETAINED_EVENT_LOGS,
+            macos_qos_class: None,
+            daemon_idle_timeout_s: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use super::*;
+    use crate::legacy_configs::configs::testing::parse;
+
+    #[test]
+    fn test_daemon_idle_timeout_s_default() -> buck2_error::Result<()> {
+        let config = parse(&[("config", indoc!(r#""#))], "config")?;
+        let startup_config = DaemonStartupConfig::new(&config)?;
+        assert_eq!(startup_config.daemon_idle_timeout_s, None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_daemon_idle_timeout_s_configured() -> buck2_error::Result<()> {
+        let config = parse(
+            &[(
+                "config",
+                indoc!(
+                    r#"
+                    [buck2]
+                    daemon_idle_timeout_s = 10800
+                    "#
+                ),
+            )],
+            "config",
+        )?;
+        let startup_config = DaemonStartupConfig::new(&config)?;
+        assert_eq!(startup_config.daemon_idle_timeout_s, Some(10800));
+        Ok(())
     }
 }

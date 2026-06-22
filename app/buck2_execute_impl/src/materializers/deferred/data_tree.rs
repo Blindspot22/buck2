@@ -21,14 +21,19 @@
 //! "foo/bar", and we need to find out which artifact "foo/bar/c" belongs to.
 
 use std::borrow::Borrow;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::collections::hash_map::IntoIter;
 use std::collections::hash_map::Iter;
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::mem;
 
+use allocative::Allocative;
+use allocative::Key;
+use allocative::Visitor;
+use allocative::hashbrown_util::bucket_count_for_capacity;
 use buck2_error::buck2_error;
+use buck2_hash::StdBuckHashMap;
 
 /// Tree that stores data in the leaves. Think of the key as the path to the
 /// leaf containing the value. The data/value is of type `V`, and each edge
@@ -38,13 +43,96 @@ use buck2_error::buck2_error;
 #[derive(Debug)]
 pub enum DataTree<K, V> {
     /// Stores data of type `V` with key of type `Iterator<Item = K>`.
-    Tree(HashMap<K, DataTree<K, V>>),
+    Tree(StdBuckHashMap<K, DataTree<K, V>>),
     Data(V),
+}
+
+/// Visits a whole `DataTree` without making the flamegraph stack follow the
+/// tree's path depth.
+pub(crate) struct DataTreeAllocativeDfs<'a, K, V> {
+    tree: &'a DataTree<K, V>,
+}
+
+impl<K: Allocative, V: Allocative> Allocative for DataTree<K, V> {
+    fn visit<'a, 'b: 'a>(&self, visitor: &'a mut Visitor<'b>) {
+        let mut visitor = visitor.enter_self_sized::<Self>();
+        match self {
+            Self::Tree(children) => {
+                visitor.visit_field_with(Key::new("Tree"), mem::size_of_val(children), |visitor| {
+                    visit_hash_map_keys_and_skipped_values(visitor, children);
+                });
+            }
+            Self::Data(data) => visitor.visit_field(Key::new("Data"), data),
+        }
+        visitor.exit();
+    }
+}
+
+/// Account for hashmap overhead while skipping values.
+///
+/// The values (`DataTree` children) are not visited here — they are walked
+/// separately by `DataTreeAllocativeDfs`. This means the standard `HashMap`
+/// `Allocative` impl can't be used because it visits both keys and values.
+///
+/// Instead we report:
+///   - each key individually (via `visit_field`)
+///   - the key-portion of occupied slots (`occupied_key_slot_bytes`)
+///   - empty bucket slots (`unused_bucket_bytes`)
+///   - one control byte per bucket (`control_bytes`)
+///
+/// The total (`occupied_key_slot_bytes + unused_bucket_bytes + control_bytes`)
+/// equals `raw_table_alloc_size_for_capacity::<(K, V)>() - len * size_of::<V>()`
+/// — the full hashmap allocation minus the value slots that the DFS accounts for.
+fn visit_hash_map_keys_and_skipped_values<K: Allocative, V: Allocative>(
+    visitor: &mut Visitor<'_>,
+    map: &StdBuckHashMap<K, DataTree<K, V>>,
+) {
+    let bucket_count = bucket_count_for_capacity(map.capacity());
+    let occupied_key_slot_bytes = map.len()
+        * mem::size_of::<(K, DataTree<K, V>)>().saturating_sub(mem::size_of::<DataTree<K, V>>());
+    let unused_bucket_bytes =
+        bucket_count.saturating_sub(map.len()) * mem::size_of::<(K, DataTree<K, V>)>();
+    let control_bytes = bucket_count;
+
+    let mut visitor = visitor.enter_unique(Key::new("data"), mem::size_of::<*const ()>());
+    visitor.visit_field_with(
+        Key::new("capacity"),
+        occupied_key_slot_bytes + unused_bucket_bytes + control_bytes,
+        |visitor| {
+            for key in map.keys() {
+                visitor.visit_field(Key::new("key"), key);
+            }
+            visitor.visit_simple(Key::new("unused_capacity"), unused_bucket_bytes);
+            visitor.visit_simple(Key::new("control_bytes"), control_bytes);
+        },
+    );
+    visitor.exit();
+}
+
+impl<K: Allocative, V: Allocative> Allocative for DataTreeAllocativeDfs<'_, K, V> {
+    fn visit<'a, 'b: 'a>(&self, visitor: &'a mut Visitor<'b>) {
+        let mut visitor = visitor.enter_self_sized::<Self>();
+        let mut visitor = visitor.enter_unique(Key::new("nodes"), 0);
+        let mut stack = vec![self.tree];
+        while let Some(tree) = stack.pop() {
+            tree.visit(&mut visitor);
+            if let DataTree::Tree(children) = tree {
+                stack.extend(children.values());
+            }
+        }
+        visitor.exit();
+    }
+}
+
+impl<K, V> DataTree<K, V> {
+    pub(crate) fn allocative_dfs(&self) -> DataTreeAllocativeDfs<'_, K, V> {
+        DataTreeAllocativeDfs { tree: self }
+    }
 }
 
 impl<K: 'static + Eq + Hash + Clone, V: 'static> DataTree<K, V> {
     pub fn new() -> Self {
-        Self::Tree(HashMap::new())
+        Self::Tree(StdBuckHashMap::default())
     }
 
     /// Gets the value at `key` or one of its prefixes, and returns it.
@@ -108,7 +196,7 @@ impl<K: 'static + Eq + Hash + Clone, V: 'static> DataTree<K, V> {
     pub fn get_subtree<'a, I, Q>(
         &self,
         key: &mut I,
-    ) -> buck2_error::Result<Option<&HashMap<K, Self>>>
+    ) -> buck2_error::Result<Option<&StdBuckHashMap<K, Self>>>
     where
         K: 'a + Borrow<Q>,
         Q: 'a + Hash + Eq + ?Sized,
@@ -199,14 +287,14 @@ impl<K: 'static + Eq + Hash + Clone, V: 'static> DataTree<K, V> {
         }
     }
 
-    pub fn children(&self) -> Option<&HashMap<K, DataTree<K, V>>> {
+    pub fn children(&self) -> Option<&StdBuckHashMap<K, DataTree<K, V>>> {
         match self {
             Self::Tree(children) => Some(children),
             Self::Data(_) => None,
         }
     }
 
-    fn children_mut(&mut self) -> Option<&mut HashMap<K, DataTree<K, V>>> {
+    fn children_mut(&mut self) -> Option<&mut StdBuckHashMap<K, DataTree<K, V>>> {
         match self {
             Self::Tree(children) => Some(children),
             Self::Data(_) => None,
@@ -357,6 +445,31 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_allocative_dfs_does_not_recurse_in_node_stack() {
+        let mut tree = DataTree::<i32, String>::new();
+        tree.insert(vec![1, 2, 3, 4, 5].into_iter(), "12345".to_owned());
+
+        let mut graph = allocative::FlameGraphBuilder::default();
+        graph.visit_root(&tree.allocative_dfs());
+        let output = graph.finish();
+        let source = output.flamegraph().write();
+
+        assert_eq!("", output.warnings());
+        assert!(
+            source.contains(";nodes;"),
+            "flamegraph source should contain flattened nodes: {source}"
+        );
+
+        for line in source.lines() {
+            let data_tree_count = line.matches("::DataTree<").count();
+            assert!(
+                data_tree_count <= 1,
+                "DataTree nodes should be visited as siblings instead of recursive stacks: {line}"
+            );
+        }
     }
 
     #[test]

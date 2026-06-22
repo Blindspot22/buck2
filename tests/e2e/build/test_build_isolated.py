@@ -66,6 +66,13 @@ async def test_success_message_printed(buck: Buck) -> None:
     assert_occurrences("\x1b[38;5;10mBUILD SUCCEEDED\x1b[39m", results.stderr, 1)
 
 
+@buck_test(inplace=False, data_dir="pass")
+async def test_success_message_suppressed_at_v0(buck: Buck) -> None:
+    results = await buck.build("//:abc", "-v0", "--console=simplenotty")
+
+    assert "BUILD SUCCEEDED" not in results.stderr
+
+
 @buck_test(inplace=False, data_dir="failing")
 async def test_multiple_errors_print_with_simple_console(buck: Buck) -> None:
     e = await expect_failure(
@@ -344,6 +351,18 @@ async def test_toolchain_deps(buck: Buck) -> None:
     # If any of the selects get resolved incorrectly, the toolchain binaries below will change.
     assert python_and_asic == "python_release_windows\nasic\n"
     assert python_only == "python_release_linux\n"
+
+    # Test foo_binary: a target that consumes a toolchain exposing multiple exec_deps
+    # (compiler + linter). This validates the pattern documented in
+    # docs/rule_authors/writing_toolchains.md "Exposing execution dependencies".
+    foo_result = await buck.build("root//tests:foo_hello")
+    foo_output = (
+        foo_result.get_build_report()
+        .output_for_target("root//tests:foo_hello")
+        .read_text()
+    )
+    assert "compiled[-O2 -Wall]:" in foo_output
+    assert "hello world" in foo_output
 
     await buck.build("root//...", "--target-platforms=root//config:platform_windows")
 

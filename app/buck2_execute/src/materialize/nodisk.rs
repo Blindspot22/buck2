@@ -57,6 +57,7 @@ impl Materializer for NoDiskMaterializer {
         _path: ProjectRelativePathBuf,
         _value: ArtifactValue,
         _srcs: Vec<CopiedArtifact>,
+        _configuration_path: Option<ProjectRelativePathBuf>,
     ) -> buck2_error::Result<()> {
         Ok(())
     }
@@ -73,6 +74,7 @@ impl Materializer for NoDiskMaterializer {
         &self,
         _path: ProjectRelativePathBuf,
         _info: HttpDownloadInfo,
+        _configuration_path: Option<ProjectRelativePathBuf>,
     ) -> buck2_error::Result<()> {
         Ok(())
     }
@@ -132,6 +134,7 @@ impl Materializer for NoDiskMaterializer {
     async fn get_artifact_entries_for_materialized_paths(
         &self,
         paths: Vec<ProjectRelativePathBuf>,
+        _fetch_root_artifact_entries_for_subpaths: bool,
     ) -> buck2_error::Result<
         Vec<
             Option<(

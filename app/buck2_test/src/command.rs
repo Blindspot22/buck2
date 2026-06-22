@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
-use buck2_build_api::actions::calculation::get_target_rule_type_name;
 use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
 use buck2_build_api::build::AsyncBuildTargetResultBuilder;
 use buck2_build_api::build::BuildConfiguredLabelOptions;
@@ -29,9 +28,11 @@ use buck2_build_api::build::ProvidersToBuild;
 use buck2_build_api::build::build_configured_label;
 use buck2_build_api::build::build_report::build_report_opts;
 use buck2_build_api::build::build_report::write_build_report;
+use buck2_build_api::interpreter::rule_defs::provider::builtin::internal_runner_test_info::FrozenInternalRunnerTestInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::run_info::FrozenRunInfo;
 use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValue;
 use buck2_build_api::interpreter::rule_defs::provider::test_provider::TestProvider;
+use buck2_build_api::interpreter::rule_defs::provider::test_provider::build_external_runner_spec;
 use buck2_build_api::materialize::MaterializationAndUploadContext;
 use buck2_cli_proto::HasClientContext;
 use buck2_cli_proto::TestRequest;
@@ -50,7 +51,7 @@ use buck2_common::pattern::resolve::ResolveTargetPatterns;
 use buck2_common::pattern::resolve::ResolvedPattern;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::name::CellName;
-use buck2_core::configuration::compatibility::MaybeCompatible;
+use buck2_core::configuration::compatibility::ResultMaybeCompatible;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
 use buck2_core::package::PackageLabelWithModifiers;
 use buck2_core::pattern::pattern::Modifiers;
@@ -68,10 +69,13 @@ use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
 use buck2_error::internal_error;
 use buck2_events::dispatch::console_message;
+use buck2_events::dispatch::instant_event;
 use buck2_events::dispatch::with_dispatcher_async;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_hash::BuckIndexSet;
+use buck2_hash::StdBuckHashSet;
 use buck2_interpreter::extra::InterpreterHostPlatform;
 use buck2_interpreter_for_build::interpreter::context::HasInterpreterContext;
 use buck2_node::load_patterns::MissingTargetBehavior;
@@ -90,6 +94,7 @@ use buck2_server_ctx::tpx_experiment_util::get_tpx_experiments;
 use buck2_test_api::data::TestResult;
 use buck2_test_api::data::TestStatus;
 use buck2_test_api::protocol::TestExecutor;
+use buck2_test_api::protocol::TestOrchestrator;
 use dice::DiceTransaction;
 use dice::LinearRecomputeDiceComputations;
 use dice_futures::cancellation::CancellationContext;
@@ -102,7 +107,6 @@ use futures::future::FutureExt;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
-use indexmap::IndexSet;
 use itertools::Itertools;
 
 use crate::downward_api::BuckTestDownwardApi;
@@ -171,7 +175,7 @@ impl CounterWithExamples {
         }
     }
 
-    fn to_cli_proto_counter(self) -> buck2_cli_proto::CounterWithExamples {
+    fn into_cli_proto_counter(self) -> buck2_cli_proto::CounterWithExamples {
         buck2_cli_proto::CounterWithExamples {
             count: self.count,
             max: self.max,
@@ -195,6 +199,7 @@ struct TestStatuses {
     skipped: CounterWithExamples,
     omitted: CounterWithExamples,
     failed: CounterWithExamples,
+    timed_out: CounterWithExamples,
     infra_failure: CounterWithExamples,
     fatals: CounterWithExamples,
     listing_success: CounterWithExamples,
@@ -208,7 +213,7 @@ impl TestStatuses {
             TestStatus::SKIP => self.skipped.add(&result.name),
             TestStatus::OMITTED => self.omitted.add(&result.name),
             TestStatus::FATAL => self.fatals.add(&result.name),
-            TestStatus::TIMEOUT => self.failed.add(&result.name),
+            TestStatus::TIMEOUT => self.timed_out.add(&result.name),
             TestStatus::INFRA_FAILURE => self.infra_failure.add(&result.name),
             TestStatus::UNKNOWN => {}
             TestStatus::RERUN => {}
@@ -218,31 +223,46 @@ impl TestStatuses {
     }
 }
 
-#[derive(Debug, buck2_error::Error)]
-#[buck2(tag = TestExecutor)]
-enum TestError {
-    #[error("Test execution completed but the tests failed")]
-    #[buck2(tag = Input)]
-    TestFailed,
-    #[error("Test execution completed but tests were skipped")]
-    #[buck2(tag = Input)]
-    TestSkipped,
-    #[error("Tests were filtered out and not run")]
-    #[buck2(tag = Input)]
-    TestOmitted,
-    #[error("Test listing failed")]
-    #[buck2(tag = Input)]
-    ListingFailed,
-    #[error("Fatal error encountered during test execution")]
-    Fatal,
-    #[error("Infra Failure error encountered during test execution")]
-    InfraFailure,
-}
-
 #[derive(Debug, buck2_error_derive::Error)]
 #[buck2(tag = TestDeadlineExpired)]
 #[error("This test run exceeded the deadline that was provided")]
 struct DeadlineExpired;
+
+#[derive(Debug, Clone)]
+pub(crate) enum InternalRunnerConfig {
+    All,
+    None,
+    Frameworks(HashSet<String>),
+}
+
+impl InternalRunnerConfig {
+    pub(crate) fn parse(value: Option<&str>) -> Self {
+        match value {
+            None | Some("true") => Self::All,
+            Some("false") => Self::None,
+            Some(list) => {
+                let frameworks: HashSet<String> = list
+                    .split(',')
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if frameworks.is_empty() {
+                    Self::None
+                } else {
+                    Self::Frameworks(frameworks)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn should_use(&self, framework_type: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::None => false,
+            Self::Frameworks(set) => set.contains(framework_type),
+        }
+    }
+}
 
 async fn test_command(
     ctx: &dyn ServerCommandContextTrait,
@@ -301,61 +321,6 @@ impl ServerCommandTemplate for TestServerCommand {
     ) -> buck2_error::Result<Self::Response> {
         test(server_ctx, ctx, &self.req).await
     }
-}
-
-fn test_executor_errors(
-    executor_exit_code: i32,
-    test_statuses: &buck2_cli_proto::test_response::TestStatuses,
-) -> Vec<buck2_data::ErrorReport> {
-    // FIXME: These errors should be derived from exit code only
-    let mut errors = Vec::new();
-    if let Some(failed) = &test_statuses.failed {
-        if failed.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(&TestError::TestFailed.into()));
-        }
-    }
-    if let Some(infra_failure) = &test_statuses.infra_failure {
-        if infra_failure.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(
-                &TestError::InfraFailure.into(),
-            ));
-        }
-    }
-    if let Some(fatal) = &test_statuses.fatals {
-        if fatal.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(&TestError::Fatal.into()));
-        }
-    }
-    if let Some(listing_failed) = &test_statuses.listing_failed {
-        if listing_failed.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(
-                &TestError::ListingFailed.into(),
-            ));
-        }
-    }
-    // If a test was skipped due to condition not being met a non-zero exit code will be returned,
-    // this doesn't seem quite right, but for now just tag it with TestSkipped to track occurrence.
-    if let Some(skipped) = &test_statuses.skipped {
-        if skipped.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(
-                &TestError::TestSkipped.into(),
-            ));
-        }
-    }
-    if let Some(omitted) = &test_statuses.omitted {
-        if omitted.count > 0 {
-            errors.push(buck2_data::ErrorReport::from(
-                &TestError::TestOmitted.into(),
-            ));
-        }
-    }
-    if errors.is_empty() {
-        errors.push(buck2_data::ErrorReport::from(&buck2_error::buck2_error!(
-            buck2_error::ErrorTag::TestExecutor,
-            "Test Executor Failed with exit code {executor_exit_code}"
-        )))
-    }
-    errors
 }
 
 async fn test(
@@ -475,11 +440,21 @@ async fn test(
 
     let project_root = server_ctx.project_root();
     let tpx_experiments = get_tpx_experiments(ctx.dupe(), project_root).await?;
+
+    // Forward AI agent identity to TPX as run tags (e.g. ai_agent_id=claude_code).
+    #[allow(unused_mut)]
+    let mut extra_tpx_args: Vec<String> = Vec::new();
+    #[cfg(fbcode_build)]
+    extra_tpx_args.extend(ai_agent_tpx_args(&client_ctx.agent_context));
+
+    let mut test_executor_args = request.test_executor_args.clone();
+    test_executor_args.extend(extra_tpx_args);
+
     let test_outcome = test_targets(
         ctx.dupe(),
         resolved_pattern,
         global_cfg_options,
-        request.test_executor_args.clone(),
+        test_executor_args,
         Arc::new(TestLabelFiltering::new(
             request.included_labels.clone(),
             request.excluded_labels.clone(),
@@ -526,56 +501,63 @@ async fn test(
                 .executor_report
                 .statuses
                 .passed
-                .to_cli_proto_counter(),
+                .into_cli_proto_counter(),
         ),
         skipped: Some(
             test_outcome
                 .executor_report
                 .statuses
                 .skipped
-                .to_cli_proto_counter(),
+                .into_cli_proto_counter(),
         ),
         omitted: Some(
             test_outcome
                 .executor_report
                 .statuses
                 .omitted
-                .to_cli_proto_counter(),
+                .into_cli_proto_counter(),
         ),
         failed: Some(
             test_outcome
                 .executor_report
                 .statuses
                 .failed
-                .to_cli_proto_counter(),
+                .into_cli_proto_counter(),
         ),
         fatals: Some(
             test_outcome
                 .executor_report
                 .statuses
                 .fatals
-                .to_cli_proto_counter(),
+                .into_cli_proto_counter(),
         ),
         infra_failure: Some(
             test_outcome
                 .executor_report
                 .statuses
                 .infra_failure
-                .to_cli_proto_counter(),
+                .into_cli_proto_counter(),
         ),
         listing_success: Some(
             test_outcome
                 .executor_report
                 .statuses
                 .listing_success
-                .to_cli_proto_counter(),
+                .into_cli_proto_counter(),
         ),
         listing_failed: Some(
             test_outcome
                 .executor_report
                 .statuses
                 .listing_failed
-                .to_cli_proto_counter(),
+                .into_cli_proto_counter(),
+        ),
+        timed_out: Some(
+            test_outcome
+                .executor_report
+                .statuses
+                .timed_out
+                .into_cli_proto_counter(),
         ),
         build_errors: build_errors_count,
     };
@@ -598,44 +580,30 @@ async fn test(
                 .configured_to_pattern_modifiers,
             &test_outcome.build_target_result.other_errors,
             None,
+            None,
+            None,
         )?
     } else {
         None
     };
 
-    let mut target_rule_type_names: Vec<String> = Vec::new();
-    for configured in test_outcome.build_target_result.configured.keys() {
-        target_rule_type_names
-            .push(get_target_rule_type_name(&mut ctx, &configured.target()).await?);
-    }
-
-    let mut errors = test_outcome.errors;
-    let exit_code_override = if errors.is_empty() {
-        Some(executor_exit_code)
-    } else {
-        // only use executor exit code if there were no errors in buck
-        None
-    };
-
-    if executor_exit_code != 0 {
-        let test_executor_errors = test_executor_errors(executor_exit_code, &test_statuses);
-        errors.extend(test_executor_errors);
-    }
-
     Ok(TestResponse {
-        exit_code: exit_code_override,
-        errors,
+        executor_exit_code,
+        errors: test_outcome.errors,
         test_statuses: Some(test_statuses),
         executor_stdout: test_outcome.executor_stdout,
         executor_stderr: test_outcome.executor_stderr,
         executor_info_messages: test_outcome.executor_report.info_messages,
         serialized_build_report,
-        target_rule_type_names,
+        // Rule types are sourced from `TargetRuleTypeName` instant events
+        // emitted in `TestDriver::interpret_targets` and accumulated by the
+        // invocation recorder.
+        target_rule_type_names: Vec::new(),
     })
 }
 
 async fn test_targets(
-    ctx: DiceTransaction,
+    mut ctx: DiceTransaction,
     pattern: ResolvedPattern<ConfiguredProvidersPatternExtra>,
     global_cfg_options: GlobalCfgOptions,
     external_runner_args: Vec<String>,
@@ -650,7 +618,7 @@ async fn test_targets(
     ignore_tests_attribute: bool,
     build_default_info: bool,
     build_run_info: bool,
-    tpx_experiments: HashSet<String>,
+    tpx_experiments: StdBuckHashSet<String>,
 ) -> buck2_error::Result<TestOutcome> {
     let session = Arc::new(session);
 
@@ -706,6 +674,33 @@ async fn test_targets(
 
     let (test_status_sender, test_status_receiver) = mpsc::unbounded();
 
+    let internal_test_timeout = ctx
+        .get_legacy_config_property(
+            cell_resolver.root_cell(),
+            BuckconfigKeyRef {
+                section: "test",
+                property: "timeout_default_s",
+            },
+        )
+        .await?
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(600));
+
+    let internal_runner_config = InternalRunnerConfig::parse(
+        ctx.get_legacy_config_property(
+            cell_resolver.root_cell(),
+            BuckconfigKeyRef {
+                section: "test",
+                property: "use_internal_runner",
+            },
+        )
+        .await?
+        .as_deref(),
+    );
+
+    let internal_test_status_sender = test_status_sender.clone();
+
     let test_server = tokio::spawn({
         let test_status_sender = test_status_sender.clone();
         let liveliness_observer = liveliness_observer.dupe();
@@ -724,11 +719,16 @@ async fn test_targets(
                     liveliness_observer.dupe(),
                     test_status_sender,
                     CancellationContext::never_cancelled(), // sending the orchestrator directly to be spawned by make_server, which never calls it.
+                    internal_runner_config.clone(),
                 )
                 .await
                 .buck_error_context("Failed to create a BuckTestOrchestrator")?;
 
                 let server_handle = make_server(orchestrator, BuckTestDownwardApi);
+
+                // Lazily created orchestrator for the in-process internal runner path.
+                // Only initialized when a target has InternalRunnerTestInfo.
+                let internal_orchestrator = tokio::sync::OnceCell::new();
 
                 let mut driver = TestDriver::new(TestDriverState {
                     ctx: &ctx,
@@ -736,8 +736,13 @@ async fn test_targets(
                     global_cfg_options: &global_cfg_options,
                     session: &session,
                     test_executor: &test_executor,
+                    internal_orchestrator: &internal_orchestrator,
+                    internal_test_status_sender: &internal_test_status_sender,
+                    liveliness_observer: &liveliness_observer,
                     cell_resolver: &cell_resolver,
                     working_dir_cell,
+                    internal_test_timeout,
+                    internal_runner_config: &internal_runner_config,
                     missing_target_behavior,
                     ignore_tests_attribute,
                     build_default_info,
@@ -763,6 +768,18 @@ async fn test_targets(
                         }
                     }
                 }
+
+                // Extract data from driver before dropping it so we can
+                // release the internal runner's sender clones.
+                let error_events = std::mem::take(&mut driver.error_events);
+                let mut build_target_result =
+                    std::mem::replace(&mut driver.build_target_result, BuildTargetResult::new());
+                drop(driver);
+
+                // Drop internal runner resources so their senders don't
+                // keep the results channel open during try_fold.
+                drop(internal_orchestrator);
+                drop(internal_test_status_sender);
 
                 test_executor
                     .end_of_test_requests()
@@ -793,16 +810,16 @@ async fn test_targets(
                     .buck_error_context("Failed to release local resources")?;
 
                 // Process the build errors we've collected.
-                let mut builder = BuildTargetResultBuilder::new(None);
-                for event in driver.error_events {
+                let mut builder = BuildTargetResultBuilder::new(None, std::time::Instant::now());
+                for event in error_events {
                     builder.event(event)?;
                 }
                 let error_target_result = builder.build();
 
-                driver.build_target_result.extend(error_target_result);
+                build_target_result.extend(error_target_result);
 
                 // And finally return our results;
-                buck2_error::Ok((driver.build_target_result, test_statuses))
+                buck2_error::Ok((build_target_result, test_statuses))
             },
         )
     });
@@ -888,10 +905,15 @@ struct TestDriverState<'a, 'e> {
     ctx: &'a DiceTransaction,
     label_filtering: &'a Arc<TestLabelFiltering>,
     global_cfg_options: &'a GlobalCfgOptions,
-    session: &'a TestSession,
+    session: &'a Arc<TestSession>,
     test_executor: &'a Arc<dyn TestExecutor + 'e>,
+    internal_orchestrator: &'a tokio::sync::OnceCell<Arc<dyn TestOrchestrator + Send + Sync>>,
+    internal_test_status_sender: &'a mpsc::UnboundedSender<buck2_error::Result<ExecutorMessage>>,
+    liveliness_observer: &'a Arc<dyn LivelinessObserver>,
     cell_resolver: &'a CellResolver,
     working_dir_cell: CellName,
+    internal_test_timeout: Duration,
+    internal_runner_config: &'a InternalRunnerConfig,
     missing_target_behavior: MissingTargetBehavior,
     ignore_tests_attribute: bool,
     build_default_info: bool,
@@ -902,8 +924,8 @@ struct TestDriverState<'a, 'e> {
 struct TestDriver<'a, 'e> {
     state: TestDriverState<'a, 'e>,
     work: FuturesUnordered<BoxFuture<'a, ControlFlow<Vec<BuildEvent>, Vec<TestDriverTask>>>>,
-    labels_configured: HashSet<(ProvidersLabelWithModifiers, bool)>,
-    labels_tested: HashSet<ConfiguredProvidersLabel>,
+    labels_configured: StdBuckHashSet<(ProvidersLabelWithModifiers, bool)>,
+    labels_tested: StdBuckHashSet<ConfiguredProvidersLabel>,
     error_events: Vec<BuildEvent>,
     build_target_result: BuildTargetResult,
 }
@@ -913,8 +935,8 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         Self {
             state,
             work: FuturesUnordered::new(),
-            labels_configured: HashSet::new(),
-            labels_tested: HashSet::new(),
+            labels_configured: StdBuckHashSet::default(),
+            labels_tested: StdBuckHashSet::default(),
             error_events: Vec::new(),
             build_target_result: BuildTargetResult::new(),
         }
@@ -1086,6 +1108,14 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                     targets
                         .into_iter()
                         .map(|((target_name, providers_pattern), target_node)| {
+                            // Emit one rule-type event per CLI-resolved top-level target so the
+                            // invocation recorder can populate
+                            // `InvocationRecord.target_rule_type_names`. Covers every rule kind,
+                            // including non-test rules like `genrule`/`cxx_library` siblings that
+                            // tests get bundled with via macros.
+                            instant_event(buck2_data::TargetRuleTypeName {
+                                rule_type: target_node.rule_type().name().to_owned(),
+                            });
                             (
                                 providers_pattern.into_providers_label_with_modifiers(
                                     package.dupe(),
@@ -1162,16 +1192,8 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 .get_configured_target_node(label.target())
                 .await
             {
-                Ok(node) => node,
-                Err(e) => {
-                    return ControlFlow::Break(create_and_map_configured_build_error(
-                        label, e, modifiers,
-                    ));
-                }
-            };
-
-            let node = match node {
-                MaybeCompatible::Incompatible(reason) => {
+                ResultMaybeCompatible::Compatible(node) => node,
+                ResultMaybeCompatible::Incompatible(reason) => {
                     if skippable {
                         //TODO: add aggregated error message
                         tracing::debug!("{}", reason.skipping_message(label.target()));
@@ -1184,7 +1206,11 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                         ));
                     }
                 }
-                MaybeCompatible::Compatible(node) => node,
+                ResultMaybeCompatible::Err(e) => {
+                    return ControlFlow::Break(create_and_map_configured_build_error(
+                        label, e, modifiers,
+                    ));
+                }
             };
 
             let oncall = node.oncall().map(|s| s.to_owned());
@@ -1258,7 +1284,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 .with_linear_recompute(|ctx| async move {
                     build_target_result(
                         &ctx,
-                        &state.label_filtering,
+                        state.label_filtering,
                         build_label,
                         modifiers_dupe,
                         state.build_default_info,
@@ -1313,10 +1339,11 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 label.dupe(),
                 providers,
                 state.test_executor.dupe(),
-                state.session,
+                state,
                 state.label_filtering.dupe(),
                 state.cell_resolver,
                 state.working_dir_cell,
+                state.internal_test_timeout,
                 test_config_unification_rollout,
                 oncall,
             )
@@ -1374,7 +1401,8 @@ async fn build_target_result(
     }
 
     let materialization_and_upload = MaterializationAndUploadContext::skip();
-    let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new(None);
+    let (result_builder, consumer) =
+        AsyncBuildTargetResultBuilder::new(None, std::time::Instant::now());
     consumer.consume(BuildEvent::new_configured(
         label.dupe(),
         ConfiguredBuildEventVariant::MapModifiers { modifiers },
@@ -1384,7 +1412,7 @@ async fn build_target_result(
             false,
             build_configured_label(
                 &consumer,
-                &ctx,
+                ctx,
                 materialization_and_upload,
                 label,
                 &ProvidersToBuild {
@@ -1405,18 +1433,91 @@ async fn build_target_result(
     Ok((build_target_result, providers))
 }
 
-async fn test_target(
+async fn test_target<'a, 'e>(
     target: ConfiguredProvidersLabel,
     providers: FrozenProviderCollectionValue,
-    test_executor: Arc<dyn TestExecutor + '_>,
-    session: &TestSession,
+    test_executor: Arc<dyn TestExecutor + 'e>,
+    driver_state: TestDriverState<'a, 'e>,
     label_filtering: Arc<TestLabelFiltering>,
     cell_resolver: &CellResolver,
     working_dir_cell: CellName,
+    internal_test_timeout: Duration,
     test_config_unification_rollout: bool,
     oncall: Option<String>,
 ) -> buck2_error::Result<Option<ConfiguredProvidersLabel>> {
     let collection = providers.provider_collection();
+
+    // Check for InternalRunnerTestInfo first — run in-process.
+    // Gated by [test].use_internal_runner (default true, comma-separated framework types,
+    // or false to force TPX fallback).
+    if let Some(internal_provider) = collection.builtin_provider::<FrozenInternalRunnerTestInfo>() {
+        let framework_type = internal_provider.as_ref().test_type();
+        if driver_state
+            .internal_runner_config
+            .should_use(framework_type)
+        {
+            let test_info: &dyn TestProvider = internal_provider.as_ref();
+            if label_filtering.is_excluded(test_info.labels()) {
+                return Ok(None);
+            }
+
+            let handle = build_configured_target_handle(
+                target.dupe(),
+                driver_state.session,
+                cell_resolver,
+                test_config_unification_rollout,
+                oncall,
+            )?;
+
+            let orchestrator = driver_state
+                .internal_orchestrator
+                .get_or_try_init(|| async {
+                    let orchestrator = BuckTestOrchestrator::new(
+                        driver_state.ctx.dupe(),
+                        driver_state.session.dupe(),
+                        driver_state.liveliness_observer.dupe(),
+                        driver_state.internal_test_status_sender.clone(),
+                        CancellationContext::never_cancelled(),
+                        driver_state.internal_runner_config.clone(),
+                    )
+                    .await
+                    .buck_error_context("Failed to create internal BuckTestOrchestrator")?;
+                    Ok::<_, buck2_error::Error>(
+                        Arc::new(orchestrator) as Arc<dyn TestOrchestrator + Send + Sync>
+                    )
+                })
+                .await?;
+
+            let provider = internal_provider.as_ref();
+            let listing_spec = build_external_runner_spec(
+                provider.listing_command(),
+                provider.env().map(|(k, _)| k),
+                provider.test_type(),
+                provider.labels(),
+                provider.contacts(),
+                handle.clone(),
+                working_dir_cell,
+            );
+            let spec = build_external_runner_spec(
+                provider.command(),
+                provider.env().map(|(k, _)| k),
+                provider.test_type(),
+                provider.labels(),
+                provider.contacts(),
+                handle,
+                working_dir_cell,
+            );
+            crate::internal_runner::run_internal_test(
+                orchestrator.as_ref(),
+                spec,
+                listing_spec,
+                internal_provider.as_ref(),
+                internal_test_timeout,
+            )
+            .await?;
+            return Ok(Some(target));
+        }
+    }
 
     let fut = match <dyn TestProvider>::from_collection(collection) {
         Some(test_info) => {
@@ -1427,7 +1528,7 @@ async fn test_target(
                 test_executor,
                 target,
                 test_info,
-                session,
+                driver_state.session,
                 cell_resolver,
                 working_dir_cell,
                 test_config_unification_rollout,
@@ -1453,8 +1554,13 @@ fn convert_error(build_result: &BuildTargetResult) -> Vec<buck2_error::Error> {
     errors.extend(build_result.other_errors.values().flatten().duped());
 
     for v in build_result.configured.values().flatten() {
-        errors.extend(v.errors.iter().duped());
-        errors.extend(v.outputs.iter().filter_map(|x| x.as_ref().err()).duped());
+        errors.extend(v.errors.iter().map(|t| t.inner.dupe()));
+        errors.extend(
+            v.outputs
+                .iter()
+                .filter_map(|x| x.inner.as_ref().err())
+                .duped(),
+        );
     }
 
     errors
@@ -1518,9 +1624,9 @@ struct TestLabelFiltering {
     /// If positive include label filters are present, then this filter will ONLY match sets of
     /// labels that contains the label filter. Otherwise, if only exclusion filters are present, or
     /// no label filters are present, this will match any set of labels as long as its not excluded.
-    included_labels: IndexSet<String>,
+    included_labels: BuckIndexSet<String>,
     /// Additional excluded labels. These have order of precedence after `included_labels`.
-    excluded_labels: IndexSet<String>,
+    excluded_labels: BuckIndexSet<String>,
     /// If true, ignores order of precedence such that as long as an exclusion filter matches, we
     /// don't match the set of labels.
     always_exclude: bool,
@@ -1625,6 +1731,9 @@ fn generate_config_entry_args(
                         target_platforms.push_str(s);
                     }
                 }
+                representative_config_flag::Source::TargetUniverse(_) => {
+                    // Target universe is not passed to TPX
+                }
             }
         }
     }
@@ -1657,6 +1766,15 @@ fn post_process_test_executor(s: &str) -> buck2_error::Result<PathBuf> {
             let exe = AbsPathBuf::new(
                 std::env::current_exe().buck_error_context("Cannot get Buck2 executable")?,
             )?;
+            // On Linux, /proc/self/exe appends " (deleted)" to the path when the
+            // binary has been removed from disk (e.g. after a buck2 upgrade).
+            if exe.as_path().to_string_lossy().ends_with(" (deleted)") {
+                return Err(buck2_error::buck2_error!(
+                    ErrorTag::BuckdExeDeleted,
+                    "The buck2 daemon's binary has been deleted from disk. \
+                     Run `buck2 kill` to restart the daemon with the current binary."
+                ));
+            }
             let exe = fs_util::canonicalize(&exe)
                 .categorize_internal()
                 .buck_error_context(
@@ -1679,12 +1797,51 @@ fn post_process_test_executor(s: &str) -> buck2_error::Result<PathBuf> {
     }
 }
 
+/// Generates `--tags` TPX args from agent context entries.
+/// Tags exceeding 80 chars are silently dropped to avoid TPX failures
+/// (testinfra MAXIMUM_TAG_LENGTH = 80).
+#[cfg(any(fbcode_build, test))]
+fn ai_agent_tpx_args(agent_context: &[buck2_data::AgentContextEntry]) -> Vec<String> {
+    use buck2_data::AgentContextEntry;
+
+    const MAX_TAG_LEN: usize = 80;
+
+    let find = |key: &str| agent_context.iter().find(|e| e.key == key);
+
+    let Some(id_entry) = find(AgentContextEntry::KEY_ID) else {
+        return Vec::new();
+    };
+
+    let mut args = Vec::new();
+    let mut push_tag = |tag: String| {
+        if tag.len() <= MAX_TAG_LEN {
+            args.extend(["--tags".to_owned(), tag]);
+        }
+    };
+
+    push_tag("ai-agent".to_owned());
+    push_tag(format!("ai_agent_id={}", &id_entry.value));
+
+    if let Some(inv) = find(AgentContextEntry::KEY_INVOCATION_ID) {
+        let inv_id = inv
+            .value
+            .rsplit_once("_invocation_")
+            .map_or(inv.value.as_str(), |(_, uuid)| uuid);
+        push_tag(format!("ai_inv_id={}", inv_id));
+    }
+
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use buck2_cli_proto::RepresentativeConfigFlag;
     use buck2_cli_proto::representative_config_flag;
+    use buck2_data::AgentContextEntry;
 
+    use crate::command::InternalRunnerConfig;
     use crate::command::TestLabelFiltering;
+    use crate::command::ai_agent_tpx_args;
     use crate::command::generate_config_entry_args;
 
     #[test]
@@ -1831,10 +1988,17 @@ mod tests {
                     "platform1".to_owned(),
                 )),
             },
+            RepresentativeConfigFlag {
+                source: Some(representative_config_flag::Source::TargetUniverse(
+                    "//uni:target".to_owned(),
+                )),
+            },
         ];
 
         generate_config_entry_args(&mut args, &config_flags);
 
+        // TargetUniverse is intentionally not passed to TPX, so the output
+        // should contain all other types but no entry for target_universe.
         let expected = vec![
             "--config-entry",
             "config=config_key=config_value",
@@ -1902,5 +2066,124 @@ mod tests {
         generate_config_entry_args(&mut args, &config_flags);
 
         assert_eq!(args, vec!["--config-entry", "config=key=value"]);
+    }
+
+    fn agent_entry(key: &str, value: &str) -> AgentContextEntry {
+        AgentContextEntry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    #[test]
+    fn test_ai_agent_tpx_args_claude_code() {
+        let ctx = vec![
+            agent_entry("id", "claude_code"),
+            agent_entry(
+                "invocation_id",
+                "claude_code_invocation_c9e892fa-148a-4494-8466-c1f44f1647d3",
+            ),
+        ];
+        assert_eq!(
+            ai_agent_tpx_args(&ctx),
+            vec![
+                "--tags",
+                "ai-agent",
+                "--tags",
+                "ai_agent_id=claude_code",
+                "--tags",
+                "ai_inv_id=c9e892fa-148a-4494-8466-c1f44f1647d3",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ai_agent_tpx_args_devmate() {
+        let ctx = vec![
+            agent_entry("id", "devmate_vscode"),
+            agent_entry(
+                "invocation_id",
+                "agent--38920caa-4558-45dd-bc90-b6abff501f8a",
+            ),
+        ];
+        let args = ai_agent_tpx_args(&ctx);
+        assert_eq!(
+            args,
+            vec![
+                "--tags",
+                "ai-agent",
+                "--tags",
+                "ai_agent_id=devmate_vscode",
+                "--tags",
+                "ai_inv_id=agent--38920caa-4558-45dd-bc90-b6abff501f8a",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ai_agent_tpx_args_no_invocation_id() {
+        let ctx = vec![agent_entry("id", "some_agent")];
+        assert_eq!(
+            ai_agent_tpx_args(&ctx),
+            vec!["--tags", "ai-agent", "--tags", "ai_agent_id=some_agent"]
+        );
+    }
+
+    #[test]
+    fn test_ai_agent_tpx_args_no_agent() {
+        let ctx = vec![agent_entry("intent", "build")];
+        let args = ai_agent_tpx_args(&ctx);
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_ai_agent_tpx_args_tag_too_long() {
+        let long_name = "a".repeat(80); // ai_agent_id= is 14 chars + 80 = 94 > 80
+        let ctx = vec![agent_entry("id", &long_name)];
+        let args = ai_agent_tpx_args(&ctx);
+        // ai-agent (8 chars) is kept, ai_agent_id=aaa... (94 chars) is dropped
+        assert_eq!(args, vec!["--tags", "ai-agent"]);
+    }
+
+    #[test]
+    fn internal_runner_config_defaults_to_all() {
+        let config = InternalRunnerConfig::parse(None);
+        assert!(config.should_use("rust"));
+        assert!(config.should_use("gtest"));
+    }
+
+    #[test]
+    fn internal_runner_config_true_enables_all() {
+        let config = InternalRunnerConfig::parse(Some("true"));
+        assert!(config.should_use("rust"));
+        assert!(config.should_use("gtest"));
+    }
+
+    #[test]
+    fn internal_runner_config_false_disables_all() {
+        let config = InternalRunnerConfig::parse(Some("false"));
+        assert!(!config.should_use("rust"));
+        assert!(!config.should_use("gtest"));
+    }
+
+    #[test]
+    fn internal_runner_config_comma_separated_frameworks() {
+        let config = InternalRunnerConfig::parse(Some("rust,gtest"));
+        assert!(config.should_use("rust"));
+        assert!(config.should_use("gtest"));
+        assert!(!config.should_use("python"));
+    }
+
+    #[test]
+    fn internal_runner_config_trims_whitespace() {
+        let config = InternalRunnerConfig::parse(Some(" rust , gtest "));
+        assert!(config.should_use("rust"));
+        assert!(config.should_use("gtest"));
+    }
+
+    #[test]
+    fn internal_runner_config_empty_string_disables() {
+        let config = InternalRunnerConfig::parse(Some(""));
+        assert!(!config.should_use("rust"));
     }
 }

@@ -20,7 +20,10 @@ LinkProviders = provider(
         "extensions": provider_field(typing.Any, default = None),
         "extra": provider_field(typing.Any, default = None),
         "extra_artifacts": provider_field(typing.Any, default = None),
+        "gc_sections_data": provider_field(typing.Any, default = None),
         "link_args": provider_field(typing.Any, default = None),
+        "linker_map_data": provider_field(typing.Any, default = None),
+        "runtime_files": provider_field(typing.Any, default = None),
         "shared_libraries": provider_field(typing.Any, default = None),
     },
 )
@@ -65,10 +68,10 @@ python_implicit_attrs = {
 }
 
 def _process_native_linking_rule_impl(ctx):
-    python_toolchain = ctx.attrs.python_toolchain[PythonToolchainInfo]
+    python_toolchain = ctx.attrs._python_toolchain[PythonToolchainInfo]
     python_internal_tools = ctx.attrs._python_internal_tools[PythonInternalToolsInfo]
     raw_deps = ctx.attrs.deps
-    shared_libs, extensions, link_args, extra, extra_artifacts = process_native_linking(
+    shared_libs, extensions, link_args, extra, extra_artifacts, linker_map_data, gc_sections_data, runtime_files = process_native_linking(
         ctx,
         raw_deps,
         python_toolchain,
@@ -76,20 +79,25 @@ def _process_native_linking_rule_impl(ctx):
         ctx.attrs.package_style,
         ctx.attrs.allow_cache_upload,
     )
-    return [LinkProviders(
-        shared_libraries = shared_libs,
-        link_args = link_args,
-        extensions = extensions,
-        extra = extra,
-        extra_artifacts = extra_artifacts,
-    ), DefaultInfo()]
+    return [
+        LinkProviders(
+            shared_libraries = shared_libs,
+            link_args = link_args,
+            extensions = extensions,
+            extra = extra,
+            extra_artifacts = extra_artifacts,
+            gc_sections_data = gc_sections_data,
+            linker_map_data = linker_map_data,
+            runtime_files = runtime_files,
+        ),
+        DefaultInfo(),
+    ]
 
 process_native_linking_rule = rule(
     impl = _process_native_linking_rule_impl,
     attrs = {
         "deps": attrs.list(attrs.dep()),  # Note: cxx-only deps here
         "package_style": attrs.any(),
-        "python_toolchain": attrs.dep(),
         "rpath": attrs.string(),
         "static_extension_utils": attrs.source(),
         "transformation_spec": attrs.option(
@@ -99,5 +107,8 @@ process_native_linking_rule = rule(
         "use_anon_target_for_analysis": attrs.bool(default = True),
         "_cxx_toolchain": attrs.dep(),
         "_python_internal_tools": attrs.dep(),
-    } | cxx_implicit_attrs | python_implicit_attrs,
+        "_python_toolchain": attrs.dep(),
+    }
+    | cxx_implicit_attrs
+    | python_implicit_attrs,
 )

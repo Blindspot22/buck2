@@ -46,11 +46,8 @@ Usage:
 """
 
 def constraint_with_aliases(
-        name: str,
-        values: list[str],
-        default: str,
-        visibility: list[str] = ["PUBLIC"],
-        aliases: dict[str, str] | None = None):
+    name: str, values: list[str], default: str, visibility: list[str] = ["PUBLIC"], aliases: dict[str, str] | None = None, execution_modifier: bool = False
+):
     """
     Creates a unified constraint rule with backwards-compatible configuration aliases.
 
@@ -62,12 +59,14 @@ def constraint_with_aliases(
         aliases: Optional mapping of alias target names to value names.
                  If None, creates aliases for all values using the value name as the alias name.
                  Example: {"old_name": "new_value"} creates alias "old_name" pointing to ":name[new_value]"
+        execution_modifier: If True, enables exec modifier resolution for this constraint.
     """
     native.constraint(
         name = name,
         values = values,
         default = default,
         visibility = visibility,
+        execution_modifier = execution_modifier,
     )
 
     if aliases == None:
@@ -87,10 +86,7 @@ def constraint_with_aliases(
                 visibility = visibility,
             )
 
-def generate_constraint_aliases(
-        constraint_name: str,
-        aliases: dict[str, str] | list[str],
-        visibility: list[str] = ["PUBLIC"]):
+def generate_constraint_aliases(constraint_name: str, aliases: dict[str, str] | list[str], visibility: list[str] = ["PUBLIC"]):
     """
     Generates configuration aliases for an existing constraint.
 

@@ -10,16 +10,17 @@ def _simple(ctx):
     re_use_case = read_config("buck2_re_client", "override_use_case")
     if re_use_case != None:
         fail("RE use case is set to: {}".format(re_use_case))
-    output = ctx.actions.declare_output("output")
+    output = ctx.actions.declare_output("output", has_content_based_path = False)
     run = ctx.actions.write(
         "run.py",
         [
             "import os",
             "import sys",
-            "build_id = os.environ[\"BUCK_BUILD_ID\"]",
+            'build_id = os.environ["BUCK_BUILD_ID"]',
             "with open(sys.argv[1], 'w') as f:",
             "  f.write(f'{build_id}\\n')",
         ],
+        has_content_based_path = False,
     )
     ctx.actions.run(
         cmd_args(["fbpython", run, output.as_output()]),

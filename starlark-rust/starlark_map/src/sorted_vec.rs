@@ -22,7 +22,7 @@ use std::slice;
 use std::vec;
 
 use allocative::Allocative;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use pagable::Pagable;
 use serde::Deserialize;
 use serde::Serialize;
@@ -41,7 +41,7 @@ use serde::Serialize;
     Serialize,
     Deserialize
 )]
-#[cfg_attr(feature = "pagable", derive(Pagable))]
+#[cfg_attr(feature = "pagable_dep", derive(Pagable))]
 pub struct SortedVec<T> {
     vec: Vec<T>,
 }
@@ -98,13 +98,12 @@ impl<T> IntoIterator for SortedVec<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sorted_vec::SortedVec;
-
     /// Test `new_unchecked` panics in debug mode when the elements are not sorted.
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic]
     fn test_new_unchecked() {
+        use crate::sorted_vec::SortedVec;
         SortedVec::new_unchecked(vec![1, 3, 2]);
     }
 }

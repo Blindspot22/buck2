@@ -14,32 +14,48 @@ use derive_more::Display;
 use dice::DetectCycles;
 use dice::Dice;
 use dice::DiceComputations;
+use dice::DiceKeyDyn;
 use dice::InjectedKey;
 use dice::Key;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 // dice graph storage needs to not reuse deps just because the value hasn't changed
 #[tokio::test]
 async fn test_dice_recompute_doesnt_reuse_wrong_deps() -> anyhow::Result<()> {
-    #[derive(Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative)]
+    #[derive(
+        Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative, Pagable
+    )]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct Leaf(u32);
 
     impl InjectedKey for Leaf {
         type Value = u32;
+        fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+            dice::NoValueSerialize::<Self::Value>::new()
+        }
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
             *x == *y
         }
     }
 
-    #[derive(Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative)]
+    #[derive(
+        Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative, Pagable
+    )]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct Derived;
 
     #[async_trait]
     impl Key for Derived {
         type Value = u32;
+
+        fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+            dice::NoValueSerialize::<Self::Value>::new()
+        }
 
         async fn compute(
             &self,
@@ -78,13 +94,19 @@ async fn test_dice_recompute_doesnt_reuse_wrong_deps() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_dice_clear_doesnt_break_ongoing_computation() -> anyhow::Result<()> {
-    #[derive(Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative)]
+    #[derive(
+        Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative, Pagable
+    )]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct Fib(u32);
 
     #[async_trait]
     impl Key for Fib {
         type Value = Option<u32>;
+        fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+            dice::NoValueSerialize::<Self::Value>::new()
+        }
 
         async fn compute(
             &self,
@@ -136,13 +158,19 @@ fn test_dice_clear_doesnt_cause_inject_compute() {
 
     // Spawn the root task
     rt.block_on(async {
-        #[derive(Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative)]
+        #[derive(
+            Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative, Pagable
+        )]
         #[display("{:?}", self)]
+        #[pagable_typetag(DiceKeyDyn)]
         struct Node;
 
         #[async_trait]
         impl Key for Node {
             type Value = u32;
+            fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+                dice::NoValueSerialize::<Self::Value>::new()
+            }
 
             async fn compute(
                 &self,
@@ -158,12 +186,18 @@ fn test_dice_clear_doesnt_cause_inject_compute() {
             }
         }
 
-        #[derive(Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative)]
+        #[derive(
+            Clone, Copy, Dupe, Display, Debug, Eq, PartialEq, Hash, Allocative, Pagable
+        )]
         #[display("{:?}", self)]
+        #[pagable_typetag(DiceKeyDyn)]
         struct Leaf;
 
         impl InjectedKey for Leaf {
             type Value = u32;
+            fn value_serialize() -> impl dice::ValueSerialize<Value = Self::Value> {
+                dice::NoValueSerialize::<Self::Value>::new()
+            }
 
             fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
                 false

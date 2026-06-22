@@ -34,10 +34,10 @@ use crate::__derive_refs::serde;
 use crate::any::ProvidesStaticType;
 use crate::environment::Methods;
 use crate::environment::MethodsBuilder;
-use crate::environment::MethodsStatic;
 use crate::starlark_complex_value;
 use crate::starlark_complex_values;
 use crate::typing::Ty;
+use crate::values::StarlarkPagable;
 use crate::values::StarlarkValue;
 use crate::values::Value;
 use crate::values::ValueLifetimeless;
@@ -54,7 +54,8 @@ use crate::values::types::type_instance_id::TypeInstanceId;
     Coerce,
     Freeze,
     ProvidesStaticType,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[repr(C)]
 #[derivative(Debug)]
@@ -76,7 +77,7 @@ impl<'v, V: ValueLike<'v>> Display for EnumValueGen<V> {
         match ty_enum_data {
             Some(ty_enum_data) => {
                 {
-                    write!(f, "{}", &ty_enum_data.name)?;
+                    write!(f, "{}", ty_enum_data.name)?;
                     write!(f, "(")?;
                     Display::fmt(&self.value, f)?;
                     write!(f, ")")?
@@ -108,6 +109,8 @@ impl<'v, V: ValueLike<'v>> EnumValueGen<V> {
     }
 }
 
+starlark::methods_static!(ENUM_VALUE_METHODS = enum_value_methods);
+
 #[starlark_value(type = EnumValue::TYPE)]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for EnumValueGen<V>
 where
@@ -121,8 +124,7 @@ where
     where
         Self: Sized,
     {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(enum_value_methods)
+        Some(ENUM_VALUE_METHODS.methods())
     }
 
     fn typechecker_ty(&self) -> Option<Ty> {

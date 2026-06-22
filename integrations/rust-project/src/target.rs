@@ -102,7 +102,15 @@ pub(crate) enum Kind {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub(crate) struct TargetInfo {
     pub(crate) name: String,
+    /// The target identifier, e.g. `fbcode//buck2/integrations/rust-project:rust-project`.
+    ///
+    /// See also <https://buck2.build/docs/concepts/labels/>
     pub(crate) label: String,
+    /// A list of tags, e.g. ["xplat", "split-dwarf"]
+    ///
+    /// This is generic metadata about the target.
+    pub(crate) labels: Vec<String>,
+
     pub(crate) kind: Kind,
     pub(crate) edition: Option<Edition>,
     pub(crate) srcs: Vec<PathBuf>,
@@ -137,7 +145,7 @@ pub(crate) struct TargetInfo {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub(crate) struct AliasedTargetInfo {
-    pub(crate) actual: Target,
+    pub(crate) actual: Option<Target>,
 }
 
 impl TargetInfo {
@@ -154,9 +162,14 @@ impl TargetInfo {
     }
 
     pub(crate) fn display_name(&self) -> String {
-        if self.name.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            // For target of the form foo:1.2.3, the buck name is 1.2.3 but
-            // that's not useful for a display name.
+        let starts_with_version = self.name.starts_with(|c: char| c.is_ascii_digit())
+            || self
+                .name
+                .strip_prefix('_')
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+        if starts_with_version {
+            // For targets of the form foo:1.2.3, foo:_1.2.3, or
+            // foo:0.3.0-pre.0, the buck name isn't useful as a display name.
             self.crate_name()
         } else {
             self.name
@@ -199,6 +212,52 @@ impl TargetInfo {
         feature_cfgs
             .chain(rustc_flags_cfgs)
             .collect::<Vec<String>>()
+    }
+
+    /// Should this target be considered part of rust-analyzer's workspace?
+    ///
+    /// When rust-analyzer monitors files for changes, it only considers files
+    /// in the workspace. This only applies when rust-analyzer.files.watcher is
+    /// set to "server", the default is "client" (i.e. VS Code watches the
+    /// files).
+    ///
+    /// <https://github.com/rust-lang/rust-analyzer/blob/a8e2add5c74cf4c3b14335eb02afe91061da0e92/crates/rust-analyzer/src/reload.rs#L722>
+    ///
+    /// The only other (minor) affect of rust-analyzer's workspaces is that can
+    /// affect the values of cfg(rust_analyzer) and cfg(test).
+    ///
+    /// <https://github.com/rust-lang/rust-analyzer/blob/a8e2add5c74cf4c3b14335eb02afe91061da0e92/crates/project-model/src/workspace.rs#L1129>
+    ///
+    /// ---
+    ///
+    /// For comparison, rust-analyzer uses is_local in cargo projects similarly
+    /// to workspaces, to decide which directories to watch. This effectively
+    /// means that it watches files in the current repository, but not files
+    /// from dependencies.
+    ///
+    /// <https://github.com/rust-lang/cargo/blob/01e42b9bf1776d78d1714c63b927154539c741b4/src/cargo/core/features.rs#L440>
+    /// <https://github.com/rust-lang/rust-analyzer/blob/a8e2add5c74cf4c3b14335eb02afe91061da0e92/crates/load-cargo/src/lib.rs#L308-L309>
+    pub(crate) fn is_workspace_member(&self) -> bool {
+        // Buck workspaces define a set of buck projects that you typically edit
+        // together, e.g. foo-lib and its corresponding foo-bin, see D48096435.
+        //
+        // We definitely want watch all these files for changes. Arguably in a
+        // monorepo we could watch everything except vendored files, but there
+        // might be performance issues.
+        if self.in_workspace {
+            return true;
+        }
+
+        // If this target contains generated code (e.g. Thrift codegen), we also
+        // want to watch those files. Generated files can change on build, they
+        // aren't generally modified in the editor.
+        if self.labels.contains(&"generated".to_owned()) {
+            return true;
+        }
+
+        // Otherwise, don't treat it as part of the workspace. This should
+        // help performance.
+        false
     }
 }
 
@@ -259,7 +318,7 @@ fn expand_atfile(path: &Path) -> Result<Vec<String>, anyhow::Error> {
     let contents = fs::read_to_string(path)?;
     let flags = contents
         .lines()
-        .filter_map(|flag| flag.strip_prefix("--cfg=").map(str::to_string));
+        .filter_map(|flag| flag.strip_prefix("--cfg=").map(str::to_owned));
     Ok(flags.collect::<Vec<String>>())
 }
 
@@ -272,6 +331,7 @@ mod tests {
         let info = TargetInfo {
             name: "bar".to_owned(),
             label: "bar".to_owned(),
+            labels: vec![],
             kind: Kind::Library,
             edition: None,
             srcs: vec![],
@@ -302,6 +362,7 @@ mod tests {
         let info = TargetInfo {
             name: "1.2.3".to_owned(),
             label: "//third-party/foo:1.2.3".to_owned(),
+            labels: vec![],
             kind: Kind::Library,
             edition: None,
             srcs: vec![],
@@ -324,10 +385,65 @@ mod tests {
     }
 
     #[test]
+    fn test_display_name_version_with_underscore() {
+        let info = TargetInfo {
+            name: "_1.2.3".to_owned(),
+            label: "//third-party/foo:_1.2.3".to_owned(),
+            labels: vec![],
+            kind: Kind::Library,
+            edition: None,
+            srcs: vec![],
+            mapped_srcs: FxHashMap::default(),
+            crate_name: Some("foo".to_owned()),
+            crate_dynamic: None,
+            crate_root: PathBuf::default(),
+            deps: vec![],
+            test_deps: vec![],
+            named_deps: FxHashMap::default(),
+            proc_macro: None,
+            features: vec![],
+            env: FxHashMap::default(),
+            source_folder: PathBuf::from("/tmp"),
+            project_relative_buildfile: PathBuf::from("third-party/BUCK"),
+            in_workspace: false,
+            rustc_flags: vec![],
+        };
+        assert_eq!(info.display_name(), "foo");
+    }
+
+    #[test]
+    fn test_display_name_prerelease_version() {
+        let info = TargetInfo {
+            name: "0.3.0-pre.0".to_owned(),
+            label: "//third-party/rust/kem:0.3.0-pre.0".to_owned(),
+            labels: vec![],
+            kind: Kind::Library,
+            edition: None,
+            srcs: vec![],
+            mapped_srcs: FxHashMap::default(),
+            crate_name: Some("kem".to_owned()),
+            crate_dynamic: None,
+            crate_root: PathBuf::default(),
+            deps: vec![],
+            test_deps: vec![],
+            named_deps: FxHashMap::default(),
+            proc_macro: None,
+            features: vec![],
+            env: FxHashMap::default(),
+            source_folder: PathBuf::from("/tmp"),
+            project_relative_buildfile: PathBuf::from("third-party/BUCK"),
+            in_workspace: false,
+            rustc_flags: vec![],
+        };
+        assert_eq!(info.display_name(), "kem");
+    }
+
+    #[test]
     fn test_display_name_strips_unittest_suffix() {
         let info = TargetInfo {
             name: "my_crate-unittest".to_owned(),
             label: "//foo:my_crate-unittest".to_owned(),
+            labels: vec![],
             kind: Kind::Test,
             edition: None,
             srcs: vec![],

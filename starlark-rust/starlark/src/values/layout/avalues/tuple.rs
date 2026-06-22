@@ -15,6 +15,13 @@
  * limitations under the License.
  */
 
+use std::mem::MaybeUninit;
+use std::ptr;
+
+use allocative::Key;
+use allocative::Visitor;
+use pagable::PagableDeserialize;
+use pagable::PagableSerialize;
 use starlark_syntax::slice_vec_ext::SliceExt;
 
 use crate::collections::maybe_uninit_backport::maybe_uninit_write_slice;
@@ -57,6 +64,16 @@ impl<'v> AValue<'v> for AValueTuple {
 
     fn offset_of_extra() -> usize {
         Tuple::offset_of_content()
+    }
+
+    fn visit_extra_allocative<'a, 'b: 'a>(
+        value: &Self::StarlarkValue,
+        visitor: &'a mut Visitor<'b>,
+    ) {
+        visitor.visit_simple(
+            Key::new("content"),
+            std::mem::size_of::<Value>() * value.len(),
+        );
     }
 
     unsafe fn heap_freeze(
@@ -138,6 +155,16 @@ impl<'v> AValue<'v> for AValueFrozenTuple {
         FrozenTuple::offset_of_content()
     }
 
+    fn visit_extra_allocative<'a, 'b: 'a>(
+        value: &Self::StarlarkValue,
+        visitor: &'a mut Visitor<'b>,
+    ) {
+        visitor.visit_simple(
+            Key::new("content"),
+            std::mem::size_of::<FrozenValue>() * value.len(),
+        );
+    }
+
     unsafe fn heap_freeze(
         _me: *mut AValueRepr<Self::StarlarkValue>,
         _freezer: &Freezer,
@@ -150,6 +177,37 @@ impl<'v> AValue<'v> for AValueFrozenTuple {
         _tracer: &Tracer<'v>,
     ) -> Value<'v> {
         panic!("shouldn't be copying frozen values");
+    }
+
+    fn starlark_serialize(
+        me: *const AValueRepr<Self::StarlarkValue>,
+        ctx: &mut dyn crate::pagable::StarlarkSerializeContext,
+    ) -> crate::Result<()> {
+        let value = unsafe { &(*me).payload };
+        let content = value.content();
+        content.len().pagable_serialize(ctx.pagable())?;
+        for elem in content {
+            ctx.serialize_frozen_value(*elem)?;
+        }
+        Ok(())
+    }
+
+    fn starlark_deserialize(
+        me: *mut AValueRepr<Self::StarlarkValue>,
+        ctx: &mut dyn crate::pagable::StarlarkDeserializeContext<'_>,
+    ) -> crate::Result<()> {
+        let len = usize::pagable_deserialize(ctx.pagable())?;
+        unsafe {
+            ptr::write(&mut (*me).payload, FrozenTuple::new(len));
+            let extra_offset = AValueRepr::<Self::StarlarkValue>::offset_of_payload()
+                + <Self as AValue>::offset_of_extra();
+            let extra_ptr = (me as *mut u8).add(extra_offset) as *mut MaybeUninit<FrozenValue>;
+            for i in 0..len {
+                let fv = ctx.deserialize_frozen_value()?;
+                (*extra_ptr.add(i)).write(fv);
+            }
+        }
+        Ok(())
     }
 }
 

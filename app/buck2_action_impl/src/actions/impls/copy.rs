@@ -30,10 +30,12 @@ use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::artifact_utils::ArtifactValueBuilder;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::CopiedArtifact;
+use buck2_hash::BuckIndexSet;
+use buck2_hash::buck_indexset;
 use dupe::Dupe;
 use gazebo::prelude::*;
-use indexmap::IndexSet;
-use indexmap::indexset;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark::values::OwnedFrozenValue;
 
 #[derive(Debug, buck2_error::Error)]
@@ -45,7 +47,7 @@ enum CopyActionValidationError {
     UnsupportedInput(ArtifactGroup),
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub(crate) enum CopyMode {
     Copy {
         // Override the destination executable bit to +x (true) or -x (false)
@@ -69,7 +71,7 @@ impl UnregisteredCopyAction {
 impl UnregisteredAction for UnregisteredCopyAction {
     fn register(
         self: Box<Self>,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         _starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
@@ -77,7 +79,7 @@ impl UnregisteredAction for UnregisteredCopyAction {
     }
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 struct CopyAction {
     copy: CopyMode,
     inputs: BoxSliceSet<ArtifactGroup>,
@@ -88,7 +90,7 @@ impl CopyAction {
     fn new(
         copy: CopyMode,
         src: ArtifactGroup,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
     ) -> buck2_error::Result<Self> {
         // TODO: Exclude other variants once they become available here. For now, this is a noop.
         match src {
@@ -103,7 +105,7 @@ impl CopyAction {
         } else {
             Ok(CopyAction {
                 copy,
-                inputs: BoxSliceSet::from(indexset![src]),
+                inputs: BoxSliceSet::from(buck_indexset![src]),
                 outputs: BoxSliceSet::from(outputs),
             })
         }
@@ -124,6 +126,7 @@ impl CopyAction {
     }
 }
 
+#[pagable_typetag]
 #[async_trait]
 impl Action for CopyAction {
     fn kind(&self) -> buck2_data::ActionKind {
@@ -207,6 +210,10 @@ impl Action for CopyAction {
             tmp_dest
         };
 
+        let configuration_path = ctx
+            .materializer()
+            .maybe_eager_configuration_path(ctx.fs(), self.output().get_path())?;
+
         ctx.materializer()
             .declare_copy(
                 dest.clone(),
@@ -225,6 +232,7 @@ impl Action for CopyAction {
                         CopyMode::Symlink => None,
                     },
                 )],
+                configuration_path,
             )
             .await?;
 

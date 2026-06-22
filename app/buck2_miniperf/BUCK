@@ -13,6 +13,9 @@ rust_binary(
     # JEMalloc isn't super lean (and we don't actually allocate anything here),
     # so dont use it.
     default_strip_mode = "full",
+    # Must be statically linked because the binary is embedded in the forkserver
+    # and written to disk without its shared library dependencies.
+    link_style = "static",
     deps = [
         "fbsource//third-party/rust:anyhow",
     ] + select({
@@ -34,6 +37,7 @@ rust_library(
     srcs = glob(
         ["test/**/*.rs"],
     ),
+    autocargo = {"ignore_rule": True},
     test_deps = select({
         # Ideally we'd use compatible_with, but TD does not understand that.
         "DEFAULT": [],

@@ -19,7 +19,7 @@ use crate::impls::value::TrackedInvalidationPaths;
 
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub(crate) struct OpaqueValueModern<K: Key> {
+pub struct OpaqueValue<K: Key> {
     pub(crate) derive_from_key: DiceKey,
     #[derivative(Debug = "ignore")]
     pub(crate) derive_from: MaybeValidDiceValue,
@@ -27,7 +27,7 @@ pub(crate) struct OpaqueValueModern<K: Key> {
     ty: PhantomData<K>,
 }
 
-impl<K> OpaqueValueModern<K>
+impl<K> OpaqueValue<K>
 where
     K: Key,
 {
@@ -53,21 +53,27 @@ mod tests {
     use async_trait::async_trait;
     use derive_more::Display;
     use dice_futures::cancellation::CancellationContext;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
 
     use crate::Dice;
     use crate::DiceComputations;
+    use crate::DiceKeyDyn;
     use crate::HashSet;
     use crate::api::data::DiceData;
     use crate::api::key::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
     use crate::impls::deps::testing::RecordingDepsTrackersExt;
     use crate::impls::key::DiceKey;
-    use crate::impls::opaque::OpaqueValueModern;
+    use crate::impls::opaque::OpaqueValue;
     use crate::impls::value::DiceKeyValue;
     use crate::impls::value::DiceValidity;
     use crate::impls::value::MaybeValidDiceValue;
     use crate::impls::value::TrackedInvalidationPaths;
 
-    #[derive(Allocative, Clone, Hash, Eq, PartialEq, Debug, Display)]
+    #[derive(Allocative, Clone, Hash, Eq, PartialEq, Debug, Display, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct K;
 
     #[async_trait]
@@ -85,15 +91,19 @@ mod tests {
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             unimplemented!("test")
         }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
     }
 
     #[tokio::test]
     async fn opaque_records_deps_when_used() {
-        let dice = Dice::new(DiceData::new());
+        let dice = Dice::new(DiceData::new(), None);
 
         let mut ctx = dice.updater().commit().await.0.0;
 
-        let opaque = OpaqueValueModern::<K>::new(
+        let opaque = OpaqueValue::<K>::new(
             DiceKey { index: 0 },
             MaybeValidDiceValue::new(Arc::new(DiceKeyValue::<K>::new(1)), DiceValidity::Valid),
             TrackedInvalidationPaths::clean(),

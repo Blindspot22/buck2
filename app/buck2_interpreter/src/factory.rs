@@ -15,13 +15,14 @@ use buck2_common::legacy_configs::key::BuckconfigKeyRef;
 use buck2_error::conversion::from_any_with_tag;
 use dice::DiceComputations;
 use dice::UserComputationData;
+use dice_futures::cancellation::CancellationPoller;
 use dupe::Dupe;
 use starlark::environment::FrozenModule;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
+use starlark::values::FrozenHeapName;
 
 use crate::dice::starlark_debug::HasStarlarkDebugger;
-use crate::dice::starlark_provider::CancellationPoller;
 use crate::dice::starlark_provider::StarlarkEvalKind;
 use crate::from_freeze::from_freeze_error;
 use crate::starlark_debug::StarlarkDebugController;
@@ -35,7 +36,6 @@ pub struct StarlarkEvaluatorProvider {
     debugger: Option<Box<dyn StarlarkDebugController>>,
     profile_listener: Option<Arc<dyn ProfileEventListener>>,
     starlark_max_callstack_size: Option<usize>,
-    starlark_enable_cancellation: bool,
 }
 
 /// Holds profiler data associated with completed Starlark evaluation.
@@ -85,7 +85,7 @@ impl FinishedStarlarkEvaluation {
     )> {
         let frozen = env
             .0
-            .freeze_and_name(Box::new(self.eval_kind.dupe()))
+            .freeze_named(FrozenHeapName::User(Box::new(self.eval_kind.dupe())))
             .map_err(from_freeze_error)?;
         let (token, profile_data) = self.finish_impl(Some(&frozen))?;
         Ok((token, frozen, profile_data))
@@ -100,7 +100,6 @@ impl StarlarkEvaluatorProvider {
             eval_kind,
             debugger: None,
             starlark_max_callstack_size: None,
-            starlark_enable_cancellation: false,
             profile_listener: None,
         }
     }
@@ -123,14 +122,6 @@ impl StarlarkEvaluatorProvider {
                 property: "starlark_max_callstack_size",
             })?;
 
-        let starlark_enable_cancellation = root_buckconfig
-            .view(ctx)
-            .parse::<bool>(BuckconfigKeyRef {
-                section: "buck2",
-                property: "starlark_enable_cancellation",
-            })?
-            .unwrap_or(false);
-
         let debugger_handle = ctx.get_starlark_debugger_handle();
         let debugger = match debugger_handle {
             Some(v) => Some(v.start_eval(&eval_kind.to_string()).await?),
@@ -142,7 +133,6 @@ impl StarlarkEvaluatorProvider {
             eval_kind,
             debugger,
             starlark_max_callstack_size,
-            starlark_enable_cancellation,
             profile_listener,
         })
     }
@@ -158,7 +148,7 @@ impl StarlarkEvaluatorProvider {
     pub fn make_reentrant_evaluator<'v, 'a, 'e>(
         mut self,
         module: &'a BuckStarlarkModule<'v>,
-        cancellation: CancellationPoller<'a>,
+        cancellation: CancellationPoller,
     ) -> buck2_error::Result<ReentrantStarlarkEvaluator<'v, 'a, 'e>> {
         let (_, _v) = (buck2_error::Ok(()), 1);
         let mut eval = Evaluator::new(&module.0);
@@ -167,17 +157,7 @@ impl StarlarkEvaluatorProvider {
                 .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))?;
         }
 
-        if self.starlark_enable_cancellation {
-            match cancellation.dupe() {
-                CancellationPoller::None => {}
-                CancellationPoller::Context(c) => {
-                    eval.set_check_cancelled(Box::new(|| c.is_cancelled()))
-                }
-                CancellationPoller::Observer(o) => {
-                    eval.set_check_cancelled(Box::new(move || o.is_cancelled()))
-                }
-            }
-        }
+        eval.set_check_cancelled(Box::new(move || cancellation.is_cancelled()));
 
         let is_profiling_enabled = self.profiler_data.initialize(&mut eval)?;
         if let Some(v) = &mut self.debugger {
@@ -197,7 +177,7 @@ impl StarlarkEvaluatorProvider {
     pub fn with_evaluator<'v, 'a, 'e: 'a, R>(
         self,
         module: &'a BuckStarlarkModule<'v>,
-        cancellation: CancellationPoller<'a>,
+        cancellation: CancellationPoller,
         closure: impl FnOnce(&mut Evaluator<'v, 'a, 'e>, bool) -> buck2_error::Result<R>,
     ) -> buck2_error::Result<(FinishedStarlarkEvaluation, R)> {
         let mut reentrant_eval: ReentrantStarlarkEvaluator<'v, '_, '_> =

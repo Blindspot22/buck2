@@ -8,10 +8,12 @@
  * above-listed licenses.
  */
 
+use std::borrow::Cow;
+
 use allocative::Allocative;
 use sorted_vector_map::SortedVectorMap;
 
-use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
+use crate::interpreter::rule_defs::cmd_args::CommandLineSink;
 
 /// A command line's expansion, suitable to actually run it.
 pub struct ExpandedCommandLine {
@@ -63,8 +65,8 @@ impl ExpandedCommandLineFingerprinter {
     }
 }
 
-impl CommandLineBuilder for ExpandedCommandLineFingerprinter {
-    fn push_arg(&mut self, s: String) {
+impl CommandLineSink for ExpandedCommandLineFingerprinter {
+    fn push_arg(&mut self, s: Cow<'_, str>) {
         self.count += 1;
 
         let bytes = s.as_bytes();
@@ -83,18 +85,18 @@ mod tests {
         pub fn fingerprint(&self) -> ExpandedCommandLineDigest {
             let mut fingerprinter = ExpandedCommandLineFingerprinter::new();
             for e in self.exe.iter() {
-                fingerprinter.push_arg(e.to_owned());
+                fingerprinter.push_arg(Cow::Borrowed(e));
             }
             fingerprinter.push_count();
 
             for e in self.args.iter() {
-                fingerprinter.push_arg(e.to_owned());
+                fingerprinter.push_arg(Cow::Borrowed(e));
             }
             fingerprinter.push_count();
 
             for (k, v) in self.env.iter() {
-                fingerprinter.push_arg(k.to_owned());
-                fingerprinter.push_arg(v.to_owned());
+                fingerprinter.push_arg(Cow::Borrowed(k));
+                fingerprinter.push_arg(Cow::Borrowed(v));
             }
 
             fingerprinter.push_count();

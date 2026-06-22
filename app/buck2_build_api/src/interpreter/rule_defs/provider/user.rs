@@ -31,12 +31,13 @@ use starlark::eval::ParametersParser;
 use starlark::typing::Ty;
 use starlark::values::Demand;
 use starlark::values::Freeze;
-use starlark::values::FrozenRef;
 use starlark::values::Heap;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueLike;
+use starlark::values::any::FrozenAnyValue;
 use starlark::values::starlark_value;
 
 use crate::interpreter::rule_defs::provider::ProviderLike;
@@ -54,10 +55,19 @@ enum UserProviderError {
 /// The result of calling the output of `provider()`. This is just a simple data structure of
 /// either immediately available values or, later, `FutureValue` types that are resolved
 /// asynchronously
-#[derive(Debug, Clone, Coerce, Trace, Freeze, ProvidesStaticType, Allocative)]
+#[derive(
+    Debug,
+    Clone,
+    Coerce,
+    Trace,
+    Freeze,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[repr(C)]
 pub struct UserProviderGen<'v, V: ValueLike<'v>> {
-    pub(crate) callable: FrozenRef<'static, UserProviderCallableData>,
+    pub(crate) callable: FrozenAnyValue<UserProviderCallableData>,
     attributes: Box<[V]>,
     _marker: PhantomData<&'v ()>,
 }
@@ -65,9 +75,14 @@ pub struct UserProviderGen<'v, V: ValueLike<'v>> {
 starlark_complex_value!(pub UserProvider<'v>);
 
 impl<'v, V: ValueLike<'v>> UserProviderGen<'v, V> {
+    pub(crate) fn callable_data(&self) -> &UserProviderCallableData {
+        &self.callable
+    }
+
     fn iter_items(&self) -> impl Iterator<Item = (&str, V)> {
-        assert_eq!(self.callable.fields.len(), self.attributes.len());
-        self.callable
+        let callable_data = self.callable_data();
+        assert_eq!(callable_data.fields.len(), self.attributes.len());
+        callable_data
             .fields
             .keys()
             .map(|s| s.as_str())
@@ -79,7 +94,7 @@ impl<'v, V: ValueLike<'v>> Display for UserProviderGen<'v, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_keyed_container(
             f,
-            &format!("{}(", self.callable.provider_id.name),
+            &format!("{}(", self.callable_data().provider_id.name),
             ")",
             "=",
             self.iter_items(),
@@ -93,16 +108,16 @@ where
     Self: ProvidesStaticType<'v>,
 {
     fn dir_attr(&self) -> Vec<String> {
-        self.callable.fields.keys().cloned().collect()
+        self.callable_data().fields.keys().cloned().collect()
     }
 
-    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
-        self.get_attr_hashed(Hashed::new(attribute), heap)
+    fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
+        self.get_attr_hashed(Hashed::new(attribute), _heap)
     }
 
     fn get_attr_hashed(&self, attribute: Hashed<&str>, _heap: Heap<'v>) -> Option<Value<'v>> {
         let index = self
-            .callable
+            .callable_data()
             .fields
             .raw_entry_v1()
             .index_from_hash(attribute.hash().promote(), |k| k == attribute.key())?;
@@ -115,7 +130,7 @@ where
             Some(other) => other,
             None => return Ok(false),
         };
-        if this.callable.provider_id != other.callable.provider_id {
+        if this.callable_data().provider_id != other.callable_data().provider_id {
             return Ok(false);
         }
         if this.attributes.len() != other.attributes.len() {
@@ -137,7 +152,7 @@ where
     }
 
     fn write_hash(&self, hasher: &mut StarlarkHasher) -> starlark::Result<()> {
-        self.callable.provider_id.hash(hasher);
+        self.callable_data().provider_id.hash(hasher);
         for (k, v) in self.iter_items() {
             k.hash(hasher);
             v.write_hash(hasher)?;
@@ -161,7 +176,7 @@ impl<'v, V: ValueLike<'v>> serde::Serialize for UserProviderGen<'v, V> {
 
 impl<'v, V: ValueLike<'v>> ProviderLike<'v> for UserProviderGen<'v, V> {
     fn id(&self) -> &Arc<ProviderId> {
-        &self.callable.provider_id
+        &self.callable_data().provider_id
     }
 
     fn items(&self) -> Vec<(&str, Value<'v>)> {
@@ -171,12 +186,13 @@ impl<'v, V: ValueLike<'v>> ProviderLike<'v> for UserProviderGen<'v, V> {
 
 /// Creates instances of mutable `UserProvider`s; called from a `NativeFunction`
 pub(crate) fn user_provider_creator<'v>(
-    callable: FrozenRef<'static, UserProviderCallableData>,
+    callable: FrozenAnyValue<UserProviderCallableData>,
     eval: &Evaluator<'v, '_, '_>,
     param_parser: &mut ParametersParser<'v, '_>,
 ) -> buck2_error::Result<Value<'v>> {
     let heap = eval.heap();
-    let values = callable
+    let callable_data: &UserProviderCallableData = &callable;
+    let values = callable_data
         .fields
         .iter()
         .map(|(name, field)| match param_parser.next_opt()? {

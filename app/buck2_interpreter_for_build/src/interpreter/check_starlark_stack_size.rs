@@ -18,8 +18,12 @@ use buck2_interpreter::factory::StarlarkEvaluatorProvider;
 use buck2_interpreter::file_type::StarlarkFileType;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use indoc::indoc;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark::environment::Globals;
 use starlark::syntax::AstModule;
 
@@ -37,7 +41,17 @@ enum CheckStarlarkStackSizeError {
 pub(crate) async fn check_starlark_stack_size(
     ctx: &mut DiceComputations<'_>,
 ) -> buck2_error::Result<()> {
-    #[derive(Debug, derive_more::Display, Clone, Allocative, Eq, PartialEq, Hash)]
+    #[derive(
+        Debug,
+        derive_more::Display,
+        Clone,
+        Allocative,
+        Eq,
+        PartialEq,
+        Hash,
+        Pagable
+    )]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct StarlarkStackSizeChecker;
 
     #[async_trait]
@@ -102,6 +116,10 @@ pub(crate) async fn check_starlark_stack_size(
 
         fn validity(x: &Self::Value) -> bool {
             x.is_ok()
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            OkPagableValueSerialize::<Self::Value>::new()
         }
     }
 

@@ -44,13 +44,21 @@ impl DiceValidValue {
     pub(crate) fn equality(&self, other: &DiceValidValue) -> bool {
         self.0.equality(&*other.0)
     }
+
+    pub(crate) fn as_dyn(&self) -> &dyn DiceValueDyn {
+        &*self.0
+    }
+
+    pub(crate) fn from_arc(arc: std::sync::Arc<dyn DiceValueDyn>) -> Self {
+        Self(arc)
+    }
 }
 
 /// Type erased value that may be transient, or whose dependencies are transient
 #[derive(Allocative, Clone, Dupe)]
-pub(crate) struct MaybeValidDiceValue {
-    value: std::sync::Arc<dyn DiceValueDyn>,
-    validity: DiceValidity,
+pub enum MaybeValidDiceValue {
+    Present(std::sync::Arc<dyn DiceValueDyn>),
+    Transient(std::sync::Arc<dyn DiceValueDyn>),
 }
 
 impl MaybeValidDiceValue {
@@ -64,49 +72,50 @@ impl MaybeValidDiceValue {
             DiceValidity::Transient
         };
 
-        Self { value, validity }
+        match validity {
+            DiceValidity::Valid => Self::Present(value),
+            DiceValidity::Transient => Self::Transient(value),
+        }
     }
 
     pub(crate) fn valid(value: DiceValidValue) -> Self {
-        Self {
-            value: value.0,
-            validity: DiceValidity::Valid,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn transient(value: std::sync::Arc<dyn DiceValueDyn>) -> Self {
-        Self {
-            value,
-            validity: DiceValidity::Transient,
-        }
+        Self::Present(value.0)
     }
 
     pub(crate) fn validity(&self) -> DiceValidity {
-        self.validity
+        match self {
+            Self::Transient(_) => DiceValidity::Transient,
+            _ => DiceValidity::Valid,
+        }
+    }
+
+    fn value(&self) -> &std::sync::Arc<dyn DiceValueDyn> {
+        match self {
+            MaybeValidDiceValue::Present(v) | MaybeValidDiceValue::Transient(v) => v,
+        }
     }
 
     pub(crate) fn downcast_maybe_transient<V: Any>(&self) -> Option<&V> {
-        self.value.downcast_ref()
+        self.value().downcast_ref()
     }
 
     /// Dynamic version of `Key::equality`.
     #[cfg(test)]
     pub(crate) fn equality(&self, other: &DiceValidValue) -> bool {
-        self.value.equality(&*other.0)
+        self.value().equality(&*other.0)
     }
 
     #[cfg(test)]
     pub(crate) fn instance_equal(&self, other: &DiceValidValue) -> bool {
         #[allow(ambiguous_wide_pointer_comparisons)]
         // we literally just want to compare the exact pointer
-        std::sync::Arc::ptr_eq(&self.value, &other.0)
+        std::sync::Arc::ptr_eq(self.value(), &other.0)
     }
 
     pub(crate) fn into_valid_value(self) -> Result<DiceValidValue, MaybeValidDiceValue> {
-        match self.validity {
-            DiceValidity::Valid => Ok(DiceValidValue(self.value)),
-            DiceValidity::Transient => Err(self),
+        match self {
+            Self::Present(v) => Ok(DiceValidValue(v)),
+            v @ Self::Transient(_) => Err(v),
         }
     }
 }
@@ -288,7 +297,7 @@ impl Debug for DiceComputedValue {
     }
 }
 
-pub(crate) trait DiceValueDyn: Allocative + Any + Send + Sync + 'static {
+pub trait DiceValueDyn: Allocative + Any + Send + Sync + 'static {
     fn value_as_any(&self) -> &dyn Any;
     /// Panics if called with incompatible values.
     fn equality(&self, other: &dyn DiceValueDyn) -> bool;
@@ -383,7 +392,7 @@ pub mod testing {
 
     impl MaybeValidDiceValue {
         pub(crate) fn testing_value(&self) -> &std::sync::Arc<dyn DiceValueDyn> {
-            &self.value
+            self.value()
         }
     }
 

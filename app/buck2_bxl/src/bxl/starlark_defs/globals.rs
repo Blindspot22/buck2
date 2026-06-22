@@ -10,6 +10,7 @@
 
 //! Starlark globals for BXL.
 
+use buck2_build_api::bxl::select::register_select_types;
 use buck2_interpreter::downstream_crate_starlark_defs::REGISTER_BUCK2_BXL_GLOBALS;
 use starlark::environment::GlobalsBuilder;
 
@@ -35,6 +36,7 @@ fn bxl_namespace(g: &mut GlobalsBuilder) {
     register_error_handling_function(g);
     register_read_package_value_function(g);
     register_bxl_type_names_in_bxl_namespace(g);
+    register_select_types(g);
     register_dynamic_actions(g);
     register_anon_rule(g);
 }

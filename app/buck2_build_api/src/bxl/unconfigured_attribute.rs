@@ -16,30 +16,34 @@ use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::source_artifact::SourceArtifact;
 use buck2_core::package::PackageLabel;
 use buck2_core::package::source_path::SourcePath;
+use buck2_error::internal_error;
 use buck2_error::starlark_error::from_starlark_with_options;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use buck2_interpreter::types::configured_providers_label::StarlarkProvidersLabel;
 use buck2_interpreter::types::select_fail::StarlarkSelectFail;
+use buck2_interpreter::types::select_incompatible::StarlarkSelectIncompatible;
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
 use buck2_node::attrs::coerced_attr::CoercedAttr;
 use buck2_node::attrs::display::AttrDisplayWithContext;
 use buck2_node::attrs::fmt_context::AttrFmtContext;
 use buck2_node::attrs::serialize::AttrSerializeWithContext;
+use buck2_node::visibility::VisibilityPattern;
 use buck2_node::visibility::VisibilityPatternList;
 use buck2_node::visibility::VisibilitySpecification;
 use buck2_node::visibility::WithinViewSpecification;
 use derive_more::From;
 use dupe::Dupe;
 use gazebo::prelude::SliceExt;
+use pagable::Pagable;
 use serde::Serialize;
 use starlark::__derive_refs::serde::Serializer;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::Heap;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Value;
 use starlark::values::dict::Dict;
@@ -52,8 +56,11 @@ use crate::bxl::select::StarlarkSelectConcat;
 use crate::bxl::select::StarlarkSelectDict;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
 
-#[derive(Debug, ProvidesStaticType, From, Allocative)]
-pub struct StarlarkCoercedAttr(pub CoercedAttr, pub PackageLabel);
+#[derive(Debug, ProvidesStaticType, From, Allocative, Pagable, StarlarkPagable)]
+pub struct StarlarkCoercedAttr(
+    #[starlark_pagable(pagable)] pub CoercedAttr,
+    #[starlark_pagable(pagable)] pub PackageLabel,
+);
 
 starlark_simple_value!(StarlarkCoercedAttr);
 
@@ -84,12 +91,13 @@ impl Serialize for StarlarkCoercedAttr {
     }
 }
 
+starlark::methods_static!(COERCED_ATTR_METHODS = coerced_attr_methods);
+
 /// Coerced attr from an unconfigured target node.
 #[starlark_value(type = "CoercedAttr")]
 impl<'v> StarlarkValue<'v> for StarlarkCoercedAttr {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(coerced_attr_methods)
+        Some(COERCED_ATTR_METHODS.methods())
     }
 }
 
@@ -164,7 +172,15 @@ impl CoercedAttrExt for CoercedAttr {
             | CoercedAttr::WithinView(WithinViewSpecification(specs)) => match specs {
                 VisibilityPatternList::Public => heap.alloc(AllocList(["PUBLIC"])),
                 VisibilityPatternList::List(specs) => {
-                    heap.alloc(AllocList(specs.iter().map(|s| s.to_string())))
+                    heap.alloc(AllocList(specs.iter().map(|s| match s {
+                        VisibilityPattern::Parsed(p) => heap.alloc(p.to_string()),
+                        VisibilityPattern::TargetNameGlob(r) => r.alloc_starlark_value(heap),
+                    })))
+                }
+                VisibilityPatternList::Intersection(_) => {
+                    return Err(internal_error!(
+                        "Intersection visibility cannot be serialized as attribute"
+                    ));
                 }
             },
             CoercedAttr::ExplicitConfiguredDep(d) => heap.alloc(
@@ -204,6 +220,10 @@ impl CoercedAttrExt for CoercedAttr {
             CoercedAttr::SelectFail(message) => {
                 let select_fail = StarlarkSelectFail::new(heap.alloc_str(message));
                 heap.alloc(select_fail)
+            }
+            CoercedAttr::SelectIncompatible(message) => {
+                let select_incompatible = StarlarkSelectIncompatible::new(heap.alloc_str(message));
+                heap.alloc(select_incompatible)
             }
             CoercedAttr::Concat(c) => heap.alloc(StarlarkSelectConcat::new(c.clone(), pkg.dupe())),
         })

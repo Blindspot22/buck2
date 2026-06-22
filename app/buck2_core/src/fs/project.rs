@@ -19,13 +19,14 @@ use std::sync::Arc;
 use buck2_error::BuckErrorContext;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
-use buck2_fs::paths::RelativePath;
 use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::relative_path::RelativePath;
+use buck2_fs::paths::relative_path::RelativePathBuf;
 use dupe::Dupe;
+use pagable::Pagable;
 use ref_cast::RefCast;
-use relative_path::RelativePathBuf;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(input)]
@@ -40,7 +41,15 @@ enum ProjectRootError {
 /// directory (cwd). The root path is the project root as defined in this
 /// library. The cwd will be the directory from which the command was invoked,
 /// which is within the project root and hence relativized against it.
-#[derive(Clone, Debug, Dupe, PartialEq, derive_more::Display, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Dupe,
+    PartialEq,
+    derive_more::Display,
+    Allocative,
+    Pagable
+)]
 #[display("{root}")]
 pub struct ProjectRoot {
     root: Arc<AbsNormPathBuf>,
@@ -277,9 +286,8 @@ impl ProjectRoot {
         let project_relative = self.strip_project_root(path)?;
         // TODO(nga): this does not treat `..` correctly.
         //   See the test below for an example.
-        // This must use `RelativePathBuf`, not `RelativePath`,
-        // because `RelativePathBuf` handles backslashes on Windows, and `RelativePath` does not.
-        ProjectRelativePath::empty().join_normalized(RelativePathBuf::from_path(project_relative)?)
+        ProjectRelativePath::empty()
+            .join_normalized(RelativePathBuf::from_system_path(project_relative)?)
     }
 
     /// Relativize an absolute path which may be not normalized or not canonicalize.
@@ -312,16 +320,9 @@ impl ProjectRoot {
                 format!("`write_file` for `{abs_path}` creating directory `{parent}`")
             })?;
         }
-        fs_util::write(&abs_path, contents)
+        fs_util::write_with_executable_bit(&abs_path, contents, executable)
             .categorize_internal()
             .with_buck_error_context(|| format!("`write_file` writing `{abs_path}`"))?;
-        if executable {
-            fs_util::set_executable(&abs_path, true)
-                .categorize_internal()
-                .with_buck_error_context(|| {
-                    format!("`write_file` setting executable `{abs_path}`")
-                })?;
-        }
         Ok(())
     }
 
@@ -339,13 +340,16 @@ impl ProjectRoot {
         }
         let file = File::create(&abs_path)
             .with_buck_error_context(|| format!("`create_file` creating `{abs_path}`"))?;
+        #[cfg(unix)]
         if executable {
-            fs_util::set_executable(&abs_path, true)
-                .categorize_internal()
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o755))
                 .with_buck_error_context(|| {
                     format!("`create_file` setting executable `{abs_path}`")
                 })?;
         }
+        #[cfg(not(unix))]
+        let _ = executable;
         Ok(file)
     }
 
@@ -516,7 +520,7 @@ impl ProjectRoot {
         let mut target = fs_util::read_link(src).categorize_internal()?;
         if target.is_relative() {
             // Grab the absolute path, then re-relativize the path to the destination
-            let relative_target = fs_util::relative_path_from_system(target.as_path())?;
+            let relative_target = RelativePathBuf::from_system_path(target.as_path())?;
             let absolute_target = relative_target.normalize().to_path(
                 src.parent()
                     .expect("a path with a parent in symlink target"),

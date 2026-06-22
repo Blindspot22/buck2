@@ -59,3 +59,9 @@ Universal Options:
           Metadata key-value pairs to inject into Buck2's logging. Client metadata must be of the
           form `key=value`, where `key` is a snake_case identifier, and will be sent to backend
           datasets
+
+      --agent-context <AGENT_CONTEXT>
+          Agent context key=value pairs for telemetry. Used by AI agents to pass structured
+          metadata. Schema is defined via buckconfig. Entries can be comma-separated or passed as
+          separate flags. Examples: --agent-context intent=fix,attempt=2,prior_error=missing_target
+          --agent-context intent=build --agent-context attempt=1

@@ -20,6 +20,7 @@
 use allocative::Allocative;
 use starlark_derive::NoSerialize;
 use starlark_derive::ProvidesStaticType;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_value;
 
 use crate as starlark;
@@ -40,7 +41,8 @@ struct ValueWithLifetimeParam<'v>(Value<'v>);
     derive_more::Display,
     NoSerialize,
     ProvidesStaticType,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[display("ValueWithoutParam")]
 struct ValueWithoutParam(String);

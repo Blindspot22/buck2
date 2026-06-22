@@ -1,4 +1,10 @@
-load("@fbsource//tools/build_defs:check_dependencies_test.bzl", "assert_dependencies_test", "audit_dependents_test", "check_dependencies_test", "check_mutually_exclusive_dependencies_test")
+load(
+    "@fbsource//tools/build_defs:check_dependencies_test.bzl",
+    "assert_dependencies_test",
+    "audit_dependents_test",
+    "check_dependencies_test",
+    "check_mutually_exclusive_dependencies_test",
+)
 
 ### This file contains some "e2e tests" for the BXL check_dependencies_test infra.
 
@@ -210,4 +216,15 @@ check_mutually_exclusive_dependencies_test(
         ".*:useless_target_2",
     ],
     target = PLATFORM_SPECIFIC_TARGET,
+)
+
+# Regression test for D101392753: clang_rt.profile must NOT appear in the
+# dependency graph of a standard (non-PGO) Rust binary. Linking it
+# unconditionally causes every binary to write default.profraw on exit.
+check_dependencies_test(
+    name = "no_unconditional_profiler_runtime",
+    blocklist_patterns = [".*clang_rt\\.profile.*"],
+    contacts = CONTACTS,
+    mode = "blocklist",
+    target = "fbcode//buck2:buck2",
 )

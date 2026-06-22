@@ -25,8 +25,11 @@ use allocative::Allocative;
 use dupe::Dupe;
 use gazebo::variants::UnpackVariants;
 use itertools::Itertools;
+use pagable::DataKey;
 use sorted_vector_map::SortedVectorMap;
 
+use super::types::PagedOutMatch;
+use super::types::PagedOutMismatch;
 use super::types::VersionedGraphResult;
 use crate::HashSet;
 use crate::api::key::InvalidationSourcePriority;
@@ -162,7 +165,10 @@ impl VersionedGraphNode {
             VersionedGraphNode::Occupied(entry) if reusable.is_reusable(&value, &deps, entry) => {
                 debug!("marking graph entry as unchanged");
                 entry.mark_unchanged(key.v, valid_deps_versions, invalidation_paths);
-                let ret = entry.computed_val(key.v);
+                let ret = entry.computed_val(
+                    key.v,
+                    "is_reusable returned true, which only happens for hydrated entries",
+                );
                 return (ret, false);
             }
             VersionedGraphNode::Occupied(entry) => {
@@ -214,7 +220,10 @@ impl VersionedGraphNode {
             dirtied_history.clone(),
             invalidation_paths,
         );
-        let ret = new.computed_val(key.v);
+        let ret = new.computed_val(
+            key.v,
+            "newly-constructed OccupiedGraphNode is always hydrated",
+        );
         *self = VersionedGraphNode::Occupied(new);
 
         (ret, true)
@@ -298,11 +307,55 @@ pub(crate) enum InvalidateResult<'a> {
     Changed(Option<std::vec::Drain<'a, DiceKey>>),
 }
 
+/// The stored value for an `OccupiedGraphNode`. At least one of `value` (the
+/// in-memory hydrated form) and `data_key` (the on-disk content-addressable
+/// reference) must be set. When both are set, the value is resident in memory
+/// AND known to be persisted on disk, so the next page-out can skip
+/// re-serialization.
+#[derive(Allocative, Debug)]
+pub(crate) struct PagableNodeValue {
+    value: Option<DiceValidValue>,
+    data_key: Option<DataKey>,
+}
+
+impl PagableNodeValue {
+    /// Constructs a hydrated-only value (no on-disk copy yet).
+    pub(crate) fn hydrated(value: DiceValidValue) -> Self {
+        Self {
+            value: Some(value),
+            data_key: None,
+        }
+    }
+
+    /// Returns the hydrated value, panicking with `msg` if the value is not currently
+    /// resident in memory. `msg` should explain why the caller knows the value is
+    /// hydrated (analogous to `Option::expect`).
+    pub(crate) fn expect_hydrated(&self, msg: &str) -> &DiceValidValue {
+        self.value.as_ref().unwrap_or_else(|| {
+            panic!(
+                "PagableNodeValue::expect_hydrated called on a paged-out value: {}",
+                msg
+            )
+        })
+    }
+
+    pub(crate) fn as_hydrated(&self) -> Option<&DiceValidValue> {
+        self.value.as_ref()
+    }
+
+    /// Returns the on-disk key if the value has already been serialized to storage.
+    /// When this is `Some`, the next page-out can skip re-serialization and reuse
+    /// the existing key.
+    pub(crate) fn data_key(&self) -> Option<DataKey> {
+        self.data_key
+    }
+}
+
 /// The stored entry of the cache
 #[derive(Allocative, Debug)]
 pub(crate) struct OccupiedGraphNode {
     key: DiceKey,
-    res: DiceValidValue,
+    res: PagableNodeValue,
     metadata: NodeMetadata,
     invalidation_paths: TrackedInvalidationPaths,
 }
@@ -436,11 +489,11 @@ impl OccupiedGraphNode {
     ) -> Self {
         Self {
             key,
-            res,
+            res: PagableNodeValue::hydrated(res),
             metadata: NodeMetadata {
                 deps,
                 rdeps: LazyDepsSet::new(),
-                verified_ranges: Arc::new(verified_ranges),
+                verified_ranges: verified_ranges.into_arc(),
                 dirtied_history,
             },
             invalidation_paths,
@@ -467,13 +520,36 @@ impl OccupiedGraphNode {
         self.invalidation_paths.update(new_invalidation_paths)
     }
 
-    pub(crate) fn val(&self) -> &DiceValidValue {
+    /// Returns this node's stored value (which may be hydrated or paged out).
+    /// Callers that need a hydrated `DiceValidValue` should call `.expect_hydrated(msg)`
+    /// with a message explaining why the caller knows the value is hydrated.
+    pub(crate) fn val(&self) -> &PagableNodeValue {
         &self.res
     }
 
-    pub(crate) fn computed_val(&self, for_version: VersionNumber) -> DiceComputedValue {
+    /// Restores the in-memory hydrated value (typically after deserializing from
+    /// disk). Keeps any existing `data_key` so the next page-out skips
+    /// re-serialization.
+    pub(crate) fn rehydrate(&mut self, value: DiceValidValue) {
+        self.res.value = Some(value);
+    }
+
+    /// Records that the value has been written to storage at `data_key` and drops
+    /// the in-memory value (the on-disk reference is now load-bearing).
+    pub(crate) fn set_paged_out(&mut self, data_key: DataKey) {
+        self.res.data_key = Some(data_key);
+        self.res.value = None;
+    }
+
+    /// `expect_hydrated_msg` is forwarded to `expect_hydrated` and should explain why the
+    /// caller knows the entry is hydrated.
+    pub(crate) fn computed_val(
+        &self,
+        for_version: VersionNumber,
+        expect_hydrated_msg: &str,
+    ) -> DiceComputedValue {
         DiceComputedValue::new(
-            MaybeValidDiceValue::valid(self.res.dupe()),
+            MaybeValidDiceValue::valid(self.val().expect_hydrated(expect_hydrated_msg).dupe()),
             self.metadata.verified_ranges.dupe(),
             self.invalidation_paths.at_version(for_version),
         )
@@ -487,13 +563,19 @@ impl OccupiedGraphNode {
     ) -> InvalidateResult<'_> {
         // TODO(cjhopman): accepting injections only for InjectedKey would make the VersionedGraph simpler. Currently, this is used
         // for "mocking" dice keys in tests via DiceBuilder::mock_and_return().
-        if self.val().equality(&value) {
-            // TODO(cjhopman): This is wrong. The node could currently be in a dirtied state and we
-            // aren't recording that the value is verified at this version.
-            return InvalidateResult::NoChange;
+        //
+        // Equality short-circuit only applies when the existing value is hydrated. If
+        // it's paged out, we can't compare without hydrating, so we skip the check
+        // and just replace the node below.
+        if let Some(existing) = self.res.as_hydrated() {
+            if existing.equality(&value) {
+                // TODO(cjhopman): This is wrong. The node could currently be in a dirtied state and we
+                // aren't recording that the value is verified at this version.
+                return InvalidateResult::NoChange;
+            }
         }
 
-        self.res = value;
+        self.res = PagableNodeValue::hydrated(value);
         self.metadata.deps = Arc::new(SeriesParallelDeps::None);
         self.metadata.verified_ranges = Arc::new(VersionRange::begins_with(version).into_ranges());
         self.invalidation_paths
@@ -508,7 +590,21 @@ impl OccupiedGraphNode {
 
     fn at_version(&self, v: VersionNumber) -> VersionedGraphResult {
         match self.metadata.verified_ranges.find_value_upper_bound(v) {
-            Some(found) if found == v => VersionedGraphResult::Match(self.computed_val(v)),
+            Some(found) if found == v => {
+                if self.res.value.is_some() {
+                    VersionedGraphResult::Match(
+                        self.computed_val(v, "the Hydrated branch checked value.is_some()"),
+                    )
+                } else {
+                    VersionedGraphResult::MatchPagedOut(PagedOutMatch {
+                        data_key: self.res.data_key.expect(
+                            "PagableNodeValue invariant: at least one of value or data_key is set",
+                        ),
+                        valid: self.metadata.verified_ranges.dupe(),
+                        invalidation_paths: self.invalidation_paths.at_version(v),
+                    })
+                }
+            }
             Some(prev_verified_version) => {
                 if self
                     .metadata
@@ -516,11 +612,21 @@ impl OccupiedGraphNode {
                     .restricted_range(v)
                     .contains(&prev_verified_version)
                 {
-                    VersionedGraphResult::CheckDeps(VersionedGraphResultMismatch {
-                        entry: self.val().dupe(),
-                        prev_verified_version,
-                        deps_to_validate: self.metadata.deps.dupe(),
-                    })
+                    if let Some(value) = &self.res.value {
+                        VersionedGraphResult::CheckDeps(VersionedGraphResultMismatch {
+                            entry: value.dupe(),
+                            prev_verified_version,
+                            deps_to_validate: self.metadata.deps.dupe(),
+                        })
+                    } else {
+                        VersionedGraphResult::CheckDepsPagedOut(PagedOutMismatch {
+                            data_key: self.res.data_key.expect(
+                                "PagableNodeValue invariant: at least one of value or data_key is set",
+                            ),
+                            prev_verified_version,
+                            deps_to_validate: self.metadata.deps.dupe(),
+                        })
+                    }
                 } else {
                     VersionedGraphResult::Compute
                 }
@@ -723,9 +829,14 @@ mod tests {
     use derive_more::Display;
     use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
 
+    use crate::DiceKeyDyn;
     use crate::api::computations::DiceComputations;
     use crate::api::key::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
     use crate::arc::Arc;
     use crate::impls::core::graph::nodes::ForceDirtyHistory;
     use crate::impls::core::graph::nodes::OccupiedGraphNode;
@@ -738,7 +849,8 @@ mod tests {
     use crate::versions::VersionRange;
     use crate::versions::VersionRanges;
 
-    #[derive(Allocative, Clone, Dupe, Debug, Display, PartialEq, Eq, Hash)]
+    #[derive(Allocative, Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct K;
 
     #[async_trait]
@@ -755,6 +867,10 @@ mod tests {
 
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
             x == y
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 

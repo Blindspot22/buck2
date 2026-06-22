@@ -13,10 +13,15 @@ use async_trait::async_trait;
 use derive_more::Display;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
+use crate::DiceKeyDyn;
 use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::key::Key;
+use crate::api::key::NoValueSerialize;
+use crate::api::key::ValueSerialize;
 use crate::api::user_data::UserComputationData;
 use crate::impls::dice::Dice;
 
@@ -24,9 +29,11 @@ use crate::impls::dice::Dice;
 async fn different_data_per_compute_ctx() {
     struct U(usize);
 
-    #[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative)]
+    #[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative, Pagable)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct DataRequest(u8);
+
     #[async_trait]
     impl Key for DataRequest {
         type Value = usize;
@@ -41,6 +48,10 @@ async fn different_data_per_compute_ctx() {
 
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
             x == y
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 

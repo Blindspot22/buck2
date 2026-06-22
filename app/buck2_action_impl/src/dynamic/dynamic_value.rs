@@ -16,16 +16,15 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Value;
 use starlark::values::ValueTyped;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark_map::StarlarkHasher;
 
 #[derive(
@@ -33,12 +32,16 @@ use starlark_map::StarlarkHasher;
     ProvidesStaticType,
     derive_more::Display,
     Allocative,
-    NoSerialize
+    NoSerialize,
+    StarlarkPagable
 )]
 #[display("DynamicValue<{}>", self.dynamic_value)]
 pub struct StarlarkDynamicValue {
+    #[starlark_pagable(pagable)]
     pub(crate) dynamic_value: DynamicValue,
 }
+
+starlark::methods_static!(DYNAMIC_VALUE_METHODS = dynamic_value_methods);
 
 #[starlark_value(type = "DynamicValue", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkDynamicValue {
@@ -56,8 +59,7 @@ impl<'v> StarlarkValue<'v> for StarlarkDynamicValue {
 
     // used for docs of `DynamicValue`
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(dynamic_value_methods)
+        Some(DYNAMIC_VALUE_METHODS.methods())
     }
 }
 
@@ -68,9 +70,8 @@ impl<'v> AllocValue<'v> for StarlarkDynamicValue {
 }
 
 #[starlark_module]
-pub(crate) fn register_dynamic_value(globals: &mut GlobalsBuilder) {
-    const DynamicValue: StarlarkValueAsType<StarlarkDynamicValue> = StarlarkValueAsType::new();
-}
+#[starlark_types(StarlarkDynamicValue as DynamicValue)]
+pub(crate) fn register_dynamic_value(globals: &mut GlobalsBuilder) {}
 
 /// A value produced by a dynamic action that can be consumed by other dynamic actions.
 ///

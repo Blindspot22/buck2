@@ -13,13 +13,16 @@
 use dupe::Dupe;
 use gazebo::variants::UnpackVariants;
 use gazebo::variants::VariantName;
+use pagable::DataKey;
 
 use crate::arc::Arc;
 use crate::impls::deps::graph::SeriesParallelDeps;
 use crate::impls::key::DiceKey;
 use crate::impls::value::DiceComputedValue;
 use crate::impls::value::DiceValidValue;
+use crate::impls::value::TrackedInvalidationPaths;
 use crate::versions::VersionNumber;
+use crate::versions::VersionRanges;
 
 /// The Key for a Versioned, incremental computation
 #[derive(Copy, Clone, Dupe, Debug)]
@@ -43,13 +46,38 @@ pub(crate) struct VersionedGraphResultMismatch {
     pub(crate) deps_to_validate: Arc<SeriesParallelDeps>,
 }
 
+/// Equivalent of [`DiceComputedValue`] for the case where the matched entry's value is
+/// paged out. The worker hydrates `data_key` via `DiceStorage` to materialize the value
+/// before constructing a `DiceComputedValue`.
+#[derive(Debug)]
+pub(crate) struct PagedOutMatch {
+    pub(crate) data_key: DataKey,
+    pub(crate) valid: Arc<VersionRanges>,
+    pub(crate) invalidation_paths: TrackedInvalidationPaths,
+}
+
+/// Equivalent of [`VersionedGraphResultMismatch`] for the case where the previous entry's
+/// value is paged out. The worker hydrates `data_key` via `DiceStorage` to materialize the
+/// previous value before deciding whether deps still hold.
+#[derive(Debug)]
+pub(crate) struct PagedOutMismatch {
+    pub(crate) data_key: DataKey,
+    pub(crate) prev_verified_version: VersionNumber,
+    pub(crate) deps_to_validate: Arc<SeriesParallelDeps>,
+}
+
 #[derive(Debug, VariantName, UnpackVariants)]
 pub(crate) enum VersionedGraphResult {
     /// the entry is present and valid at the requested version
     Match(DiceComputedValue),
+    /// the entry is present and valid at the requested version, but its value is paged
+    /// out and must be hydrated before use
+    MatchPagedOut(PagedOutMatch),
     /// the entry at the requested version has been invalidated and
     /// we have a previous value with deps to possibly resurrect
     CheckDeps(VersionedGraphResultMismatch),
+    /// like `CheckDeps`, but the previous entry's value is paged out
+    CheckDepsPagedOut(PagedOutMismatch),
     /// the entry is missing or there's no previously valid value to check
     Compute,
     /// the storage has rejected the request

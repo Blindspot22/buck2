@@ -520,7 +520,7 @@ pub fn get_default_executor_config(host_platform: HostPlatformOverride) -> Comma
             dependencies: vec![],
             gang_workers: vec![],
             custom_image: None,
-            meta_internal_extra_params: MetaInternalExtraParams::default(),
+            meta_internal_extra_params: MetaInternalExtraParams::default_arc(),
             priority: None,
         })
     };
@@ -531,6 +531,7 @@ pub fn get_default_executor_config(host_platform: HostPlatformOverride) -> Comma
             path_separator: get_default_path_separator(host_platform),
             output_paths_behavior: Default::default(),
             use_bazel_protocol_remote_persistent_workers: false,
+            network_access: None,
         },
     }
 }

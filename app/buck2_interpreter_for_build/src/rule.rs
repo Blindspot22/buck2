@@ -54,11 +54,12 @@ use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
-use starlark::values::FrozenRef;
 use starlark::values::FrozenStringValue;
 use starlark::values::FrozenValue;
+use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
@@ -69,7 +70,6 @@ use starlark::values::list::ListType;
 use starlark::values::list::UnpackList;
 use starlark::values::list_or_tuple::UnpackListOrTuple;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::typing::FrozenStarlarkCallable;
 use starlark::values::typing::StarlarkCallable;
 use starlark::values::typing::StarlarkCallableChecked;
@@ -131,7 +131,7 @@ struct ArtifactPromiseMappings<'v> {
 }
 
 /// Mappings of frozen promise artifact name to the frozen starlark function that will produce it, for anon targets.
-#[derive(Debug, ProvidesStaticType, Trace, Allocative)]
+#[derive(Debug, ProvidesStaticType, Trace, Allocative, StarlarkPagable)]
 pub struct FrozenArtifactPromiseMappings {
     pub mappings: SmallMap<FrozenStringValue, FrozenValue>,
 }
@@ -160,7 +160,7 @@ enum RuleError {
     )]
     IsConfigurationAndToolchain,
     #[error("`rule` can only be declared in bzl files")]
-    RuleNonInBzl,
+    RuleNotInBzl,
     #[error("Cannot specify `cfg` and `supports_incoming_transition` at the same time")]
     CfgAndSupportsIncomingTransition,
     #[error("{0} rules do not support incoming transitions")]
@@ -196,7 +196,7 @@ impl<'v> StarlarkRuleCallable<'v> {
                 BzlOrBxlPath::Bxl(bxl_path.clone())
             }
             (PerFileTypeContext::Bxl(_), RuleImpl::BuildRule(_)) => {
-                return Err(RuleError::RuleNonInBzl.into());
+                return Err(RuleError::RuleNotInBzl.into());
             }
             // TODO(nero): add error for it
             (_, _) => unreachable!(
@@ -396,14 +396,14 @@ impl<'v> StarlarkValue<'v> for StarlarkRuleCallable<'v> {
     }
 }
 
-#[derive(Debug, ProvidesStaticType, Allocative, Clone, Dupe)]
+#[derive(Debug, ProvidesStaticType, Allocative, Clone, Dupe, StarlarkPagable)]
 enum FrozenRuleImpl {
     BuildRule(FrozenStarlarkCallable<(FrozenValue,), ListType<FrozenValue>>),
     BxlAnon(FrozenStarlarkCallable<(FrozenValue, FrozenValue), ListType<FrozenValue>>),
 }
 
 impl FrozenRuleImpl {
-    fn to_frozen_value(self) -> FrozenValue {
+    fn into_frozen_value(self) -> FrozenValue {
         match self {
             FrozenRuleImpl::BuildRule(callable) => callable.0,
             FrozenRuleImpl::BxlAnon(callable) => callable.0,
@@ -473,17 +473,28 @@ impl<'v> Freeze for StarlarkRuleCallable<'v> {
     }
 }
 
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(
+    Debug,
+    Display,
+    ProvidesStaticType,
+    NoSerialize,
+    Allocative,
+    StarlarkPagable
+)]
 #[display("{}()", rule.rule_type.name())]
 pub struct FrozenStarlarkRuleCallable {
+    #[starlark_pagable(pagable)]
     rule: Arc<Rule>,
     /// Identical to `rule.rule_type` but more specific type.
+    #[starlark_pagable(pagable)]
     rule_type: Arc<StarlarkRuleType>,
     implementation: FrozenRuleImpl,
     /// We don't need rely on `signature` to get the default value here, instead we get the default
     /// value from `Rule.attributes`. So use in the ParametersSpecNoDefaults for more clarity
     signature: ParametersSpec<FrozenValue>,
+    #[starlark_pagable(pagable)]
     rule_docs: DocItem,
+    #[starlark_pagable(pagable)]
     ty: Ty,
     ignore_attrs_for_profiling: bool,
     artifact_promise_mappings: Option<FrozenArtifactPromiseMappings>,
@@ -492,15 +503,14 @@ starlark_simple_value!(FrozenStarlarkRuleCallable);
 
 fn unpack_frozen_rule(
     rule: FrozenValue,
-) -> buck2_error::Result<FrozenRef<'static, FrozenStarlarkRuleCallable>> {
-    rule.downcast_frozen_ref::<FrozenStarlarkRuleCallable>()
-        .ok_or_else(|| internal_error!("Expecting FrozenRuleCallable"))
+) -> buck2_error::Result<FrozenValueTyped<'static, FrozenStarlarkRuleCallable>> {
+    FrozenValueTyped::new(rule).ok_or_else(|| internal_error!("Expecting FrozenRuleCallable"))
 }
 
 pub(crate) fn init_frozen_rule_get_impl() {
     FROZEN_RULE_GET_IMPL.init(|rule| {
         let rule = unpack_frozen_rule(rule)?;
-        Ok(rule.implementation.dupe().to_frozen_value())
+        Ok(rule.implementation.dupe().into_frozen_value())
     })
 }
 
@@ -579,6 +589,7 @@ impl<'v> StarlarkValue<'v> for FrozenStarlarkRuleCallable {
 }
 
 #[starlark_module]
+#[starlark_types(StarlarkRuleCallable<'_> as Rule)]
 pub fn register_rule_function(builder: &mut GlobalsBuilder) {
     /// Define a rule. As a simple example:
     ///
@@ -646,7 +657,4 @@ pub fn register_rule_function(builder: &mut GlobalsBuilder) {
         StarlarkRuleCallable::new_anon(r#impl, attrs, doc, artifact_promise_mappings, eval)
             .map_err(Into::into)
     }
-
-    /// Type symbol for Rule.
-    const Rule: StarlarkValueAsType<StarlarkRuleCallable> = StarlarkValueAsType::new();
 }

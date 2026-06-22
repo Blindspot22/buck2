@@ -19,7 +19,9 @@
 
 use std::cmp;
 
-use crate::cast::transmute;
+use starlark_derive::StarlarkPagable;
+
+use crate as starlark;
 use crate::eval::bc::addr::BcAddr;
 use crate::eval::bc::addr::BcAddrOffset;
 use crate::eval::bc::bytecode::Bc;
@@ -54,11 +56,12 @@ use crate::eval::runtime::frame_span::FrameSpan;
 use crate::eval::runtime::slots::LocalCapturedSlotId;
 use crate::eval::runtime::slots::LocalSlotId;
 use crate::values::FrozenHeap;
-use crate::values::FrozenRef;
 use crate::values::FrozenStringValue;
 use crate::values::FrozenValue;
+use crate::values::any::FrozenAnyValue;
+use crate::values::types::any_array::FrozenAnyArray;
 
-#[derive(Debug)]
+#[derive(Debug, StarlarkPagable)]
 pub(crate) struct BcStmtLoc {
     pub(crate) span: FrameSpan,
 }
@@ -67,6 +70,7 @@ pub(crate) struct BcStmtLoc {
 /// Map<BcAddr, BcStmtLoc>. This is very performance sensitive (when profiling/debugging are enabled we
 /// do a lookup for every instruction) and so it's implemented as a vec of statements and then a vec of
 /// statement indexes for each possible BcAddr in a bytecode Bc.
+#[derive(StarlarkPagable)]
 pub(crate) struct BcStatementLocations {
     pub(crate) locs: Vec<BcStmtLoc>,
     /// Map bytecode offset to index in `locs`.
@@ -102,7 +106,7 @@ impl BcStatementLocations {
     }
 
     fn last_stmt_idx(&self) -> Option<u32> {
-        for stmt_idx in (&self.stmts).iter().rev() {
+        for stmt_idx in self.stmts.iter().rev() {
             if *stmt_idx != u32::MAX {
                 return Some(*stmt_idx & !Self::CONTINUED_BIT);
             }
@@ -163,7 +167,7 @@ pub(crate) struct BcWriter<'f> {
     /// Current stack size.
     stack_size: u32,
     /// Local slot count.
-    local_names: FrozenRef<'f, [FrozenStringValue]>,
+    local_names: FrozenAnyArray<FrozenStringValue>,
     /// Local variables which are known to be definitely assigned at current program point.
     definitely_assigned: BcDefinitelyAssigned,
     /// Max observed stack size.
@@ -180,7 +184,7 @@ pub(crate) struct BcWriter<'f> {
 impl<'f> BcWriter<'f> {
     /// Empty.
     pub(crate) fn new(
-        local_names: FrozenRef<'f, [FrozenStringValue]>,
+        local_names: FrozenAnyArray<FrozenStringValue>,
         param_count: u32,
         heap: &'f FrozenHeap,
     ) -> BcWriter<'f> {
@@ -225,14 +229,6 @@ impl<'f> BcWriter<'f> {
         let _ = definitely_assigned;
         assert_eq!(stack_size, 0);
         assert!(for_loops.is_empty());
-        // Drop lifetime.
-        let local_names = unsafe {
-            transmute!(
-                FrozenRef<[FrozenStringValue]>,
-                FrozenRef<[FrozenStringValue]>,
-                local_names
-            )
-        };
         Bc {
             instrs: instrs.finish(spans, stmt_locs, local_names),
             local_count: local_names.len().try_into().unwrap(),
@@ -621,7 +617,7 @@ impl<'f> BcWriter<'f> {
         r
     }
 
-    pub(crate) fn alloc_file_span(&self, span: FrameSpan) -> FrozenRef<'static, FrameSpan> {
-        self.heap.alloc_any(span)
+    pub(crate) fn alloc_file_span(&self, span: FrameSpan) -> FrozenAnyValue<FrameSpan> {
+        self.heap.alloc_any_value(span)
     }
 }

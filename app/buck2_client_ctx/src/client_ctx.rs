@@ -21,14 +21,17 @@ use buck2_common::init::LogDownloadMethod;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_common::invocation_paths_result::InvocationPathsResult;
 use buck2_core::error::buck2_hard_error_env;
+use buck2_core::error::buck2_show_soft_errors_env;
 use buck2_error::BuckErrorContext;
 use buck2_event_observer::verbosity::Verbosity;
 use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_fs::working_dir::AbsWorkingDir;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
+use superconsole::Stdin;
 use tokio::runtime::Runtime;
 
+use crate::agent_context::AgentContextEntry;
 use crate::client_metadata::ClientMetadata;
 use crate::common::BuckArgMatches;
 use crate::common::CommonEventLogOptions;
@@ -43,7 +46,6 @@ use crate::events_ctx::EventsCtx;
 use crate::exit_result::ExitResult;
 use crate::immediate_config::ImmediateConfigContext;
 use crate::restarter::Restarter;
-use crate::stdin::Stdin;
 use crate::streaming::StreamingCommand;
 
 pub struct ClientCommandContext<'a> {
@@ -66,6 +68,7 @@ pub struct ClientCommandContext<'a> {
     oncall: Option<String>,
     pub(crate) client_metadata: Vec<ClientMetadata>,
     pub(crate) isolation: FileNameBuf,
+    pub(crate) agent_context: Vec<AgentContextEntry>,
 }
 
 impl<'a> ClientCommandContext<'a> {
@@ -85,6 +88,7 @@ impl<'a> ClientCommandContext<'a> {
         oncall: Option<String>,
         client_metadata: Vec<ClientMetadata>,
         isolation: FileNameBuf,
+        agent_context: Vec<AgentContextEntry>,
     ) -> Self {
         ClientCommandContext {
             init,
@@ -102,7 +106,13 @@ impl<'a> ClientCommandContext<'a> {
             oncall,
             client_metadata,
             isolation,
+            agent_context,
         }
+    }
+
+    /// Check whether the expanded argv (after flagfile expansion) contains a `--` separator.
+    pub fn expanded_argv_has_separator(&self) -> bool {
+        self.argv.expanded_argv.args().any(|arg| arg == "--")
     }
 
     pub fn fbinit(&self) -> fbinit::FacebookInit {
@@ -266,6 +276,7 @@ impl<'a> ClientCommandContext<'a> {
             sanitized_argv: Vec::new(),
             argfiles: Vec::new(),
             buck2_hard_error: buck2_hard_error_env()?.unwrap_or_default().to_owned(),
+            buck2_show_soft_errors: buck2_show_soft_errors_env()?.unwrap_or_default().to_owned(),
             command_name: command_name.to_owned(),
             client_metadata: self
                 .client_metadata
@@ -276,7 +287,22 @@ impl<'a> ClientCommandContext<'a> {
             representative_config_flags: Vec::new(),
             exit_when: Default::default(),
             profile_pattern_opts: None,
+            agent_context: self
+                .agent_context
+                .iter()
+                .map(|e| buck2_data::AgentContextEntry {
+                    key: e.key.clone(),
+                    value: e.value.clone(),
+                })
+                .collect(),
         })
+    }
+
+    pub fn client_id(&self) -> Option<&str> {
+        self.client_metadata
+            .iter()
+            .find(|m| m.key == "id")
+            .map(|m| m.value.as_str())
     }
 
     pub fn log_download_method(&self) -> buck2_error::Result<LogDownloadMethod> {

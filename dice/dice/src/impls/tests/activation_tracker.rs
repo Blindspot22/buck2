@@ -16,16 +16,21 @@ use async_trait::async_trait;
 use derive_more::Display;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::ActivationData;
 use crate::ActivationTracker;
 use crate::Dice;
 use crate::DiceDataBuilder;
+use crate::DiceKeyDyn;
 use crate::DynKey;
 use crate::InjectedKey;
 use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::key::Key;
+use crate::api::key::NoValueSerialize;
+use crate::api::key::ValueSerialize;
 use crate::api::user_data::UserComputationData;
 
 #[derive(Default, Allocative)]
@@ -91,8 +96,9 @@ impl Kind {
 #[derive(PartialEq, Eq, Debug, Dupe, Clone, Allocative)]
 struct Data;
 
-#[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Debug, Display, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct Injected;
 
 #[async_trait]
@@ -102,10 +108,15 @@ impl InjectedKey for Injected {
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
+    }
 }
 
-#[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative)]
+#[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct Stage0;
 
 #[async_trait]
@@ -124,10 +135,15 @@ impl Key for Stage0 {
     fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
         true
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
+    }
 }
 
-#[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative)]
+#[derive(Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(DiceKeyDyn)]
 struct Stage1;
 
 #[async_trait]
@@ -145,6 +161,10 @@ impl Key for Stage1 {
 
     fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
         true
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
     }
 }
 

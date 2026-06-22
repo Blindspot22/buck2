@@ -8,14 +8,7 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
-
 //! Implements Buck's handling of target patterns and parsing of build files.
-
-#![feature(pattern)]
-#![feature(try_blocks)]
-#![feature(never_type)]
-#![feature(box_patterns)]
 
 pub mod allow_relative_paths;
 pub mod build_context;
@@ -40,4 +33,5 @@ pub mod soft_error;
 pub mod starlark_debug;
 pub mod starlark_profiler;
 pub mod starlark_promise;
+pub mod testing;
 pub mod types;

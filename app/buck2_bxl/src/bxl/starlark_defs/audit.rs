@@ -23,7 +23,6 @@ use futures::FutureExt;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
@@ -64,11 +63,12 @@ pub(crate) struct StarlarkAuditCtx<'v> {
     cell_resolver: CellResolver,
 }
 
+starlark::methods_static!(AUDIT_METHODS = audit_methods);
+
 #[starlark_value(type = "bxl.AuditContext", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkAuditCtx<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(audit_methods)
+        Some(AUDIT_METHODS.methods())
     }
 }
 
@@ -110,7 +110,7 @@ fn audit_methods(builder: &mut MethodsBuilder) {
     /// ```python
     /// def _impl_audit_output(ctx):
     ///     target_platform = "foo"
-    ///     result = ctx.audit().output("buck-out/v2/gen/fbcode/some_cfg_hash/path/to/__target__/artifact", target_platform)
+    ///     result = ctx.audit().output("buck-out/v2/art/fbcode/some_cfg_hash/path/to/__target__/artifact", target_platform)
     ///     ctx.output.print(result)
     /// ```
     fn output<'v>(

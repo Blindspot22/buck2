@@ -42,11 +42,13 @@ use buck2_execute::directory::re_tree_to_directory;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::CasDownloadInfo;
 use buck2_execute::materialize::materializer::DeclareArtifactPayload;
+use buck2_hash::BuckIndexSet;
 use chrono::DateTime;
 use chrono::TimeZone;
 use chrono::Utc;
 use dupe::Dupe;
-use indexmap::IndexSet;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use remote_execution as RE;
 use starlark::values::OwnedFrozenValue;
 
@@ -73,13 +75,13 @@ enum CasArtifactActionExecutionError {
     },
 }
 
-#[derive(Debug, Allocative, Clone, Dupe, Copy)]
+#[derive(Debug, Allocative, Clone, Dupe, Copy, Pagable)]
 pub(crate) enum DirectoryKind {
     Directory,
     Tree,
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub(crate) enum ArtifactKind {
     Directory(DirectoryKind),
     File,
@@ -90,13 +92,14 @@ pub(crate) enum ArtifactKind {
 /// provide an minimum expiration timestamp when you add this to force users to think about the TTL
 /// of the artifacts they are referencing (though admittedly this was also an issue in
 /// download_file).
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub(crate) struct UnregisteredCasArtifactAction {
     pub(crate) digest: FileDigest,
     pub(crate) re_use_case: RemoteExecutorUseCase,
     /// We require the caller to declare when this digest will expire. The intention is to force
     /// callers to pay some modicum of attention to when their digests expire.
     #[allocative(skip)]
+    #[pagable(flatten_serde)]
     pub(crate) expires_after: DateTime<Utc>,
     pub(crate) executable: bool,
     pub(crate) kind: ArtifactKind,
@@ -105,7 +108,7 @@ pub(crate) struct UnregisteredCasArtifactAction {
 impl UnregisteredAction for UnregisteredCasArtifactAction {
     fn register(
         self: Box<Self>,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         _starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
@@ -113,7 +116,7 @@ impl UnregisteredAction for UnregisteredCasArtifactAction {
     }
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 struct CasArtifactAction {
     output: BuildArtifact,
     inner: UnregisteredCasArtifactAction,
@@ -121,7 +124,7 @@ struct CasArtifactAction {
 
 impl CasArtifactAction {
     fn new(
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         inner: UnregisteredCasArtifactAction,
     ) -> buck2_error::Result<Self> {
         let outputs_len = outputs.len();
@@ -157,6 +160,7 @@ impl CasArtifactAction {
     }
 }
 
+#[pagable_typetag]
 #[async_trait]
 impl Action for CasArtifactAction {
     fn kind(&self) -> buck2_data::ActionKind {
@@ -331,13 +335,16 @@ impl Action for CasArtifactAction {
             }
             .as_ref(),
         )?;
+        let configuration_path = ctx
+            .materializer()
+            .maybe_eager_configuration_path(ctx.fs(), self.output.get_path())?;
         ctx.materializer()
             .declare_cas_many(
                 Arc::new(CasDownloadInfo::new_declared(self.inner.re_use_case)),
                 vec![DeclareArtifactPayload {
                     path,
                     artifact: value.dupe(),
-                    persist_full_directory_structure: false,
+                    configuration_path,
                 }],
             )
             .await?;

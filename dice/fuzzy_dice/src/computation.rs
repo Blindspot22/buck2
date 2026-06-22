@@ -17,24 +17,40 @@ use crossbeam::queue::SegQueue;
 use derivative::Derivative;
 use derive_more::Display;
 use dice::DiceComputations;
+use dice::DiceKeyDyn;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
 use dice::Key;
+use dice::NoValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future;
 use futures::future::BoxFuture;
+use pagable::Pagable;
+use pagable::PagablePanic;
+use pagable::pagable_typetag;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Display, Debug, Allocative)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Display, Debug, Allocative, Pagable)]
 #[derive(Serialize, Deserialize)]
 #[display("key{}", _0)]
 #[serde(transparent)]
 pub struct Var(pub usize);
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, Allocative)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    Allocative,
+    Pagable
+)]
 pub enum Unit {
     Variable(Var),
     Literal(bool),
@@ -74,14 +90,19 @@ async fn lookup_unit(ctx: &mut DiceComputations<'_>, var: Var) -> anyhow::Result
     Ok(ctx.compute(&LookupVar(var)).await?)
 }
 
-#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("Lookup({})", _0)]
+#[pagable_typetag(DiceKeyDyn)]
 struct LookupVar(Var);
 impl InjectedKey for LookupVar {
     type Value = Arc<Expr>;
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
     }
 }
 
@@ -158,9 +179,10 @@ impl FuzzState {
     }
 }
 
-#[derive(Derivative, Clone, Display, Allocative)]
+#[derive(Derivative, Clone, Display, Allocative, PagablePanic)]
 #[derivative(Hash, Debug)]
 #[display("Eval({})", key)]
+#[pagable_typetag(DiceKeyDyn)]
 pub struct EvalVar {
     key: Var,
     #[derivative(Debug = "ignore", Hash = "ignore")]
@@ -199,6 +221,10 @@ impl<T> MaybeTransient<T> {
 #[async_trait]
 impl Key for EvalVar {
     type Value = Result<MaybeTransient<bool>, Arc<anyhow::Error>>;
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        NoValueSerialize::<Self::Value>::new()
+    }
 
     async fn compute(
         &self,

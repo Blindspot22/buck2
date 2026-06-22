@@ -15,18 +15,17 @@ use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::values::Demand;
 use starlark::values::Freeze;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
 use super::StarlarkTaggedValueGen;
@@ -34,7 +33,6 @@ use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
-use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
 use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
@@ -47,7 +45,8 @@ use crate::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
     Freeze,
     Display,
     ProvidesStaticType,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[derive(NoSerialize)] // TODO make artifacts serializable
 #[repr(C)]
@@ -64,14 +63,15 @@ impl<V: ValueLifetimeless> StarlarkTaggedCommandLineGen<V> {
 
 starlark_complex_value!(pub StarlarkTaggedCommandLine);
 
+starlark::methods_static!(TAGGED_COMMAND_LINE_METHODS = tagged_command_line_methods);
+
 #[starlark_value(type = "TaggedCommandLine")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkTaggedCommandLineGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(tagged_command_line_methods)
+        Some(TAGGED_COMMAND_LINE_METHODS.methods())
     }
 
     fn provide(&'v self, demand: &mut Demand<'_, 'v>) {
@@ -91,15 +91,10 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for StarlarkTaggedCommandLineG
         command_line_arg_like_impl!(StarlarkTaggedCommandLine::starlark_type_repr());
     }
 
-    fn add_to_command_line(
-        &self,
-        cli: &mut dyn CommandLineBuilder,
-        context: &mut dyn CommandLineContext,
-        artifact_path_mapping: &dyn ArtifactPathMapper,
-    ) -> buck2_error::Result<()> {
+    fn add_to_command_line(&self, fmt: &mut CommandLineBuilder<'v, '_>) -> buck2_error::Result<()> {
         ValueAsCommandLineLike::unpack_value_err(self.inner.value().to_value())?
             .0
-            .add_to_command_line(cli, context, artifact_path_mapping)
+            .add_to_command_line(fmt)
     }
 
     fn visit_artifacts(
@@ -130,7 +125,7 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for StarlarkTaggedCommandLineG
 }
 
 #[starlark_module]
-pub(crate) fn register_tagged_command_line(globals: &mut GlobalsBuilder) {
-    const TaggedCommandLine: StarlarkValueAsType<StarlarkTaggedCommandLine> =
-        StarlarkValueAsType::new();
-}
+#[starlark_types(
+    StarlarkTaggedCommandLine<'_> as TaggedCommandLine
+)]
+pub(crate) fn register_tagged_command_line(globals: &mut GlobalsBuilder) {}

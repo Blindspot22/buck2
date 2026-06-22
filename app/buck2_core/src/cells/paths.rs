@@ -19,12 +19,13 @@ use std::ops::Deref;
 use std::path::PathBuf;
 
 use allocative::Allocative;
-use buck2_fs::paths::RelativePathBuf;
 use buck2_fs::paths::file_name::FileName;
 use buck2_fs::paths::fmt::quoted_display;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathIter;
+use buck2_fs::paths::relative_path::RelativePath;
+use buck2_fs::paths::relative_path::RelativePathBuf;
 use derivative::Derivative;
 use derive_more::Display;
 use gazebo::transmute;
@@ -34,7 +35,6 @@ use pagable::PagableDeserialize;
 use pagable::PagableDeserializer;
 use pagable::PagableSerialize;
 use ref_cast::RefCast;
-use relative_path::RelativePath;
 use serde::Serialize;
 use strong_hash::StrongHash;
 
@@ -333,38 +333,6 @@ impl CellRelativePath {
         self.0.extension()
     }
 
-    /// Build an owned `CellRelativePathBuf`, joined with the given path and
-    /// normalized.
-    ///
-    /// ```
-    /// use std::convert::TryFrom;
-    ///
-    /// use buck2_core::cells::paths::CellRelativePath;
-    /// use buck2_core::cells::paths::CellRelativePathBuf;
-    ///
-    /// assert_eq!(
-    ///     CellRelativePath::from_path("foo/bar")?.join_normalized("../baz.txt")?,
-    ///     CellRelativePathBuf::unchecked_new("foo/baz.txt".into()),
-    /// );
-    ///
-    /// assert_eq!(
-    ///     CellRelativePath::from_path("foo")?
-    ///         .join_normalized("../../baz.txt")
-    ///         .is_err(),
-    ///     true
-    /// );
-    ///
-    /// # buck2_error::Ok(())
-    /// ```
-    pub fn join_normalized<P: AsRef<RelativePath>>(
-        &self,
-        path: P,
-    ) -> buck2_error::Result<CellRelativePathBuf> {
-        let inner = self.0.join_normalized(path)?;
-        // TODO need verify?
-        Ok(CellRelativePathBuf(inner))
-    }
-
     /// Iterator over the components of this path
     ///
     /// ```
@@ -511,10 +479,12 @@ impl<'a> TryFrom<&'a RelativePath> for &'a CellRelativePath {
     /// use buck2_core::cells::paths::CellRelativePath;
     /// use buck2_fs::paths::RelativePath;
     ///
-    /// assert!(<&CellRelativePath>::try_from(RelativePath::new("foo/bar")).is_ok());
-    /// assert!(<&CellRelativePath>::try_from(RelativePath::new("")).is_ok());
-    /// assert!(<&CellRelativePath>::try_from(RelativePath::new("normalize/./bar")).is_err());
-    /// assert!(<&CellRelativePath>::try_from(RelativePath::new("normalize/../bar")).is_err());
+    /// assert!(<&CellRelativePath>::try_from(RelativePath::unchecked_new("foo/bar")).is_ok());
+    /// assert!(<&CellRelativePath>::try_from(RelativePath::unchecked_new("")).is_ok());
+    /// assert!(<&CellRelativePath>::try_from(RelativePath::unchecked_new("normalize/./bar")).is_err());
+    /// assert!(
+    ///     <&CellRelativePath>::try_from(RelativePath::unchecked_new("normalize/../bar")).is_err()
+    /// );
     /// ```
     fn try_from(s: &'a RelativePath) -> buck2_error::Result<&'a CellRelativePath> {
         Ok(CellRelativePath::ref_cast(ForwardRelativePath::new(

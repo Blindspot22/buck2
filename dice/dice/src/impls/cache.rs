@@ -14,10 +14,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use allocative::Allocative;
+use buck2_hash::BuckHasherBuilder;
 use dashmap::DashMap;
 use dice_error::result::CancellationReason;
 use dupe::Dupe;
-use fxhash::FxBuildHasher;
 use lock_free_hashtable::sharded::ShardedLockFreeRawTable;
 
 use crate::arc::Arc;
@@ -29,7 +29,7 @@ use crate::impls::value::DiceComputedValue;
 struct Data {
     completed: ShardedLockFreeRawTable<Arc<DiceCompletedTask>, 64>,
     /// Completed tasks lazily moved into `completed` from this map.
-    storage: DashMap<DiceKey, DiceTask, FxBuildHasher>,
+    storage: DashMap<DiceKey, DiceTask, BuckHasherBuilder>,
     is_cancelled: AtomicBool,
 }
 
@@ -47,8 +47,8 @@ struct DiceCompletedTask {
 /// Reference to the task in the cache.
 pub(crate) enum DiceTaskRef<'a> {
     Computed(DiceComputedValue),
-    Occupied(dashmap::mapref::entry::OccupiedEntry<'a, DiceKey, DiceTask, FxBuildHasher>),
-    Vacant(dashmap::mapref::entry::VacantEntry<'a, DiceKey, DiceTask, FxBuildHasher>),
+    Occupied(dashmap::mapref::entry::OccupiedEntry<'a, DiceKey, DiceTask>),
+    Vacant(dashmap::mapref::entry::VacantEntry<'a, DiceKey, DiceTask>),
     TransactionCancelled,
 }
 
@@ -168,12 +168,10 @@ impl SharedCache {
 pub(crate) mod introspection {
     use crate::impls::cache::SharedCache;
     use crate::impls::key::DiceKey;
-    use crate::legacy::dice_futures::dice_task::DiceTaskStateForDebugging;
+    use crate::impls::task::DiceTaskState;
 
     impl SharedCache {
-        pub(crate) fn iter_tasks(
-            &self,
-        ) -> impl Iterator<Item = (DiceKey, DiceTaskStateForDebugging)> {
+        pub(crate) fn iter_tasks(&self) -> impl Iterator<Item = (DiceKey, DiceTaskState)> {
             self.data
                 .storage
                 .iter()
@@ -184,8 +182,6 @@ pub(crate) mod introspection {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
-
     use allocative::Allocative;
     use async_trait::async_trait;
     use derive_more::Display;
@@ -194,24 +190,23 @@ mod tests {
     use dice_futures::spawner::TokioSpawner;
     use dupe::Dupe;
     use futures::FutureExt;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
 
+    use crate::DiceKeyDyn;
     use crate::api::computations::DiceComputations;
     use crate::api::key::Key;
-    use crate::arc::Arc;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
     use crate::impls::cache::DiceTaskRef;
     use crate::impls::cache::SharedCache;
     use crate::impls::key::DiceKey;
-    use crate::impls::key::ParentKey;
     use crate::impls::task::dice::DiceTask;
     use crate::impls::task::spawn_dice_task;
-    use crate::impls::value::DiceComputedValue;
-    use crate::impls::value::DiceKeyValue;
-    use crate::impls::value::DiceValidValue;
-    use crate::impls::value::MaybeValidDiceValue;
-    use crate::impls::value::TrackedInvalidationPaths;
-    use crate::versions::VersionRanges;
+    use crate::testing_helpers::make_completed_task;
 
-    #[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash)]
+    #[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct K;
 
     #[async_trait]
@@ -229,27 +224,10 @@ mod tests {
         fn equality(_: &Self::Value, _: &Self::Value) -> bool {
             true
         }
-    }
 
-    async fn make_completed_task(key: DiceKey, val: usize) -> DiceTask {
-        let task = spawn_dice_task(key, &TokioSpawner, &(), |handle| {
-            async move {
-                handle.finished(DiceComputedValue::new(
-                    MaybeValidDiceValue::valid(DiceValidValue::testing_new(
-                        DiceKeyValue::<K>::new(val),
-                    )),
-                    Arc::new(VersionRanges::new()),
-                    TrackedInvalidationPaths::clean(),
-                ));
-
-                Box::new(()) as Box<dyn Any + Send>
-            }
-            .boxed()
-        });
-
-        task.depended_on_by(ParentKey::None).unwrap().await.unwrap();
-
-        task
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
     }
 
     async fn make_finished_cancelling_task(key: DiceKey) -> DiceTask {
@@ -281,8 +259,8 @@ mod tests {
     async fn test_drain_task() {
         let cache = SharedCache::new();
 
-        let completed_task1 = make_completed_task(DiceKey { index: 10 }, 1).await;
-        let completed_task2 = make_completed_task(DiceKey { index: 20 }, 2).await;
+        let completed_task1 = make_completed_task::<K>(DiceKey { index: 10 }, 1).await;
+        let completed_task2 = make_completed_task::<K>(DiceKey { index: 20 }, 2).await;
 
         let finished_cancelling_tasks1 = make_finished_cancelling_task(DiceKey { index: 30 }).await;
         let finished_cancelling_tasks2 = make_finished_cancelling_task(DiceKey { index: 40 }).await;

@@ -44,9 +44,8 @@ def include_path_for_relative_module_map_paths(ctx: AnalysisContext) -> list[str
         return []
 
 def _traverse_sdk_modules_graph(
-        swift_sdk_module_name_to_deps: dict[str, Dependency],
-        clang_sdk_module_name_to_deps: dict[str, Dependency],
-        sdk_module_dep: Dependency):
+    swift_sdk_module_name_to_deps: dict[str, Dependency], clang_sdk_module_name_to_deps: dict[str, Dependency], sdk_module_dep: Dependency
+):
     if SdkUncompiledModuleInfo not in sdk_module_dep:
         return
 
@@ -135,6 +134,7 @@ def swift_toolchain_impl(ctx):
             swift_upcoming_features = ctx.attrs.swift_upcoming_features,
             uncompiled_clang_sdk_modules_deps = uncompiled_clang_sdk_modules_deps,
             uncompiled_swift_sdk_modules_deps = uncompiled_swift_sdk_modules_deps,
+            enforce_dedupe_eligibility = ctx.attrs.enforce_dedupe_eligibility,
             use_depsfiles = ctx.attrs.use_depsfiles,
             uses_content_based_paths = ctx.attrs.uses_content_based_paths,
         ),

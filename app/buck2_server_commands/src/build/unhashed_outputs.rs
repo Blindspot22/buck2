@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashSet;
 use std::path;
 use std::time::Instant;
 
@@ -22,6 +21,7 @@ use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_fs::paths::abs_path::AbsPath;
+use buck2_hash::StdBuckHashSet;
 use buck2_query::__derive_refs::indexmap::IndexMap;
 use itertools::Itertools;
 use tracing::info;
@@ -35,38 +35,30 @@ pub(crate) fn create_unhashed_outputs(
 
     let start = std::time::Instant::now();
     // The following IndexMap will contain a key of the unhashed/symlink path and values of all the hashed locations that map to the unhashed location.
-    let mut unhashed_to_hashed: IndexMap<AbsNormPathBuf, HashSet<AbsNormPathBuf>> = IndexMap::new();
+    let mut unhashed_to_hashed: IndexMap<AbsNormPathBuf, StdBuckHashSet<AbsNormPathBuf>> =
+        IndexMap::new();
     for provider_artifact in provider_artifacts {
         if !matches!(provider_artifact.provider_type, BuildProviderType::Default) {
             continue;
         }
 
-        match provider_artifact.values.iter().exactly_one() {
-            Ok((artifact, value)) => match artifact.as_parts() {
-                (BaseArtifactKind::Build(build), _projected_path) => {
-                    if let Some(unhashed_path) =
-                        artifact_fs.retrieve_unhashed_location(build.get_path())
-                    {
-                        let path = artifact_fs.resolve_build(
-                            build.get_path(),
-                            if build.get_path().is_content_based_path() {
-                                Some(value.content_based_path_hash())
-                            } else {
-                                None
-                            }
-                            .as_ref(),
-                        )?;
-                        let abs_unhashed_path = fs.resolve(&unhashed_path);
-                        let entry = unhashed_to_hashed
-                            .entry(abs_unhashed_path)
-                            .or_insert_with(HashSet::new);
-                        entry.insert(fs.resolve(&path));
-                    }
+        if let Ok((artifact, value)) = provider_artifact.values.iter().exactly_one()
+            && let (BaseArtifactKind::Build(build), _projected_path) = artifact.as_parts()
+            && let Some(unhashed_path) = artifact_fs.retrieve_unhashed_location(build.get_path())
+        {
+            let path = artifact_fs.resolve_build(
+                build.get_path(),
+                if build.get_path().is_content_based_path() {
+                    Some(value.content_based_path_hash())
+                } else {
+                    None
                 }
-                _ => {}
-            },
-            Err(_) => {}
-        };
+                .as_ref(),
+            )?;
+            let abs_unhashed_path = fs.resolve(&unhashed_path);
+            let entry = unhashed_to_hashed.entry(abs_unhashed_path).or_default();
+            entry.insert(fs.resolve(&path));
+        }
     }
     // The IndexMap is used now to determine if and what conflicts exist where multiple hashed artifact locations
     // all want a symlink to the same unhashed artifact location and deal with them accordingly.
@@ -132,23 +124,20 @@ fn create_unhashed_link(
             .with_buck_error_context(|| "while creating unhashed directory for symlink")?;
     }
 
-    match fs_util::symlink_metadata(&abs_unhashed_path).categorize_internal() {
-        Ok(metadata) => {
-            if metadata.is_dir() {
-                fs_util::remove_dir_all(&abs_unhashed_path)
-                    .categorize_internal()
-                    .with_buck_error_context(
-                        || "was not able to remove absolute unhashed path (directory)",
-                    )?
-            } else {
-                fs_util::remove_file(&abs_unhashed_path)
-                    .categorize_internal()
-                    .with_buck_error_context(
-                        || "was not able to remove absolute unhashed path (file)",
-                    )?
-            }
+    if let Ok(metadata) = fs_util::symlink_metadata(&abs_unhashed_path).categorize_internal() {
+        if metadata.is_dir() {
+            fs_util::remove_dir_all(&abs_unhashed_path)
+                .categorize_internal()
+                .with_buck_error_context(
+                    || "was not able to remove absolute unhashed path (directory)",
+                )?
+        } else {
+            fs_util::remove_file(&abs_unhashed_path)
+                .categorize_internal()
+                .with_buck_error_context(
+                    || "was not able to remove absolute unhashed path (file)",
+                )?
         }
-        Err(_) => {}
     }
     fs_util::symlink(original_path, abs_unhashed_path)
         .categorize_internal()

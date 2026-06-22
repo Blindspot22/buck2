@@ -9,15 +9,20 @@
 # pyre-strict
 
 
+import asyncio
+import json
 import os
+import signal
 from pathlib import Path
 from typing import Any, Optional
 
 import pytest
 from buck2.tests.e2e_util.api.buck import Buck
+from buck2.tests.e2e_util.api.buck_result import BuckException
 from buck2.tests.e2e_util.api.fixtures import Fixture, Span
 from buck2.tests.e2e_util.api.lsp import LSPResponseError
-from buck2.tests.e2e_util.buck_workspace import buck_test
+from buck2.tests.e2e_util.buck_workspace import buck_test, env
+from buck2.tests.e2e_util.helper.utils import daemon_is_alive
 
 
 def _assert_range(range: dict[str, Any], expected: Optional[Span]) -> None:
@@ -35,7 +40,7 @@ def _assert_uris(actual: str, expected: str) -> None:
         # Windows file paths are case-insensitive, and the LSP returns the drive identifier in upper-case.
         # Windows also allows paths to use forward and backward slashes interchangeably.
         # Normalize the paths only on Windows to avoid flakiness.
-        assert actual.lower().replace("\\", "/") == expected.lower()
+        assert actual.replace("\\", "/").replace("%3A", ":").lower() == expected.lower()
     else:
         assert actual == expected
 
@@ -60,11 +65,219 @@ def fixture(buck: Buck, path: Path) -> Fixture:
     return fixture
 
 
+async def _wait_for_exit(process: asyncio.subprocess.Process, timeout: float) -> bool:
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+        return True
+    except TimeoutError:
+        return False
+
+
+async def _kill_if_alive(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+
+    process.kill()
+    await asyncio.wait_for(process.wait(), timeout=30)
+
+
+async def _wait_for_file_to_contain(
+    path: Path,
+    substring: str,
+    timeout: float,
+) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if path.exists() and substring in path.read_text():
+            return True
+        await asyncio.sleep(1)
+    return False
+
+
+def _active_commands_snapshot_has_command(
+    msg: dict[str, Any],
+    command_name: str,
+) -> bool:
+    snapshot = msg.get("response", {}).get("ActiveCommandsSnapshot")
+    if snapshot is None:
+        return False
+
+    return any(
+        command_name in command["argv"] for command in snapshot["active_commands"]
+    )
+
+
+async def _wait_for_active_command_state(
+    subscribe: Any,
+    command_name: str,
+    present: bool,
+    timeout: float,
+) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return False
+
+        try:
+            msg = await asyncio.wait_for(subscribe.read_message(), timeout=remaining)
+        except TimeoutError:
+            return False
+
+        if _active_commands_snapshot_has_command(msg, command_name) == present:
+            return True
+
+
 @buck_test()
 async def test_lsp_starts(buck: Buck) -> None:
     async with await buck.lsp() as lsp:
         # Will fail if the initialize response is not received
         await lsp.init_connection()
+
+
+@buck_test()
+async def test_lsp_stdin_eof_clears_server_command(
+    buck: Buck,
+) -> None:
+    try:
+        async with await buck.subscribe("--active-commands") as subscribe:
+            lsp = await buck.lsp()
+            try:
+                await lsp.init_connection()
+                assert await _wait_for_active_command_state(
+                    subscribe, "lsp", present=True, timeout=10
+                )
+
+                assert lsp.process.stdin is not None
+                lsp.process.stdin.close()
+
+                exited = await _wait_for_exit(lsp.process, timeout=10)
+                assert exited
+                assert lsp.process.returncode is not None
+
+                assert await _wait_for_active_command_state(
+                    subscribe, "lsp", present=False, timeout=10
+                )
+            finally:
+                await _kill_if_alive(lsp.process)
+    finally:
+        await buck.kill()
+
+
+@buck_test()
+@env("BUCK2_TESTING_INACTIVITY_TIMEOUT", "true")
+async def test_lsp_does_not_exit_when_daemon_times_out(buck: Buck) -> None:
+    await buck.server()
+    status = await buck.status()
+    pid = json.loads(status.stdout)["process_info"]["pid"]
+    daemon_dir = await buck.get_daemon_dir()
+    daemon_stderr = daemon_dir / "buckd.stderr"
+
+    lsp = await buck.lsp()
+    try:
+        exited = await _wait_for_exit(lsp.process, timeout=10)
+        assert not exited
+        saw_inactivity_timeout = await _wait_for_file_to_contain(
+            daemon_stderr,
+            "inactivity timeout elapsed",
+            timeout=20,
+        )
+        assert saw_inactivity_timeout
+        assert daemon_is_alive(pid)
+    finally:
+        await _kill_if_alive(lsp.process)
+
+
+@buck_test(skip_for_os=["windows"])
+@env("BUCK2_TESTING_INACTIVITY_TIMEOUT", "true")
+@env("BUCKD_STARTUP_TIMEOUT", "90")
+async def test_lsp_daemon_inactivity_shutdown_currently_times_out_before_recovering_different_user_version(
+    buck: Buck,
+) -> None:
+    await buck.server()
+    status = await buck.status()
+    original_pid = json.loads(status.stdout)["process_info"]["pid"]
+    daemon_dir = await buck.get_daemon_dir()
+    daemon_stderr = daemon_dir / "buckd.stderr"
+    daemon_info = daemon_dir / "buckd.info"
+
+    lsp = await buck.lsp()
+    try:
+        exited = await _wait_for_exit(lsp.process, timeout=10)
+        assert not exited
+
+        saw_inactivity_timeout = await _wait_for_file_to_contain(
+            daemon_stderr,
+            "inactivity timeout elapsed",
+            timeout=20,
+        )
+        assert saw_inactivity_timeout
+        assert daemon_is_alive(original_pid)
+
+        info = json.loads(daemon_info.read_text())
+        info["version"] = "different-version"
+        daemon_info.write_text(json.dumps(info))
+
+        start = asyncio.get_running_loop().time()
+        with pytest.raises(BuckException) as exc:
+            await buck.server()
+        elapsed = asyncio.get_running_loop().time() - start
+
+        assert elapsed >= 90
+        assert "Failed to connect to buck daemon." in exc.value.stderr
+        assert "version: different-version" in exc.value.stderr
+    finally:
+        await _kill_if_alive(lsp.process)
+
+
+@buck_test()
+async def test_lsp_exits_when_daemon_disappears(buck: Buck) -> None:
+    await buck.server()
+
+    lsp = await buck.lsp()
+    try:
+        await lsp.init_connection()
+        await buck.kill()
+
+        exited = await _wait_for_exit(lsp.process, timeout=10)
+        assert exited
+        assert lsp.process.returncode is not None
+    finally:
+        await _kill_if_alive(lsp.process)
+
+
+@buck_test()
+@env("BUCK2_TESTING_INACTIVITY_TIMEOUT", "true")
+async def test_lsp_requests_keep_daemon_alive(buck: Buck) -> None:
+    async with await buck.lsp() as lsp:
+        await lsp.init_connection()
+        daemon_info = await buck.get_daemon_dir() / "buckd.info"
+        pid = json.loads(daemon_info.read_text())["pid"]
+
+        for _ in range(6):
+            await asyncio.sleep(0.2)
+            await lsp.open_file(Path("clean_lint.bzl"))
+
+        assert json.loads(daemon_info.read_text())["pid"] == pid
+        assert lsp.process.returncode is None
+
+
+@buck_test(skip_for_os=["windows"])
+async def test_lsp_exits_when_daemon_is_killed(buck: Buck) -> None:
+    await buck.server()
+    status = await buck.status()
+    pid = json.loads(status.stdout)["process_info"]["pid"]
+
+    lsp = await buck.lsp()
+    try:
+        await lsp.init_connection()
+        os.kill(pid, signal.SIGKILL)
+
+        exited = await _wait_for_exit(lsp.process, timeout=8)
+        assert exited
+        assert lsp.process.returncode is not None
+    finally:
+        await _kill_if_alive(lsp.process)
 
 
 @buck_test()
@@ -93,6 +306,7 @@ async def test_goto_definition(buck: Buck) -> None:
     async with await buck.lsp() as lsp:
         await lsp.init_connection()
         diags = await lsp.open_file(src_targets_path)
+        # pyrefly: ignore [unsupported-operation]
         assert len(diags["diagnostics"]) == 0
 
         res = await lsp.goto_definition(
@@ -101,7 +315,11 @@ async def test_goto_definition(buck: Buck) -> None:
             src_targets.start_col("load_click"),
         )
         _assert_goto_result(
-            res, src_targets.spans["load"], buck.cwd / dest_bzl_path, None
+            # pyrefly: ignore [bad-argument-type]
+            res,
+            src_targets.spans["load"],
+            buck.cwd / dest_bzl_path,
+            None,
         )
 
         res = await lsp.goto_definition(
@@ -110,6 +328,7 @@ async def test_goto_definition(buck: Buck) -> None:
             src_targets.start_col("dummy_click"),
         )
         _assert_goto_result(
+            # pyrefly: ignore [bad-argument-type]
             res,
             src_targets.spans["dummy"],
             buck.cwd / dest_bzl_path,
@@ -121,6 +340,7 @@ async def test_goto_definition(buck: Buck) -> None:
             src_targets.start_line("missing_click"),
             src_targets.start_col("missing_click"),
         )
+        # pyrefly: ignore [bad-argument-type]
         assert len(res) == 0
 
         res = await lsp.goto_definition(
@@ -129,7 +349,11 @@ async def test_goto_definition(buck: Buck) -> None:
             src_targets.start_col("missing_foo_click"),
         )
         _assert_goto_result(
-            res, src_targets.spans["missing_foo"], buck.cwd / dest_targets_path, None
+            # pyrefly: ignore [bad-argument-type]
+            res,
+            src_targets.spans["missing_foo"],
+            buck.cwd / dest_targets_path,
+            None,
         )
 
         res = await lsp.goto_definition(
@@ -138,6 +362,7 @@ async def test_goto_definition(buck: Buck) -> None:
             src_targets.start_col("rule_click"),
         )
         _assert_goto_result(
+            # pyrefly: ignore [bad-argument-type]
             res,
             src_targets.spans["rule"],
             buck.cwd / dest_bzl_path,
@@ -150,6 +375,7 @@ async def test_goto_definition(buck: Buck) -> None:
             src_targets.start_col("baz_click"),
         )
         _assert_goto_result(
+            # pyrefly: ignore [bad-argument-type]
             res,
             src_targets.spans["baz"],
             buck.cwd / dest_targets_path,
@@ -163,13 +389,15 @@ async def test_returns_file_contents_for_starlark_types(buck: Buck) -> None:
         await lsp.init_connection()
 
         res = await lsp.file_contents("starlark:/native/DefaultInfo.bzl")
+        # pyrefly: ignore [unsupported-operation]
         assert res["contents"] is not None
 
         res = await lsp.file_contents("starlark:/native/NonExistent.bzl")
+        # pyrefly: ignore [unsupported-operation]
         assert res["contents"] is None
 
         with pytest.raises(LSPResponseError):
-            await lsp.file_contents(f"file:{lsp.cwd / '.buckconfig'}")
+            await lsp.file_contents((lsp.cwd / ".buckconfig").as_uri())
 
 
 @buck_test()
@@ -180,6 +408,7 @@ async def test_goto_definition_for_globals(buck: Buck) -> None:
     async with await buck.lsp() as lsp:
         await lsp.init_connection()
         diags = await lsp.open_file(globals_bzl_path)
+        # pyrefly: ignore [unsupported-operation]
         assert len(diags["diagnostics"]) == 0
 
         res = await lsp.goto_definition(
@@ -188,12 +417,18 @@ async def test_goto_definition_for_globals(buck: Buck) -> None:
             globals_bzl.start_col("func2_click"),
         )
 
+        # pyrefly: ignore [bad-argument-type]
         assert len(res) == 1
+        # pyrefly: ignore [unsupported-operation]
         _assert_range(res[0]["originSelectionRange"], globals_bzl.spans["func2"])
+        # pyrefly: ignore [unsupported-operation]
         assert res[0]["targetRange"]["start"]["line"] != 0
+        # pyrefly: ignore [unsupported-operation]
         assert res[0]["targetSelectionRange"]["start"]["line"] != 0
         _assert_uris(
-            res[0]["targetUri"], (buck.cwd / "prelude" / "prelude.bzl").as_uri()
+            # pyrefly: ignore [unsupported-operation]
+            res[0]["targetUri"],
+            (buck.cwd / "prelude" / "prelude.bzl").as_uri(),
         )
 
         res = await lsp.goto_definition(
@@ -202,8 +437,11 @@ async def test_goto_definition_for_globals(buck: Buck) -> None:
             globals_bzl.start_col("info_click"),
         )
 
+        # pyrefly: ignore [bad-argument-type]
         assert len(res) == 1
+        # pyrefly: ignore [unsupported-operation]
         _assert_range(res[0]["originSelectionRange"], globals_bzl.spans["info"])
+        # pyrefly: ignore [unsupported-operation]
         _assert_uris(res[0]["targetUri"], "starlark:/native/DefaultInfo.bzl")
 
         res = await lsp.goto_definition(
@@ -211,6 +449,7 @@ async def test_goto_definition_for_globals(buck: Buck) -> None:
             globals_bzl.start_line("invalid_click"),
             globals_bzl.start_col("invalid_click"),
         )
+        # pyrefly: ignore [bad-argument-type]
         assert len(res) == 0
 
 
@@ -223,6 +462,7 @@ async def test_supports_bxl_files(buck: Buck) -> None:
     async with await buck.lsp() as lsp:
         await lsp.init_connection()
         diags = await lsp.open_file(src_bxl_path)
+        # pyrefly: ignore [unsupported-operation]
         assert len(diags["diagnostics"]) == 0
 
         res = await lsp.goto_definition(
@@ -231,6 +471,7 @@ async def test_supports_bxl_files(buck: Buck) -> None:
             src_bxl.start_col("foo_click"),
         )
         _assert_goto_result(
+            # pyrefly: ignore [bad-argument-type]
             res,
             src_bxl.spans["foo"],
             buck.cwd / src_bxl_path,
@@ -243,5 +484,9 @@ async def test_supports_bxl_files(buck: Buck) -> None:
             src_bxl.start_col("f_click"),
         )
         _assert_goto_result(
-            res, src_bxl.spans["f"], buck.cwd / src_bxl_path, src_bxl.spans["dest_f"]
+            # pyrefly: ignore [bad-argument-type]
+            res,
+            src_bxl.spans["f"],
+            buck.cwd / src_bxl_path,
+            src_bxl.spans["dest_f"],
         )

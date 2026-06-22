@@ -42,7 +42,6 @@ use starlark_syntax::fast_string::StrIndices;
 use crate as starlark;
 use crate::collections::aligned_padded_str::AlignedPaddedStr;
 use crate::environment::Methods;
-use crate::environment::MethodsStatic;
 use crate::private::Private;
 use crate::typing::Ty;
 use crate::values::Freeze;
@@ -227,10 +226,7 @@ impl Display for StarlarkStr {
     }
 }
 
-pub(crate) fn str_methods() -> Option<&'static Methods> {
-    static RES: MethodsStatic = MethodsStatic::new();
-    RES.methods(crate::values::types::string::methods::string_methods)
-}
+starlark::methods_static!(STRING_METHODS = crate::values::types::string::methods::string_methods);
 
 #[starlark_value(type = STRING_TYPE)]
 impl<'v> StarlarkValue<'v> for StarlarkStr {
@@ -242,12 +238,16 @@ impl<'v> StarlarkValue<'v> for StarlarkStr {
     }
 
     fn get_methods() -> Option<&'static Methods> {
-        str_methods()
+        Some(STRING_METHODS.methods())
     }
 
     fn collect_repr(&self, buffer: &mut String) {
         // String repr() is quite hot, so optimise it
         string_repr(self, buffer)
+    }
+
+    fn collect_str(&self, buffer: &mut String) {
+        buffer.push_str(self.as_str())
     }
 
     fn to_bool(&self) -> bool {

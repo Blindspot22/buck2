@@ -8,12 +8,12 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
 #![feature(try_blocks)]
-#![feature(once_cell_try)]
 #![feature(used_with_arg)]
 
 pub mod active_commands;
+mod agent_context_validation;
+mod agent_host_guard;
 mod clean_stale;
 mod cpu_usage_collector;
 mod ctx;
@@ -22,6 +22,7 @@ mod dice_tracker;
 mod file_status;
 mod heartbeat_guard;
 mod host_info;
+mod hydration;
 mod jemalloc_stats;
 pub mod lsp;
 mod materialize;

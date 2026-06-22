@@ -16,6 +16,8 @@ use async_trait::async_trait;
 use buck2_common::file_ops::metadata::FileMetadata;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
+use buck2_core::fs::artifact_path_resolver::ArtifactFs;
+use buck2_core::fs::buck_out_path::BuildArtifactPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_directory::directory::directory_iterator::DirectoryIterator;
 use buck2_directory::directory::entry::DirectoryEntry;
@@ -38,10 +40,19 @@ use crate::directory::ActionSharedDirectory;
 use crate::execute::action_digest::TrackedActionDigest;
 use crate::materialize::http::Checksum;
 
+/// Opaque guard returned by `Materializer::register_eager_paths`.
+/// Dropping this guard releases the eager path registrations and cancels
+/// any in-flight low-priority materializations for those paths.
+pub trait EagerMaterializationGuard: Send + Sync + 'static {}
+
+impl EagerMaterializationGuard for () {}
+
 pub struct WriteRequest {
     pub path: ProjectRelativePathBuf,
     pub content: Vec<u8>,
     pub is_executable: bool,
+    /// For content-based artifacts, the configuration-based path used for eager materialization lookups.
+    pub configuration_path: Option<ProjectRelativePathBuf>,
 }
 
 #[cold]
@@ -129,8 +140,8 @@ pub enum MaterializationError {
 pub struct DeclareArtifactPayload {
     pub path: ProjectRelativePathBuf,
     pub artifact: ArtifactValue,
-    /// Whether materializer state should store full information about directory artifact.
-    pub persist_full_directory_structure: bool,
+    /// For content-based artifacts, the configuration-based path used for eager materialization lookups.
+    pub configuration_path: Option<ProjectRelativePathBuf>,
 }
 
 /// A trait providing methods to asynchronously materialize artifacts.
@@ -174,6 +185,7 @@ pub trait Materializer: Allocative + Send + Sync + 'static {
         path: ProjectRelativePathBuf,
         value: ArtifactValue,
         srcs: Vec<CopiedArtifact>,
+        configuration_path: Option<ProjectRelativePathBuf>,
     ) -> buck2_error::Result<()>;
 
     async fn declare_cas_many_impl<'a, 'b>(
@@ -186,6 +198,7 @@ pub trait Materializer: Allocative + Send + Sync + 'static {
         &self,
         path: ProjectRelativePathBuf,
         info: HttpDownloadInfo,
+        configuration_path: Option<ProjectRelativePathBuf>,
     ) -> buck2_error::Result<()>;
 
     /// Write contents to paths. The output is ordered in the same order as the input. Implicitly
@@ -296,14 +309,20 @@ pub trait Materializer: Allocative + Send + Sync + 'static {
     /// time.
     fn add_snapshot_stats(&self, _snapshot: &mut buck2_data::Snapshot) {}
 
-    /// Given a list of `paths`, returns a list of corresponding artifact entries only if all the following conditions are met:
-    ///   - There is an artifact at the given path (either declared or materialized).
-    ///   - The materializer state contains sufficient information about the artifact.
-    ///   - The path refers to the root of the artifact (not a subpath).
-    /// If any of these conditions are not satisfied for a given path, `None` is returned for that path.
+    /// Returns artifact entries for the given `paths`.
+    ///
+    /// If `fetch_root_artifact_entries_for_subpaths` is false, only returns entries
+    /// for paths that exactly match a known artifact root.
+    ///
+    /// If true, also matches paths that are subpaths of a known artifact root,
+    /// returning the root artifact's entry (not the subpath's). The subpath need
+    /// not actually exist within the artifact's directory structure.
+    ///
+    /// Returns `None` for any path that doesn't match a known artifact.
     async fn get_artifact_entries_for_materialized_paths(
         &self,
         paths: Vec<ProjectRelativePathBuf>,
+        fetch_root_artifact_entries_for_subpaths: bool,
     ) -> buck2_error::Result<
         Vec<
             Option<(
@@ -312,6 +331,36 @@ pub trait Materializer: Allocative + Send + Sync + 'static {
             )>,
         >,
     >;
+
+    /// Whether eager materialization is enabled for this materializer.
+    fn is_eager_materialization_enabled(&self) -> bool {
+        false
+    }
+
+    /// Returns the configuration-hash path to use for eager materialization lookups when the
+    /// feature is enabled for a content-based artifact path.
+    fn maybe_eager_configuration_path(
+        &self,
+        fs: &ArtifactFs,
+        path: &BuildArtifactPath,
+    ) -> buck2_error::Result<Option<ProjectRelativePathBuf>> {
+        if self.is_eager_materialization_enabled() && path.is_content_based_path() {
+            Ok(Some(fs.resolve_build_configuration_hash_path(path)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Register paths for eager materialization. When artifacts are declared at these paths,
+    /// they will be materialized at low priority. Returns a guard that, when dropped,
+    /// unregisters the paths and cancels any in-flight low-priority materializations.
+    async fn register_eager_paths(
+        &self,
+        _paths: Vec<ProjectRelativePathBuf>,
+        _event_dispatcher: EventDispatcher,
+    ) -> buck2_error::Result<Box<dyn EagerMaterializationGuard>> {
+        Ok(Box::new(()))
+    }
 }
 
 #[derive(Copy, Clone, Dupe, Debug)]
@@ -351,9 +400,11 @@ impl dyn Materializer {
         path: ProjectRelativePathBuf,
         value: ArtifactValue,
         srcs: Vec<CopiedArtifact>,
+        configuration_path: Option<ProjectRelativePathBuf>,
     ) -> buck2_error::Result<()> {
         self.check_declared_external_symlink(&value)?;
-        self.declare_copy_impl(path, value, srcs).await
+        self.declare_copy_impl(path, value, srcs, configuration_path)
+            .await
     }
 
     /// Declares a list of artifacts whose files can be materialized by
@@ -377,24 +428,23 @@ impl dyn Materializer {
     /// path. This function runs a check on all declared artifacts and returns `Err` if they
     /// are external symlinks with an existing value on `remaining_path` and `Ok` otherwise.
     fn check_declared_external_symlink(&self, value: &ArtifactValue) -> buck2_error::Result<()> {
-        match value.entry() {
-            DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(external_symlink)) => {
-                if !external_symlink.remaining_path().is_empty() {
-                    return Err(buck2_error::buck2_error!(
-                        buck2_error::ErrorTag::Tier0,
-                        "Internal error: external symlink should not be declared on materializer with non-empty remaining path: '{}'",
-                        external_symlink.dupe().to_path_buf().display()
-                    ));
-                }
+        if let DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(external_symlink)) =
+            value.entry()
+        {
+            if !external_symlink.remaining_path().is_empty() {
+                return Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::Tier0,
+                    "Internal error: external symlink should not be declared on materializer with non-empty remaining path: '{}'",
+                    external_symlink.dupe().to_path_buf().display()
+                ));
             }
-            _ => {}
         }
         Ok(())
     }
 }
 
 /// Information to perform the copy of an artifact from `src` to `dest`.
-#[derive(Debug)]
+#[derive(Debug, Allocative)]
 pub struct CopiedArtifact {
     /// Source path of the copied artifact.
     pub src: ProjectRelativePathBuf,
@@ -422,7 +472,7 @@ impl CopiedArtifact {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Allocative)]
 pub enum CasDownloadInfoOrigin {
     /// Declared by an action that executed on RE.
     Execution(ActionExecutionOrigin),
@@ -431,7 +481,7 @@ pub enum CasDownloadInfoOrigin {
     Declared,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Allocative)]
 pub struct ActionExecutionOrigin {
     /// Digest of the action that led us to discover this CAS object.
     action_digest: TrackedActionDigest,
@@ -517,7 +567,7 @@ impl fmt::Display for CasDownloadInfoOriginNotFound<'_> {
 }
 
 /// Information about a CAS download we might require when an artifact is not materialized.
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Allocative)]
 #[display("{}, re_use_case = {}", self.origin, self.re_use_case)]
 pub struct CasDownloadInfo {
     pub origin: CasDownloadInfoOrigin,
@@ -565,7 +615,7 @@ impl CasDownloadInfo {
 }
 
 /// Information about a CAS download we might require when an artifact is not materialized.
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Allocative)]
 #[display("{} declared by {}", self.url, self.owner)]
 pub struct HttpDownloadInfo {
     /// URL to download the file from.
@@ -704,6 +754,8 @@ pub trait DeferredMaterializerExtensions: Send + Sync {
     fn list_subscriptions(&self)
     -> buck2_error::Result<BoxStream<'static, ProjectRelativePathBuf>>;
 
+    async fn allocative(&self) -> buck2_error::Result<allocative::FlameGraphOutput>;
+
     /// Obtain a list of files that don't match their in-memory representation. This may not catch
     /// all discrepancies.
     fn fsck(
@@ -716,9 +768,7 @@ pub trait DeferredMaterializerExtensions: Send + Sync {
 
     async fn clean_stale_artifacts(
         &self,
-        keep_since_time: DateTime<Utc>,
-        dry_run: bool,
-        tracked_only: bool,
+        args: CleanStaleArtifactsArgs,
     ) -> buck2_error::Result<buck2_cli_proto::CleanStaleResponse>;
 
     async fn test_iter(&self, count: usize) -> buck2_error::Result<String>;
@@ -728,4 +778,13 @@ pub trait DeferredMaterializerExtensions: Send + Sync {
     async fn create_subscription(
         &self,
     ) -> buck2_error::Result<Box<dyn DeferredMaterializerSubscription>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct CleanStaleArtifactsArgs {
+    pub keep_since_time: DateTime<Utc>,
+    pub dry_run: bool,
+    pub tracked_only: bool,
+    pub adaptive_low_disk_threshold: Option<f64>,
+    pub adaptive_min_ttl: Option<std::time::Duration>,
 }

@@ -31,12 +31,12 @@ def git_fetch_impl(ctx: AnalysisContext) -> list[Provider]:
     else:
         fail("Invalid git_fetch `object_format`: Must be one of sha1 or sha256: {}".format(object_format))
 
-    git_dir = ctx.actions.declare_output(".git", dir = True)
+    git_dir = ctx.actions.declare_output(".git", dir = True, has_content_based_path = False)
 
     short_path = ctx.attrs.name.removesuffix(".git")
     if not short_path:
         short_path = "work-tree"
-    work_tree = ctx.actions.declare_output(short_path, dir = True)
+    work_tree = ctx.actions.declare_output(short_path, dir = True, has_content_based_path = False)
 
     cmd = [
         ctx.attrs._git_fetch_tool[RunInfo],
@@ -45,6 +45,8 @@ def git_fetch_impl(ctx: AnalysisContext) -> list[Provider]:
         cmd_args("--repo=", ctx.attrs.repo, delimiter = ""),
         cmd_args("--rev=", rev, delimiter = ""),
     ]
+    if ctx.attrs.git != None:
+        cmd.append(cmd_args("--git=", ctx.attrs.git, delimiter = ""))
     if object_format != None:
         cmd.append(cmd_args("--object-format=", object_format, delimiter = ""))
 
@@ -55,10 +57,9 @@ def git_fetch_impl(ctx: AnalysisContext) -> list[Provider]:
         allow_cache_upload = ctx.attrs.allow_cache_upload,
     )
 
-    return [DefaultInfo(
-        default_output = work_tree,
-        sub_targets = {
-            path: [DefaultInfo(default_output = work_tree.project(path))]
-            for path in ctx.attrs.sub_targets
-        },
-    )]
+    return [
+        DefaultInfo(
+            default_output = work_tree,
+            sub_targets = {path: [DefaultInfo(default_output = work_tree.project(path))] for path in ctx.attrs.sub_targets},
+        )
+    ]

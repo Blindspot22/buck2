@@ -119,7 +119,6 @@ use dupe::Copy_;
 use dupe::Dupe;
 use dupe::Dupe_;
 use either::Either;
-use gazebo::variants::VariantName;
 use parking_lot::Mutex;
 use strong_hash::StrongHash;
 
@@ -374,6 +373,7 @@ impl<T: Pagable> PagableArc<T> {
     /// # Errors
     ///
     /// Returns an error if deserialization from storage fails.
+    #[cfg(any(feature = "tokio", test))]
     pub fn pin_sync(&self) -> crate::Result<PinnedPagableArc<T>>
     where
         T: Pagable,
@@ -705,7 +705,7 @@ impl<T> PagableArcInnerData<T> {
     }
 }
 
-#[derive(Debug, gazebo::variants::VariantName)]
+#[derive(Debug)]
 enum PagableArcInnerState<T> {
     Pinned(std::sync::Arc<T>),
     Unpinned(std::sync::Arc<T>),
@@ -715,7 +715,7 @@ enum PagableArcInnerState<T> {
 impl<T> PagableArcInnerState<T> {
     fn unwrap_ready(&self) -> &T {
         match self {
-            PagableArcInnerState::Pinned(t) => &t,
+            PagableArcInnerState::Pinned(t) => t,
             PagableArcInnerState::Unpinned(_) => panic!("Unpinned state is not ready"),
             PagableArcInnerState::PagedOut => panic!("PagedOut state is not ready"),
         }
@@ -730,7 +730,14 @@ impl<T> PagableArcInnerState<T> {
     }
 }
 
+// On 64-bit platforms, all fields (including AtomicU64) are usize-aligned so
+// the struct packs into 8 usizes.  On 32-bit targets (e.g. wasm32), fixed-size
+// fields like AtomicU64 stay 8 bytes while usize shrinks to 4, so the struct
+// occupies 12 usizes instead.
+#[cfg(target_pointer_width = "64")]
 static_assertions::assert_eq_size!(PagableArcInner<[usize; 4]>, [usize; 8]);
+#[cfg(target_pointer_width = "32")]
+static_assertions::assert_eq_size!(PagableArcInner<[usize; 4]>, [usize; 12]);
 
 impl<T: Pagable> PagableArcInner<T> {
     pub fn new_paged_out(key: &DataKey, storage: PagableStorageHandle) -> Self {
@@ -812,6 +819,7 @@ impl<T: Pagable> PagableArcInner<T> {
 
     /// Ensures data is pinned, blocking if deserialization is needed.
     /// Adds one to pinned_count on success.
+    #[cfg(any(feature = "tokio", test))]
     fn alloc_pinned_blocking(&self) -> anyhow::Result<()>
     where
         T: Pagable,
@@ -974,8 +982,17 @@ impl<T: Pagable> ArcErase for PagableArc<T> {
     }
 
     fn serialize_inner(&self, ser: &mut dyn PagableSerializer) -> anyhow::Result<()> {
-        let strong = self.pin_sync()?;
-        <T as PagableSerialize>::pagable_serialize(&strong, ser)
+        #[cfg(any(feature = "tokio", test))]
+        {
+            let strong = self.pin_sync()?;
+            <T as PagableSerialize>::pagable_serialize(&strong, ser)
+        }
+        #[cfg(not(any(feature = "tokio", test)))]
+        {
+            Err(anyhow::anyhow!(
+                "Cannot serialize PagableArc without tokio feature"
+            ))
+        }
     }
 
     fn deserialize_inner<'de, D: PagableDeserializer<'de> + ?Sized>(

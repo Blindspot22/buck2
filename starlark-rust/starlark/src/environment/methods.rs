@@ -36,16 +36,30 @@ use crate::values::function::NativeAttribute;
 use crate::values::function::NativeMeth;
 use crate::values::function::NativeMethFn;
 use crate::values::function::NativeMethod;
+use crate::values::layout::heap::heap_type::FrozenHeapName;
 use crate::values::types::unbound::UnboundValue;
 
 /// Methods of an object.
 #[derive(Clone, Debug)]
 pub struct Methods {
     /// This field holds the objects referenced in `members`.
-    #[allow(dead_code)]
     heap: FrozenHeapRef,
     members: SymbolMap<UnboundValue>,
     docstring: Option<String>,
+}
+
+/// Heap name for a [`Methods`] object, used for heap graph tracking.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct MethodFrozenHeapName {
+    /// A name identifying this methods heap (e.g. type name like "dict",
+    /// or a module path like "starlark::values::types::dict::methods::dict_methods").
+    pub name: &'static str,
+}
+
+impl std::fmt::Display for MethodFrozenHeapName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "methods({})", self.name)
+    }
 }
 
 /// Used to build a [`Methods`] value.
@@ -61,6 +75,8 @@ pub struct MethodsBuilder {
     /// combined with each other, but having the main documentation for the object on the methods
     /// instead of on the object type directly is extraordinarily confusing.
     docstring: Option<String>,
+    /// Heap name for identification in heap graph tracking.
+    heap_name: Option<MethodFrozenHeapName>,
 }
 
 impl Methods {
@@ -77,6 +93,11 @@ impl Methods {
             UnboundValue::Attr(attr) => Some(attr.typ.dupe()),
             UnboundValue::Method(method) => Some(method.ty.dupe()),
         }
+    }
+
+    /// The heap that owns the values in these methods.
+    pub fn heap(&self) -> &FrozenHeapRef {
+        &self.heap
     }
 
     #[inline]
@@ -137,13 +158,17 @@ impl MethodsBuilder {
             heap: FrozenHeap::new(),
             members: SymbolMap::new(),
             docstring: None,
+            heap_name: None,
         }
     }
 
     /// Called at the end to build a [`Methods`].
     pub fn build(self) -> Methods {
+        let heap = self
+            .heap
+            .into_ref_impl(self.heap_name.map(FrozenHeapName::Method), None);
         Methods {
-            heap: self.heap.into_ref(),
+            heap,
             members: self.members,
             docstring: self.docstring,
         }
@@ -215,8 +240,7 @@ impl MethodsBuilder {
         sig: ParametersSpec<FrozenValue>,
         f: NativeMethFn,
     ) {
-        // TODO(nga): do not unwrap.
-        let ty = Ty::from_native_callable_components(&components, None).unwrap();
+        let ty = components.make_type(None);
 
         self.members.insert(
             name,
@@ -236,50 +260,96 @@ impl MethodsBuilder {
     }
 }
 
-/// Used to create methods for a [`StarlarkValue`](crate::values::StarlarkValue).
-///
-/// To define a method `foo()` on your type, define
-///  usually written as:
+/// Lazy, named cache for a [`Methods`] value. Created via the
+/// [`methods_static!`](crate::methods_static) macro; the methods are built on
+/// first access via the supplied initializer.
 ///
 /// ```ignore
-/// fn my_methods(builder: &mut GlobalsBuilder) {
-///     fn foo(me: ARef<Foo>) -> anyhow::Result<NoneType> {
-///         ...
-///     }
-/// }
+/// fn my_methods(builder: &mut MethodsBuilder) { ... }
+///
+/// starlark::methods_static!(MY_METHODS = my_methods);
 ///
 /// impl StarlarkValue<'_> for Foo {
-///     ...
-///     fn get_methods(&self) -> Option<&'static Globals> {
-///         static RES: GlobalsStatic = GlobalsStatic::new();
-///         RES.methods(module_creator)
+///     fn get_methods() -> Option<&'static Methods> {
+///         Some(MY_METHODS.methods())
 ///     }
-///     ...
 /// }
 /// ```
-pub struct MethodsStatic(OnceCell<Methods>);
+pub struct MethodsStatic {
+    cell: OnceCell<Methods>,
+    name: &'static str,
+    init: fn(&mut MethodsBuilder),
+}
 
 impl MethodsStatic {
-    /// Create a new [`MethodsStatic`].
-    pub const fn new() -> Self {
-        Self(OnceCell::new())
+    /// Create a new [`MethodsStatic`]. Prefer the
+    /// [`methods_static!`](crate::methods_static) macro, which fills in `name`
+    /// from the call site.
+    pub const fn new(name: &'static str, init: fn(&mut MethodsBuilder)) -> MethodsStatic {
+        MethodsStatic {
+            cell: OnceCell::new(),
+            name,
+            init,
+        }
     }
 
-    /// Populate the globals with a builder function. Always returns `Some`, but using this API
-    /// to be a better fit for [`StarlarkValue.get_methods`](crate::values::StarlarkValue::get_methods).
-    pub fn methods(&'static self, x: impl FnOnce(&mut MethodsBuilder)) -> Option<&'static Methods> {
-        Some(self.0.get_or_init(|| MethodsBuilder::new().with(x).build()))
+    /// Get (or build, on first call) the [`Methods`] value.
+    pub fn methods(&'static self) -> &'static Methods {
+        self.cell.get_or_init(|| {
+            let mut builder = MethodsBuilder::new();
+            builder.heap_name = Some(MethodFrozenHeapName { name: self.name });
+            (self.init)(&mut builder);
+            builder.build()
+        })
     }
 
-    /// Copy all the methods in this [`MethodsBuilder`] into a new one. All variables will
-    /// only be allocated once (ensuring things like function comparison works properly).
-    pub fn populate(&'static self, x: impl FnOnce(&mut MethodsBuilder), out: &mut MethodsBuilder) {
-        let methods = self.methods(x).unwrap();
+    /// Copy all the methods into another builder. The methods' values stay
+    /// owned by the static's heap; `out`'s heap takes a reference so the
+    /// dependency is recorded for downstream consumers (e.g. pagable
+    /// serialization).
+    pub fn populate(&'static self, out: &mut MethodsBuilder) {
+        let methods = self.methods();
         for (name, value) in methods.members.iter() {
             out.members.insert(name.as_str(), value.clone());
         }
+        out.heap.add_reference(&methods.heap);
         out.docstring = methods.docstring.clone();
     }
+}
+
+/// Define a `static` of type [`MethodsStatic`] backed by an init function. The
+/// heap is named `<module_path>::<NAME>`.
+///
+/// ```ignore
+/// fn my_methods(builder: &mut MethodsBuilder) { ... }
+///
+/// starlark::methods_static!(MY_METHODS = my_methods);
+/// ```
+///
+/// Or with an inline closure:
+///
+/// ```ignore
+/// starlark::methods_static!(RES = |b| {
+///     b.set_attribute("foo", 42, None);
+/// });
+/// ```
+#[macro_export]
+macro_rules! methods_static {
+    ($vis:vis $name:ident = $init:expr) => {
+        $vis static $name: $crate::__derive_refs::MethodsStatic =
+            $crate::__derive_refs::MethodsStatic::new(
+                concat!(module_path!(), "::", stringify!($name)),
+                $init,
+            );
+
+        $crate::__derive_refs::inventory::submit! {
+            $crate::__derive_refs::StaticHeapEntry {
+                file: file!(),
+                line: line!(),
+                get_heap: || $name.methods().heap(),
+            }
+        }
+    };
 }
 
 #[cfg(test)]
@@ -288,30 +358,40 @@ mod tests {
     use derive_more::Display;
     use starlark_derive::NoSerialize;
     use starlark_derive::ProvidesStaticType;
+    use starlark_derive::StarlarkPagable;
     use starlark_derive::starlark_value;
 
     use crate as starlark;
     use crate::assert::Assert;
     use crate::environment::Methods;
-    use crate::environment::MethodsStatic;
     use crate::starlark_simple_value;
     use crate::values::StarlarkValue;
 
     #[test]
     fn test_set_attribute() {
-        #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+        #[derive(
+            Debug,
+            Display,
+            ProvidesStaticType,
+            NoSerialize,
+            Allocative,
+            StarlarkPagable
+        )]
         #[display("Magic")]
         struct Magic;
         starlark_simple_value!(Magic);
 
+        starlark::methods_static!(
+            RES = |x| {
+                x.set_attribute("my_type", "magic", None);
+                x.set_attribute("my_value", 42, None);
+            }
+        );
+
         #[starlark_value(type = "magic")]
         impl<'v> StarlarkValue<'v> for Magic {
             fn get_methods() -> Option<&'static Methods> {
-                static RES: MethodsStatic = MethodsStatic::new();
-                RES.methods(|x| {
-                    x.set_attribute("my_type", "magic", None);
-                    x.set_attribute("my_value", 42, None);
-                })
+                Some(RES.methods())
             }
         }
 

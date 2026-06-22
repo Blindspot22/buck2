@@ -194,7 +194,8 @@ impl<'v> Freeze for BxlFunction<'v> {
     }
 }
 
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative,   starlark::StarlarkPagablePanic // okay("bxl")
+)]
 #[display("{}()", bxl_id.name)]
 pub(crate) struct FrozenBxlFunction {
     implementation: FrozenValue,
@@ -214,7 +215,7 @@ impl FrozenBxlFunction {
         self.implementation
     }
 
-    pub(crate) fn to_clap<'v>(&'v self, mut clap: clap::Command) -> clap::Command {
+    pub(crate) fn to_clap(&self, mut clap: clap::Command) -> clap::Command {
         if let Some(docs) = self.docs.as_ref() {
             clap = clap.about(docs.clone())
         }

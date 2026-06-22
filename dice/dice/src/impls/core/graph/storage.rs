@@ -365,7 +365,7 @@ impl VersionedGraph {
             invalidation_paths,
         );
 
-        let res = entry.computed_val(v);
+        let res = entry.computed_val(v, "newly-constructed OccupiedGraphNode is always hydrated");
         self.nodes.insert(key, VersionedGraphNode::Occupied(entry));
         res
     }
@@ -407,7 +407,17 @@ impl ValueReusable {
                 if new_deps != &***value.deps() {
                     return false;
                 }
-                new_value.equality(value.val())
+                // We can't compare against a paged-out value without hydrating it,
+                // which would require blocking I/O on the core thread. Treat as not
+                // reusable; the graph will replace the entry with the new (hydrated)
+                // value. Worker-driven hydration via `Rehydrate` happens on lookups
+                // that explicitly return `MatchPagedOut` / `CheckDepsPagedOut`, so
+                // we only land here when the lookup returned `Compute` over a
+                // force-dirtied paged-out node.
+                value
+                    .val()
+                    .as_hydrated()
+                    .is_some_and(|v| new_value.equality(v))
             }
             // For version-based, the deps are guaranteed to match if `version` is in the node's verified versions.
             ValueReusable::VersionBased(version) => value.is_verified_at(*version),
@@ -488,10 +498,15 @@ mod tests {
     use derive_more::Display;
     use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
 
+    use crate::DiceKeyDyn;
     use crate::api::computations::DiceComputations;
     use crate::api::key::InvalidationSourcePriority;
     use crate::api::key::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
     use crate::arc::Arc;
     use crate::impls::core::graph::storage::InvalidateKind;
     use crate::impls::core::graph::storage::StorageType;
@@ -506,7 +521,8 @@ mod tests {
     use crate::impls::value::TrackedInvalidationPaths;
     use crate::versions::VersionNumber;
 
-    #[derive(Allocative, Clone, Dupe, Debug, Display, PartialEq, Eq, Hash)]
+    #[derive(Allocative, Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct K;
 
     #[async_trait]
@@ -523,6 +539,10 @@ mod tests {
 
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
             x == y
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -1578,5 +1598,106 @@ mod tests {
         cache.get(key_a2).assert_compute();
 
         Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Tests covering the interaction between paged-out values and graph
+    // mutation paths. These exercise edge cases where a node's `NodeValue`
+    // is `PagedOut` at the moment a write reaches it — paths the worker
+    // doesn't (or can't) hydrate first.
+    // ---------------------------------------------------------------------
+
+    use crate::impls::core::graph::nodes::VersionedGraphNode;
+
+    /// Paged-out node + lookup-returns-Compute (after force-dirty) +
+    /// recompute with same value: the graph cannot equality-compare the new
+    /// value against the paged-out one, so it replaces rather than reusing.
+    /// Previously this path panicked in `is_reusable`.
+    #[test]
+    fn paged_out_recompute_replaces_entry_without_panic() {
+        let mut cache = VersionedGraph::new();
+        let key0 = VersionedGraphKey::new(VersionNumber::new(0), DiceKey { index: 0 });
+        let value = DiceValidValue::testing_new(DiceKeyValue::<K>::new(100));
+        cache.update(
+            key0,
+            value,
+            ValueReusable::EqualityBased,
+            Arc::new(SeriesParallelDeps::None),
+            StorageType::Normal,
+            TrackedInvalidationPaths::clean(),
+        );
+
+        // Simulate a page-out: replace the node's hydrated value with a paged-out marker.
+        if let Some(VersionedGraphNode::Occupied(occ)) = cache.nodes.get_mut(&key0.k) {
+            occ.set_paged_out(pagable::DataKey(0xdeadbeef));
+        } else {
+            panic!("expected Occupied node");
+        }
+
+        // Force-dirty at v=1. This shrinks verified_ranges to [0, 1) so a lookup at
+        // v=1 returns Compute, prompting the worker to recompute and send
+        // UpdateComputed (which then triggers the equality reuse check).
+        cache.invalidate(
+            VersionedGraphKey::new(VersionNumber::new(1), DiceKey { index: 0 }),
+            InvalidateKind::ForceDirty,
+            InvalidationSourcePriority::Normal,
+        );
+
+        // Worker recomputes and sends UpdateComputed with the same value+deps.
+        let new_value = DiceValidValue::testing_new(DiceKeyValue::<K>::new(100));
+        let key_v1 = VersionedGraphKey::new(VersionNumber::new(1), DiceKey { index: 0 });
+        cache.update(
+            key_v1,
+            new_value.dupe(),
+            ValueReusable::EqualityBased,
+            Arc::new(SeriesParallelDeps::None),
+            StorageType::Normal,
+            TrackedInvalidationPaths::clean(),
+        );
+
+        // The entry was replaced (not reused) — the new lookup must see the hydrated
+        // value, which we verify by reading it back as a successful Match.
+        let result = cache.get(key_v1);
+        let computed = result.unpack_match().expect("entry should be a Match");
+        assert!(computed.value().equality(&new_value));
+    }
+
+    /// Paged-out node + injection of a new value: the graph cannot
+    /// equality-compare to short-circuit, so it replaces unconditionally.
+    /// Previously this path panicked in `OccupiedGraphNode::on_injected`.
+    #[test]
+    fn paged_out_inject_replaces_entry_without_panic() {
+        let mut cache = VersionedGraph::new();
+        let key = VersionedGraphKey::new(VersionNumber::new(0), DiceKey { index: 0 });
+        let value = DiceValidValue::testing_new(DiceKeyValue::<K>::new(100));
+        cache.update(
+            key,
+            value,
+            ValueReusable::EqualityBased,
+            Arc::new(SeriesParallelDeps::None),
+            StorageType::Normal,
+            TrackedInvalidationPaths::clean(),
+        );
+
+        if let Some(VersionedGraphNode::Occupied(occ)) = cache.nodes.get_mut(&key.k) {
+            occ.set_paged_out(pagable::DataKey(0xdeadbeef));
+        } else {
+            panic!("expected Occupied node");
+        }
+
+        let new_value = DiceValidValue::testing_new(DiceKeyValue::<K>::new(200));
+        let key_v1 = VersionedGraphKey::new(VersionNumber::new(1), DiceKey { index: 0 });
+        let changed = cache.invalidate(
+            key_v1,
+            InvalidateKind::Update(new_value.dupe(), StorageType::Normal),
+            InvalidationSourcePriority::Normal,
+        );
+        // Injection always succeeds (returns true / changed) on a paged-out node, even
+        // if the new value happens to equal the paged-out one, because we can't tell.
+        assert!(changed);
+
+        let result = cache.get(key_v1);
+        let computed = result.unpack_match().expect("entry should be a Match");
+        assert!(computed.value().equality(&new_value));
     }
 }

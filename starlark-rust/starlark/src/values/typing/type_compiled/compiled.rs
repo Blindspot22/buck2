@@ -24,6 +24,9 @@ use std::hash::Hasher;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_module;
 use starlark_derive::starlark_value;
 use starlark_derive::type_matcher;
@@ -37,7 +40,8 @@ use crate::any::ProvidesStaticType;
 use crate::coerce::Coerce;
 use crate::environment::Methods;
 use crate::environment::MethodsBuilder;
-use crate::environment::MethodsStatic;
+use crate::pagable::static_value::TypeCompiledStaticRegistered;
+use crate::pagable::static_value::static_type_compiled;
 use crate::private::Private;
 use crate::typing::Ty;
 use crate::values::AllocStaticSimple;
@@ -49,6 +53,7 @@ use crate::values::FrozenValue;
 use crate::values::Heap;
 use crate::values::NoSerialize;
 use crate::values::StarlarkValue;
+use crate::values::StaticValueRegistered;
 use crate::values::StringValue;
 use crate::values::Trace;
 use crate::values::Value;
@@ -61,7 +66,10 @@ use crate::values::type_repr::StarlarkTypeRepr;
 use crate::values::types::tuple::value::Tuple;
 use crate::values::typing::type_compiled::factory::TypeCompiledFactory;
 use crate::values::typing::type_compiled::matcher::TypeMatcher;
-use crate::values::typing::type_compiled::matchers::IsAny;
+use crate::values::typing::type_compiled::matcher::TypeMatcherDyn;
+
+// Static type-compiled value for `typing.Any`.
+static_type_compiled!(TYPE_COMPILED_ANY: IsAny, Ty::any());
 
 #[derive(Debug, Error)]
 enum TypingError {
@@ -118,12 +126,51 @@ where
     Debug,
     Allocative,
     ProvidesStaticType,
-    NoSerialize
+    NoSerialize,
+    StarlarkPagable
 )]
+#[starlark_pagable(bound = "T: TypeMatcher")]
 /// A compiled type expression wrapped as a Starlark value with a type matcher.
 pub struct TypeCompiledImplAsStarlarkValue<T: 'static> {
+    #[starlark_pagable(pagable)]
     type_compiled_impl: T,
+    #[starlark_pagable(pagable)]
     ty: Ty,
+}
+
+// SAFETY: TypeMatcherRegistered is only implemented for types that are registered
+// via #[type_matcher] or register_type_matcher!, which ensures vtable registration.
+unsafe impl<T: crate::values::typing::type_compiled::matcher::TypeMatcherRegistered>
+    crate::pagable::vtable_register::VtableRegistered for TypeCompiledImplAsStarlarkValue<T>
+{
+}
+
+// SAFETY: TypeCompiledImplAsStarlarkValue<T> is only statically allocated when T is
+// registered via static_type_compiled!, which ensures proper pagable registration.
+unsafe impl<T: TypeCompiledStaticRegistered> StaticValueRegistered
+    for TypeCompiledImplAsStarlarkValue<T>
+{
+}
+
+#[cfg(all(test, feature = "pagable"))]
+impl<T> TypeCompiledImplAsStarlarkValue<T> {
+    pub(crate) fn new_for_test(
+        type_compiled_impl: T,
+        ty: Ty,
+    ) -> TypeCompiledImplAsStarlarkValue<T> {
+        TypeCompiledImplAsStarlarkValue {
+            type_compiled_impl,
+            ty,
+        }
+    }
+
+    pub(crate) fn ty_for_test(&self) -> &Ty {
+        &self.ty
+    }
+
+    pub(crate) fn impl_for_test(&self) -> &T {
+        &self.type_compiled_impl
+    }
 }
 
 impl<T> TypeCompiledImplAsStarlarkValue<T>
@@ -133,7 +180,10 @@ where
     pub(crate) const fn alloc_static(
         imp: T,
         ty: Ty,
-    ) -> AllocStaticSimple<TypeCompiledImplAsStarlarkValue<T>> {
+    ) -> AllocStaticSimple<TypeCompiledImplAsStarlarkValue<T>>
+    where
+        T: TypeCompiledStaticRegistered,
+    {
         AllocStaticSimple::alloc(TypeCompiledImplAsStarlarkValue {
             type_compiled_impl: imp,
             ty,
@@ -142,7 +192,8 @@ where
 }
 
 #[doc(hidden)]
-#[derive(Hash, Eq, PartialEq, Debug, Clone, Allocative)]
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Allocative, Pagable)]
+#[pagable_typetag(TypeMatcherDyn)]
 pub struct DummyTypeMatcher;
 
 #[type_matcher]
@@ -151,6 +202,12 @@ impl TypeMatcher for DummyTypeMatcher {
         unreachable!()
     }
 }
+
+// Register the canonical (`DummyTypeMatcher`) variant. Other matchers'
+// `Canonical` points here.
+crate::register_ty_starlark_value!(TypeCompiledImplAsStarlarkValue<DummyTypeMatcher>);
+
+starlark::methods_static!(TYPE_COMPILED_METHODS = type_compiled_methods);
 
 #[starlark_value(type = "type")]
 impl<'v, T: 'static> StarlarkValue<'v> for TypeCompiledImplAsStarlarkValue<T>
@@ -190,8 +247,7 @@ where
     where
         Self: Sized,
     {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(type_compiled_methods)
+        Some(TYPE_COMPILED_METHODS.methods())
     }
 }
 
@@ -232,7 +288,8 @@ fn type_compiled_methods(methods: &mut MethodsBuilder) {
     Copy,
     Dupe,
     Coerce,
-    ProvidesStaticType
+    ProvidesStaticType,
+    StarlarkPagable
 )]
 #[repr(transparent)]
 pub struct TypeCompiled<V: ValueLifetimeless>(
@@ -478,10 +535,7 @@ impl TypeCompiled<FrozenValue> {
 
     /// `typing.Any`.
     pub fn any() -> TypeCompiled<FrozenValue> {
-        static ANYTHING: AllocStaticSimple<TypeCompiledImplAsStarlarkValue<IsAny>> =
-            TypeCompiledImplAsStarlarkValue::alloc_static(IsAny, Ty::any());
-
-        TypeCompiled::unchecked_new(ANYTHING.to_frozen_value())
+        TypeCompiled::unchecked_new(TYPE_COMPILED_ANY.to_frozen_value())
     }
 }
 

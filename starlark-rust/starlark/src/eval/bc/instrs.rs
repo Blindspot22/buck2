@@ -27,8 +27,11 @@ use std::mem;
 use std::ptr;
 use std::slice;
 
+use dupe::Dupe;
 use either::Either;
+use starlark_derive::StarlarkPagable;
 
+use crate as starlark;
 use crate::eval::bc::addr::BcAddr;
 use crate::eval::bc::addr::BcAddrOffset;
 use crate::eval::bc::addr::BcPtrAddr;
@@ -43,8 +46,14 @@ use crate::eval::bc::repr::BcInstrRepr;
 use crate::eval::bc::slow_arg::BcInstrEndArg;
 use crate::eval::bc::slow_arg::BcInstrSlowArg;
 use crate::eval::bc::writer::BcStatementLocations;
-use crate::values::FrozenRef;
+use crate::pagable::StarlarkDeserialize;
+use crate::pagable::StarlarkDeserializeContext;
+use crate::pagable::StarlarkSerialize;
+use crate::pagable::StarlarkSerializeContext;
+use crate::static_starlark_value;
 use crate::values::FrozenStringValue;
+use crate::values::types::any_array::AnyArray;
+use crate::values::types::any_array::FrozenAnyArray;
 
 impl BcOpcode {
     /// Drop instruction at given address.
@@ -81,43 +90,183 @@ unsafe fn drop_instrs(instrs: &[u64]) {
     }
 }
 
-/// Statically allocate a valid instruction buffer micro-optimization.
-///
-/// Valid bytecode must end with `EndOfBc` instruction, otherwise evaluation overruns
-/// the instruction buffer.
-///
-/// `BcInstrs` type need to have `Default` (it is convenient).
-///
-/// Allocating a vec in `BcInstrs::default` is non-free.
-///
-/// Assertion that `BcInstrs::instrs` is not empty is cheap but not free.
-///
-/// But if `BcInstrs::instrs` is `Either` allocated instructions or a pointer to statically
-/// allocated instructions, then both `BcInstrs::default` is free
-/// and evaluation start [is free](https://rust.godbolt.org/z/3nEhWGo4Y).
+// Statically allocate a valid instruction buffer micro-optimization.
+//
+// Valid bytecode must end with `EndOfBc` instruction, otherwise evaluation overruns
+// the instruction buffer.
+//
+// `BcInstrs` type need to have `Default` (it is convenient).
+//
+// Allocating a vec in `BcInstrs::default` is non-free.
+//
+// Assertion that `BcInstrs::instrs` is not empty is cheap but not free.
+//
+// But if `BcInstrs::instrs` is `Either` allocated instructions or a pointer to statically
+// allocated instructions, then both `BcInstrs::default` is free
+// and evaluation start [is free](https://rust.godbolt.org/z/3nEhWGo4Y).
+static_starlark_value!(VALUE_EMPTY_LOCAL_NAMES: AnyArray<FrozenStringValue> = AnyArray::empty());
+
 fn empty_instrs() -> &'static [u64] {
-    static END_OF_BC: BcInstrRepr<InstrEnd> = BcInstrRepr {
-        header: BcInstrHeader::for_opcode(BcOpcode::End),
-        arg: BcInstrEndArg {
-            end_addr: BcAddr(0),
-            slow_args: Vec::new(),
-            local_names: FrozenRef::new(&[]),
-        },
-        _align: [],
-    };
+    static END_OF_BC: std::sync::LazyLock<BcInstrRepr<InstrEnd>> =
+        std::sync::LazyLock::new(|| BcInstrRepr {
+            header: BcInstrHeader::for_opcode(BcOpcode::End),
+            arg: BcInstrEndArg {
+                end_addr: BcAddr(0),
+                slow_args: Vec::new(),
+                local_names: VALUE_EMPTY_LOCAL_NAMES.unpack(),
+            },
+            _align: [],
+        });
     unsafe {
         slice::from_raw_parts(
-            &END_OF_BC as *const BcInstrRepr<_> as *const u64,
-            mem::size_of_val(&END_OF_BC) / mem::size_of::<u64>(),
+            &*END_OF_BC as *const BcInstrRepr<_> as *const u64,
+            mem::size_of_val(&*END_OF_BC) / mem::size_of::<u64>(),
         )
     }
 }
 
+/// Marker for the "empty / default" bc variant of [`BcInstrs`].
+///
+/// Zero-sized; resolves to the shared static buffer from [`empty_instrs()`]
+/// at read time. Using a ZST here (instead of storing `&'static [u64]`
+/// directly in the field) avoids putting a `'static` pointer inside
+/// `BcInstrs`, which would otherwise block serialization.
+#[derive(Debug, Copy, Clone, Dupe, Default, PartialEq, Eq, StarlarkPagable)]
+pub(crate) struct BcInstrsEmpty;
+
+impl BcInstrsEmpty {
+    /// Resolve to the shared static empty bc buffer ([`empty_instrs`]).
+    ///
+    /// A single `InstrEnd` terminator, zero-alloc, identical across all
+    /// `BcInstrs::default()` instances in the process.
+    #[inline]
+    pub(crate) fn as_slice(self) -> &'static [u64] {
+        empty_instrs()
+    }
+}
+
 pub(crate) struct BcInstrs {
-    // We use `usize` here to guarantee the buffer is properly aligned
-    // to store `BcInstrLayout`.
-    instrs: Either<Box<[u64]>, &'static [u64]>,
+    // `Left`: owned compiled buffer (`u64` for 8-byte alignment of
+    // `BcInstrRepr`). `Right`: empty marker, resolved lazily.
+    instrs: Either<Box<[u64]>, BcInstrsEmpty>,
     pub(crate) stmt_locs: BcStatementLocations,
+}
+
+// Manual `StarlarkSerialize` / `StarlarkDeserialize` for `BcInstrs`.
+//
+// The `Box<[u64]>` here is a packed buffer of `BcInstrRepr<I>` with embedded
+// `FrozenValue`s — raw `u64` ser/de is unsound across processes. We walk via
+// `self.iter()` and route each `I::Arg` through its own `StarlarkSerialize`.
+//
+// Wire format: u8 tag (0=empty, 1=compiled). Tag=1 is followed by a stream
+// of `(u32 opcode, I::Arg)` terminated by `BcOpcode::End`. Then `stmt_locs`.
+
+impl StarlarkSerialize for BcInstrs {
+    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+        use pagable::PagableSerialize;
+        match &self.instrs {
+            Either::Right(empty) => {
+                0u8.pagable_serialize(ctx.pagable())?;
+                <BcInstrsEmpty as StarlarkSerialize>::starlark_serialize(empty, ctx)?;
+            }
+            Either::Left(_) => {
+                1u8.pagable_serialize(ctx.pagable())?;
+                for (ptr, _ip) in self.iter() {
+                    let opcode = ptr.get_opcode();
+                    (opcode as u32).pagable_serialize(ctx.pagable())?;
+                    let mut handler = SerializeArgHandler {
+                        ctx,
+                        ptr,
+                        result: Ok(()),
+                    };
+                    opcode.dispatch(&mut handler);
+                    handler.result?;
+                }
+            }
+        }
+        self.stmt_locs.starlark_serialize(ctx)?;
+        Ok(())
+    }
+}
+
+impl StarlarkDeserialize for BcInstrs {
+    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
+        use pagable::PagableDeserialize;
+        let tag = u8::pagable_deserialize(ctx.pagable())?;
+        let instrs = match tag {
+            0 => Either::Right(<BcInstrsEmpty as StarlarkDeserialize>::starlark_deserialize(ctx)?),
+            1 => {
+                let mut writer = BcInstrsWriter::new();
+                loop {
+                    let opcode_n = u32::pagable_deserialize(ctx.pagable())?;
+                    let opcode = BcOpcode::by_number(opcode_n).ok_or_else(|| {
+                        crate::Error::new_other(anyhow::anyhow!(
+                            "invalid BcOpcode number on deserialize: {opcode_n}"
+                        ))
+                    })?;
+                    let mut handler = DeserializeArgHandler {
+                        ctx,
+                        writer: &mut writer,
+                        result: Ok(()),
+                    };
+                    opcode.dispatch(&mut handler);
+                    handler.result?;
+                    if opcode == BcOpcode::End {
+                        break;
+                    }
+                }
+                // Take the buffer without `finish()` (which appends another
+                // `InstrEnd`); the deserialized one is already in place.
+                let mut writer = writer;
+                let buf = mem::take(&mut writer.instrs);
+                mem::forget(writer);
+                Either::Left(buf.into_boxed_slice())
+            }
+            _ => {
+                return Err(crate::Error::new_other(anyhow::anyhow!(
+                    "invalid BcInstrs tag: {tag}"
+                )));
+            }
+        };
+        let stmt_locs = BcStatementLocations::starlark_deserialize(ctx)?;
+        Ok(BcInstrs { instrs, stmt_locs })
+    }
+}
+
+struct SerializeArgHandler<'a, 'b> {
+    ctx: &'a mut dyn StarlarkSerializeContext,
+    ptr: BcPtrAddr<'b>,
+    result: crate::Result<()>,
+}
+
+impl<'a, 'b> BcOpcodeHandler<()> for &mut SerializeArgHandler<'a, 'b> {
+    #[inline(always)]
+    fn handle<I: BcInstr>(self) {
+        // Dispatched on the opcode at `ptr`, so the record is `BcInstrRepr<I>`.
+        let repr = self
+            .ptr
+            .get_instr_checked::<I>()
+            .expect("opcode/instr type mismatch");
+        self.result = <I::Arg as StarlarkSerialize>::starlark_serialize(&repr.arg, self.ctx);
+    }
+}
+
+struct DeserializeArgHandler<'a, 'de, 'w> {
+    ctx: &'a mut dyn StarlarkDeserializeContext<'de>,
+    writer: &'w mut BcInstrsWriter,
+    result: crate::Result<()>,
+}
+
+impl<'a, 'de, 'w> BcOpcodeHandler<()> for &mut DeserializeArgHandler<'a, 'de, 'w> {
+    #[inline(always)]
+    fn handle<I: BcInstr>(self) {
+        match <I::Arg as StarlarkDeserialize>::starlark_deserialize(self.ctx) {
+            Ok(arg) => {
+                self.writer.write::<I>(arg);
+            }
+            Err(e) => self.result = Err(e),
+        }
+    }
 }
 
 /// Raw instructions writer.
@@ -129,7 +278,7 @@ pub(crate) struct BcInstrsWriter {
 
 impl Default for BcInstrs {
     fn default() -> Self {
-        Self::for_instrs(Either::Right(empty_instrs()), BcStatementLocations::new())
+        Self::for_instrs(Either::Right(BcInstrsEmpty), BcStatementLocations::new())
     }
 }
 
@@ -139,7 +288,7 @@ impl Drop for BcInstrs {
             Either::Left(heap_allocated) => unsafe {
                 drop_instrs(heap_allocated);
             },
-            Either::Right(_statically_allocated) => {}
+            Either::Right(BcInstrsEmpty) => {}
         }
     }
 }
@@ -158,12 +307,22 @@ pub(crate) struct PatchAddr {
 }
 
 impl BcInstrs {
+    /// Borrow the raw `u64` buffer, resolving the `Empty` marker to
+    /// [`empty_instrs()`] transparently.
+    #[inline]
+    fn as_slice(&self) -> &[u64] {
+        match &self.instrs {
+            Either::Left(boxed) => boxed,
+            Either::Right(empty) => empty.as_slice(),
+        }
+    }
+
     pub(crate) fn start_ptr(&self) -> BcPtrAddr<'_> {
-        BcPtrAddr::for_slice_start(&self.instrs)
+        BcPtrAddr::for_slice_start(self.as_slice())
     }
 
     pub(crate) fn for_instrs(
-        instrs: Either<Box<[u64]>, &'static [u64]>,
+        instrs: Either<Box<[u64]>, BcInstrsEmpty>,
         stmt_locs: BcStatementLocations,
     ) -> Self {
         Self { instrs, stmt_locs }
@@ -171,7 +330,7 @@ impl BcInstrs {
 
     pub(crate) fn end(&self) -> BcAddr {
         BcAddr(
-            self.instrs
+            self.as_slice()
                 .len()
                 .checked_mul(mem::size_of::<u64>())
                 .unwrap()
@@ -187,8 +346,9 @@ impl BcInstrs {
     #[cfg(test)]
     pub(crate) fn opcodes(&self) -> Vec<BcOpcode> {
         let mut opcodes = Vec::new();
-        let end = BcPtrAddr::for_slice_end(&self.instrs);
-        let mut ptr = BcPtrAddr::for_slice_start(&self.instrs);
+        let slice = self.as_slice();
+        let end = BcPtrAddr::for_slice_end(slice);
+        let mut ptr = BcPtrAddr::for_slice_start(slice);
         while ptr != end {
             assert!(ptr < end);
             let opcode = ptr.get_opcode();
@@ -354,7 +514,7 @@ impl BcInstrsWriter {
         mut self,
         slow_args: Vec<(BcAddr, BcInstrSlowArg)>,
         stmt_locs: BcStatementLocations,
-        local_names: FrozenRef<'static, [FrozenStringValue]>,
+        local_names: FrozenAnyArray<FrozenStringValue>,
     ) -> BcInstrs {
         self.write::<InstrEnd>(BcInstrEndArg {
             end_addr: self.ip(),
@@ -382,8 +542,13 @@ mod tests {
     use crate::eval::bc::instrs::BcInstrsWriter;
     use crate::eval::bc::stack_ptr::BcSlot;
     use crate::eval::bc::writer::BcStatementLocations;
+    use crate::register_starlark_any;
     use crate::values::FrozenHeap;
+    use crate::values::FrozenStringValue;
     use crate::values::FrozenValue;
+
+    // Register Vec<FrozenStringValue> for use with alloc_any in pagable mode.
+    register_starlark_any!(Vec<FrozenStringValue>);
 
     #[test]
     fn write() {
@@ -403,9 +568,7 @@ mod tests {
     #[test]
     fn display() {
         let heap = FrozenHeap::new();
-        let local_names = heap
-            .alloc_any(vec![const_frozen_string!("abc")])
-            .map(|s| s.as_slice());
+        let local_names = heap.alloc_any_array_value(&[const_frozen_string!("abc")]);
         let mut bc = BcInstrsWriter::new();
         bc.write::<InstrConst>((FrozenValue::new_bool(true), BcSlot(0).to_out()));
         bc.write::<InstrReturn>(BcSlot(0).to_in());

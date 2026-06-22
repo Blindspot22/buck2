@@ -10,7 +10,6 @@
 
 use starlark::environment::GlobalsBuilder;
 use starlark::values::FrozenValue;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 use crate::interpreter::rule_defs::transitive_set::FrozenTransitiveSetDefinition;
 use crate::interpreter::rule_defs::transitive_set::transitive_set::TransitiveSetGen;
@@ -20,20 +19,12 @@ use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetProje
 use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetTraversalGen;
 
 #[starlark_module]
-pub fn register_transitive_set_types(globals: &mut GlobalsBuilder) {
-    const TransitiveSet: StarlarkValueAsType<TransitiveSetGen<FrozenValue>> =
-        StarlarkValueAsType::new();
-    const TransitiveSetArgsProjection: StarlarkValueAsType<
-        TransitiveSetArgsProjectionGen<FrozenValue>,
-    > = StarlarkValueAsType::new();
-    const TransitiveSetDefinition: StarlarkValueAsType<FrozenTransitiveSetDefinition> =
-        StarlarkValueAsType::new();
-    const TransitiveSetJsonProjection: StarlarkValueAsType<
-        TransitiveSetJsonProjectionGen<FrozenValue>,
-    > = StarlarkValueAsType::new();
-    const TransitiveSetIterator: StarlarkValueAsType<TransitiveSetTraversalGen<FrozenValue>> =
-        StarlarkValueAsType::new();
-    const TransitiveSetArgsProjectionIterator: StarlarkValueAsType<
-        TransitiveSetProjectionTraversalGen<FrozenValue>,
-    > = StarlarkValueAsType::new();
-}
+#[starlark_types(
+    TransitiveSetGen<FrozenValue> as TransitiveSet,
+    TransitiveSetArgsProjectionGen<FrozenValue> as TransitiveSetArgsProjection,
+    FrozenTransitiveSetDefinition as TransitiveSetDefinition,
+    TransitiveSetJsonProjectionGen<FrozenValue> as TransitiveSetJsonProjection,
+    TransitiveSetTraversalGen<FrozenValue> as TransitiveSetIterator,
+    TransitiveSetProjectionTraversalGen<FrozenValue> as TransitiveSetArgsProjectionIterator
+)]
+pub fn register_transitive_set_types(globals: &mut GlobalsBuilder) {}

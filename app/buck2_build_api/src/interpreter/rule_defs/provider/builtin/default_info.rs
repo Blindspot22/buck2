@@ -27,11 +27,11 @@ use starlark::eval::Evaluator;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
 use starlark::values::FrozenHeap;
-use starlark::values::FrozenRef;
 use starlark::values::FrozenValue;
 use starlark::values::FrozenValueOfUnchecked;
 use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
+use starlark::values::StarlarkPagable;
 use starlark::values::StringValue;
 use starlark::values::Trace;
 use starlark::values::UnpackAndDiscard;
@@ -131,7 +131,16 @@ use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectio
 /// $ buck build //subdir:foo[stripped]
 /// ```
 #[internal_provider(default_info_creator)]
-#[derive(Clone, Debug, Freeze, Trace, Coerce, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Freeze,
+    Trace,
+    Coerce,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[freeze(validator = validate_default_info, bounds = "V: ValueLike<'freeze>")]
 #[repr(C)]
 pub struct DefaultInfoGen<V: ValueLifetimeless> {
@@ -257,7 +266,7 @@ impl FrozenDefaultInfo {
         }))
     }
 
-    pub fn default_outputs<'a>(&'a self) -> Vec<StarlarkArtifact> {
+    pub fn default_outputs(&self) -> Vec<StarlarkArtifact> {
         self.default_outputs_impl()
             .unwrap()
             .collect::<Result<_, _>>()
@@ -271,8 +280,9 @@ impl FrozenDefaultInfo {
     fn sub_targets_impl(
         &self,
     ) -> buck2_error::Result<
-        impl Iterator<Item = buck2_error::Result<(&str, FrozenRef<'static, FrozenProviderCollection>)>>
-        + '_,
+        impl Iterator<
+            Item = buck2_error::Result<(&str, FrozenValueTyped<'static, FrozenProviderCollection>)>,
+        > + '_,
     > {
         let sub_targets = FrozenDictRef::from_frozen_value(self.sub_targets.get())
             .ok_or_else(|| internal_error!("sub_targets should be a dict-like object"))?;
@@ -282,15 +292,18 @@ impl FrozenDefaultInfo {
                 k.to_value()
                     .unpack_str()
                     .ok_or_else(|| internal_error!("sub_targets should have string keys"))?,
-                v.downcast_frozen_ref::<FrozenProviderCollection>()
-                    .ok_or_else(|| internal_error!(
+                FrozenValueTyped::new(v).ok_or_else(|| {
+                    internal_error!(
                         "Values inside of a frozen provider should be frozen provider collection",
-                    ))?,
+                    )
+                })?,
             ))
         }))
     }
 
-    pub fn sub_targets(&self) -> SmallMap<&str, FrozenRef<'static, FrozenProviderCollection>> {
+    pub fn sub_targets(
+        &self,
+    ) -> SmallMap<&str, FrozenValueTyped<'static, FrozenProviderCollection>> {
         self.sub_targets_impl()
             .unwrap()
             .collect::<Result<_, _>>()

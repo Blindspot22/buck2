@@ -23,20 +23,22 @@ use std::fmt::Debug;
 use std::fmt::Display;
 
 use allocative::Allocative;
+use pagable::StaticValue;
 use starlark_derive::NoSerialize;
 use starlark_derive::starlark_value;
 
 use crate as starlark;
 use crate::any::ProvidesStaticType;
+use crate::pagable::vtable_register::VtableRegistered;
+use crate::typing::starlark_value::TyStarlarkValueVTable;
 use crate::values::AllocValue;
 use crate::values::Freeze;
 use crate::values::Heap;
-use crate::values::HeapSendable;
 use crate::values::StarlarkValue;
 use crate::values::Trace;
 use crate::values::Value;
 use crate::values::ValueLike;
-use crate::values::layout::heap::send::HeapSyncable;
+use crate::values::layout::avalue::AValueSimpleBound;
 
 /// Allocate arbitrary value on the starlark heap without implementing full [`StarlarkValue`].
 ///
@@ -84,21 +86,113 @@ impl<T> Display for StarlarkAnyComplex<T> {
     }
 }
 
+/// Marker trait certifying that `T` has a registered typing vtable entry
+/// for `StarlarkAnyComplex<T>`. Implemented per-`T` by
+/// [`register_starlark_any_complex!`][crate::register_starlark_any_complex].
+///
+/// This indirection exists to work around the orphan rule: downstream
+/// crates can't `impl HasTyVTable for StarlarkAnyComplex<LocalT>` directly
+/// (both trait and outer type are foreign), but they can impl this marker on
+/// their local `T`. A blanket impl in this crate then provides `HasTyVTable`
+/// for the corresponding `StarlarkAnyComplex<T>`.
+///
+/// `T` must implement [`StarlarkPagable`](crate::pagable::StarlarkPagable)
+/// so that `StarlarkAnyComplex<T>` can satisfy the `StarlarkSerialize` /
+/// `StarlarkDeserialize` bounds of `StarlarkValue`. Types that never actually
+/// round-trip can derive [`StarlarkPagablePanic`](starlark_derive::StarlarkPagablePanic)
+/// to satisfy the bound with panicking stubs.
+pub trait StarlarkAnyComplexHasTyVTable: crate::pagable::StarlarkPagable {
+    /// Typing vtable entry for `StarlarkAnyComplex<Self>`.
+    const TY_VTABLE_STATIC: StaticValue<TyStarlarkValueVTable>;
+}
+
+#[cfg(feature = "pagable")]
+impl<T> crate::typing::HasTyVTable for StarlarkAnyComplex<T>
+where
+    T: StarlarkAnyComplexHasTyVTable,
+{
+    const TY_VTABLE_STATIC: StaticValue<TyStarlarkValueVTable> =
+        <T as StarlarkAnyComplexHasTyVTable>::TY_VTABLE_STATIC;
+}
+
 #[starlark_value(type = "any_complex")]
 impl<'v, T> StarlarkValue<'v> for StarlarkAnyComplex<T>
 where
-    T: Allocative + ProvidesStaticType<'v> + 'v,
+    T: Allocative + ProvidesStaticType<'v> + 'v + StarlarkAnyComplexHasTyVTable,
     T::StaticType: Sized,
 {
     type Canonical = Self;
+}
+
+impl<T: crate::pagable::StarlarkPagable> crate::pagable::StarlarkSerialize
+    for StarlarkAnyComplex<T>
+{
+    fn starlark_serialize(
+        &self,
+        ctx: &mut dyn crate::pagable::StarlarkSerializeContext,
+    ) -> crate::Result<()> {
+        <T as crate::pagable::StarlarkSerialize>::starlark_serialize(&self.value, ctx)
+    }
+}
+
+impl<T: crate::pagable::StarlarkPagable> crate::pagable::StarlarkDeserialize
+    for StarlarkAnyComplex<T>
+{
+    fn starlark_deserialize(
+        ctx: &mut dyn crate::pagable::StarlarkDeserializeContext<'_>,
+    ) -> crate::Result<Self> {
+        Ok(StarlarkAnyComplex {
+            value: <T as crate::pagable::StarlarkDeserialize>::starlark_deserialize(ctx)?,
+        })
+    }
+}
+
+/// Register vtables for `StarlarkAnyComplex<T>`.
+///
+/// Three forms:
+/// - `register_starlark_any_complex!(T)` — registers the typing vtable for
+///   `StarlarkAnyComplex<T>`. Use for a `T` that is never stored on the
+///   frozen heap (e.g. unfrozen `Foo<'_>` alone, or a standalone type).
+/// - `register_starlark_any_complex!(frozen T)` — registers the typing vtable **and**
+///   the frozen-heap vtable. Use for the `'static` frozen companion that
+///   lives on the frozen heap.
+/// - `register_starlark_any_complex!(T, frozen FrozenT)` — paired form: does both of
+///   the above in one call. Preferred for a typical freeze pair.
+///
+/// ```ignore
+/// register_starlark_any_complex!(Foo<'_>, frozen FrozenFoo);
+/// ```
+#[macro_export]
+macro_rules! register_starlark_any_complex {
+    ($unfrozen:ty, frozen $frozen:ty) => {
+        $crate::register_starlark_any_complex!($unfrozen);
+        $crate::register_starlark_any_complex!(frozen $frozen);
+    };
+    (frozen $t:ty) => {
+        $crate::register_starlark_any_complex!($t);
+        // SAFETY: register_simple_vtable_entry! below registers the vtable.
+        unsafe impl $crate::values::any_complex::FrozenAnyComplexVtableRegistered for $t {}
+        $crate::register_simple_vtable_entry!($crate::values::any_complex::StarlarkAnyComplex<$t>);
+    };
+    ($t:ty) => {
+        const _: () = {
+            $crate::__declare_ty_vtable_static!(
+                $crate::values::any_complex::StarlarkAnyComplex<$t>
+            );
+            impl $crate::values::any_complex::StarlarkAnyComplexHasTyVTable for $t {
+                const TY_VTABLE_STATIC: pagable::StaticValue<
+                    $crate::__derive_refs::TyStarlarkValueVTable,
+                > = VTABLE_STATIC;
+            }
+        };
+    };
 }
 
 impl<'v, T> AllocValue<'v> for StarlarkAnyComplex<T>
 where
     Self: StarlarkValue<'v> + Freeze,
     T: Trace<'v> + ProvidesStaticType<'v>,
-    <Self as Freeze>::Frozen:
-        StarlarkValue<'static> + HeapSendable<'static> + HeapSyncable<'static>,
+    <Self as Freeze>::Frozen: AValueSimpleBound<'static>,
     <Self as ProvidesStaticType<'v>>::StaticType: Send,
 {
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
@@ -106,10 +200,26 @@ where
     }
 }
 
+/// Marker trait for frozen types that can be wrapped in `StarlarkAnyComplex`
+/// and are registered for vtable lookup.
+///
+/// # Safety
+///
+/// Implementors must also register the vtable entry for `StarlarkAnyComplex<Self>`
+/// using [`register_simple_vtable_entry!`](macro@crate::register_simple_vtable_entry). Use the
+/// [`register_starlark_any_complex!`](macro@crate::register_starlark_any_complex)
+/// macro with the `frozen` form instead of implementing this trait manually —
+/// it handles both the trait implementation and vtable registration.
+pub unsafe trait FrozenAnyComplexVtableRegistered {}
+
+unsafe impl<T> VtableRegistered for StarlarkAnyComplex<T> where T: FrozenAnyComplexVtableRegistered {}
+
 #[cfg(test)]
 mod tests {
     use allocative::Allocative;
     use starlark_derive::ProvidesStaticType;
+    use starlark_derive::StarlarkPagable;
+    use starlark_derive::StarlarkPagablePanic;
     use starlark_derive::Trace;
 
     use crate as starlark;
@@ -122,35 +232,38 @@ mod tests {
     use crate::values::FrozenValue;
     use crate::values::StringValue;
     use crate::values::Value;
+    use crate::values::layout::heap::heap_type::StarlarkTestHeapName;
     use crate::values::list::AllocList;
     use crate::values::types::any_complex::StarlarkAnyComplex;
 
+    // Types used for StarlarkAnyComplex test - must be at module level for registration.
+    #[derive(Trace, Allocative, ProvidesStaticType, StarlarkPagablePanic)]
+    struct UnfrozenData<'v> {
+        string: StringValue<'v>,
+        other: Value<'v>,
+    }
+
+    impl<'v> Freeze for UnfrozenData<'v> {
+        type Frozen = FrozenData;
+
+        fn freeze(self, freezer: &Freezer) -> FreezeResult<Self::Frozen> {
+            Ok(FrozenData {
+                string: self.string.freeze(freezer)?,
+                other: freezer.freeze(self.other)?,
+            })
+        }
+    }
+
+    #[derive(Allocative, ProvidesStaticType, StarlarkPagable)]
+    struct FrozenData {
+        string: FrozenStringValue,
+        other: FrozenValue,
+    }
+
+    crate::register_starlark_any_complex!(UnfrozenData<'_>, frozen FrozenData);
+
     #[test]
     fn test_any_complex() {
-        #[derive(Trace, Allocative, ProvidesStaticType)]
-        struct UnfrozenData<'v> {
-            string: StringValue<'v>,
-            other: Value<'v>,
-        }
-
-        impl<'v> Freeze for UnfrozenData<'v> {
-            type Frozen = FrozenData;
-
-            fn freeze(self, freezer: &Freezer) -> FreezeResult<Self::Frozen> {
-                Ok(FrozenData {
-                    string: self.string.freeze(freezer)?,
-                    other: freezer.freeze(self.other)?,
-                })
-            }
-        }
-
-        #[derive(Allocative, ProvidesStaticType)]
-        struct FrozenData {
-            string: FrozenStringValue,
-            #[expect(dead_code)]
-            other: FrozenValue,
-        }
-
         Module::with_temp_heap(|module| {
             let data = module.heap().alloc(StarlarkAnyComplex::new(UnfrozenData {
                 string: module.heap().alloc_str("aaa"),
@@ -166,7 +279,7 @@ mod tests {
 
             module.set_extra_value(data);
 
-            let module = module.freeze()?;
+            let module = module.freeze_named(StarlarkTestHeapName::frozen_heap_name())?;
 
             let data = module.extra_value().unwrap();
             assert_eq!(

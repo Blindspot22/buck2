@@ -1,11 +1,11 @@
 # This file is @generated, regenerate by re-running test with `-- --env BUCK2_UPDATE_GOLDEN=1` appended to the test command
 
 $ buck cquery root//:foo -v0 --target-platforms=//:platform1
-root//:foo (root//:platform1#7358739dcc633a9a)
+root//:foo (root//:platform1#<HASH>)
 
 $ buck cquery root//:foo --console=none -v0 --target-platforms=//:platform2
 Command failed: 
-Error looking up configured node root//:foo (root//:platform2#44754460902db3e4)
+Error looking up configured node root//:foo (root//:platform2#<HASH>)
 
 Caused by:
     0: configuring attr `data`
@@ -13,7 +13,7 @@ Caused by:
 
 $ buck cquery root//:foo --console=none -v0 --target-platforms=//:platform3
 Command failed: 
-Error looking up configured node root//:foo (root//:platform3#7ef364a2e8f80652)
+Error looking up configured node root//:foo (root//:platform3#<HASH>)
 
 Caused by:
     0: configuring attr `data`
@@ -61,7 +61,8 @@ $ buck uquery root//:foo -v0 --output-format=json -B
           "message": "fail message"
         }
       }
-    }
+    },
+    "deps": []
   }
 }
 
@@ -82,11 +83,7 @@ Error evaluating expression:
 
 Caused by:
     0: Error evaluating build file: `root//:TARGETS.fixture`
-    1: Traceback (most recent call last):
-         * TARGETS.fixture:51, in <module>
-             error_rule(
-       
-       error: Error coercing attribute `data` of `root//:foo2`
+    1: error: Error coercing attribute `data` of `root//:foo2`
          --> TARGETS.fixture:51:1
           |
        51 | / error_rule(
@@ -95,6 +92,10 @@ Caused by:
        54 | | )
           | |_^
           |
+       Traceback (most recent call last):
+         * TARGETS.fixture:51, in <module>
+             error_rule(
+       
     2: Error coercing attribute `data` of type `attrs.string()`
     3: Error coercing "bad use"
     4: Expected `str`, but got `SelectFail (repr: "bad use")`

@@ -13,8 +13,11 @@ use async_trait::async_trait;
 use dice::DiceComputations;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
+use dice::PagableValueSerialize;
+use dice::ValueSerialize;
 use dupe::Dupe;
 use pagable::Pagable;
+use pagable::pagable_typetag;
 
 #[derive(Debug, Clone, Dupe, Eq, PartialEq, Allocative, Pagable)]
 struct StarlarkTypesValue {
@@ -31,9 +34,11 @@ struct StarlarkTypesValue {
     Eq,
     PartialEq,
     Hash,
-    Allocative
+    Allocative,
+    Pagable
 )]
 #[display("{:?}", self)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct StarlarkTypesKey;
 
 impl InjectedKey for StarlarkTypesKey {
@@ -41,6 +46,10 @@ impl InjectedKey for StarlarkTypesKey {
 
     fn equality(x: &StarlarkTypesValue, y: &StarlarkTypesValue) -> bool {
         x == y
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        PagableValueSerialize::<Self::Value>::new()
     }
 }
 

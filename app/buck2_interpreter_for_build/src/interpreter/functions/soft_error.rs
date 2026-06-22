@@ -8,6 +8,7 @@
  * above-listed licenses.
  */
 
+use buck2_core::error::validate_logview_category;
 use buck2_core::soft_error;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
@@ -31,11 +32,24 @@ enum SoftErrorError {
     InvalidCategory(String),
 }
 
+fn validate_category(category: &str) -> starlark::Result<()> {
+    if !category.starts_with("starlark_") {
+        return Err(
+            buck2_error::Error::from(SoftErrorError::InvalidCategory(category.to_owned())).into(),
+        );
+    }
+
+    validate_logview_category(category).map_err(starlark::Error::from)?;
+
+    Ok(())
+}
+
 #[starlark_module]
 pub(crate) fn register_soft_error(builder: &mut GlobalsBuilder) {
     /// Produce an error that will become a hard error at some point in the future, but
     /// for now is a warning which is logged to the server.
-    /// In the open source version of Buck2 this function always results in an error.
+    /// In the open source version of Buck2 this function always results in an error
+    /// (deprecation soft errors are promoted to hard errors in OSS builds).
     ///
     /// Called passing a stable key (must be `snake_case` and start with `starlark_`,
     /// used for consistent reporting) and an arbitrary message (used for debugging).
@@ -55,12 +69,7 @@ pub(crate) fn register_soft_error(builder: &mut GlobalsBuilder) {
         #[starlark(require = named)] stack: Option<bool>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<NoneType> {
-        if !category.starts_with("starlark_") {
-            return Err(buck2_error::Error::from(SoftErrorError::InvalidCategory(
-                category.to_owned(),
-            ))
-            .into());
-        }
+        validate_category(category)?;
 
         let err = if stack.unwrap_or(true) {
             SoftErrorError::StarlarkSoftError {
@@ -77,7 +86,82 @@ pub(crate) fn register_soft_error(builder: &mut GlobalsBuilder) {
             .into()
         };
 
-        soft_error!(category, err, quiet: quiet.unwrap_or_default(),)?;
+        soft_error!(category, err, quiet: quiet.unwrap_or_default(), error_on_oss: true)?;
         Ok(NoneType)
+    }
+
+    /// Validate that a soft error category is valid for use from Starlark.
+    /// The category must start with `starlark_` and be `lower_snake_case`
+    /// (only `a-z` and `_`, no consecutive underscores, must start and end with a letter).
+    /// Raises an error if the category is invalid, returns `None` on success.
+    fn validate_soft_error_category(
+        #[starlark(require = pos)] category: &str,
+    ) -> starlark::Result<NoneType> {
+        validate_category(category)?;
+        Ok(NoneType)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use starlark::assert::Assert;
+
+    use crate::interpreter::functions::soft_error::register_soft_error;
+
+    #[test]
+    fn test_validate_soft_error_category_valid() {
+        let mut a = Assert::new();
+        a.globals_add(register_soft_error);
+        a.is_true("validate_soft_error_category('starlark_valid_category') == None");
+    }
+
+    #[test]
+    fn test_validate_soft_error_category_missing_prefix() {
+        let mut a = Assert::new();
+        a.globals_add(register_soft_error);
+        a.fail(
+            "validate_soft_error_category('no_starlark_prefix')",
+            "should have category starting with `starlark_`",
+        );
+    }
+
+    #[test]
+    fn test_validate_soft_error_category_ends_with_underscore() {
+        let mut a = Assert::new();
+        a.globals_add(register_soft_error);
+        a.fail(
+            "validate_soft_error_category('starlark_')",
+            "must be lower_snake_case",
+        );
+    }
+
+    #[test]
+    fn test_validate_soft_error_category_consecutive_underscores() {
+        let mut a = Assert::new();
+        a.globals_add(register_soft_error);
+        a.fail(
+            "validate_soft_error_category('starlark_has__double')",
+            "must be lower_snake_case",
+        );
+    }
+
+    #[test]
+    fn test_validate_soft_error_category_contains_digit() {
+        let mut a = Assert::new();
+        a.globals_add(register_soft_error);
+        a.fail(
+            "validate_soft_error_category('starlark_has_1number')",
+            "must be lower_snake_case",
+        );
+    }
+
+    #[test]
+    fn test_validate_soft_error_category_empty() {
+        let mut a = Assert::new();
+        a.globals_add(register_soft_error);
+        a.fail(
+            "validate_soft_error_category('')",
+            "should have category starting with `starlark_`",
+        );
     }
 }

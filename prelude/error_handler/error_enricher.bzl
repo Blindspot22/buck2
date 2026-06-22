@@ -36,28 +36,26 @@ def _apply_subcategory_remediation(error: ActionSubError, enricher: ErrorEnriche
             if enricher.subcategory_remediations and subcategory in enricher.subcategory_remediations:
                 error.remediation = enricher.subcategory_remediations[subcategory]
 
-def enrich_errors(
-        errors: list[ActionSubError],
-        enrichers: list[ErrorEnricher],
-        category_prefix: str = "") -> list[ActionSubError]:
+def enrich_errors(errors: list[ActionSubError], enrichers: list[ErrorEnricher], category_prefix: str = "") -> list[ActionSubError]:
     for error in errors:
         message = error.message if error.message else ""
+        path = error.file if error.file else ""
 
         for enricher in enrichers:
+            if enricher.file_matcher and enricher.file_matcher not in path:
+                continue
             if not match_error(enricher.matcher, message):
                 continue
 
             error.category = category_prefix + enricher.category
             _apply_subcategory_remediation(error, enricher, message)
+            if not error.remediation and enricher.message:
+                error.remediation = enricher.message
             break
 
     return errors
 
-def create_and_enrich_errors(
-        ctx: ActionErrorCtx,
-        text: str,
-        enrichers: list[ErrorEnricher],
-        category_prefix: str = "") -> list[ActionSubError]:
+def create_and_enrich_errors(ctx: ActionErrorCtx, text: str, enrichers: list[ErrorEnricher], category_prefix: str = "") -> list[ActionSubError]:
     """
     Create an ActionSubError for EACH matching enricher.
 

@@ -27,17 +27,23 @@ mod tests {
     use derive_more::Display;
     use dice_futures::cancellation::CancellationContext;
     use dupe::Dupe;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
 
+    use crate::DiceKeyDyn;
     use crate::HashMap;
     use crate::api::computations::DiceComputations;
     use crate::api::cycles::DetectCycles;
     use crate::api::key::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
     use crate::impls::dice::Dice;
     use crate::introspection::graph::SerializedGraphNodeForKey;
     use crate::introspection::serialize_graph;
 
-    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct KeyA(usize);
 
     #[async_trait]
@@ -59,10 +65,15 @@ mod tests {
         fn equality(_: &Self::Value, _: &Self::Value) -> bool {
             unimplemented!()
         }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
     }
 
-    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct KeyB;
 
     #[async_trait]
@@ -79,6 +90,10 @@ mod tests {
 
         fn equality(_: &Self::Value, _: &Self::Value) -> bool {
             unimplemented!()
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -143,9 +158,11 @@ mod tests {
         let mut ctx = dice.updater().commit().await;
         ctx.compute(&KeyA(3)).await?;
 
-        let node = bincode::serialize(&dice.to_introspectable())?;
+        let node =
+            bincode::serde::encode_to_vec(dice.to_introspectable(), bincode::config::legacy())?;
 
-        let _out: Vec<SerializedGraphNodeForKey> = bincode::deserialize(&node)?;
+        let (_out, _): (Vec<SerializedGraphNodeForKey>, _) =
+            bincode::serde::decode_from_slice(&node, bincode::config::legacy())?;
         Ok(())
     }
 }

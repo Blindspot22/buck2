@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -18,6 +17,7 @@ use allocative::Allocative;
 use buck2_common::init::ResourceControlConfig;
 use buck2_events::daemon_id::DaemonId;
 use buck2_events::dispatch::EventDispatcher;
+use buck2_hash::StdBuckHashMap;
 use buck2_util::threads::thread_spawn;
 use dupe::Dupe;
 use futures::StreamExt as _;
@@ -65,7 +65,7 @@ pub struct MemoryTrackerSharedState {
     /// The memory tracker regularly updates the scheduler with information about the memory state
     /// of the scenes. This map stores the current pairing of scenes to the actions they're
     /// associated with, and is used by the memory tracker to update the scheduler.
-    pub(crate) scene_action_mapping: tokio::sync::Mutex<HashMap<SceneIdRef, ActionScene>>,
+    pub(crate) scene_action_mapping: tokio::sync::Mutex<StdBuckHashMap<SceneIdRef, ActionScene>>,
 }
 
 pub struct MemoryReporter {
@@ -90,7 +90,15 @@ pub fn spawn_memory_reporter(
             tokio::select! {
                 Some(resource_control_event) = resource_control_event_rx.recv() => {
                     let event = resource_control_event.complete(dispatcher.trace_id());
-                    dispatcher.instant_event(event);
+                    // Spawn and detach the send_now call so we don't block
+                    // the event loop. send_now bypasses the scribe producer
+                    // queue; under memory pressure the queue-based path gets
+                    // blocked while send_now can still deliver events directly
+                    // to scribed.
+                    let dispatcher = dispatcher.dupe();
+                    tokio::spawn(async move {
+                        dispatcher.instant_event_send_now(event).await;
+                    });
                 }
                 _ = cancel.cancelled() => {
                     break;
@@ -118,7 +126,7 @@ pub async fn create_memory_tracker(
 
     let cgroup_pool = CgroupPool::create_in_parent_cgroup(
         cgroup_tree.forkserver_and_actions(),
-        &resource_control_config,
+        resource_control_config,
     )
     .await?;
     let effective_resource_constraints = *cgroup_tree.effective_resource_constraints();
@@ -133,7 +141,7 @@ pub async fn create_memory_tracker(
         cgroup_tree,
         action_cgroups: std::sync::Mutex::new(action_cgroups),
         pool: tokio::sync::Mutex::new(cgroup_pool),
-        scene_action_mapping: tokio::sync::Mutex::new(HashMap::new()),
+        scene_action_mapping: tokio::sync::Mutex::new(StdBuckHashMap::default()),
     };
     let handle = Arc::new(handle);
     let memory_tracker = MemoryTracker {
@@ -187,7 +195,7 @@ impl MemoryTracker {
 
     async fn collect_memory_reading(
         handle: &MemoryTrackerHandle,
-        mut allprocs_memory_pressure_handle: &mut MemoryPressureHandle,
+        allprocs_memory_pressure_handle: &mut MemoryPressureHandle,
     ) -> Option<MemoryReading> {
         let Ok((
             allprocs_memory_current,
@@ -201,7 +209,7 @@ impl MemoryTracker {
             handle
                 .cgroup_tree
                 .allprocs()
-                .read_memory_pressure_total(&mut allprocs_memory_pressure_handle),
+                .read_memory_pressure_total(allprocs_memory_pressure_handle),
             handle.cgroup_tree.daemon().read_memory_current(),
             handle.cgroup_tree.daemon().read_swap_current(),
         )
@@ -221,7 +229,7 @@ impl MemoryTracker {
 
     async fn collect_scene_readings(
         handle: &MemoryTrackerHandle,
-    ) -> HashMap<SceneIdRef, SceneResourceReading> {
+    ) -> StdBuckHashMap<SceneIdRef, SceneResourceReading> {
         let mut scenes = handle.scene_action_mapping.lock().await;
         scenes
             .iter_mut()
@@ -294,11 +302,28 @@ mod tests {
             10000000,
             "allprocs_memory_current",
         );
-        assert_max_over(
-            |e| e.allprocs_memory_pressure,
-            10,
-            "allprocs_memory_pressure",
-        );
+        let check_memory_pressure;
+        #[cfg(fbcode_build)]
+        {
+            if environment::is_on_demand() {
+                // In OD environments, memory pressure may be lower due to different cgroup configurations
+                // or resource constraints, so skip this assertion there.
+                check_memory_pressure = false;
+            } else {
+                check_memory_pressure = true;
+            }
+        }
+        #[cfg(not(fbcode_build))]
+        {
+            check_memory_pressure = true;
+        }
+        if check_memory_pressure {
+            assert_max_over(
+                |e| e.allprocs_memory_pressure,
+                10,
+                "allprocs_memory_pressure",
+            );
+        }
         assert_max_over(
             |e| e.daemon_memory_current,
             10000000,

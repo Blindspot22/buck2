@@ -17,6 +17,7 @@ _internal_tool_attrs = {
     "deferred_link_action": _internal_tool("prelude//rust/tools:deferred_link_action"),
     "extract_link_action": _internal_tool("prelude//rust/tools:extract_link_action"),
     "failure_filter_action": _internal_tool("prelude//rust/tools:failure_filter_action"),
+    "from_any_dir": _internal_tool("prelude//rust/tools:from_any_dir"),
     "redirect_stdout": _internal_tool("prelude//rust/tools:redirect_stdout"),
     "rustc_action": _internal_tool("prelude//rust/tools:rustc_action"),
     "rustdoc_coverage": _internal_tool("prelude//rust/tools:rustdoc_coverage"),
@@ -26,18 +27,10 @@ _internal_tool_attrs = {
     "transitive_dependency_symlinks_tool": _internal_tool("prelude//rust/tools:transitive_dependency_symlinks"),
 }
 
-RustInternalToolsInfo = provider(fields = {
-    tool: RunInfo
-    for tool in _internal_tool_attrs.keys()
-})
+RustInternalToolsInfo = provider(fields = {tool: RunInfo for tool in _internal_tool_attrs.keys()})
 
 def _impl(ctx: AnalysisContext) -> list[Provider]:
-    info = RustInternalToolsInfo(
-        **{
-            tool: getattr(ctx.attrs, tool)[RunInfo]
-            for tool in _internal_tool_attrs.keys()
-        }
-    )
+    info = RustInternalToolsInfo(**{tool: getattr(ctx.attrs, tool)[RunInfo] for tool in _internal_tool_attrs.keys()})
     return [DefaultInfo(), info]
 
 rust_internal_tools_toolchain = rule(

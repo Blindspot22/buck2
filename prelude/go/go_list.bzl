@@ -18,13 +18,13 @@ GoListOut = record(
     name = field(str),
     imports = field(list[str], default = []),
     test_imports = field(list[str], default = []),
-    x_test_imports = field(list[str], default = []),
     go_files = field(list[Artifact], default = []),
     h_files = field(list[Artifact], default = []),
     c_files = field(list[Artifact], default = []),
     cxx_files = field(list[Artifact], default = []),
     cgo_files = field(list[Artifact], default = []),
     s_files = field(list[Artifact], default = []),
+    syso_files = field(list[Artifact], default = []),
     test_go_files = field(list[Artifact], default = []),
     x_test_go_files = field(list[Artifact], default = []),
     ignored_go_files = field(list[Artifact], default = []),
@@ -36,13 +36,22 @@ GoListOut = record(
     error = field(GoListError | None, default = None),
 )
 
-def go_list(actions: AnalysisActions, go_toolchain: GoToolchainInfo, pkg_name: str, srcs: list[Artifact], package_root: str, build_tags: list[str], cgo_enabled: bool, with_tests: bool) -> Artifact:
+def go_list(
+    actions: AnalysisActions,
+    go_toolchain: GoToolchainInfo,
+    pkg_import_path: str,
+    srcs: list[Artifact],
+    package_root: str,
+    build_tags: list[str],
+    cgo_enabled: bool,
+    with_tests: bool,
+) -> Artifact:
     env = get_toolchain_env_vars(go_toolchain)
 
-    go_list_out = actions.declare_output(paths.basename(pkg_name) + "_go_list.json", has_content_based_path = True)
+    go_list_out = actions.declare_output(paths.basename(pkg_import_path) + "_go_list.json", has_content_based_path = True)
 
     srcs_dir = actions.symlinked_dir(
-        "__{}_srcs_dir__".format(paths.basename(pkg_name)),
+        "__{}_srcs_dir__".format(paths.basename(pkg_import_path)),
         {src.short_path.removeprefix(package_root).lstrip("/"): src for src in srcs},
         has_content_based_path = True,
     )
@@ -61,14 +70,26 @@ def go_list(actions: AnalysisActions, go_toolchain: GoToolchainInfo, pkg_name: s
         srcs_dir,
     ]
 
-    identifier = paths.basename(pkg_name)
+    identifier = paths.basename(pkg_import_path)
     actions.run(go_list_args, env = env, category = "go_list", identifier = identifier)
 
     return go_list_out
 
 def parse_go_list_out(srcs: list[Artifact], package_root: str, go_list_out: ArtifactValue) -> GoListOut:
     go_list = go_list_out.read_json()
-    go_files, cgo_files, h_files, c_files, cxx_files, s_files, test_go_files, x_test_go_files, ignored_go_files, ignored_other_files = [], [], [], [], [], [], [], [], [], []
+    go_files, cgo_files, h_files, c_files, cxx_files, s_files, syso_files, test_go_files, x_test_go_files, ignored_go_files, ignored_other_files = (
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
 
     for src in srcs:
         # remove package_root prefix from src artifact path to match `go list` output format
@@ -85,6 +106,8 @@ def parse_go_list_out(srcs: list[Artifact], package_root: str, go_list_out: Arti
             cxx_files.append(src)
         if src_path in go_list.get("SFiles", []):
             s_files.append(src)
+        if src_path in go_list.get("SysoFiles", []):
+            syso_files.append(src)
         if src_path in go_list.get("TestGoFiles", []):
             test_go_files.append(src)
         if src_path in go_list.get("XTestGoFiles", []):
@@ -97,7 +120,6 @@ def parse_go_list_out(srcs: list[Artifact], package_root: str, go_list_out: Arti
     name = go_list.get("Name", "")
     imports = go_list.get("Imports", [])
     test_imports = go_list.get("TestImports", [])
-    x_test_imports = go_list.get("XTestImports", [])
     cgo_cflags = go_list.get("CgoCFLAGS", [])
     cgo_cppflags = go_list.get("CgoCPPFLAGS", [])
     embed_patterns = go_list.get("EmbedPatterns", [])
@@ -108,13 +130,13 @@ def parse_go_list_out(srcs: list[Artifact], package_root: str, go_list_out: Arti
         name = name,
         imports = imports,
         test_imports = test_imports,
-        x_test_imports = x_test_imports,
         go_files = go_files,
         h_files = h_files,
         c_files = c_files,
         cxx_files = cxx_files,
         cgo_files = cgo_files,
         s_files = s_files,
+        syso_files = syso_files,
         test_go_files = test_go_files,
         x_test_go_files = x_test_go_files,
         cgo_cflags = cgo_cflags,

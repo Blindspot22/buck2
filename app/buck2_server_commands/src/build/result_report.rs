@@ -18,9 +18,9 @@ use buck2_build_api::build::BuildProviderType;
 use buck2_build_api::build::BuildTargetResult;
 use buck2_build_api::build::ConfiguredBuildTargetResult;
 use buck2_build_api::build::ProviderArtifacts;
-use buck2_build_api::interpreter::rule_defs::cmd_args::AbsCommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArgLike;
+use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::run_info::FrozenRunInfo;
 use buck2_certs::validate::CertState;
 use buck2_certs::validate::check_cert_state;
@@ -32,8 +32,8 @@ use buck2_core::pattern::pattern::Modifiers;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::artifact::fs::ExecutorFs;
+use buck2_hash::BuckHashMap;
 use dupe::Dupe;
-use fxhash::FxHashMap;
 use starlark_map::small_map::SmallMap;
 
 mod proto {
@@ -85,8 +85,13 @@ impl<'a> ResultReporter<'a> {
         for (k, v) in &build_result.configured {
             // We omit skipped targets here.
             let Some(v) = v else { continue };
-            non_action_errors.extend(v.errors.iter().cloned());
-            action_errors.extend(v.outputs.iter().filter_map(|x| x.as_ref().err()).cloned());
+            non_action_errors.extend(v.errors.iter().map(|t| t.inner.clone()));
+            action_errors.extend(
+                v.outputs
+                    .iter()
+                    .filter_map(|x| x.inner.as_ref().err())
+                    .cloned(),
+            );
 
             out.collect_result(k, v, build_result.configured_to_pattern_modifiers.get(k))?;
         }
@@ -121,9 +126,9 @@ impl<'a> ResultReporter<'a> {
         let outputs = result
             .outputs
             .iter()
-            .filter_map(|output| output.as_ref().ok());
+            .filter_map(|output| output.inner.as_ref().ok());
 
-        let mut artifact_path_mapping = FxHashMap::default();
+        let mut artifact_path_mapping = BuckHashMap::default();
 
         // NOTE: We use an SmallMap here to preserve the order the rule author wrote, all
         // the while avoiding duplicates.
@@ -220,14 +225,16 @@ impl<'a> ResultReporter<'a> {
                 };
                 let executor_fs = ExecutorFs::new(self.artifact_fs, path_separator);
                 let mut cli = Vec::<String>::new();
-                let mut ctx = AbsCommandLineContext::new(&executor_fs);
                 let error_counting_artifact_path_mapper =
                     ErrorCountingArtifactPathMapperImpl::new(artifact_path_mapping);
-                runinfo.add_to_command_line(
+                let mut fmt = CommandLineBuilder::new_with_options(
                     &mut cli,
-                    &mut ctx,
                     &error_counting_artifact_path_mapper,
-                )?;
+                    &executor_fs,
+                    true,
+                    None,
+                );
+                runinfo.add_to_command_line(&mut fmt)?;
                 if error_counting_artifact_path_mapper
                     .content_based_paths_with_no_hash
                     .get()
@@ -279,13 +286,13 @@ impl<'a> ResultReporter<'a> {
 }
 
 struct ErrorCountingArtifactPathMapperImpl<'a> {
-    pub map: FxHashMap<&'a Artifact, ContentBasedPathHash>,
+    pub map: BuckHashMap<&'a Artifact, ContentBasedPathHash>,
     pub content_based_paths_with_no_hash: Cell<usize>,
     pub scratch_content_based_path_hash: ContentBasedPathHash,
 }
 
 impl<'a> ErrorCountingArtifactPathMapperImpl<'a> {
-    pub fn new(map: FxHashMap<&'a Artifact, ContentBasedPathHash>) -> Self {
+    pub fn new(map: BuckHashMap<&'a Artifact, ContentBasedPathHash>) -> Self {
         Self {
             map,
             content_based_paths_with_no_hash: Cell::new(0),

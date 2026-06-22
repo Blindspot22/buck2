@@ -114,6 +114,7 @@ impl StreamingCommand for StarlarkDebugAttachCommand {
             },
             // The DAP server side does not handle hangups. So, until it does... we never hang up:
             || None,
+            || None,
         )
         .await??;
 
@@ -196,8 +197,8 @@ impl StreamingCommand for StarlarkDebugAttachCommand {
                 events: &[std::sync::Arc<BuckEvent>],
             ) -> buck2_error::Result<()> {
                 for ev in events {
-                    match unpack_event(ev)? {
-                        UnpackedBuckEvent::Instant(_, _, data) => match data {
+                    if let UnpackedBuckEvent::Instant(_, _, data) = unpack_event(ev)? {
+                        match data {
                             buck2_data::instant_event::Data::StructuredError(soft_error) => {
                                 if !soft_error.quiet {
                                     self.write_console(&format!(
@@ -210,8 +211,7 @@ impl StreamingCommand for StarlarkDebugAttachCommand {
                                 self.write_console(&message.message)?;
                             }
                             _ => {}
-                        },
-                        _ => {}
+                        }
                     }
                 }
                 Ok(())

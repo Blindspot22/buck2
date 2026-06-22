@@ -17,28 +17,55 @@ def _android_sdk_tools_impl(ctx):
 
     sub_targets["adb"] = [RunInfo(args = ["{}/build-tools/platform-tools/adb".format(ctx.attrs.android_sdk_path)])]
 
-    android_jar = ctx.actions.declare_output("android.jar")
-    ctx.actions.run(cmd_args(["ln", "-s", "{}/platforms/{}/android.jar".format(ctx.attrs.android_sdk_path, ctx.attrs.compile_sdk_version), android_jar.as_output()]), category = "android_jar_symlink")
+    android_jar = ctx.actions.declare_output("android.jar", has_content_based_path = False)
+    ctx.actions.run(
+        cmd_args(["ln", "-s", "{}/platforms/{}/android.jar".format(ctx.attrs.android_sdk_path, ctx.attrs.compile_sdk_version), android_jar.as_output()]),
+        category = "android_jar_symlink",
+    )
     sub_targets["android.jar"] = [DefaultInfo(default_output = android_jar)]
 
-    core_for_system_modules_jar = ctx.actions.declare_output("core-for-system-modules.jar")
-    ctx.actions.run(cmd_args(["ln", "-s", "{}/platforms/{}/core-for-system-modules.jar".format(ctx.attrs.android_sdk_path, ctx.attrs.compile_sdk_version), core_for_system_modules_jar.as_output()]), category = "core_for_system_modules_jar_symlink")
+    core_for_system_modules_jar = ctx.actions.declare_output("core-for-system-modules.jar", has_content_based_path = False)
+    ctx.actions.run(
+        cmd_args([
+            "ln",
+            "-s",
+            "{}/platforms/{}/core-for-system-modules.jar".format(ctx.attrs.android_sdk_path, ctx.attrs.compile_sdk_version),
+            core_for_system_modules_jar.as_output(),
+        ]),
+        category = "core_for_system_modules_jar_symlink",
+    )
     sub_targets["core-for-system-modules.jar"] = [DefaultInfo(default_output = core_for_system_modules_jar)]
 
-    framework_aidl_file = ctx.actions.declare_output("framework.aidl")
-    ctx.actions.run(cmd_args(["ln", "-s", "{}/platforms/{}/framework.aidl".format(ctx.attrs.android_sdk_path, ctx.attrs.compile_sdk_version), framework_aidl_file.as_output()]), category = "framework_aidl_symlink")
+    framework_aidl_file = ctx.actions.declare_output("framework.aidl", has_content_based_path = False)
+    ctx.actions.run(
+        cmd_args(
+            ["ln", "-s", "{}/platforms/{}/framework.aidl".format(ctx.attrs.android_sdk_path, ctx.attrs.compile_sdk_version), framework_aidl_file.as_output()]
+        ),
+        category = "framework_aidl_symlink",
+    )
     sub_targets["framework.aidl"] = [DefaultInfo(default_output = framework_aidl_file)]
 
-    optimized_proguard_config = ctx.actions.declare_output("proguard-android-optimize.txt")
-    ctx.actions.run(cmd_args(["ln", "-s", "{}/platforms/tools/proguard/proguard-android-optimize.txt".format(ctx.attrs.android_sdk_path), optimized_proguard_config.as_output()]), category = "optimized_proguard_config_symlink")
+    optimized_proguard_config = ctx.actions.declare_output("proguard-android-optimize.txt", has_content_based_path = False)
+    ctx.actions.run(
+        cmd_args(
+            ["ln", "-s", "{}/platforms/tools/proguard/proguard-android-optimize.txt".format(ctx.attrs.android_sdk_path), optimized_proguard_config.as_output()]
+        ),
+        category = "optimized_proguard_config_symlink",
+    )
     sub_targets["optimized_proguard_config"] = [DefaultInfo(default_output = optimized_proguard_config)]
 
-    proguard_config = ctx.actions.declare_output("proguard-android.txt")
-    ctx.actions.run(cmd_args(["ln", "-s", "{}/platforms/tools/proguard/proguard-android.txt".format(ctx.attrs.android_sdk_path), proguard_config.as_output()]), category = "proguard_config_symlink")
+    proguard_config = ctx.actions.declare_output("proguard-android.txt", has_content_based_path = False)
+    ctx.actions.run(
+        cmd_args(["ln", "-s", "{}/platforms/tools/proguard/proguard-android.txt".format(ctx.attrs.android_sdk_path), proguard_config.as_output()]),
+        category = "proguard_config_symlink",
+    )
     sub_targets["proguard_config"] = [DefaultInfo(default_output = proguard_config)]
 
-    proguard_jar = ctx.actions.declare_output("proguard.jar")
-    ctx.actions.run(cmd_args(["ln", "-s", "{}/platforms/tools/proguard/lib/proguard.jar".format(ctx.attrs.android_sdk_path), proguard_jar.as_output()]), category = "proguard_jar_symlink")
+    proguard_jar = ctx.actions.declare_output("proguard.jar", has_content_based_path = False)
+    ctx.actions.run(
+        cmd_args(["ln", "-s", "{}/platforms/tools/proguard/lib/proguard.jar".format(ctx.attrs.android_sdk_path), proguard_jar.as_output()]),
+        category = "proguard_jar_symlink",
+    )
     sub_targets["proguard.jar"] = [DefaultInfo(default_output = proguard_jar)]
 
     return [
@@ -54,11 +81,7 @@ android_sdk_tools = rule(
     },
 )
 
-def system_android_toolchain(
-        name,
-        android_sdk_tools_target,
-        jdk_system_image,
-        **kwargs):
+def system_android_toolchain(name, android_sdk_tools_target, jdk_system_image, **kwargs):
     kwargs["aapt2_filter_resources"] = "prelude//android/tools:filter_extra_resources"
     kwargs["aapt2"] = "{}[aapt2]".format(android_sdk_tools_target)
     kwargs["aar_builder"] = "prelude//toolchains/android/src/com/facebook/buck/android/aar:aar_builder_binary"
@@ -85,8 +108,10 @@ def system_android_toolchain(
     # @oss-disable[end= ]: kwargs["gatorade_mergemap_tool"] = "prelude//android/tools/meta_only:gatorade_mergemap_tool"
     kwargs["generate_build_config"] = "prelude//toolchains/android/src/com/facebook/buck/android/build_config:generate_build_config_binary"
     kwargs["generate_manifest"] = "prelude//toolchains/android/src/com/facebook/buck/android/manifest:generate_manifest_binary"
+    kwargs["sort_pre_dexed_files"] = "prelude//android/tools:sort_pre_dexed_files"
     kwargs["installer"] = "prelude//toolchains/android/src/com/facebook/buck/installer/android:android_installer"
     kwargs["instrumentation_test_can_run_locally"] = True
+    kwargs["collect_perfetto"] = False
     kwargs["instrumentation_test_runner_classpath"] = [
         "prelude//toolchains/android/src/com/facebook/buck/testrunner:testrunner-bin-android-fixed",
         "prelude//toolchains/android/third-party:android-common",
@@ -117,7 +142,9 @@ def system_android_toolchain(
     kwargs["proguard_config"] = "{}[proguard_config]".format(android_sdk_tools_target)
     kwargs["proguard_jar"] = "{}[proguard.jar]".format(android_sdk_tools_target)
     kwargs["r_dot_java_weight_factor"] = 8
-    kwargs["replace_application_id_placeholders"] = "prelude//toolchains/android/src/com/facebook/buck/android/manifest:replace_application_id_placeholders_binary"
+    kwargs["replace_application_id_placeholders"] = (
+        "prelude//toolchains/android/src/com/facebook/buck/android/manifest:replace_application_id_placeholders_binary"
+    )
     kwargs["secondary_dex_compression_command"] = "prelude//toolchains/android/src/com/facebook/buck/android/dex:secondary_dex_compression_binary"
     kwargs["secondary_dex_weight_limit"] = 1024
     kwargs["set_application_id_to_specified_package"] = True
@@ -125,10 +152,7 @@ def system_android_toolchain(
     kwargs["unpack_aar"] = "prelude//android/tools:unpack_aar"
     kwargs["zipalign"] = "{}[zipalign]".format(android_sdk_tools_target)
 
-    system_android_toolchain_rule(
-        name = name,
-        **kwargs
-    )
+    system_android_toolchain_rule(name = name, **kwargs)
 
 def system_android_toolchain_rule_impl(ctx):
     return [
@@ -166,6 +190,7 @@ def system_android_toolchain_rule_impl(ctx):
             generate_manifest = ctx.attrs.generate_manifest,
             installer = ctx.attrs.installer,
             instrumentation_test_can_run_locally = ctx.attrs.instrumentation_test_can_run_locally,
+            collect_perfetto = ctx.attrs.collect_perfetto,
             instrumentation_test_runner_classpath = ctx.attrs.instrumentation_test_runner_classpath,
             instrumentation_test_runner_main_class = ctx.attrs.instrumentation_test_runner_main_class,
             jar_splitter_command = ctx.attrs.jar_splitter_command,
@@ -190,6 +215,7 @@ def system_android_toolchain_rule_impl(ctx):
             secondary_dex_weight_limit = ctx.attrs.secondary_dex_weight_limit,
             set_application_id_to_specified_package = ctx.attrs.set_application_id_to_specified_package,
             should_run_sanity_check_for_placeholders = ctx.attrs.should_run_sanity_check_for_placeholders,
+            sort_pre_dexed_files = ctx.attrs.sort_pre_dexed_files,
             unpack_aar = ctx.attrs.unpack_aar,
             zipalign = ctx.attrs.zipalign,
         ),
@@ -209,6 +235,7 @@ system_android_toolchain_rule = rule(
         "app_without_resources_stub": attrs.source(),
         "bundle_apks_builder": attrs.dep(providers = [RunInfo]),
         "bundle_builder": attrs.dep(providers = [RunInfo]),
+        "collect_perfetto": attrs.bool(),
         "combine_native_library_dirs": attrs.dep(providers = [RunInfo]),
         "consolidate_class_names": attrs.option(attrs.dep(providers = [RunInfo]), default = None),
         "copy_string_resources": attrs.dep(providers = [RunInfo]),
@@ -248,6 +275,7 @@ system_android_toolchain_rule = rule(
         "secondary_dex_weight_limit": attrs.int(),
         "set_application_id_to_specified_package": attrs.bool(),
         "should_run_sanity_check_for_placeholders": attrs.bool(),
+        "sort_pre_dexed_files": attrs.option(attrs.dep(providers = [RunInfo]), default = None),
         "unpack_aar": attrs.dep(providers = [RunInfo]),
         "zipalign": attrs.dep(providers = [RunInfo]),
     },

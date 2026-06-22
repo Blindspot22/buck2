@@ -31,6 +31,7 @@ use starlark::values::Freezer;
 use starlark::values::FrozenValue;
 use starlark::values::NoSerialize;
 use starlark::values::OwnedFrozenValue;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
@@ -73,7 +74,8 @@ struct StarlarkCfgConstructor<'v> {
     derive_more::Display,
     NoSerialize,
     ProvidesStaticType,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[display("{:?}", self)]
 struct FrozenStarlarkCfgConstructor {

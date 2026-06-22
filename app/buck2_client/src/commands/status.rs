@@ -134,7 +134,7 @@ fn duration_to_string(duration: Duration) -> String {
     format_duration(duration).to_string()
 }
 
-fn process_status(status: StatusResponse) -> buck2_error::Result<serde_json::Value> {
+pub(crate) fn process_status(status: StatusResponse) -> buck2_error::Result<serde_json::Value> {
     let timestamp = match status.start_time {
         None => "unknown".to_owned(),
         Some(timestamp) => timestamp_to_string(timestamp.seconds as u64, timestamp.nanos as u32)?,
@@ -159,6 +159,7 @@ fn process_status(status: StatusResponse) -> buck2_error::Result<serde_json::Val
         "supports_vpnless": status.supports_vpnless.unwrap_or_default(),
         "http2": status.http2,
         "io_provider": status.io_provider,
+        "allprocs_cgroup_path": status.allprocs_cgroup_path,
     });
 
     if let Some(tokio_runtime_metrics) = status.tokio_runtime_metrics {

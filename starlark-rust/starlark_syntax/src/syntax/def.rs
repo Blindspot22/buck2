@@ -20,6 +20,7 @@ use std::ops::Range;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::Pagable;
 
 use crate::codemap::CodeMap;
 use crate::codemap::Span;
@@ -64,7 +65,7 @@ pub struct DefParam<'a, P: AstPayload> {
 /// with markers `/` and `*` omitted.
 /// This struct contains sizes and indices to split the list into parts.
 #[derive(
-    Copy, Clone, Dupe, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Allocative
+    Copy, Clone, Dupe, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Allocative, Pagable
 )]
 pub struct DefParamIndices {
     /// Number of parameters which can be filled positionally.
@@ -92,8 +93,7 @@ impl DefParamIndices {
 
     pub fn named_only(&self, param_count: usize) -> Range<usize> {
         self.args
-            .map(|a| a as usize + 1)
-            .unwrap_or(self.num_positional as usize)
+            .map_or(self.num_positional as usize, |a| a as usize + 1)
             ..self.kwargs.unwrap_or(param_count as u32) as usize
     }
 }

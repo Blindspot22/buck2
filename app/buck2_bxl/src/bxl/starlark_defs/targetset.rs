@@ -12,6 +12,14 @@ use std::convert::Infallible;
 use std::ops::Deref;
 
 use allocative::Allocative;
+// Used only by `register_ty_starlark_value!` invocations below, which expand to nothing
+// when the starlark `pagable` feature is off (e.g. in OSS cargo builds).
+#[allow(unused_imports)]
+use buck2_build_api::actions::query::ActionQueryNode;
+#[allow(unused_imports)]
+use buck2_node::nodes::configured::ConfiguredTargetNode;
+#[allow(unused_imports)]
+use buck2_node::nodes::unconfigured::TargetNode;
 use buck2_query::query::environment::QueryTarget;
 use buck2_query::query::syntax::simple::eval::set::TargetSet;
 use derive_more::Display;
@@ -19,8 +27,8 @@ use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
+use starlark::typing::HasTyVTable;
 use starlark::typing::Ty;
 use starlark::values::AllocValue;
 use starlark::values::Freeze;
@@ -39,7 +47,25 @@ use crate::bxl::starlark_defs::alloc_node::AllocNode;
 
 pub(crate) trait NodeLike = QueryTarget + std::fmt::Debug + Eq + Dupe + AllocNode + Allocative;
 
-#[derive(Debug, Display, Clone)]
+unsafe impl<N: QueryTarget + 'static> starlark::pagable::VtableRegistered for StarlarkTargetSet<N> {}
+
+starlark::register_simple_vtable_entry!(
+    StarlarkTargetSet<buck2_node::nodes::unconfigured::TargetNode>
+);
+starlark::register_simple_vtable_entry!(
+    StarlarkTargetSet<buck2_node::nodes::configured::ConfiguredTargetNode>
+);
+starlark::register_simple_vtable_entry!(
+    StarlarkTargetSet<buck2_build_api::actions::query::ActionQueryNode>
+);
+
+#[derive(
+    Debug,
+    Display,
+    Clone,
+    starlark::StarlarkPagableViaPagable,
+    pagable::PagablePanic // okay("bxl")
+)]
 #[derive(NoSerialize, Allocative)] // TODO maybe this should be
 /// The StarlarkValue implementation for TargetSet to expose it to starlark.
 pub(crate) struct StarlarkTargetSet<Node: QueryTarget>(pub(crate) TargetSet<Node>);
@@ -68,7 +94,10 @@ impl<Node: QueryTarget> Freeze for StarlarkTargetSet<Node> {
     }
 }
 
-impl<'v, Node: NodeLike> StarlarkTypeRepr for &'v StarlarkTargetSet<Node> {
+impl<Node: NodeLike> StarlarkTypeRepr for &StarlarkTargetSet<Node>
+where
+    StarlarkTargetSet<Node>: HasTyVTable,
+{
     type Canonical = Self;
 
     fn starlark_type_repr() -> Ty {
@@ -76,7 +105,10 @@ impl<'v, Node: NodeLike> StarlarkTypeRepr for &'v StarlarkTargetSet<Node> {
     }
 }
 
-impl<'v, Node: NodeLike> UnpackValue<'v> for &'v StarlarkTargetSet<Node> {
+impl<'v, Node: NodeLike> UnpackValue<'v> for &'v StarlarkTargetSet<Node>
+where
+    StarlarkTargetSet<Node>: HasTyVTable,
+{
     type Error = Infallible;
 
     fn unpack_value_impl(x: Value<'v>) -> Result<Option<Self>, Self::Error> {
@@ -84,19 +116,26 @@ impl<'v, Node: NodeLike> UnpackValue<'v> for &'v StarlarkTargetSet<Node> {
     }
 }
 
-impl<'v, Node: NodeLike> AllocValue<'v> for StarlarkTargetSet<Node> {
+impl<'v, Node: NodeLike> AllocValue<'v> for StarlarkTargetSet<Node>
+where
+    Self: HasTyVTable,
+{
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_simple(self)
     }
 }
 
+starlark::methods_static!(STARLARK_TARGET_SET_METHODS = starlark_target_set_methods);
+
 #[starlark_value(type = "target_set")]
-impl<'v, Node: NodeLike> StarlarkValue<'v> for StarlarkTargetSet<Node> {
+impl<'v, Node: NodeLike> StarlarkValue<'v> for StarlarkTargetSet<Node>
+where
+    Self: HasTyVTable,
+{
     type Canonical = Self;
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(starlark_target_set_methods)
+        Some(STARLARK_TARGET_SET_METHODS.methods())
     }
 
     fn iterate_collect(&self, heap: Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
@@ -147,6 +186,11 @@ impl<'v, Node: NodeLike> StarlarkValue<'v> for StarlarkTargetSet<Node> {
     }
 }
 
+// Register each concrete type of TargetSet for HasTyVTable
+starlark::register_ty_starlark_value!(StarlarkTargetSet<TargetNode>);
+starlark::register_ty_starlark_value!(StarlarkTargetSet<ConfiguredTargetNode>);
+starlark::register_ty_starlark_value!(StarlarkTargetSet<ActionQueryNode>);
+
 impl<Node: QueryTarget> From<TargetSet<Node>> for StarlarkTargetSet<Node> {
     fn from(v: TargetSet<Node>) -> Self {
         Self(v)
@@ -168,7 +212,10 @@ impl<Node: QueryTarget> Deref for StarlarkTargetSet<Node> {
     }
 }
 
-impl<Node: NodeLike> StarlarkTargetSet<Node> {
+impl<Node: NodeLike> StarlarkTargetSet<Node>
+where
+    Self: HasTyVTable,
+{
     pub(crate) fn from_value<'v>(x: Value<'v>) -> Option<&'v Self> {
         ValueLike::downcast_ref::<Self>(x)
     }

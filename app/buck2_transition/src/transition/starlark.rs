@@ -9,7 +9,6 @@
  */
 
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
@@ -19,6 +18,7 @@ use buck2_core::bzl::ImportPath;
 use buck2_core::configuration::transition::id::TransitionId;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_error::BuckErrorContext;
+use buck2_hash::StdBuckHashSet;
 use buck2_interpreter::build_context::starlark_path_from_build_context;
 use buck2_interpreter::coerce::COERCE_PROVIDERS_LABEL_FOR_BZL;
 use buck2_interpreter::downstream_crate_starlark_defs::REGISTER_BUCK2_TRANSITION_GLOBALS;
@@ -28,10 +28,16 @@ use derive_more::Display;
 use dupe::Dupe;
 use either::Either;
 use gazebo::prelude::*;
+use pagable::PagableDeserialize;
+use pagable::PagableSerialize;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
+use starlark::pagable::StarlarkDeserialize;
+use starlark::pagable::StarlarkDeserializeContext;
+use starlark::pagable::StarlarkSerialize;
+use starlark::pagable::StarlarkSerializeContext;
 use starlark::starlark_complex_values;
 use starlark::starlark_module;
 use starlark::typing::ParamIsRequired;
@@ -46,6 +52,7 @@ use starlark::values::Freezer;
 use starlark::values::FrozenStringValue;
 use starlark::values::FrozenValue;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
@@ -91,14 +98,55 @@ pub(crate) struct Transition<'v> {
     split: bool,
 }
 
-#[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(
+    Debug,
+    Display,
+    ProvidesStaticType,
+    NoSerialize,
+    Allocative,
+    StarlarkPagable
+)]
 #[display("transition")]
 pub(crate) struct FrozenTransition {
+    #[starlark_pagable(pagable)]
     id: Arc<TransitionId>,
     pub(crate) implementation: FrozenValue,
+    // Mixed: keys are starlark, `ProvidersLabel` is pagable-only (`buck2_core`
+    // cannot depend on `starlark`) — so the generic `SmallMap<K, V>:
+    // StarlarkSerialize` blanket doesn't apply. Bridge here.
+    #[starlark_pagable(
+        serialize_with = "serialize_refs",
+        deserialize_with = "deserialize_refs"
+    )]
     pub(crate) refs: SmallMap<FrozenStringValue, ProvidersLabel>,
     pub(crate) attrs_names: Option<Vec<FrozenStringValue>>,
+    #[starlark_pagable(pagable)]
     pub(crate) split: bool,
+}
+
+fn serialize_refs(
+    field: &SmallMap<FrozenStringValue, ProvidersLabel>,
+    ctx: &mut dyn StarlarkSerializeContext,
+) -> starlark::Result<()> {
+    PagableSerialize::pagable_serialize(&field.len(), ctx.pagable())?;
+    for (k, v) in field.iter() {
+        StarlarkSerialize::starlark_serialize(k, ctx)?;
+        PagableSerialize::pagable_serialize(v, ctx.pagable())?;
+    }
+    Ok(())
+}
+
+fn deserialize_refs(
+    ctx: &mut dyn StarlarkDeserializeContext<'_>,
+) -> starlark::Result<SmallMap<FrozenStringValue, ProvidersLabel>> {
+    let len = usize::pagable_deserialize(ctx.pagable())?;
+    let mut map = SmallMap::with_capacity(len);
+    for _ in 0..len {
+        let k = FrozenStringValue::starlark_deserialize(ctx)?;
+        let v = <ProvidersLabel as PagableDeserialize>::pagable_deserialize(ctx.pagable())?;
+        map.insert(k, v);
+    }
+    Ok(map)
 }
 
 #[starlark_value(type = "Transition")]
@@ -141,11 +189,12 @@ impl Freeze for Transition<'_> {
         let id = self.id.into_inner().ok_or(FreezeError::new(
             TransitionError::TransitionNotAssigned.to_string(),
         ))?;
-        let refs = self
-            .refs
-            .into_iter()
-            .map(|(k, v)| Ok((k.freeze(freezer)?, v.0)))
-            .collect::<FreezeResult<_>>()?;
+        // N.B. collect::<Result<_>> sets the lower bound to zero,
+        // which can cause over-allocations in frozen containers.
+        let mut refs = SmallMap::with_capacity(self.refs.len());
+        for (k, v) in self.refs {
+            refs.insert(k.freeze(freezer)?, v.0);
+        }
         let attrs = self
             .attrs
             .map(|a| a.into_try_map(|a| a.freeze(freezer)))
@@ -180,20 +229,24 @@ impl TransitionValue for FrozenTransition {
 }
 
 pub(crate) struct ParamNameAndType {
-    pub(crate) name: &'static str,
+    pub(crate) name: pagable::StaticStr,
     pub(crate) ty: LazyLock<Ty>,
 }
 
+pagable::static_str!(IMPL_PLATFORM_NAME = "platform");
+pagable::static_str!(IMPL_REFS_NAME = "refs");
+pagable::static_str!(IMPL_ATTRS_NAME = "attrs");
+
 pub(crate) static IMPL_PLATFORM_PARAM: ParamNameAndType = ParamNameAndType {
-    name: "platform",
+    name: IMPL_PLATFORM_NAME,
     ty: LazyLock::new(PlatformInfo::starlark_type_repr),
 };
 static IMPL_REFS_PARAM: ParamNameAndType = ParamNameAndType {
-    name: "refs",
+    name: IMPL_REFS_NAME,
     ty: LazyLock::new(StructRef::starlark_type_repr),
 };
 pub(crate) static IMPL_ATTRS_PARAM: ParamNameAndType = ParamNameAndType {
-    name: "attrs",
+    name: IMPL_ATTRS_NAME,
     ty: LazyLock::new(StructRef::starlark_type_repr),
 };
 
@@ -240,12 +293,12 @@ fn validate_transition_impl(
         .check_callable_with(
             [],
             [
-                (IMPL_PLATFORM_PARAM.name, &*IMPL_PLATFORM_PARAM.ty),
-                (IMPL_REFS_PARAM.name, &*IMPL_REFS_PARAM.ty),
+                (IMPL_PLATFORM_PARAM.name.as_str(), &*IMPL_PLATFORM_PARAM.ty),
+                (IMPL_REFS_PARAM.name.as_str(), &*IMPL_REFS_PARAM.ty),
             ]
             .into_iter()
             .chain(match attrs {
-                true => Some((IMPL_ATTRS_PARAM.name, &*IMPL_ATTRS_PARAM.ty)),
+                true => Some((IMPL_ATTRS_PARAM.name.as_str(), &*IMPL_ATTRS_PARAM.ty)),
                 false => None,
             }),
             None,
@@ -287,7 +340,7 @@ fn register_transition_function(builder: &mut GlobalsBuilder) {
         .clone();
 
         if let Some(attrs) = &attrs {
-            let attrs_set: HashSet<StringValue> = attrs.items.iter().copied().collect();
+            let attrs_set: StdBuckHashSet<StringValue> = attrs.items.iter().copied().collect();
             if attrs_set.len() != attrs.items.len() {
                 return Err(buck2_error::Error::from(TransitionError::NonUniqueAttrs).into());
             }

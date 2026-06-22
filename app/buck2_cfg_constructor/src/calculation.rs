@@ -29,16 +29,21 @@ use derive_more::Display;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
 enum CalculationCfgConstructorError {
     #[error(
-        "Usage of both `modifiers` attribute and modifiers in metadata is not allowed for target `{0}`"
+        "Target `{0}` sets `metadata[\"buck.cfg_modifiers\"]` which is no longer supported. \
+         Use the first-class `modifiers` attribute instead."
     )]
-    TargetModifiersAttrAndMetadataNotAllowed(TargetLabel),
+    MetadataModifiersNotSupported(TargetLabel),
 }
 
 pub struct CfgConstructorCalculationInstance;
@@ -56,7 +61,8 @@ async fn get_cfg_constructor_uncached(
 async fn get_cfg_constructor(
     ctx: &mut DiceComputations<'_>,
 ) -> buck2_error::Result<Option<Arc<dyn CfgConstructorImpl>>> {
-    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct GetCfgConstructorKey;
 
     #[async_trait]
@@ -73,6 +79,10 @@ async fn get_cfg_constructor(
 
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             false
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            OkPagableValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -91,8 +101,9 @@ impl CfgConstructorCalculationImpl for CfgConstructorCalculationInstance {
         rule_type: &RuleType,
         configuring_exec_dep: bool,
     ) -> buck2_error::Result<ConfigurationData> {
-        #[derive(Clone, Display, Dupe, Debug, Eq, Hash, PartialEq, Allocative)]
+        #[derive(Clone, Display, Dupe, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
         #[display("CfgConstructorInvocationKey")]
+        #[pagable_typetag(dice::DiceKeyDyn)]
         struct CfgConstructorInvocationKey {
             package_cfg_modifiers: Option<MetadataValue>,
             target_cfg_modifiers: Option<MetadataValue>,
@@ -134,6 +145,10 @@ impl CfgConstructorCalculationImpl for CfgConstructorCalculationInstance {
                     _ => false,
                 }
             }
+
+            fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+                OkPagableValueSerialize::<Self::Value>::new()
+            }
         }
 
         let Some(cfg_constructor) = get_cfg_constructor(ctx).await? else {
@@ -147,21 +162,24 @@ impl CfgConstructorCalculationImpl for CfgConstructorCalculationInstance {
             .map(|m| m.to_value())
             .map(MetadataValue::new);
 
-        let metadata_modifiers = target.metadata()?.and_then(|m| m.get(modifier_key));
-        let target_modifiers = target.target_modifiers()?;
-        let target_cfg_modifiers = match (metadata_modifiers, target_modifiers) {
-            (None, Some(t)) if !t.is_empty() => Some(MetadataValue(t.as_json())),
-            (Some(_), Some(t)) if !t.is_empty() => {
-                return Err(
-                    CalculationCfgConstructorError::TargetModifiersAttrAndMetadataNotAllowed(
-                        target.label().dupe(),
-                    )
-                    .into(),
-                );
-            }
-            (Some(m), _) => Some(m.dupe()),
-            _ => None,
-        };
+        // metadata["buck.cfg_modifiers"] is no longer supported. Fail loudly so the developer
+        // knows the modifier they wrote won't be applied.
+        if target
+            .metadata()?
+            .is_some_and(|m| m.get(modifier_key).is_some())
+        {
+            return Err(
+                CalculationCfgConstructorError::MetadataModifiersNotSupported(
+                    target.label().dupe(),
+                )
+                .into(),
+            );
+        }
+
+        let target_cfg_modifiers = target
+            .target_modifiers()?
+            .filter(|t| !t.is_empty())
+            .map(|t| MetadataValue(t.as_json()));
 
         // If there are no PACKAGE/target/cli modifiers, return the original configuration without computing DICE call
         // TODO(scottcao): This is just for rollout purpose. Remove once modifier is rolled out

@@ -19,6 +19,7 @@ use buck2_interpreter::build_context::starlark_path_from_build_context;
 use buck2_interpreter::paths::path::StarlarkPath;
 use derive_more::Display;
 use dupe::Dupe;
+use pagable::Pagable;
 use serde::Serialize;
 use serde::Serializer;
 use starlark::any::ProvidesStaticType;
@@ -39,6 +40,8 @@ use starlark::values::FreezeResult;
 use starlark::values::Freezer;
 use starlark::values::FrozenValue;
 use starlark::values::Heap;
+use starlark::values::StarlarkPagable;
+use starlark::values::StarlarkPagableViaPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
@@ -50,10 +53,12 @@ use starlark::values::typing::FrozenStarlarkCallable;
 use starlark::values::typing::StarlarkCallableChecked;
 use starlark::values::typing::TypeInstanceId;
 use starlark::values::typing::TypeMatcherFactory;
+use strong_hash::StrongHash;
 
 use crate::interpreter::rule_defs::transitive_set::TransitiveSet;
 use crate::interpreter::rule_defs::transitive_set::TransitiveSetError;
 use crate::interpreter::rule_defs::transitive_set::transitive_set::TransitiveSetMatcher;
+use crate::interpreter::rule_defs::type_id_domain::Buck2TypeIdDomain;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
@@ -62,7 +67,18 @@ enum TransitiveSetDefinitionError {
     TransitiveSetOnlyInBzl,
 }
 
-#[derive(Debug, Clone, Dupe, Copy, Trace, Freeze, PartialEq, Allocative)]
+#[derive(
+    Debug,
+    Clone,
+    Dupe,
+    Copy,
+    Trace,
+    Freeze,
+    PartialEq,
+    Allocative,
+    Pagable,
+    StarlarkPagable
+)]
 pub enum TransitiveSetProjectionKind {
     Args,
     Json,
@@ -85,7 +101,7 @@ impl TransitiveSetProjectionKind {
 }
 
 // The Coerce derivation doesn't work if this is just a tuple in the SmallMap value.
-#[derive(Debug, Clone, Trace, Coerce, Freeze, Allocative)]
+#[derive(Debug, Clone, Trace, Coerce, Freeze, Allocative, StarlarkPagable)]
 #[repr(C)]
 pub struct TransitiveSetProjectionSpec<V: ValueLifetimeless> {
     pub kind: TransitiveSetProjectionKind,
@@ -93,14 +109,14 @@ pub struct TransitiveSetProjectionSpec<V: ValueLifetimeless> {
 }
 
 /// A unique identity for a given [`TransitiveSetDefinition`].
-#[derive(Debug, Clone, Display, Allocative, Hash)]
+#[derive(Debug, Clone, Display, Allocative, Hash, StrongHash, Pagable)]
 #[display("{}", name)]
 struct TransitiveSetId {
     module_id: ImportPath,
     name: String,
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable, StarlarkPagableViaPagable)]
 pub(crate) struct TransitiveSetDefinitionExported {
     /// The name of this transitive set. This is filed in by `export_as` when it's assigned to a
     /// top-level variable. This must be set before this is used.
@@ -121,7 +137,7 @@ pub struct TransitiveSetDefinition<'v> {
     operations: TransitiveSetOperationsGen<Value<'v>>,
 }
 
-#[derive(Debug, Clone, Trace, Coerce, Freeze, Allocative)]
+#[derive(Debug, Clone, Trace, Coerce, Freeze, Allocative, StarlarkPagable)]
 #[repr(C)]
 pub struct TransitiveSetOperationsGen<V: ValueLifetimeless> {
     /// Callables that will project the values contained in transitive sets of this type to
@@ -240,7 +256,8 @@ impl<'v> StarlarkValue<'v> for TransitiveSetDefinition<'v> {
                 module_id: self.module_id.clone(),
                 name: variable_name.to_owned(),
             });
-            let set_type_instance_id = TypeInstanceId::r#gen();
+            let set_type_instance_id =
+                TypeInstanceId::from_identity(Buck2TypeIdDomain::TransitiveSet, &*id);
             let set_ty = Ty::custom(TyUser::new(
                 variable_name.to_owned(),
                 TyStarlarkValue::new::<TransitiveSet>(),
@@ -298,7 +315,7 @@ impl<'v> StarlarkValue<'v> for TransitiveSetDefinition<'v> {
     }
 }
 
-#[derive(Display, ProvidesStaticType, Allocative)]
+#[derive(Display, ProvidesStaticType, Allocative, StarlarkPagable)]
 #[display("{}", exported.id)]
 pub struct FrozenTransitiveSetDefinition {
     pub(crate) exported: TransitiveSetDefinitionExported,

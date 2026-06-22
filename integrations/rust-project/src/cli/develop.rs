@@ -54,7 +54,10 @@ pub(crate) enum Output {
 }
 
 impl Develop {
-    pub(crate) fn from_command(command: Command) -> (Develop, Input, OutputCfg) {
+    pub(crate) fn from_command(
+        command: Command,
+        project_root: Option<PathBuf>,
+    ) -> (Develop, Input, OutputCfg) {
         if let crate::Command::Develop {
             files,
             targets,
@@ -86,7 +89,7 @@ impl Develop {
             };
 
             let mode = select_mode(mode.as_deref());
-            let buck = buck::Buck::new(buck2_command.clone(), mode);
+            let buck = buck::Buck::new(buck2_command.clone(), mode, project_root.clone());
 
             let develop = Develop {
                 sysroot,
@@ -137,7 +140,7 @@ impl Develop {
             };
 
             let mode = select_mode(mode.as_deref());
-            let buck = buck::Buck::new(buck2_command.clone(), mode);
+            let buck = buck::Buck::new(buck2_command.clone(), mode, project_root);
 
             let develop = Develop {
                 sysroot,
@@ -289,7 +292,7 @@ impl Develop {
             },
             SysrootConfig::BuckConfig => {
                 let project_root = buck.resolve_project_root()?;
-                resolve_buckconfig_sysroot(&buck, &project_root, &targets)?
+                resolve_buckconfig_sysroot(buck, &project_root, &targets)?
             }
             SysrootConfig::Rustup => resolve_rustup_sysroot()?,
         };

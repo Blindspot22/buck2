@@ -35,19 +35,27 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use postcard::de_flavors::Slice;
-use postcard::ser_flavors::Flavor;
+use dupe::Dupe;
+use postcard::ser_flavors::Flavor as _;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::PagableDeserializerRecipe;
 use crate::arc_erase::ArcEraseDyn;
+use crate::flavors::PagableSlice;
+use crate::flavors::PagableVecFlavor;
+use crate::flavors::SharedPosition;
 use crate::storage::data::DataKey;
 use crate::storage::data::PagableData;
 use crate::storage::handle::PagableStorageHandle;
+use crate::storage::traits::DeserializedArcCache;
 use crate::storage::traits::PagableStorage;
+use crate::traits::PagableCursor;
 use crate::traits::PagableDeserializer;
 use crate::traits::PagableSerializer;
+use crate::traits::SessionContext;
 
 /// A simple in-memory serializer for testing pagable types.
 ///
@@ -57,8 +65,12 @@ use crate::traits::PagableSerializer;
 /// (duplicate arcs are only serialized once). After serialization,
 /// call [`finish`](Self::finish) to retrieve the serialized bytes and pointers.
 pub struct TestingSerializer {
-    serde: postcard::Serializer<postcard::ser_flavors::StdVec>,
+    serde: postcard::Serializer<PagableVecFlavor>,
     seen_arcs: HashSet<usize>,
+    /// Only used to populate `PagableCursor::arc_index`. Not meaningful for
+    /// testing because arcs are serialized inline in the byte stream.
+    arc_count: usize,
+    session_context: SessionContext,
 }
 
 impl TestingSerializer {
@@ -66,16 +78,15 @@ impl TestingSerializer {
     pub fn new() -> Self {
         Self {
             serde: postcard::Serializer {
-                output: postcard::ser_flavors::StdVec::new(),
+                output: PagableVecFlavor::new(),
             },
             seen_arcs: HashSet::new(),
+            arc_count: 0,
+            session_context: SessionContext::new(),
         }
     }
 
-    /// Finish serialization and return the serialized bytes and stashed pointers.
-    ///
-    /// The returned pointers include their type IDs for verification during
-    /// deserialization.
+    /// Finish serialization and return the serialized bytes.
     pub fn finish(self) -> Vec<u8> {
         self.serde.output.finalize().unwrap()
     }
@@ -88,7 +99,7 @@ impl Default for TestingSerializer {
 }
 
 impl PagableSerializer for TestingSerializer {
-    fn serde(&mut self) -> &mut postcard::Serializer<postcard::ser_flavors::StdVec> {
+    fn serde(&mut self) -> &mut postcard::Serializer<PagableVecFlavor> {
         &mut self.serde
     }
 
@@ -101,8 +112,20 @@ impl PagableSerializer for TestingSerializer {
             // First time seeing this arc, serialize its contents
             arc.serialize(self)?;
         }
+        self.arc_count += 1;
         // If already seen, nothing more to write - identity is enough
         Ok(())
+    }
+
+    fn position(&mut self) -> PagableCursor {
+        PagableCursor {
+            byte_pos: self.serde.output.position(),
+            arc_index: self.arc_count,
+        }
+    }
+
+    fn session_context(&mut self) -> &SessionContext {
+        &self.session_context
     }
 }
 
@@ -113,21 +136,44 @@ impl PagableSerializer for TestingSerializer {
 /// stream, with arc identity preserved (duplicate arcs point to the same
 /// allocation). Type IDs are checked during unstashing to catch type mismatches.
 pub struct TestingDeserializer<'de> {
-    serde: postcard::Deserializer<'de, Slice<'de>>,
+    /// Owned copy of the input. Recipes clone this `Arc` instead of copying.
+    bytes_arc: Arc<[u8]>,
+    pos: SharedPosition,
+    serde: postcard::Deserializer<'de, PagableSlice<'de>>,
     seen_arcs: HashMap<usize, Box<dyn ArcEraseDyn>>,
+    /// Only used to populate `PagableCursor::arc_index`. Not meaningful for
+    /// testing because arcs are deserialized inline from the byte stream.
+    arc_index: usize,
     storage: PagableStorageHandle,
 }
 
 impl<'de> TestingDeserializer<'de> {
     /// Create a new testing deserializer.
     ///
-    /// The `bytes` and `stashed_ptrs` should come from a previous call to
+    /// The `bytes` should come from a previous call to
     /// [`TestingSerializer::finish`].
     pub fn new(bytes: &'de [u8]) -> Self {
+        let pos = SharedPosition::new();
         Self {
-            serde: postcard::Deserializer::from_bytes(bytes),
+            bytes_arc: Arc::from(bytes.to_vec().into_boxed_slice()),
+            pos: pos.clone(),
+            serde: postcard::Deserializer::from_flavor(PagableSlice::new(bytes, pos)),
             seen_arcs: HashMap::new(),
-            storage: PagableStorageHandle::new(std::sync::Arc::new(EmptyPagableStorage)),
+            arc_index: 0,
+            storage: PagableStorageHandle::new(Arc::new(EmptyPagableStorage::new())),
+        }
+    }
+
+    /// Construct a deserializer sharing an existing `Arc<[u8]>` and storage.
+    pub fn from_bytes_arc(bytes: &'de Arc<[u8]>, storage: PagableStorageHandle) -> Self {
+        let pos = SharedPosition::new();
+        Self {
+            bytes_arc: bytes.dupe(),
+            pos: pos.clone(),
+            serde: postcard::Deserializer::from_flavor(PagableSlice::new(bytes, pos)),
+            seen_arcs: HashMap::new(),
+            arc_index: 0,
+            storage,
         }
     }
 }
@@ -137,22 +183,39 @@ impl<'de> PagableDeserializer<'de> for TestingDeserializer<'de> {
         Box::new(<dyn erased_serde::Deserializer>::erase(&mut self.serde))
     }
 
+    fn position(&self) -> PagableCursor {
+        PagableCursor {
+            byte_pos: self.pos.get(),
+            arc_index: self.arc_index,
+        }
+    }
+
+    unsafe fn seek(&mut self, cursor: PagableCursor) {
+        self.pos.set(cursor.byte_pos);
+        self.arc_index = cursor.arc_index;
+    }
+
     fn deserialize_arc(
         &mut self,
         _type_id: std::any::TypeId,
         deserialize_fn: for<'a> fn(
             &mut dyn PagableDeserializer<'a>,
+            Arc<dyn PagableDeserializerRecipe>,
         ) -> crate::Result<Box<dyn ArcEraseDyn>>,
     ) -> crate::Result<Box<dyn ArcEraseDyn>> {
         // Read identity first
         let identity: usize = Deserialize::deserialize(&mut self.serde)?;
 
+        self.arc_index += 1;
         if let Some(arc_dyn) = self.seen_arcs.get(&identity) {
             // Already seen - return a clone
             Ok(arc_dyn.clone_dyn())
         } else {
             // First time - deserialize, store in map, return
-            let arc = deserialize_fn(self)?;
+            let recipe: Arc<dyn PagableDeserializerRecipe> = Arc::new(TestingRecipe {
+                bytes: self.bytes_arc.dupe(),
+            });
+            let arc = deserialize_fn(self, recipe)?;
             self.seen_arcs.insert(identity, arc.clone_dyn());
             Ok(arc)
         }
@@ -165,38 +228,69 @@ impl<'de> PagableDeserializer<'de> for TestingDeserializer<'de> {
     fn as_dyn(&mut self) -> &mut dyn crate::traits::PagableDeserializer<'de> {
         self
     }
+
+    fn session_context(&self) -> &SessionContext {
+        self.storage.backing_storage().session_context()
+    }
 }
 
-pub(crate) struct EmptyPagableStorage;
+pub(crate) struct EmptyPagableStorage {
+    arc_cache: DeserializedArcCache,
+    session_context: SessionContext,
+}
+
+impl EmptyPagableStorage {
+    pub(crate) fn new() -> Self {
+        Self {
+            arc_cache: DeserializedArcCache::new(),
+            session_context: SessionContext::new(),
+        }
+    }
+}
+
+pub(crate) struct TestingRecipe {
+    bytes: Arc<[u8]>,
+}
+
+impl PagableDeserializerRecipe for TestingRecipe {
+    fn open<'a>(
+        &'a self,
+        storage: &'a PagableStorageHandle,
+    ) -> Box<dyn PagableDeserializer<'a> + 'a> {
+        Box::new(TestingDeserializer::from_bytes_arc(
+            &self.bytes,
+            storage.dupe(),
+        ))
+    }
+}
 
 #[async_trait::async_trait]
 impl PagableStorage for EmptyPagableStorage {
-    fn fetch_arc_or_data_blocking(
-        &self,
-        _type_id: &std::any::TypeId,
-        _key: &DataKey,
-    ) -> anyhow::Result<either::Either<Box<dyn ArcEraseDyn>, std::sync::Arc<PagableData>>> {
+    fn arc_cache(&self) -> &DeserializedArcCache {
+        &self.arc_cache
+    }
+
+    fn fetch_data_blocking(&self, _key: &DataKey) -> anyhow::Result<Arc<PagableData>> {
         Err(anyhow::anyhow!(
             "No storage available for testing deserializer"
         ))
     }
 
-    async fn fetch_data(&self, _key: &DataKey) -> anyhow::Result<std::sync::Arc<PagableData>> {
+    async fn fetch_data(&self, _key: &DataKey) -> anyhow::Result<Arc<PagableData>> {
         Err(anyhow::anyhow!(
             "No storage available for testing deserializer"
         ))
-    }
-
-    fn on_arc_deserialized(
-        &self,
-        _typeid: std::any::TypeId,
-        _key: DataKey,
-        _arc: Box<dyn ArcEraseDyn>,
-    ) -> Option<Box<dyn ArcEraseDyn>> {
-        None
     }
 
     fn schedule_for_paging(&self, _arc: Box<dyn ArcEraseDyn>) {
         // no-op
+    }
+
+    fn session_context(&self) -> &SessionContext {
+        &self.session_context
+    }
+
+    fn store_data(&self, data: PagableData) -> anyhow::Result<DataKey> {
+        Ok(data.compute_key())
     }
 }

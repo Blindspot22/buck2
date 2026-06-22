@@ -16,7 +16,11 @@ use std::hash::Hash;
 
 use allocative::Allocative;
 use dupe::Dupe;
+use pagable::PagableDeserializeOwned;
+use pagable::PagableSerialize;
+use pagable::PagableTagged;
 
+use crate::ValueSerialize;
 use crate::api::data::DiceData;
 use crate::api::key::Key;
 use crate::api::storage_type::StorageType;
@@ -25,7 +29,19 @@ use crate::introspection::graph::short_type_name;
 
 /// Synchronously computed key from an "opaque" value.
 pub trait ProjectionKey:
-    Allocative + Clone + PartialEq + Eq + Hash + Display + Debug + Send + Sync + 'static
+    Allocative
+    + Clone
+    + PartialEq
+    + Eq
+    + Hash
+    + Display
+    + Debug
+    + Send
+    + Sync
+    + PagableSerialize
+    + PagableDeserializeOwned
+    + PagableTagged
+    + 'static
 {
     /// Key of the value that this projection key is computed from.
     type DeriveFromKey: Key;
@@ -61,6 +77,8 @@ pub trait ProjectionKey:
     fn key_type_name() -> &'static str {
         short_type_name(std::any::type_name::<Self>())
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value>;
 }
 
 /// Context for projection key computation.

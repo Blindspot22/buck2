@@ -53,6 +53,16 @@ class K2JvmAbiCommandLineProcessor : CommandLineProcessor {
             "Enable debug output for K2 ABI generation. Default is false.",
             false,
         )
+
+    const val COMPOSE_PLUGIN_PATH_FRAGMENT: String = "compose-compiler-plugin"
+
+    val ENABLE_COMPOSE_ABI_EMULATION_OPTION: CliOption =
+        CliOption(
+            "enableComposeAbiEmulation",
+            "<boolean>",
+            "Enable Compose ABI emulation. Default is false.",
+            false,
+        )
   }
 
   override val pluginId: String
@@ -65,6 +75,7 @@ class K2JvmAbiCommandLineProcessor : CommandLineProcessor {
             EARLY_TERMINATION_OPTION,
             ENABLE_MIXED_COMPILATION,
             DEBUG_OUTPUT_OPTION,
+            ENABLE_COMPOSE_ABI_EMULATION_OPTION,
         )
 
   override fun processOption(
@@ -80,6 +91,11 @@ class K2JvmAbiCommandLineProcessor : CommandLineProcessor {
           configuration.put(K2JvmAbiConfigurationKeys.ENABLE_MIXED_COMPILATION, value == "true")
       DEBUG_OUTPUT_OPTION ->
           configuration.put(K2JvmAbiConfigurationKeys.DEBUG_OUTPUT, value == "true")
+      ENABLE_COMPOSE_ABI_EMULATION_OPTION ->
+          configuration.put(
+              K2JvmAbiConfigurationKeys.ENABLE_COMPOSE_ABI_EMULATION,
+              value == "true",
+          )
       else -> throw CliOptionProcessingException("Unknown option: ${option.optionName}")
     }
   }

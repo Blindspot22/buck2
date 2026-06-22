@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use allocative::Allocative;
-use buck2_util::hash::BuckHasher;
+use buck2_data::NetworkAccess as BuckNetworkAccess;
+use buck2_hash::BuckHasher;
 use derive_more::Display;
 use dupe::Dupe;
 use itertools::Itertools;
@@ -52,7 +53,7 @@ pub struct RemoteEnabledExecutorOptions {
     pub dependencies: Vec<RemoteExecutorDependency>,
     pub gang_workers: Vec<ReGangWorker>,
     pub custom_image: Option<Box<RemoteExecutorCustomImage>>,
-    pub meta_internal_extra_params: MetaInternalExtraParams,
+    pub meta_internal_extra_params: Arc<MetaInternalExtraParams>,
     pub priority: Option<i32>,
 }
 
@@ -114,6 +115,105 @@ impl ReGangWorker {
     }
 }
 
+/// Locality constraint for gang scheduling.
+/// Determines how gang workers should be co-located.
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Hash, Allocative, Pagable)]
+pub enum ReGangLocality {
+    /// Workers can be in any location
+    Unspecified,
+    /// Workers must be in the same region
+    Region,
+    /// Workers must be in the same datacenter
+    Datacenter,
+    /// Workers must be in the same network domain
+    NetworkDomain,
+}
+
+#[derive(Debug, buck2_error::Error)]
+#[buck2(input)]
+enum ReGangLocalityErrors {
+    #[error("Invalid locality value `{0}`. Expected one of: region, datacenter, network_domain")]
+    InvalidLocality(String),
+}
+
+impl ReGangLocality {
+    pub fn parse(s: &str) -> buck2_error::Result<ReGangLocality> {
+        match s.to_lowercase().as_str() {
+            "region" => Ok(ReGangLocality::Region),
+            "datacenter" => Ok(ReGangLocality::Datacenter),
+            "network_domain" => Ok(ReGangLocality::NetworkDomain),
+            _ => Err(ReGangLocalityErrors::InvalidLocality(s.to_owned()).into()),
+        }
+    }
+}
+
+/// Describes a constrained gang for Remote Execution.
+/// All workers in the gang will have the same capabilities specification.
+#[derive(Debug, Eq, PartialEq, Clone, Hash, Allocative, Pagable)]
+pub struct ReGang {
+    /// The platform capabilities required for all gang workers
+    pub capabilities: SortedMap<String, String>,
+    /// Number of workers in the gang
+    pub num_of_workers: i32,
+    /// Optional locality constraint for gang scheduling
+    pub locality: Option<ReGangLocality>,
+    /// Optional number of sub-groups for locality partitioning
+    pub num_sub_groups: Option<i32>,
+}
+
+#[derive(Debug, buck2_error::Error)]
+#[buck2(input)]
+enum ReGangErrors {
+    #[error("RE gang requires `{0}` to be set")]
+    MissingField(&'static str),
+    #[error("RE gang `num_of_workers` must be positive, got `{0}`")]
+    InvalidNumOfWorkers(i32),
+    #[error(
+        "RE gang `num_sub_groups` must be at least 1 and divide `num_of_workers` evenly, got num_sub_groups={0}, num_of_workers={1}"
+    )]
+    InvalidNumSubGroups(i32, i32),
+}
+
+impl ReGang {
+    pub fn parse(
+        capabilities: SortedMap<String, String>,
+        num_of_workers: i32,
+        locality: Option<ReGangLocality>,
+        num_sub_groups: Option<i32>,
+    ) -> buck2_error::Result<ReGang> {
+        if num_of_workers <= 0 {
+            return Err(ReGangErrors::InvalidNumOfWorkers(num_of_workers).into());
+        }
+
+        if capabilities.is_empty() {
+            return Err(ReGangErrors::MissingField("capabilities").into());
+        }
+
+        if let Some(n) = num_sub_groups {
+            if n < 1 || num_of_workers % n != 0 {
+                return Err(ReGangErrors::InvalidNumSubGroups(n, num_of_workers).into());
+            }
+        }
+
+        Ok(ReGang {
+            capabilities,
+            num_of_workers,
+            locality,
+            num_sub_groups,
+        })
+    }
+}
+
+#[cfg(not(test))]
+fn revision() -> Option<String> {
+    crate::execution_types::revision::REVISION.get()
+}
+
+#[cfg(test)]
+fn revision() -> Option<String> {
+    crate::execution_types::mock_revision::MOCK_REVISION.with(|r| r.borrow().clone())
+}
+
 impl RemoteExecutorDependency {
     pub fn parse(dep_map: SmallMap<&str, &str>) -> buck2_error::Result<RemoteExecutorDependency> {
         fn username() -> Option<String> {
@@ -139,11 +239,18 @@ impl RemoteExecutorDependency {
 
         let id = if *interpolate == "true" {
             let username: Option<String> = username();
+            let mut interpolated_id = id.to_string();
             if let Some(username) = username {
-                id.replace("$(username)", &username)
+                interpolated_id = interpolated_id.replace("$(username)", &username);
             } else {
-                id.replace("$(username)", "")
+                interpolated_id = interpolated_id.replace("$(username)", "");
             }
+            if interpolated_id.contains("$(revision)") {
+                let revision = revision().unwrap_or_default();
+                interpolated_id = interpolated_id.replace("$(revision)", &revision);
+            }
+
+            interpolated_id
         } else {
             id.to_string()
         };
@@ -349,11 +456,66 @@ pub enum CacheUploadBehavior {
     Disabled,
 }
 
+pub const NETWORK_ACCESS_VALUES: &[&str] = &["all", "none", "loopback", "strict", "private"];
+
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Dupe, Hash, Pagable, Allocative)]
+pub enum ExecutorNetworkAccess {
+    All,
+    None,
+    Loopback,
+    Strict,
+    Private,
+}
+
+impl From<ExecutorNetworkAccess> for BuckNetworkAccess {
+    fn from(value: ExecutorNetworkAccess) -> Self {
+        match value {
+            ExecutorNetworkAccess::All => BuckNetworkAccess::All,
+            ExecutorNetworkAccess::None => BuckNetworkAccess::None,
+            ExecutorNetworkAccess::Loopback => BuckNetworkAccess::Loopback,
+            ExecutorNetworkAccess::Strict => BuckNetworkAccess::Strict,
+            ExecutorNetworkAccess::Private => BuckNetworkAccess::Private,
+        }
+    }
+}
+
+impl From<BuckNetworkAccess> for ExecutorNetworkAccess {
+    fn from(value: BuckNetworkAccess) -> Self {
+        match value {
+            BuckNetworkAccess::All => ExecutorNetworkAccess::All,
+            BuckNetworkAccess::None => ExecutorNetworkAccess::None,
+            BuckNetworkAccess::Loopback => ExecutorNetworkAccess::Loopback,
+            BuckNetworkAccess::Strict => ExecutorNetworkAccess::Strict,
+            BuckNetworkAccess::Private => ExecutorNetworkAccess::Private,
+        }
+    }
+}
+
+pub fn parse_network_access(s: &str) -> buck2_error::Result<BuckNetworkAccess> {
+    match s {
+        "all" => Ok(BuckNetworkAccess::All),
+        "none" => Ok(BuckNetworkAccess::None),
+        "loopback" => Ok(BuckNetworkAccess::Loopback),
+        "strict" => Ok(BuckNetworkAccess::Strict),
+        "private" => Ok(BuckNetworkAccess::Private),
+        _ => Err(buck2_error::buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Invalid network_access value `{}`, expected one of [{}]",
+            s,
+            NETWORK_ACCESS_VALUES
+                .iter()
+                .map(|v| format!("`{v}`"))
+                .join(", ")
+        )),
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Dupe, Hash, Pagable, Allocative)]
 pub struct CommandGenerationOptions {
     pub path_separator: PathSeparatorKind,
     pub output_paths_behavior: OutputPathsBehavior,
     pub use_bazel_protocol_remote_persistent_workers: bool,
+    pub network_access: Option<ExecutorNetworkAccess>,
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, Allocative, Clone, Pagable)]
@@ -386,6 +548,7 @@ impl CommandExecutorConfig {
                 path_separator: PathSeparatorKind::system_default(),
                 output_paths_behavior: Default::default(),
                 use_bazel_protocol_remote_persistent_workers: false,
+                network_access: None,
             },
         })
     }
@@ -415,11 +578,25 @@ pub struct RemoteExecutionPolicy {
 pub struct MetaInternalExtraParams {
     pub remote_execution_policy: RemoteExecutionPolicy,
     pub remote_execution_caf_fbpkgs: Vec<RemoteExecutorCafFbpkg>,
+    pub gang: Option<ReGang>,
+    /// Allow RE workers to upload action results to the action cache even
+    /// when the action runs without network isolation. Useful for actions
+    /// that require network access but produce deterministic outputs.
+    pub allow_unsandboxed_action_cache_uploads: bool,
+}
+
+impl MetaInternalExtraParams {
+    pub fn default_arc() -> Arc<MetaInternalExtraParams> {
+        static DEFAULT: Lazy<Arc<MetaInternalExtraParams>> =
+            Lazy::new(|| Arc::new(MetaInternalExtraParams::default()));
+        DEFAULT.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution_types::mock_revision::with_test_revision;
 
     #[test]
     fn test_re_gang_worker_parse_success() {
@@ -437,5 +614,98 @@ mod tests {
             Some(&"H100".to_owned())
         );
         assert_eq!(worker.capabilities.get("rack"), Some(&"rack_01".to_owned()));
+    }
+
+    #[test]
+    fn test_dependency_parse_with_revision_interpolation_clean() {
+        with_test_revision(
+            Some("abc123def456abc123def456abc123def456abcd".to_owned()),
+            || {
+                let mut dep_map = SmallMap::new();
+                dep_map.insert("smc_tier", "my.tier");
+                dep_map.insert("id", "Sandbox:host:$(revision)");
+                dep_map.insert("enable_interpolation", "true");
+
+                let dep = RemoteExecutorDependency::parse(dep_map).unwrap();
+                assert_eq!(
+                    dep.id,
+                    "Sandbox:host:abc123def456abc123def456abc123def456abcd"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_dependency_parse_with_revision_interpolation_dirty() {
+        with_test_revision(
+            Some("abc123def456abc123def456abc123def456abcd+".to_owned()),
+            || {
+                let mut dep_map = SmallMap::new();
+                dep_map.insert("smc_tier", "my.tier");
+                dep_map.insert("id", "Sandbox:host:$(revision)");
+                dep_map.insert("enable_interpolation", "true");
+
+                let dep = RemoteExecutorDependency::parse(dep_map).unwrap();
+                assert_eq!(
+                    dep.id,
+                    "Sandbox:host:abc123def456abc123def456abc123def456abcd+"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_dependency_parse_with_revision_interpolation_missing() {
+        with_test_revision(None, || {
+            let mut dep_map = SmallMap::new();
+            dep_map.insert("smc_tier", "my.tier");
+            dep_map.insert("id", "Sandbox:host:$(revision)");
+            dep_map.insert("enable_interpolation", "true");
+
+            let dep = RemoteExecutorDependency::parse(dep_map).unwrap();
+            assert_eq!(dep.id, "Sandbox:host:");
+        });
+    }
+
+    #[test]
+    fn test_dependency_parse_without_revision_placeholder() {
+        let mut dep_map = SmallMap::new();
+        dep_map.insert("smc_tier", "my.tier");
+        dep_map.insert("id", "Limit:foo");
+        dep_map.insert("enable_interpolation", "true");
+
+        let dep = RemoteExecutorDependency::parse(dep_map).unwrap();
+        assert_eq!(
+            dep.id, "Limit:foo",
+            "id without placeholders should be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_network_access_parse() {
+        assert_eq!(
+            parse_network_access("all").expect("all should parse"),
+            BuckNetworkAccess::All
+        );
+        assert_eq!(
+            parse_network_access("none").expect("none should parse"),
+            BuckNetworkAccess::None
+        );
+        assert_eq!(
+            parse_network_access("loopback").expect("loopback should parse"),
+            BuckNetworkAccess::Loopback
+        );
+        assert_eq!(
+            parse_network_access("strict").expect("strict should parse"),
+            BuckNetworkAccess::Strict
+        );
+        assert_eq!(
+            parse_network_access("private").expect("private should parse"),
+            BuckNetworkAccess::Private
+        );
+        assert!(
+            parse_network_access("default").is_err(),
+            "Omitted network_access should use the default executor behavior"
+        );
     }
 }

@@ -26,7 +26,6 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::values::AllocFrozenValue;
 use starlark::values::AllocValue;
 use starlark::values::Demand;
@@ -35,6 +34,7 @@ use starlark::values::FrozenValue;
 use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
@@ -44,7 +44,6 @@ use starlark::values::ValueLike;
 use starlark::values::ValueTyped;
 use starlark::values::ValueTypedComplex;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark_map::StarlarkHasher;
 
@@ -57,7 +56,6 @@ use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
-use crate::interpreter::rule_defs::cmd_args::CommandLineContext;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
 use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
 
@@ -83,7 +81,8 @@ use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command
     Trace,
     NoSerialize,
     Allocative,
-    Freeze
+    Freeze,
+    StarlarkPagable
 )]
 #[repr(C)]
 pub struct StarlarkOutputArtifactGen<V: ValueLifetimeless> {
@@ -218,17 +217,20 @@ impl<'v, V: ValueLike<'v>> StarlarkArtifactLike<'v> for StarlarkOutputArtifactGe
     }
 }
 
+starlark::methods_static!(
+    OUTPUT_ARTIFACT_METHODS = |b| {
+        any_artifact_methods(b);
+        output_artifact_methods(b);
+    }
+);
+
 #[starlark_value(type = "OutputArtifact")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkOutputArtifactGen<V>
 where
     Self: ProvidesStaticType<'v> + Display + CommandLineArgLike<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(|b| {
-            any_artifact_methods(b);
-            output_artifact_methods(b);
-        })
+        Some(OUTPUT_ARTIFACT_METHODS.methods())
     }
 
     fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
@@ -299,24 +301,17 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for StarlarkOutputArtifactGen<
         command_line_arg_like_impl!(FrozenStarlarkOutputArtifact::starlark_type_repr());
     }
 
-    fn add_to_command_line(
-        &self,
-        cli: &mut dyn CommandLineBuilder,
-        ctx: &mut dyn CommandLineContext,
-        _artifact_path_mapping: &dyn ArtifactPathMapper,
-    ) -> buck2_error::Result<()> {
+    fn add_to_command_line(&self, fmt: &mut CommandLineBuilder<'v, '_>) -> buck2_error::Result<()> {
         match self.unpack() {
-            Either::Left(_) => {
-                // TODO: proper error message
-                Err(buck2_error::buck2_error!(
-                    buck2_error::ErrorTag::Tier0,
-                    "proper error here; we should not be adding mutable starlark objects to clis"
-                ))
-            }
+            Either::Left(_) => Err(buck2_error::internal_error!(
+                "Cannot add an unfrozen output artifact to a command line. \
+                     Output artifacts must be declared and bound to an action \
+                     before they can be used in command lines"
+            )),
             Either::Right(v) => {
                 // We do not need to use the ArtifactPathMapper here as output artifacts are always
                 // resolved to a known path since their content hash is not yet available.
-                cli.push_location(ctx.resolve_output_artifact(&v.artifact)?);
+                fmt.push_output_artifact(&v.artifact)?;
                 Ok(())
             }
         }
@@ -352,6 +347,7 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for StarlarkOutputArtifactGen<
 
 /// The result of calling [`Artifact.as_output()`](../Artifact/#artifactas_output).
 #[starlark_module]
-pub(crate) fn register_output_artifact(globals: &mut GlobalsBuilder) {
-    const OutputArtifact: StarlarkValueAsType<StarlarkOutputArtifact> = StarlarkValueAsType::new();
-}
+#[starlark_types(
+    StarlarkOutputArtifact<'_> as OutputArtifact
+)]
+pub(crate) fn register_output_artifact(globals: &mut GlobalsBuilder) {}

@@ -36,11 +36,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
@@ -60,6 +62,30 @@ public class D8Utils {
       Collection<Path> classpathFiles,
       Optional<Integer> minSdkVersion)
       throws CompilationFailedException, IOException {
+    return runD8Command(
+        diagnosticsHandler,
+        outputDexFile,
+        filesToDex,
+        options,
+        primaryDexClassNamesPath,
+        androidJarPath,
+        classpathFiles,
+        minSdkVersion,
+        // NULLSAFE_FIXME[Not Vetted Third-Party]
+        OptionalInt.empty());
+  }
+
+  public static D8Output runD8Command(
+      D8DiagnosticsHandler diagnosticsHandler,
+      Path outputDexFile,
+      Iterable<Path> filesToDex,
+      Set<D8Options> options,
+      Optional<Path> primaryDexClassNamesPath,
+      Path androidJarPath,
+      Collection<Path> classpathFiles,
+      Optional<Integer> minSdkVersion,
+      OptionalInt threadCount)
+      throws CompilationFailedException, IOException {
     Set<Path> inputs = new HashSet<>();
     for (Path toDex : filesToDex) {
       if (Files.isRegularFile(toDex)) {
@@ -76,33 +102,36 @@ public class D8Utils {
     boolean outputToDex = outputDexFile.getFileName().toString().endsWith(".dex");
     Path output = outputToDex ? Files.createTempDirectory("buck-d8") : outputDexFile;
 
-    // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
     D8Command.Builder builder =
-        // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+        // NULLSAFE_FIXME[Not Vetted Third-Party]
         D8Command.builder(diagnosticsHandler)
-            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+            // NULLSAFE_FIXME[Not Vetted Third-Party]
             .addProgramFiles(inputs)
-            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+            // NULLSAFE_FIXME[Not Vetted Third-Party]
             .setIntermediate(options.contains(D8Options.INTERMEDIATE))
-            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+            // NULLSAFE_FIXME[Not Vetted Third-Party]
             .addLibraryFiles(androidJarPath)
+            // NULLSAFE_FIXME[Not Vetted Third-Party]
             .setMode(
                 options.contains(D8Options.NO_OPTIMIZE)
                     ? CompilationMode.DEBUG
                     : CompilationMode.RELEASE)
-            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+            // NULLSAFE_FIXME[Not Vetted Third-Party]
             .setOutput(output, OutputMode.DexIndexed)
-            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+            // NULLSAFE_FIXME[Not Vetted Third-Party]
             .setDisableDesugaring(options.contains(D8Options.NO_DESUGAR))
-            // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+            // NULLSAFE_FIXME[Not Vetted Third-Party]
             .setInternalOptionsModifier(
                 (InternalOptions opt) -> {
-                  // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+                  // NULLSAFE_FIXME[Not Vetted Third-Party]
                   opt.testing.forceJumboStringProcessing = options.contains(D8Options.FORCE_JUMBO);
                   if (options.contains(D8Options.MINIMIZE_PRIMARY_DEX)) {
                     opt.minimalMainDex = true;
                   } else if (options.contains(D8Options.MAXIMIZE_PRIMARY_DEX)) {
                     opt.minimalMainDex = false;
+                  }
+                  if (threadCount.isPresent()) {
+                    opt.threadCount = threadCount.getAsInt();
                   }
                 });
 
@@ -117,20 +146,18 @@ public class D8Utils {
       builder.addClasspathFiles(classpathFiles);
     }
 
-    // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
+    // NULLSAFE_FIXME[Not Vetted Third-Party]
     D8Command d8Command = builder.build();
     com.android.tools.r8.D8.run(d8Command);
 
     if (outputToDex) {
-      File[] outputs = output.toFile().listFiles();
-      if (outputs != null && (outputs.length > 0)) {
-        Files.move(outputs[0].toPath(), outputDexFile, StandardCopyOption.REPLACE_EXISTING);
-      }
+      moveSingleDexOutput(output, outputDexFile, options);
     }
 
-    // NULLSAFE_FIXME[Unvetted Third Party In Nullsafe]
     return new D8Output(
+        // NULLSAFE_FIXME[Not Vetted Third-Party]
         d8Command.getDexItemFactory().computeReferencedResources(),
+        // NULLSAFE_FIXME[Not Vetted Third-Party]
         d8Command.getDexItemFactory().computeSynthesizedTypes());
   }
 
@@ -228,6 +255,38 @@ public class D8Utils {
     } else {
       return String.format("assets/%s", module);
     }
+  }
+
+  /**
+   * Moves a single DEX file from a D8 output directory to the final destination. When {@link
+   * D8Options#FAIL_ON_MULTIPLE_DEX} is present in the options set, throws {@link
+   * IllegalStateException} if D8 produced multiple DEX files. Otherwise, silently moves the first
+   * file (sorted lexicographically).
+   *
+   * <p>This is package-visible for testing.
+   */
+  static void moveSingleDexOutput(Path d8OutputDir, Path outputDexFile, Set<D8Options> options)
+      throws IOException {
+    File[] outputs = d8OutputDir.toFile().listFiles();
+    if (outputs == null || outputs.length == 0) {
+      return;
+    }
+    if (outputs.length > 1 && options.contains(D8Options.FAIL_ON_MULTIPLE_DEX)) {
+      StringBuilder fileList = new StringBuilder();
+      for (File f : outputs) {
+        fileList.append("\n  ").append(f.getName());
+      }
+      throw new IllegalStateException(
+          "D8 produced "
+              + outputs.length
+              + " DEX files but only a single output was expected:"
+              + fileList
+              + "\nThe combined input likely exceeds DEX reference limits."
+              + " Enable split_dex (use_split_dex = True) for this target.");
+    }
+    // File.listFiles() returns undefined order — sort for determinism.
+    Arrays.sort(outputs);
+    Files.move(outputs[0].toPath(), outputDexFile, StandardCopyOption.REPLACE_EXISTING);
   }
 
   public static class D8DiagnosticsHandler implements DiagnosticsHandler {

@@ -14,15 +14,23 @@ import json
 import logging
 import os
 import pstats
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from apple.tools.code_signing.codesign_bundle import (
+    AdhocSigningContext,
     codesign_bundle,
     CodesignConfiguration,
     CodesignedPath,
+    selection_profile_context_from_signing_context,
+    SigningContextWithProfileSelection,
     write_empty_codesign_manifest,
+)
+from apple.tools.code_signing.provisioning_profile_metadata import (
+    ProvisioningProfileMetadata,
 )
 from apple.tools.re_compatibility_utils.writable import make_dir_recursively_writable
 
@@ -100,6 +108,11 @@ def _args_parser() -> argparse.ArgumentParser:
         """,
     )
     parser.add_argument(
+        "--fast-adhoc-signing-probe-enabled",
+        action="store_true",
+        help="Allow fast-adhoc signing to consult the bundled signature probe tool when it is available.",
+    )
+    parser.add_argument(
         "--incremental-state",
         metavar="<IncrementalState.json>",
         type=Path,
@@ -158,6 +171,13 @@ def _args_parser() -> argparse.ArgumentParser:
         help="Required if swift support was requested. Bundle relative destination path to plugins directory.",
     )
     parser.add_argument(
+        "--resources-destination",
+        metavar="<Resources>",
+        type=Path,
+        required=False,
+        help="Required if swift support was requested. Bundle relative destination path to resources directory.",
+    )
+    parser.add_argument(
         "--appclips-destination",
         metavar="<AppClips>",
         type=Path,
@@ -189,9 +209,23 @@ def _args_parser() -> argparse.ArgumentParser:
         help="Create symlinks for versioned macOS bundle",
     )
     parser.add_argument(
-        "--verify-entitlements",
+        "--include-build-info-file",
         action="store_true",
-        help="Verify that the bundle's entitlements match the provisioning profile",
+        help="Include the build info file in the assembled bundle.",
+    )
+    parser.add_argument(
+        "--bundle-telemetry-logger",
+        metavar="<path/to/logger>",
+        type=Path,
+        required=False,
+        help="Path to bundle telemetry logger tool. If provided, will be invoked after bundle assembly completes.",
+    )
+
+    parser.add_argument(
+        "--signing-info-output",
+        type=Path,
+        required=False,
+        help="Path to the output JSON file for simplified signing identity metadata.",
     )
 
     add_args_for_signing_context(parser)
@@ -311,6 +345,16 @@ def _main() -> None:
         signing_context_and_selected_identity_from_args(args)
     )
 
+    if args.signing_info_output:
+        selection_profile_context = selection_profile_context_from_signing_context(
+            signing_context
+        )
+        signing_info = _build_signing_info_json(
+            args, selected_identity_argument, selection_profile_context
+        )
+        with open(args.signing_info_output, "w") as signing_info_file:
+            json.dump(signing_info, signing_info_file, indent=4)
+
     with args.spec.open(mode="rb") as spec_file:
         spec = json.load(spec_file, object_hook=lambda d: BundleSpecItem(**d))
         spec = _deduplicate_spec(spec)
@@ -345,6 +389,9 @@ def _main() -> None:
     else:
         swift_stdlib_paths = []
 
+    prepared_entitlements_path: Optional[Path] = None
+    telemetry_tmp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
+
     if args.codesign:
         # Vendored frameworks/bundles could already be pre-signed, in which case,
         # re-signing them requires modifying them. On RE, the umask is such that
@@ -373,6 +420,12 @@ def _main() -> None:
             for path in swift_stdlib_paths
         ]
 
+        if args.bundle_telemetry_logger:
+            telemetry_tmp_dir = tempfile.TemporaryDirectory()
+            prepared_entitlements_path = (
+                Path(telemetry_tmp_dir.name) / "prepared_entitlements.plist"
+            )
+
         codesign_bundle(
             bundle_path=bundle_path,
             signing_context=signing_context,
@@ -380,7 +433,12 @@ def _main() -> None:
             codesign_on_copy_paths=codesign_on_copy_paths,
             codesign_tool=args.codesign_tool,
             codesign_configuration=args.codesign_configuration,
+            fast_adhoc_signing_probe_enabled=args.fast_adhoc_signing_probe_enabled,
             codesign_manifest_path=args.codesign_manifest,
+            entitlements_suffixed_key_map=args.entitlements_suffixed_key_map,
+            entitlements_removed_keys=args.entitlements_removed_keys,
+            entitlements_removed_values_map=args.entitlements_removed_values_map,
+            prepared_entitlements_output_path=prepared_entitlements_path,
         )
     elif args.codesign_manifest:
         # Always write the codesign manifest file, even when unsigned
@@ -413,6 +471,104 @@ def _main() -> None:
             sortby = pstats.SortKey.CUMULATIVE
             ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
             ps.print_stats()
+
+    if args.bundle_telemetry_logger:
+        selected_profile_path = _get_selected_profile_path(signing_context)
+        info_plist_in_bundle = (
+            (args.output / args.info_plist_destination)
+            if args.info_plist_destination
+            else None
+        )
+        _run_bundle_telemetry_logger(
+            logger_path=args.bundle_telemetry_logger,
+            bundle_path=args.output,
+            info_plist=info_plist_in_bundle,
+            entitlements=prepared_entitlements_path,
+            selected_provisioning_profile=selected_profile_path,
+        )
+
+    if telemetry_tmp_dir is not None:
+        telemetry_tmp_dir.cleanup()
+
+
+def _build_signing_info_json(
+    args: argparse.Namespace,
+    selected_identity: Optional[str],
+    selection_profile_context: Optional[SigningContextWithProfileSelection],
+) -> dict:
+    if not args.codesign:
+        return {}
+
+    signing_info: dict = {
+        "codesign_type": "adhoc" if args.ad_hoc else "distribution",
+    }
+
+    if selected_identity:
+        signing_info["codesign_identity"] = selected_identity
+
+    if selection_profile_context:
+        selected_profile_info = selection_profile_context.selected_profile_info
+        profile_metadata: ProvisioningProfileMetadata = selected_profile_info.profile
+        if profile_metadata.provisioned_devices is not None:
+            provisioned_devices = "list"
+        elif profile_metadata.provisions_all_devices:
+            provisioned_devices = "all"
+        else:
+            provisioned_devices = "none"
+        signing_info["provisioning_profile"] = {
+            "uuid": profile_metadata.uuid,
+            "file_name": profile_metadata.file_path.name,
+            "provisioned_devices": provisioned_devices,
+        }
+        signing_info["signing_certificate"] = {
+            "fingerprint": selected_profile_info.identity.fingerprint,
+            "subject_common_name": selected_profile_info.identity.subject_common_name,
+        }
+
+    return signing_info
+
+
+def _get_selected_profile_path(
+    signing_context: Optional[object],
+) -> Optional[Path]:
+    if signing_context is None:
+        return None
+
+    signing_context_with_profile: Optional[SigningContextWithProfileSelection] = None
+    if isinstance(signing_context, SigningContextWithProfileSelection):
+        signing_context_with_profile = signing_context
+    if isinstance(signing_context, AdhocSigningContext):
+        signing_context_with_profile = signing_context.profile_selection_context
+
+    return (
+        signing_context_with_profile.selected_profile_info.profile.file_path
+        if signing_context_with_profile
+        else None
+    )
+
+
+def _run_bundle_telemetry_logger(
+    logger_path: Path,
+    bundle_path: Path,
+    info_plist: Optional[Path],
+    entitlements: Optional[Path],
+    selected_provisioning_profile: Optional[Path],
+) -> None:
+    cmd: List[str] = [str(logger_path), "--bundle", str(bundle_path)]
+    if info_plist:
+        cmd.extend(["--info-plist", str(info_plist)])
+    if entitlements:
+        cmd.extend(["--entitlements", str(entitlements)])
+    if selected_provisioning_profile:
+        cmd.extend(["--provisioning-profile", str(selected_provisioning_profile)])
+    try:
+        subprocess.run(cmd, check=False)
+    except Exception:
+        # Telemetry is best-effort, never fail the build
+        logging.getLogger(__name__).debug(
+            "Failed to run bundle telemetry logger",
+            exc_info=True,
+        )
 
 
 def _incremental_context(

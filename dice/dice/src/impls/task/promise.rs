@@ -22,19 +22,13 @@ use futures::future::BoxFuture;
 use futures::task::AtomicWaker;
 
 use crate::arc::Arc;
-use crate::impls::task::dice::Cancellations;
-use crate::impls::task::dice::DiceTaskInternal;
+use crate::impls::task::dice::DiceTask;
 use crate::impls::task::dice::SlabId;
-use crate::impls::task::handle::TaskState;
 use crate::impls::value::DiceComputedValue;
 
-/// A string reference to a 'DiceTask' that is pollable as a future.
+/// A strong reference to a 'DiceTask' that is pollable as a future.
 /// This is only awoken when the result is ready, as none of the pollers are responsible for
-/// running the task to completion
-///
-/// Memory size:
-/// DicePromise <-> Shared: DicePromise is 2 triomphe::Arc and a usize, whereas Shared is a usize
-/// and 1 std::Arc, so we hold one extra Arc.
+/// running the task to completion.
 pub(crate) struct DicePromise(pub(super) DicePromiseInternal);
 
 pub(super) enum DicePromiseInternal {
@@ -43,9 +37,8 @@ pub(super) enum DicePromiseInternal {
     },
     Pending {
         slab: SlabId,
-        task_internal: Arc<DiceTaskInternal>,
+        task: DiceTask,
         waker: Arc<AtomicWaker>,
-        cancellations: Cancellations,
     },
     Done,
 }
@@ -75,24 +68,14 @@ impl DicePromise {
         Self(DicePromiseInternal::Ready { result })
     }
 
-    pub(super) fn pending(
-        slab: SlabId,
-        internal: Arc<DiceTaskInternal>,
-        waker: Arc<AtomicWaker>,
-        cancellations: Cancellations,
-    ) -> Self {
-        Self(DicePromiseInternal::Pending {
-            slab,
-            task_internal: internal,
-            waker,
-            cancellations,
-        })
+    pub(super) fn pending(slab: SlabId, task: DiceTask, waker: Arc<AtomicWaker>) -> Self {
+        Self(DicePromiseInternal::Pending { slab, task, waker })
     }
 
     pub(crate) fn is_pending(&self) -> bool {
         match &self.0 {
             DicePromiseInternal::Ready { .. } => false,
-            DicePromiseInternal::Pending { task_internal, .. } => task_internal.is_pending(),
+            DicePromiseInternal::Pending { task, .. } => task.is_pending(),
             DicePromiseInternal::Done => false,
         }
     }
@@ -105,72 +88,7 @@ impl DicePromise {
     ) -> CancellableResult<DiceComputedValue> {
         match &self.0 {
             DicePromiseInternal::Ready { result } => Ok(result.dupe()),
-            DicePromiseInternal::Pending { task_internal, .. } => {
-                if let Some(res) = task_internal.read_value() {
-                    res
-                } else if let Some(sync_res) = {
-                    let lock = task_internal.sync_value.read();
-                    let value = lock.dupe();
-                    drop(lock);
-                    value
-                } {
-                    Ok(sync_res)
-                } else {
-                    match task_internal.state.report_project() {
-                        TaskState::Continue => {}
-                        TaskState::Finished => {
-                            return task_internal
-                                .read_value()
-                                .expect("task finished must mean result is ready");
-                        }
-                    }
-
-                    let result = {
-                        let mut locked = task_internal.sync_value.write();
-
-                        if let Some(res) = locked.as_ref() {
-                            return Ok(res.dupe());
-                        }
-
-                        let result = f();
-
-                        assert!(
-                            locked.replace(result.sync_result.dupe()).is_none(),
-                            "should only complete sync result once"
-                        );
-
-                        result
-                    };
-
-                    tokio::spawn({
-                        let future = result.state_future;
-                        let internals = task_internal.dupe();
-
-                        async move {
-                            let res = future.await;
-
-                            let mut sync_value = internals.sync_value.write();
-
-                            match res {
-                                Ok(result) => {
-                                    // only errors if cancelled, so we can ignore any errors when
-                                    // setting the result
-                                    let _ignore = internals.set_value(result);
-                                }
-                                Err(reason) => {
-                                    // if its cancelled, report cancelled
-                                    internals.report_terminated(reason);
-                                }
-                            }
-
-                            // stop storing the sync value since the async one is done
-                            sync_value.take()
-                        }
-                    });
-
-                    Ok(result.sync_result)
-                }
-            }
+            DicePromiseInternal::Pending { task, .. } => task.sync_get_or_complete(f),
             DicePromiseInternal::Done => panic!("poll after ready"),
         }
     }
@@ -181,12 +99,7 @@ impl Drop for DicePromise {
         match &self.0 {
             DicePromiseInternal::Ready { .. } => {}
             DicePromiseInternal::Done => {}
-            DicePromiseInternal::Pending {
-                slab,
-                task_internal,
-                cancellations,
-                ..
-            } => task_internal.drop_waiter(slab, cancellations),
+            DicePromiseInternal::Pending { slab, task, .. } => task.drop_waiter(slab),
         }
     }
 }
@@ -202,13 +115,9 @@ impl Future for DicePromise {
                     _ => unreachable!(),
                 }
             }
-            DicePromiseInternal::Pending {
-                task_internal,
-                waker,
-                ..
-            } => {
+            DicePromiseInternal::Pending { task, waker, .. } => {
                 waker.register(cx.waker());
-                if let Some(res) = task_internal.read_value() {
+                if let Some(res) = task.read_value() {
                     Poll::Ready(res)
                 } else {
                     Poll::Pending

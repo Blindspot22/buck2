@@ -16,10 +16,15 @@ use allocative::Allocative;
 use async_trait::async_trait;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::PagableDeserializeOwned;
+use pagable::PagableSerialize;
+use pagable::typetag::PagableTagged;
 
 use crate::InvalidationSourcePriority;
 use crate::api::computations::DiceComputations;
 use crate::api::key::Key;
+use crate::api::key::ValueSerialize;
 use crate::api::storage_type::StorageType;
 
 /// Specialized version of `Key` above. This type of Key is never computed. It
@@ -32,7 +37,19 @@ use crate::api::storage_type::StorageType;
 /// require a `panic!` implementation in `compute` function, both of which are
 /// horrible and breaks semantics of traits.
 pub trait InjectedKey:
-    Allocative + Clone + Debug + Display + Send + Sync + Eq + Hash + 'static
+    PagableSerialize
+    + PagableDeserializeOwned
+    + Allocative
+    + Clone
+    + Debug
+    + Display
+    + Send
+    + Sync
+    + Eq
+    + Hash
+    + Pagable
+    + PagableTagged
+    + 'static
 {
     type Value: Allocative + Dupe + Send + Sync + 'static;
 
@@ -41,6 +58,8 @@ pub trait InjectedKey:
     fn invalidation_source_priority() -> InvalidationSourcePriority {
         InvalidationSourcePriority::Normal
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value>;
 }
 
 #[async_trait]
@@ -72,5 +91,9 @@ where
 
     fn invalidation_source_priority() -> InvalidationSourcePriority {
         K::invalidation_source_priority()
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        <K as InjectedKey>::value_serialize()
     }
 }

@@ -10,17 +10,17 @@
 
 #![cfg(test)]
 
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
 use buck2_error::internal_error;
+use buck2_hash::BuckIndexSet;
+use buck2_hash::StdBuckHashMap;
 use buck2_query::query::traversal::NodeLookup;
 use buck2_query::query::traversal::async_depth_first_postorder_traversal;
 use buck2_query::query::traversal::async_depth_limited_traversal;
 use derive_more::Display;
 use derive_more::From;
-use indexmap::IndexSet;
 
 use super::*;
 
@@ -35,7 +35,7 @@ struct TestTargetAttr;
 #[derive(Clone, Dupe, Eq, PartialEq)]
 struct TestTarget {
     id: TestTargetId,
-    deps: Arc<IndexSet<TestTargetId>>,
+    deps: Arc<BuckIndexSet<TestTargetId>>,
 }
 
 /// Custom debug to make the test output more readable
@@ -130,7 +130,7 @@ impl QueryTarget for TestTarget {
 }
 
 struct TestEnv {
-    graph: HashMap<TestTargetId, TestTarget>,
+    graph: StdBuckHashMap<TestTargetId, TestTarget>,
 }
 
 impl NodeLookup<TestTarget> for TestEnv {
@@ -230,7 +230,7 @@ impl TestEnv {
 
 #[derive(Default)]
 pub struct TestEnvBuilder {
-    graph: HashMap<u64, IndexSet<u64>>,
+    graph: StdBuckHashMap<u64, BuckIndexSet<u64>>,
 }
 
 impl TestEnvBuilder {
@@ -383,7 +383,7 @@ async fn test_paths_with_cycles_present() -> buck2_error::Result<()> {
     assert_eq!(path, env.set("1,2,3,4,5")?);
 
     let path = env
-        .rdeps(&env.set("1")?, &env.set("3")?, Some(2), None)
+        .rdeps(&env.set("1")?, &env.set("3")?, Some(2).into(), None)
         .await?;
     assert_eq!(path, env.set("4,1,2,3")?);
 
@@ -402,32 +402,32 @@ async fn test_rdeps() -> buck2_error::Result<()> {
     let env = env.build();
 
     let path = env
-        .rdeps(&env.set("1")?, &env.set("6")?, Some(0), None)
+        .rdeps(&env.set("1")?, &env.set("6")?, Some(0).into(), None)
         .await?;
     assert_eq!(path, env.set("6")?);
 
     let path = env
-        .rdeps(&env.set("1")?, &env.set("6")?, Some(1), None)
+        .rdeps(&env.set("1")?, &env.set("6")?, Some(1).into(), None)
         .await?;
     assert_eq!(path, env.set("3,6")?);
 
     let path = env
-        .rdeps(&env.set("1")?, &env.set("6")?, Some(2), None)
+        .rdeps(&env.set("1")?, &env.set("6")?, Some(2).into(), None)
         .await?;
     assert_eq!(path, env.set("1,2,3,6")?);
 
     let path = env
-        .rdeps(&env.set("1")?, &env.set("6")?, Some(3), None)
+        .rdeps(&env.set("1")?, &env.set("6")?, Some(3).into(), None)
         .await?;
     assert_eq!(path, env.set("1,2,3,6")?);
 
     let path = env
-        .rdeps(&env.set("1")?, &env.set("6")?, Some(4), None)
+        .rdeps(&env.set("1")?, &env.set("6")?, Some(4).into(), None)
         .await?;
     assert_eq!(path, env.set("1,2,3,6")?);
 
     let path = env
-        .rdeps(&env.set("1")?, &env.set("6")?, None, None)
+        .rdeps(&env.set("1")?, &env.set("6")?, None::<u32>.into(), None)
         .await?;
     assert_eq!(path, env.set("1,2,3,6")?);
 

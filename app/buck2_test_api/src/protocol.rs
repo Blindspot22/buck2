@@ -21,6 +21,7 @@ use host_sharing::HostSharingRequirements;
 use sorted_vector_map::SortedVectorMap;
 
 use crate::data::ArgValue;
+use crate::data::CasDigest;
 use crate::data::ConfiguredTargetHandle;
 use crate::data::DeclaredOutput;
 use crate::data::ExecuteResponse;
@@ -70,6 +71,9 @@ pub trait TestOrchestrator: Send + Sync {
         // ExternalRunnerTestInfo to work.
         executor_override: Option<ExecutorConfigOverride>,
         required_local_resources: RequiredLocalResources,
+        // When true, disables test execution cache lookups even if the test rule
+        // supports it.
+        disable_test_execution_caching: bool,
     ) -> buck2_error::Result<ExecuteResponse>;
 
     /// reports a test is done
@@ -83,7 +87,11 @@ pub trait TestOrchestrator: Send + Sync {
     ) -> buck2_error::Result<()>;
 
     /// report a summary about the current test executor
-    async fn report_test_session(&self, session_info: String) -> buck2_error::Result<()>;
+    async fn report_test_session(
+        &self,
+        session_info: String,
+        test_session_id: Option<String>,
+    ) -> buck2_error::Result<()>;
 
     /// report that all tests are done and provide the exit code that this test executor wants to
     /// return for the test command, no more executions
@@ -104,6 +112,17 @@ pub trait TestOrchestrator: Send + Sync {
     /// attach a message containing information that the executor wants to be surfaced
     /// to the user
     async fn attach_info_message(&self, message: String) -> buck2_error::Result<()>;
+
+    /// Upload a local file to CAS and return its digest.
+    ///
+    /// This is called by tpx to upload local test artifacts to CAS instead of
+    /// Everstore. Buck2 handles the actual CAS upload using its RE client.
+    async fn upload_to_cas(
+        &self,
+        local_path: String,
+        ttl_seconds: i64,
+        use_case: String,
+    ) -> buck2_error::Result<CasDigest>;
 }
 
 // TODO need to figure out what this is. we can go without it for now

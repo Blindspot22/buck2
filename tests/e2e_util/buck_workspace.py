@@ -7,7 +7,7 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
-# pyre-unsafe
+# pyre-strict
 
 import contextlib
 import hashlib
@@ -21,6 +21,7 @@ import tempfile
 from collections import namedtuple
 from pathlib import Path
 from typing import (
+    Any,
     AsyncGenerator,
     AsyncIterator,
     Awaitable,
@@ -54,7 +55,7 @@ BuckTestMarker = namedtuple(
 
 @contextlib.asynccontextmanager
 async def buck_fixture(  # noqa C901 : "too complex"
-    marker,
+    marker: BuckTestMarker,
 ) -> AsyncGenerator[Buck, None]:
     """Returns a Buck for testing"""
 
@@ -128,12 +129,21 @@ async def buck_fixture(  # noqa C901 : "too complex"
     # Create a temporary file to store all lines of extra buck config values.
     extra_config_lines = []
 
+    # Override all RE use cases to use buck2-testing, which has an isolated
+    # CAS namespace (cas_store_version offset by TEST_OFFSET=200).
+    extra_config_lines.append("[buck2_re_client]\noverride_use_case = buck2-testing\n")
+
     project_dir = base_dir / "project"
 
     # Temp dir needed for EdenFS, will only be created if necessary
     eden_dir = base_dir / "eden"
 
+    orig_stdout = sys.stdout
     try:
+        # Redirect stdout to stderr during the test so that `print` statements
+        # show up in the test failure output by default for debugging.
+        sys.stdout = sys.stderr
+
         if marker.setup_eden:
             assert not marker.inplace, (
                 "EdenFS for e2e tests is not supported for inplace tests"
@@ -228,6 +238,8 @@ async def buck_fixture(  # noqa C901 : "too complex"
             else:
                 await buck.clean()
     finally:
+        sys.stdout = orig_stdout
+
         if keep_temp:
             print(f"Not deleting temporary directory at {base_dir}", file=sys.stderr)
         else:
@@ -237,7 +249,7 @@ async def buck_fixture(  # noqa C901 : "too complex"
 
 
 @pytest.fixture(scope="function")
-async def buck(request) -> AsyncIterator[Buck]:
+async def buck(request: pytest.FixtureRequest) -> AsyncIterator[Buck]:
     marker = request.node.get_closest_marker("buck_test")
     if marker is None:
         raise Exception(
@@ -274,10 +286,10 @@ async def _get_common_dir() -> Path:
     return common_dir
 
 
-def nobuckd(fn: Callable) -> Callable:
+def nobuckd(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Disables buck daemon"""
 
-    def wrapped(fn: Callable, buck: Buck, *args, **kwargs):
+    def wrapped(fn: Callable[..., Any], buck: Buck, *args: Any, **kwargs: Any) -> Any:
         buck.set_buckd(True)
         return fn(buck, *args, **kwargs)
 
@@ -312,7 +324,7 @@ def _setup_eden(
     project_dir: Path,
     env: Dict[str, str],
     is_windows: bool,
-):
+) -> None:
     eden_dir.mkdir(exist_ok=True)
     # Start up an EdenFS Client and point it to the temp dirs
     subprocess.check_call(
@@ -341,6 +353,10 @@ def _setup_eden(
     redirection_type = "symlink" if sys.platform == "darwin" else "bind"
     with open(temp_repo / ".eden-redirections", "w") as f:
         f.write(f'[redirections]\n"buck-out" = "{redirection_type}"\n')
+
+    # Make sure the repo's `sl status` is clean. Eden auto-creates the redirections
+    with open(temp_repo / ".gitignore", "w") as f:
+        f.write("/buck-out\n")
 
     subprocess.check_call(
         ["hg", "commit", "--addremove", "-m", "init"],
@@ -371,12 +387,12 @@ def _setup_eden(
     )
 
 
-def _cleanup_eden(
+def eden_remove(
     eden_dir: Path,
     project_dir: Path,
     env: Dict[str, str],
-):
-    # Remove the Eden mount created for the test
+) -> None:
+    """Remove an Eden checkout mount."""
     subprocess.run(
         _eden_base_cmd(eden_dir)
         + [
@@ -388,6 +404,14 @@ def _cleanup_eden(
         stderr=sys.stderr,
         env=env,
     )
+
+
+def _cleanup_eden(
+    eden_dir: Path,
+    project_dir: Path,
+    env: Dict[str, str],
+) -> None:
+    eden_remove(eden_dir, project_dir, env)
 
     subprocess.run(
         _eden_base_cmd(eden_dir)
@@ -478,13 +502,13 @@ def buck_test(
     data_dir: Optional[str] = "",
     # Accepted values are specified in SKIPPABLE_PLATFORMS
     skip_for_os: List[str] = [],  # noqa: B006 value is read-only
-    allow_soft_errors=False,
+    allow_soft_errors: bool = False,
     extra_buck_config: Optional[Dict[str, Dict[str, str]]] = None,
-    skip_final_kill=False,
-    setup_eden=False,
-    disable_daemon_cgroup=True,
-    write_invocation_record=False,
-) -> Callable:
+    skip_final_kill: bool = False,
+    setup_eden: bool = False,
+    disable_daemon_cgroup: bool = True,
+    write_invocation_record: bool = False,
+) -> Callable[..., Any]:
     """
     Defines a buck test. This is a must have decorator on all test case functions.
 
@@ -556,14 +580,16 @@ def buck_test(
     )
 
 
-def env(key: str, value: str) -> Callable:
+def env(key: str, value: str) -> Callable[..., Any]:
     """
     Decorator for adding an environment variable to a test case.
     For example, @env("BUCK_LOG", "info")
     """
 
-    def inner_decorator(fn: BuckTestFn) -> Callable:
-        async def wrapped(fn: BuckTestFn, buck: Buck, *args, **kwargs) -> None:
+    def inner_decorator(fn: BuckTestFn) -> Callable[..., Any]:
+        async def wrapped(
+            fn: BuckTestFn, buck: Buck, *args: Any, **kwargs: Any
+        ) -> None:
             buck.set_env(key, value)
             return await fn(buck, *args, **kwargs)
 
@@ -572,14 +598,16 @@ def env(key: str, value: str) -> Callable:
     return inner_decorator
 
 
-def windows_cmd_option(key: WindowsCmdOption, value: bool) -> Callable:
+def windows_cmd_option(key: WindowsCmdOption, value: bool) -> Callable[..., Any]:
     """
     Decorator for specifying the state for cmd.exe's specified key feature
     For example, @windows_cmd_option(WindowsCmdOption.DelayedExpansion, True)
     """
 
-    def inner_decorator(fn: BuckTestFn) -> Callable:
-        async def wrapped(fn: BuckTestFn, buck: Buck, *args, **kwargs) -> None:
+    def inner_decorator(fn: BuckTestFn) -> Callable[..., Any]:
+        async def wrapped(
+            fn: BuckTestFn, buck: Buck, *args: Any, **kwargs: Any
+        ) -> None:
             buck.set_windows_cmd_option(key, value)
             return await fn(buck, *args, **kwargs)
 
@@ -605,12 +633,14 @@ def is_deployed_buck2() -> bool:
 
 
 def get_mode_from_platform(
-    mode="dev", prefix=True, skip_validation_i_know_what_im_doing=False
+    mode: str = "dev",
+    prefix: bool = True,
+    skip_validation_i_know_what_im_doing: bool = False,
 ) -> str:
     if not skip_validation_i_know_what_im_doing and (mode not in ("dev", "opt")):
         raise Exception(f"Invalid mode: {mode}")
 
-    def modefile_basename():
+    def modefile_basename() -> str:
         if sys.platform == "darwin":
             if mode.startswith("dev"):
                 return "mac"

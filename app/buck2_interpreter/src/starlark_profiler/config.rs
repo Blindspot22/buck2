@@ -24,10 +24,15 @@ use dice::DiceProjectionComputations;
 use dice::DiceTransactionUpdater;
 use dice::InjectedKey;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::PagableValueSerialize;
 use dice::ProjectionKey;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use itertools::Itertools;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use ref_cast::RefCast;
 use regex::Regex;
 use starlark::eval::ProfileMode;
@@ -36,7 +41,7 @@ use crate::dice::starlark_provider::StarlarkEvalKind;
 use crate::starlark_profiler::mode::StarlarkProfileMode;
 
 /// Global profiling configuration.
-#[derive(PartialEq, Eq, Clone, Debug, Allocative)]
+#[derive(PartialEq, Eq, Clone, Debug, Allocative, Pagable)]
 #[derive(Default)]
 pub enum StarlarkProfilerConfiguration {
     /// No profiling.
@@ -58,7 +63,7 @@ pub enum StarlarkProfilerConfiguration {
     ProfilePattern(ProfileMode, ProfileRegex, AbsPathBuf),
 }
 
-#[derive(Clone, Debug, Allocative)]
+#[derive(Clone, Debug, Allocative, Pagable)]
 pub struct ProfileRegex(#[allocative(skip)] Regex);
 impl ProfileRegex {
     pub fn new(patterns: &[String]) -> buck2_error::Result<Self> {
@@ -75,7 +80,7 @@ impl PartialEq for ProfileRegex {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, Allocative)]
+#[derive(PartialEq, Eq, Clone, Debug, Allocative, Pagable)]
 enum StarlarkProfilerConfigurationResolved {
     None,
     ProfileLastLoading(ProfileMode, PackagePredicate),
@@ -93,9 +98,11 @@ enum StarlarkProfilerConfigurationResolved {
     Eq,
     PartialEq,
     Hash,
-    Allocative
+    Allocative,
+    Pagable
 )]
 #[display("{:?}", self)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct StarlarkProfilerConfigurationResolvedKey;
 
 #[async_trait]
@@ -181,6 +188,10 @@ impl Key for StarlarkProfilerConfigurationResolvedKey {
             _ => false,
         }
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
 #[derive(
@@ -191,15 +202,21 @@ impl Key for StarlarkProfilerConfigurationResolvedKey {
     PartialEq,
     Hash,
     Allocative,
-    RefCast
+    RefCast,
+    Pagable
 )]
 #[repr(transparent)]
+#[pagable_typetag(dice::DiceProjectionDyn)]
 struct StarlarkProfileModeForKind(StarlarkEvalKind);
 
 impl ProjectionKey for StarlarkProfileModeForKind {
     type DeriveFromKey = StarlarkProfilerConfigurationResolvedKey;
 
     type Value = buck2_error::Result<StarlarkProfileMode>;
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 
     fn compute(
         &self,
@@ -269,9 +286,11 @@ impl ProjectionKey for StarlarkProfileModeForKind {
     Eq,
     PartialEq,
     Hash,
-    Allocative
+    Allocative,
+    Pagable
 )]
 #[display("{:?}", self)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 pub struct StarlarkProfilerConfigurationKey;
 
 impl InjectedKey for StarlarkProfilerConfigurationKey {
@@ -279,6 +298,10 @@ impl InjectedKey for StarlarkProfilerConfigurationKey {
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        PagableValueSerialize::<Self::Value>::new()
     }
 }
 

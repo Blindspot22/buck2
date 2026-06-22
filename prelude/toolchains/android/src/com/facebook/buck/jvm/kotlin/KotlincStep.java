@@ -50,8 +50,6 @@ public class KotlincStep implements IsolatedStep {
 
   private static final String CLASSPATH_FLAG = "-classpath";
   private static final String DESTINATION_FLAG = "-d";
-  private static final String INCLUDE_RUNTIME_FLAG = "-include-runtime";
-  private static final String EXCLUDE_REFLECT = "-no-reflect";
   private static final String X_PLUGIN_ARG = "-Xplugin=";
   private static final String PLUGIN = "-P";
 
@@ -74,6 +72,7 @@ public class KotlincStep implements IsolatedStep {
   private final @Nullable String kosabiEarlyTerminationMessagePrefix;
   private final boolean kosabiShouldEnableMixedCompilation;
   private final ImmutableList<AbsPath> sourceOnlyAbiClasspath;
+  private final ImmutableList<AbsPath> applicabilityClasspath;
   private final boolean verifySourceOnlyAbiConstraints;
   private ImmutableList<IsolatedStep> postKotlinCompilationFailureSteps;
   private final Optional<AbsPath> depTrackerPath;
@@ -81,6 +80,8 @@ public class KotlincStep implements IsolatedStep {
   private final KotlinCDAnalytics kotlinCDAnalytics;
   private final LanguageVersion languageVersion;
   private final boolean shouldKosabiJvmAbiGenUseK2;
+
+  private static final String COMPOSE_PLUGIN_PATH_FRAGMENT = "compose-compiler-plugin";
 
   KotlincStep(
       BuildTargetValue invokingRule,
@@ -100,6 +101,7 @@ public class KotlincStep implements IsolatedStep {
       @Nullable String kosabiEarlyTerminationMessagePrefix,
       boolean kosabiShouldEnableMixedCompilation,
       ImmutableList<AbsPath> sourceOnlyAbiClasspath,
+      ImmutableList<AbsPath> applicabilityClasspath,
       boolean verifySourceOnlyAbiConstraints,
       ImmutableList<IsolatedStep> postKotlinCompilationFailureSteps,
       Optional<AbsPath> depTrackerPath,
@@ -124,6 +126,7 @@ public class KotlincStep implements IsolatedStep {
     this.kosabiEarlyTerminationMessagePrefix = kosabiEarlyTerminationMessagePrefix;
     this.kosabiShouldEnableMixedCompilation = kosabiShouldEnableMixedCompilation;
     this.sourceOnlyAbiClasspath = sourceOnlyAbiClasspath;
+    this.applicabilityClasspath = applicabilityClasspath;
     this.verifySourceOnlyAbiConstraints = verifySourceOnlyAbiConstraints;
     this.postKotlinCompilationFailureSteps = postKotlinCompilationFailureSteps;
     this.depTrackerPath = depTrackerPath;
@@ -167,6 +170,12 @@ public class KotlincStep implements IsolatedStep {
 
       Instant compilationEnd = Instant.now();
       Duration compilationDuration = Duration.between(compilationStart, compilationEnd);
+      LOG.info(
+          "KOTLINCD_STEP_DURATION|%s|%s|%d|%d",
+          invokingRule.getFullyQualifiedName(),
+          this.getClass().getSimpleName(),
+          compilationDuration.toMillis(),
+          sourceFilePaths.size());
       loggingContext.addExtras(
           this.getClass().getSimpleName(),
           "Kotlinc step duration: " + compilationDuration.toMillis() + " ms");
@@ -277,11 +286,27 @@ public class KotlincStep implements IsolatedStep {
         AbsPath applicabilityPlugin =
             resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_APPLICABILITY_PLUGIN);
         builder.add(X_PLUGIN_ARG + applicabilityPlugin);
+
+        // Pass the reduced source-only-abi classpath to the applicability plugin
+        // so checkers can detect types that won't be available during SO-ABI
+        // generation. applicabilityClasspath contains only deps with
+        // required_for_source_only_abi=True or in source_only_abi_deps — an
+        // empty list is valid (no deps on SO-ABI classpath, checker flags all
+        // external type refs). Never fall back to sourceOnlyAbiClasspath here
+        // as it contains the full library classpath during library builds.
+        if (!applicabilityClasspath.isEmpty()) {
+          String classpathValue =
+              Joiner.on(File.pathSeparator)
+                  .join(transform(applicabilityClasspath, path -> path.getPath().toString()));
+          builder.add(PLUGIN);
+          builder.add(
+              "plugin:"
+                  + "com.facebook.kotlin.compilerplugins.kosabiapplicability"
+                  + ":source-only-abi-classpath="
+                  + classpathValue);
+        }
       }
     }
-
-    builder.add(INCLUDE_RUNTIME_FLAG);
-    builder.add(EXCLUDE_REFLECT);
 
     if (trackClassUsage) {
       depTrackerPath.ifPresentOrElse(
@@ -350,34 +375,25 @@ public class KotlincStep implements IsolatedStep {
       builder.add(
           "plugin:com.facebook.k2.jvm.abi.gen:outputDir="
               + ruleCellRoot.resolve(outputDirectory).toString());
-    } else {
-      if (resolvedKosabiPluginOptionPath.containsKey(
-          KosabiConfig.PROPERTY_KOSABI_JVM_ABI_GEN_PLUGIN)) {
-        AbsPath jvmAbiPlugin =
-            resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_JVM_ABI_GEN_PLUGIN);
-        builder.add(X_PLUGIN_ARG + jvmAbiPlugin);
+      // Enable Compose ABI emulation only when the Compose compiler plugin is active.
+      // The emulation adds $stable fields and @StabilityInferred annotations to match
+      // the real Compose compiler output. Only targets with the Compose plugin should
+      // get these artifacts — otherwise @StabilityInferred leaks into ABI jars of
+      // non-Compose targets and causes downstream javac failures.
+      if (shouldEnableComposeAbiEmulation()) {
         builder.add(PLUGIN);
-        builder.add("plugin:com.facebook.jvm.abi.gen:outputDir=" + outputPaths.getClassesDir());
-        builder.add(PLUGIN);
-        builder.add("plugin:com.facebook.jvm.abi.gen:earlyTermination=true");
-        // Kosabi can only works with legacy jvm abi gen which use AnalysisHandlerExtension
-        builder.add(PLUGIN);
-        builder.add("plugin:com.facebook.jvm.abi.gen:useLegacyAbiGen=true");
-        // Enable Mixed compilation if KspAnnotationProcessors are supported
-        if (kosabiShouldEnableMixedCompilation) {
-          builder.add(PLUGIN);
-          builder.add("plugin:com.facebook.jvm.abi.gen:enableMixedCompilation=true");
-        }
-      }
-      if (resolvedKosabiPluginOptionPath.containsKey(
-          KosabiConfig.PROPERTY_KOSABI_SOURCE_MODIFIER_PLUGIN)) {
-        AbsPath sourceModifierPlugin =
-            resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_SOURCE_MODIFIER_PLUGIN);
-        builder.add(X_PLUGIN_ARG + sourceModifierPlugin);
+        builder.add("plugin:com.facebook.k2.jvm.abi.gen:enableComposeAbiEmulation=true");
       }
     }
 
     addClasspath(builder, this.sourceOnlyAbiClasspath);
+  }
+
+  private boolean shouldEnableComposeAbiEmulation() {
+    if (!shouldKosabiJvmAbiGenUseK2) return false;
+    return extraArguments.stream()
+        .filter(arg -> arg.startsWith("-Xplugin="))
+        .anyMatch(arg -> arg.contains(COMPOSE_PLUGIN_PATH_FRAGMENT));
   }
 
   private void addClasspath(ImmutableList.Builder<String> builder, Iterable<AbsPath> pathElements) {

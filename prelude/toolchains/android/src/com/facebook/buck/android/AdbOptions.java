@@ -10,6 +10,9 @@
 
 package com.facebook.buck.android;
 
+import com.facebook.infer.annotation.Nullsafe;
+
+@Nullsafe(Nullsafe.Mode.LOCAL)
 public class AdbOptions {
 
   public static final String MULTI_INSTALL_MODE_SHORT_ARG = "-x";
@@ -22,6 +25,7 @@ public class AdbOptions {
   private boolean ignoreMissingDevice;
   private boolean apexMode;
   private String restartMode;
+  private boolean waitForDeviceReady;
 
   public AdbOptions(
       String adbExecutablePath,
@@ -31,7 +35,8 @@ public class AdbOptions {
       boolean stagedInstallMode,
       boolean ignoreMissingDevice,
       boolean apexMode,
-      String restartMode) {
+      String restartMode,
+      boolean waitForDeviceReady) {
     this.adbExecutablePath = adbExecutablePath;
     this.adbThreadCount = adbThreadCount;
     this.adbServerPort = adbServerPort;
@@ -40,6 +45,7 @@ public class AdbOptions {
     this.ignoreMissingDevice = ignoreMissingDevice;
     this.apexMode = apexMode;
     this.restartMode = restartMode;
+    this.waitForDeviceReady = waitForDeviceReady;
   }
 
   public String getAdbExecutablePath() {
@@ -74,6 +80,10 @@ public class AdbOptions {
     return restartMode;
   }
 
+  public boolean getWaitForDeviceReady() {
+    return waitForDeviceReady;
+  }
+
   @Override
   public String toString() {
     return "AdbOptions{"
@@ -93,6 +103,8 @@ public class AdbOptions {
         + apexMode
         + ", restartMode="
         + restartMode
+        + ", waitForDeviceReady="
+        + waitForDeviceReady
         + '}';
   }
 }

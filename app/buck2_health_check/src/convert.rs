@@ -138,6 +138,7 @@ impl TryFrom<buck2_health_check_proto::Message> for Message {
                 header: rich_msg.header,
                 body: rich_msg.body,
                 footer: rich_msg.footer,
+                compact: rich_msg.compact,
             }),
         }
     }
@@ -153,11 +154,13 @@ impl TryInto<buck2_health_check_proto::Message> for Message {
                 header,
                 body,
                 footer,
+                compact,
             } => buck2_health_check_proto::message::Data::Rich(
                 buck2_health_check_proto::RichMessage {
                     header,
                     body,
                     footer,
+                    compact,
                 },
             ),
         };
@@ -265,6 +268,11 @@ impl TryInto<buck2_health_check_proto::HealthCheckContextEvent> for HealthCheckC
                     data: Some(buck2_health_check_proto::health_check_context_event::Data::ExperimentConfigurations(system_info.clone())),
                 }
             }
+            HealthCheckContextEvent::TestSlowBuildThreshold(secs) => {
+                buck2_health_check_proto::HealthCheckContextEvent {
+                    data: Some(buck2_health_check_proto::health_check_context_event::Data::TestSlowBuildThresholdSecs(secs)),
+                }
+            }
         })
     }
 }
@@ -289,6 +297,9 @@ impl TryFrom<buck2_health_check_proto::HealthCheckContextEvent> for HealthCheckC
             }
             buck2_health_check_proto::health_check_context_event::Data::ExperimentConfigurations(system_info) => {
                 HealthCheckContextEvent::ExperimentConfigurations(system_info)
+            }
+            buck2_health_check_proto::health_check_context_event::Data::TestSlowBuildThresholdSecs(secs) => {
+                HealthCheckContextEvent::TestSlowBuildThreshold(secs)
             }
         }
     )

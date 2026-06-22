@@ -77,11 +77,7 @@ impl ExitResult {
     }
 
     pub fn is_success(&self) -> bool {
-        if let ExitResultVariant::Status(ExitCode::Success) = &self.variant {
-            true
-        } else {
-            false
-        }
+        matches!(self.variant, ExitResultVariant::Status(ExitCode::Success))
     }
 
     /// Return the stored error that hasn't been shown to the user yet, if there is one.
@@ -200,8 +196,7 @@ impl ExitResult {
         }
         let exit_code = best_error(&errors)
             .and_then(|e| e.best_tag())
-            .map(|t| t.exit_code())
-            .unwrap_or(ExitCode::UnknownFailure);
+            .map_or(ExitCode::UnknownFailure, |t| t.exit_code());
         status_with_error_report(exit_code, errors)
     }
 

@@ -12,6 +12,7 @@ python_library(
     name = "utils",
     srcs = ["helper/utils.py"],
     deps = [
+        "fbsource//third-party/pypi/psutil:psutil",
         "//buck2/tests/e2e_util/api:api",
     ],
 )
@@ -46,3 +47,19 @@ export_file(
 export_file(name = "test_bxl_template.py")
 
 export_file(name = "test_bxl_check_dependencies_template.py")
+
+# Type checking target for Python scripts
+python_library(
+    name = "scripts-typing",
+    srcs = [
+        "conftest.py",
+        "test_bxl_check_dependencies_template.py",
+        "test_bxl_template.py",
+    ],
+    typing = True,
+    deps = [
+        "fbsource//third-party/pypi/pytest:pytest",
+        "//buck2/tests/e2e_util:utilities",
+        "//buck2/tests/e2e_util/api:api",
+    ],
+)

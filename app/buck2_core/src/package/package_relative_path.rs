@@ -18,12 +18,17 @@ use buck2_fs::paths::file_name::FileName;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathIter;
+use buck2_fs::paths::relative_path::RelativePath;
+use buck2_fs::paths::relative_path::RelativePathBuf;
 use buck2_util::arc_str::ArcS;
 use buck2_util::arc_str::StringInside;
 use gazebo::transmute;
+use pagable::Pagable;
+use pagable::PagableBoxDeserialize;
+use pagable::PagableDeserialize;
+use pagable::PagableDeserializer;
+use pagable::PagableSerialize;
 use ref_cast::RefCast;
-use relative_path::RelativePath;
-use relative_path::RelativePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -41,7 +46,8 @@ use crate::package::quoted_display;
     Ord,
     RefCast,
     Allocative,
-    strong_hash::StrongHash
+    strong_hash::StrongHash,
+    PagableSerialize
 )]
 #[derivative(Debug)]
 #[repr(transparent)]
@@ -49,6 +55,16 @@ pub struct PackageRelativePath(
     // Note we transmute between `PackageRelativePath` and `ForwardRelativePath`.
     #[derivative(Debug(format_with = "quoted_display"))] ForwardRelativePath,
 );
+
+impl<'de> PagableBoxDeserialize<'de> for PackageRelativePath {
+    fn deserialize_box<D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Box<Self>> {
+        let owned =
+            <PackageRelativePathBuf as PagableDeserialize>::pagable_deserialize(deserializer)?;
+        Ok(owned.into_box())
+    }
+}
 
 /// The owned version of 'PackageRelativePath'
 #[derive(
@@ -62,7 +78,8 @@ pub struct PackageRelativePath(
     Ord,
     Allocative,
     Serialize,
-    Deserialize
+    Deserialize,
+    Pagable
 )]
 #[derivative(Debug)]
 pub struct PackageRelativePathBuf(
@@ -478,12 +495,6 @@ impl PackageRelativePathBuf {
         self.0.push(path)
     }
 
-    /// Pushes a `RelativePath` to the existing buffer, normalizing it
-    #[inline]
-    pub fn push_normalized<P: AsRef<RelativePath>>(&mut self, path: P) -> buck2_error::Result<()> {
-        self.0.push_normalized(path)
-    }
-
     #[inline]
     pub fn into_box(self) -> Box<PackageRelativePath> {
         let s: Box<str> = self.0.into_string().into_boxed_str();
@@ -547,10 +558,14 @@ impl<'a> TryFrom<&'a RelativePath> for &'a PackageRelativePath {
     /// use buck2_core::package::package_relative_path::PackageRelativePath;
     /// use buck2_fs::paths::RelativePath;
     ///
-    /// assert!(<&PackageRelativePath>::try_from(RelativePath::new("foo/bar")).is_ok());
-    /// assert!(<&PackageRelativePath>::try_from(RelativePath::new("")).is_ok());
-    /// assert!(<&PackageRelativePath>::try_from(RelativePath::new("normalize/./bar")).is_err());
-    /// assert!(<&PackageRelativePath>::try_from(RelativePath::new("normalize/../bar")).is_err());
+    /// assert!(<&PackageRelativePath>::try_from(RelativePath::unchecked_new("foo/bar")).is_ok());
+    /// assert!(<&PackageRelativePath>::try_from(RelativePath::unchecked_new("")).is_ok());
+    /// assert!(
+    ///     <&PackageRelativePath>::try_from(RelativePath::unchecked_new("normalize/./bar")).is_err()
+    /// );
+    /// assert!(
+    ///     <&PackageRelativePath>::try_from(RelativePath::unchecked_new("normalize/../bar")).is_err()
+    /// );
     /// ```
     #[inline]
     fn try_from(s: &'a RelativePath) -> buck2_error::Result<&'a PackageRelativePath> {
@@ -678,14 +693,14 @@ impl Deref for PackageRelativePathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use buck2_hash::StdBuckHashMap;
 
     use crate::package::package_relative_path::PackageRelativePath;
     use crate::package::package_relative_path::PackageRelativePathBuf;
 
     #[test]
     fn paths_work_in_maps() -> buck2_error::Result<()> {
-        let mut map = HashMap::new();
+        let mut map = StdBuckHashMap::default();
 
         let p1 = PackageRelativePath::new("foo")?;
         let p2 = PackageRelativePath::new("bar")?;
@@ -707,14 +722,6 @@ mod tests {
         let path2 = PackageRelativePath::new("foo")?;
         let path3 = PackageRelativePath::new("bar")?;
 
-        let str2 = "foo";
-        let str3 = "bar";
-        let str_abs = "/ble";
-
-        let string2 = "foo".to_owned();
-        let string3 = "bar".to_owned();
-        let string_abs = "/ble".to_owned();
-
         assert_eq!(path1_buf, path2_buf);
         assert_ne!(path1_buf, path3_buf);
 
@@ -723,22 +730,6 @@ mod tests {
 
         assert_eq!(path1_buf, path2);
         assert_ne!(path1, path3_buf);
-
-        assert_eq!(path1_buf, str2);
-        assert_ne!(path1_buf, str3);
-        assert_ne!(path1_buf, str_abs);
-
-        assert_eq!(path1, str2);
-        assert_ne!(path1, str3);
-        assert_ne!(path1, str_abs);
-
-        assert_eq!(path1_buf, string2);
-        assert_ne!(path1_buf, string3);
-        assert_ne!(path1_buf, string_abs);
-
-        assert_eq!(path1, string2);
-        assert_ne!(path1, string3);
-        assert_ne!(path1, string_abs);
 
         Ok(())
     }

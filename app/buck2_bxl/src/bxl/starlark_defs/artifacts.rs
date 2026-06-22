@@ -26,12 +26,12 @@ use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact::Starla
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
 use buck2_build_api::interpreter::rule_defs::artifact::starlark_declared_artifact::StarlarkDeclaredArtifact;
 use buck2_execute::path::artifact_path::ArtifactPath;
+use buck2_hash::BuckIndexSet;
 use derive_more::Display;
 use dice::DiceComputations;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use futures::FutureExt;
-use indexmap::IndexSet;
 use serde::Serialize;
 use serde::Serializer;
 use starlark::any::ProvidesStaticType;
@@ -39,7 +39,6 @@ use starlark::collections::SmallSet;
 use starlark::collections::StarlarkHasher;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
@@ -59,7 +58,14 @@ pub(crate) struct EnsuredArtifact {
     pub(crate) abs: bool,
 }
 
-#[derive(Clone, Debug, Trace, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Debug,
+    Trace,
+    ProvidesStaticType,
+    Allocative,
+    starlark::StarlarkPagablePanic
+)]
 #[repr(C)]
 pub(crate) struct EnsuredArtifactGroupInner {
     pub(crate) ags: Vec<ArtifactGroup>,
@@ -99,7 +105,15 @@ pub(crate) async fn visit_artifact_path_without_associated_deduped(
     Ok(())
 }
 
-#[derive(Clone, Dupe, Debug, Trace, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Dupe,
+    Debug,
+    Trace,
+    ProvidesStaticType,
+    Allocative,
+    starlark::StarlarkPagablePanic
+)]
 #[repr(C)]
 pub(crate) struct EnsuredArtifactGroup<'v> {
     // Have `EnsuredArtifactGroup` be a wrapper around `EnsuredArtifactGroupInner` as a Starlark `Value`
@@ -134,14 +148,20 @@ impl<'v> EnsuredArtifactGroup<'v> {
     }
 }
 
-#[starlark_value(type = "bxl.EnsuredArtifactGroup", StarlarkTypeRepr, UnpackValue)]
+starlark::methods_static!(ARTIFACT_GROUP_METHODS = artifact_group_methods);
+
+#[starlark_value(
+    type = "bxl.EnsuredArtifactGroup",
+    StarlarkTypeRepr,
+    UnpackValue,
+    ty_vtable_no_freeze
+)]
 impl<'v> StarlarkValue<'v> for EnsuredArtifactGroup<'v>
 where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(artifact_group_methods)
+        Some(ARTIFACT_GROUP_METHODS.methods())
     }
 
     fn write_hash(&self, hasher: &mut StarlarkHasher) -> starlark::Result<()> {
@@ -151,7 +171,12 @@ where
     }
 }
 
-#[starlark_value(type = "bxl.EnsuredArtifactGroupInner", StarlarkTypeRepr, UnpackValue)]
+#[starlark_value(
+    type = "bxl.EnsuredArtifactGroupInner",
+    StarlarkTypeRepr,
+    UnpackValue,
+    ty_vtable_no_freeze
+)]
 impl<'v> StarlarkValue<'v> for EnsuredArtifactGroupInner
 where
     Self: ProvidesStaticType<'v>,
@@ -284,14 +309,20 @@ impl Serialize for EnsuredArtifactGroupInner {
     }
 }
 
-#[starlark_value(type = "bxl.EnsuredArtifact", StarlarkTypeRepr, UnpackValue)]
+starlark::methods_static!(ENSURED_ARTIFACT_METHODS = ensured_artifact_methods);
+
+#[starlark_value(
+    type = "bxl.EnsuredArtifact",
+    StarlarkTypeRepr,
+    UnpackValue,
+    ty_vtable_no_freeze
+)]
 impl<'v> StarlarkValue<'v> for EnsuredArtifact
 where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(ensured_artifact_methods)
+        Some(ENSURED_ARTIFACT_METHODS.methods())
     }
 
     fn write_hash(&self, hasher: &mut StarlarkHasher) -> starlark::Result<()> {
@@ -444,7 +475,7 @@ fn artifact_group_methods(builder: &mut MethodsBuilder) {
 #[derive(Debug, Allocative)]
 pub(crate) struct LazyBuildArtifact {
     /// The artifacts that are associated with this artifact. This is used to materialize.
-    artifacts_to_build: IndexSet<ArtifactGroup>,
+    artifacts_to_build: BuckIndexSet<ArtifactGroup>,
     artifact: StarlarkArtifact,
 }
 
@@ -460,7 +491,7 @@ impl LazyBuildArtifact {
             .flat_map(|v| v.iter())
             .cloned()
             .chain(iter::once(ArtifactGroup::Artifact(bound_artifact)))
-            .collect::<IndexSet<_>>();
+            .collect::<BuckIndexSet<_>>();
 
         LazyBuildArtifact {
             artifacts_to_build: artifacts,

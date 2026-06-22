@@ -67,13 +67,11 @@ impl<'a> DiceWorkerStateAwaitingPrevious<'a> {
 
     pub(crate) async fn previously_cancelled(
         self,
-        internals: &mut DiceTaskHandle<'_>,
+        _internals: &mut DiceTaskHandle<'_>,
     ) -> DiceWorkerStateLookupNode {
         debug!(msg = "previously cancelled task was cancelled");
 
         self.prevent_cancellation.exit_critical_section().await;
-
-        internals.report_initial_lookup();
 
         DiceWorkerStateLookupNode {
             k: self.k,
@@ -83,13 +81,11 @@ impl<'a> DiceWorkerStateAwaitingPrevious<'a> {
 
     pub(crate) async fn no_previous_task(
         self,
-        internals: &mut DiceTaskHandle<'_>,
+        _internals: &mut DiceTaskHandle<'_>,
     ) -> DiceWorkerStateLookupNode {
         debug!(msg = "no previous task to wait for");
 
         self.prevent_cancellation.exit_critical_section().await;
-
-        internals.report_initial_lookup();
 
         DiceWorkerStateLookupNode {
             k: self.k,
@@ -103,13 +99,12 @@ impl<'a> DiceWorkerStateAwaitingPrevious<'a> {
         previous: PreviouslyCancelledTask,
     ) -> Either<CancellableResult<DiceWorkerStateFinishedAndCached>, DiceWorkerStateLookupNode>
     {
-        previous.previous.await_termination().await;
+        previous.await_termination().await;
 
         // old task actually finished, so just use that result if it wasn't
         // cancelled
 
         match previous
-            .previous
             .get_finished_value()
             .expect("Terminated task must have finished value")
         {
@@ -148,15 +143,13 @@ pub(crate) struct DiceWorkerStateLookupNode {
 impl DiceWorkerStateLookupNode {
     pub(crate) fn checking_deps(
         self,
-        internals: &mut DiceTaskHandle,
+        _internals: &mut DiceTaskHandle,
         eval: &AsyncEvaluator,
     ) -> (
         DiceWorkerStateCheckingDeps,
         KeyComputingUserCycleDetectorData,
     ) {
         debug!(msg = "found existing entry with mismatching version. checking if deps changed.");
-
-        internals.checking_deps();
 
         let cycles = self.cycles.start_computing_key(
             self.k,
@@ -169,12 +162,10 @@ impl DiceWorkerStateLookupNode {
 
     pub(crate) fn lookup_dirtied(
         self,
-        internals: &mut DiceTaskHandle,
+        _internals: &mut DiceTaskHandle,
         eval: &AsyncEvaluator,
     ) -> (DiceWorkerStateEvaluating, KeyComputingUserCycleDetectorData) {
         debug!(msg = "lookup requires recompute.");
-
-        internals.computing();
 
         let cycles = self.cycles.start_computing_key(
             self.k,
@@ -204,10 +195,9 @@ pub(crate) struct DiceWorkerStateCheckingDeps {}
 impl DiceWorkerStateCheckingDeps {
     pub(crate) fn deps_not_match(
         self,
-        internals: &mut DiceTaskHandle,
+        _internals: &mut DiceTaskHandle,
     ) -> DiceWorkerStateEvaluating {
         debug!(msg = "deps changed");
-        internals.computing();
 
         DiceWorkerStateEvaluating {}
     }

@@ -16,8 +16,12 @@ use buck2_fs::paths::file_name::FileNameBuf;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use gazebo::prelude::SliceExt as _;
 use gazebo::prelude::VecExt as _;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::legacy_configs::dice::HasLegacyConfigs;
 use crate::legacy_configs::key::BuckconfigKeyRef;
@@ -81,9 +85,11 @@ pub trait HasBuildfiles {
     Hash,
     Eq,
     PartialEq,
-    allocative::Allocative
+    allocative::Allocative,
+    Pagable
 )]
 #[display("BuildfilesKey({})", self.0)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct BuildfilesKey(CellName);
 
 #[async_trait::async_trait]
@@ -104,6 +110,10 @@ impl Key for BuildfilesKey {
             (Ok(x), Ok(y)) => x == y,
             _ => false,
         }
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
     }
 }
 

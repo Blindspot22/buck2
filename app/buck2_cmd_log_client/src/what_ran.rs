@@ -9,7 +9,6 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::io::Write;
 
 use buck2_client_ctx::client_ctx::BuckSubcommand;
@@ -33,9 +32,10 @@ use buck2_event_observer::what_ran::WhatRanOutputWriter;
 use buck2_event_observer::what_ran::WhatRanRelevantAction;
 use buck2_event_observer::what_ran::WhatRanState;
 use buck2_events::span::SpanId;
+use buck2_hash::BuckIndexMap;
+use buck2_hash::StdBuckHashMap;
 use futures::TryStreamExt;
 use futures::stream::Stream;
-use indexmap::IndexMap;
 
 use crate::LogCommandOutputFormat;
 use crate::LogCommandOutputFormatWithWriter;
@@ -205,7 +205,7 @@ impl WhatRanEntry {
 #[derive(Default)]
 pub struct WhatRanCommandState {
     /// Maps action spans to their details.
-    known_actions: HashMap<SpanId, WhatRanEntry>,
+    known_actions: StdBuckHashMap<SpanId, WhatRanEntry>,
 }
 
 impl WhatRanState for WhatRanCommandState {
@@ -223,9 +223,8 @@ impl WhatRanCommandState {
         let mut cmd = Self::default();
 
         while let Some(event) = events.try_next().await? {
-            match event {
-                StreamValue::Event(event) => cmd.event(event, output, options)?,
-                _ => {}
+            if let StreamValue::Event(event) = event {
+                cmd.event(event, output, options)?;
             }
         }
 
@@ -282,55 +281,39 @@ impl WhatRanCommandState {
                 return Ok(());
             }
             // Emit WhatRanRelevantAction when we see the corresponding SpanEnd
-            match &data {
-                buck2_data::buck_event::Data::SpanEnd(span) => {
-                    if let Some(mut entry) =
-                        self.known_actions.remove(&SpanId::from_u64(event.span_id)?)
-                    {
-                        if should_emit_finished_action(&span.data, options) {
-                            // Get extra data out of SpanEnd event
-                            let (execution_kind, std_err, duration, scheduling_mode) = match &span
-                                .data
-                            {
-                                Some(buck2_data::span_end_event::Data::ActionExecution(
-                                    action_exec,
-                                )) => (
-                                    Some(action_exec.execution_kind),
-                                    action_exec.commands.iter().last().and_then(|cmd| {
-                                        cmd.details.as_ref().map(|d| d.cmd_stderr.as_ref())
-                                    }),
-                                    action_exec.wall_time.as_ref().map(
-                                        |prost_types::Duration { seconds, nanos }| {
-                                            std::time::Duration::new(*seconds as u64, *nanos as u32)
-                                        },
-                                    ),
-                                    action_exec
-                                        .scheduling_mode
-                                        .as_ref()
-                                        .and_then(|o| SchedulingMode::try_from(*o).ok()),
-                                ),
-                                _ => (None, None, None, None),
-                            };
+            if let buck2_data::buck_event::Data::SpanEnd(span) = &data
+                && let Some(mut entry) =
+                    self.known_actions.remove(&SpanId::from_u64(event.span_id)?)
+                && should_emit_finished_action(&span.data, options)
+            {
+                // Get extra data out of SpanEnd event
+                let (execution_kind, std_err, duration, scheduling_mode) =
+                    match &span.data {
+                        Some(buck2_data::span_end_event::Data::ActionExecution(action_exec)) => (
+                            Some(action_exec.execution_kind),
+                            action_exec.commands.iter().last().and_then(|cmd| {
+                                cmd.details.as_ref().map(|d| d.cmd_stderr.as_ref())
+                            }),
+                            action_exec.wall_time.as_ref().map(
+                                |prost_types::Duration { seconds, nanos }| {
+                                    std::time::Duration::new(*seconds as u64, *nanos as u32)
+                                },
+                            ),
+                            action_exec
+                                .scheduling_mode
+                                .as_ref()
+                                .and_then(|o| SchedulingMode::try_from(*o).ok()),
+                        ),
+                        _ => (None, None, None, None),
+                    };
 
-                            if execution_kind
-                                == Some(buck2_data::ActionExecutionKind::LocalDepFile as i32)
-                            {
-                                entry
-                                    .reproducers
-                                    .push(CommandReproducer::LocalDepFileCacheHit);
-                            }
-
-                            entry.emit_what_ran_entry(
-                                output,
-                                options,
-                                std_err,
-                                duration,
-                                scheduling_mode,
-                            )?;
-                        }
-                    }
+                if execution_kind == Some(buck2_data::ActionExecutionKind::LocalDepFile as i32) {
+                    entry
+                        .reproducers
+                        .push(CommandReproducer::LocalDepFileCacheHit);
                 }
-                _ => {}
+
+                entry.emit_what_ran_entry(output, options, std_err, duration, scheduling_mode)?;
             }
         }
 
@@ -514,8 +497,8 @@ impl WhatRanOutputWriter for OutputFormatWithWriter<'_> {
     }
 }
 
-fn into_index_map(platform: &Option<buck2_data::RePlatform>) -> IndexMap<&str, &str> {
-    platform.as_ref().map_or_else(IndexMap::new, |p| {
+fn into_index_map(platform: &Option<buck2_data::RePlatform>) -> BuckIndexMap<&str, &str> {
+    platform.as_ref().map_or_else(BuckIndexMap::new, |p| {
         p.properties
             .iter()
             .map(|Property { name, value }| (name.as_ref(), value.as_ref()))
@@ -562,27 +545,27 @@ mod json_reproducer {
         LocalDepFileCache,
         Re {
             digest: &'a str,
-            platform_properties: IndexMap<&'a str, &'a str>,
+            platform_properties: BuckIndexMap<&'a str, &'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             action_key: Option<&'a str>,
         },
         ReWorker {
             digest: &'a str,
-            platform_properties: IndexMap<&'a str, &'a str>,
+            platform_properties: BuckIndexMap<&'a str, &'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             action_key: Option<&'a str>,
         },
         Local {
             command: Cow<'a, [String]>,
-            env: IndexMap<&'a str, &'a str>,
+            env: BuckIndexMap<&'a str, &'a str>,
         },
         Worker {
             command: Cow<'a, [String]>,
-            env: IndexMap<&'a str, &'a str>,
+            env: BuckIndexMap<&'a str, &'a str>,
         },
         WorkerInit {
             command: Cow<'a, [String]>,
-            env: IndexMap<&'a str, &'a str>,
+            env: BuckIndexMap<&'a str, &'a str>,
         },
     }
 }
@@ -609,7 +592,7 @@ mod tests {
 
     fn make_base_command() -> JsonCommand<'static> {
         let command = Cow::Owned(vec!["some".to_owned(), "command".to_owned()]);
-        let mut env = IndexMap::new();
+        let mut env = BuckIndexMap::default();
         env.insert("KEY", "val");
 
         JsonCommand {
@@ -629,7 +612,7 @@ mod tests {
             identity: "some/target",
             reproducer: JsonReproducer::Re {
                 digest: "placeholder",
-                platform_properties: indexmap::indexmap! {
+                platform_properties: buck2_hash::buck_indexmap! {
                     "platform" => "linux-remote-execution"
                 },
                 action_key: None,

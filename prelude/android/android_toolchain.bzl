@@ -6,9 +6,11 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
-AndroidPlatformInfo = provider(fields = {
-    "name": provider_field(typing.Any, default = None),
-})
+AndroidPlatformInfo = provider(
+    fields = {
+        "name": provider_field(typing.Any, default = None),
+    }
+)
 
 AndroidToolchainInfo = provider(
     fields = {
@@ -27,6 +29,7 @@ AndroidToolchainInfo = provider(
         "app_without_resources_stub": provider_field(typing.Any, default = None),
         "bundle_apks_builder": provider_field(typing.Any, default = None),
         "bundle_builder": provider_field(typing.Any, default = None),
+        "collect_perfetto": provider_field(typing.Any, default = None),
         "combine_native_library_dirs": provider_field(typing.Any, default = None),
         "consolidate_class_names": provider_field(typing.Any, default = None),
         "copy_string_resources": provider_field(typing.Any, default = None),
@@ -67,6 +70,7 @@ AndroidToolchainInfo = provider(
         "secondary_dex_weight_limit": provider_field(typing.Any, default = None),
         "set_application_id_to_specified_package": provider_field(typing.Any, default = None),
         "should_run_sanity_check_for_placeholders": provider_field(typing.Any, default = None),
+        "sort_pre_dexed_files": provider_field(typing.Any, default = None),
         "unpack_aar": provider_field(typing.Any, default = None),
         "zipalign": provider_field(typing.Any, default = None),
     },

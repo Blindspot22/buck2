@@ -69,7 +69,7 @@ impl AsyncEvaluator {
                 )));
 
                 let value = key_dyn
-                    .compute(&mut new_ctx, &handle.cancellation_ctx())
+                    .compute(&mut new_ctx, handle.cancellation_ctx())
                     .await;
                 let (recorded_deps, evaluation_data, cycles) = new_ctx.0.0.finalize();
 

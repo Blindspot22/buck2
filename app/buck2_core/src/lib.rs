@@ -8,16 +8,11 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
-#![feature(decl_macro)]
 #![feature(never_type)]
-#![feature(pattern)]
-#![feature(box_patterns)]
+#![cfg_attr(test, feature(pattern))]
 #![feature(impl_trait_in_assoc_type)]
-#![feature(io_error_more)]
-#![feature(once_cell_try)]
-#![feature(try_blocks)]
 #![feature(used_with_arg)]
+#![feature(try_trait_v2)]
 
 // Re-export these because we don't want to make people add a dependency on this crate everywhere
 pub use buck2_env::env;

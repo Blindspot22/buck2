@@ -8,12 +8,12 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
+use buck2_hash::StdBuckHashMap;
 use buck2_interpreter::starlark_profiler::data::StarlarkProfileDataAndStats;
 
 use crate::analysis::registry::RecordedAnalysisValues;
@@ -34,14 +34,15 @@ use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectio
 use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValueRef;
 use crate::validation::transitive_validations::TransitiveValidations;
 
-#[derive(Debug, Clone, Dupe, Allocative)]
+#[derive(Debug, Clone, Dupe, Allocative, pagable::Pagable)]
 pub struct AnalysisResult {
     analysis_values: Arc<RecordedAnalysisValues>,
     /// Profiling data after running analysis, for this analysis only, without dependencies.
     /// `None` when profiling is disabled.
     /// For forward node, this value is shared with underlying analysis (including this field).
+    #[pagable(discard = "None")]
     pub profile_data: Option<Arc<StarlarkProfileDataAndStats>>,
-    promise_artifact_map: Arc<HashMap<PromiseArtifactId, Artifact>>,
+    promise_artifact_map: Arc<StdBuckHashMap<PromiseArtifactId, Artifact>>,
     pub num_declared_actions: u64,
     pub num_declared_artifacts: u64,
     /// `None` means there are no `ValidationInfo` providers in transitive dependencies.
@@ -53,7 +54,7 @@ impl AnalysisResult {
     pub fn new(
         analysis_values: RecordedAnalysisValues,
         profile_data: Option<Arc<StarlarkProfileDataAndStats>>,
-        promise_artifact_map: HashMap<PromiseArtifactId, Artifact>,
+        promise_artifact_map: StdBuckHashMap<PromiseArtifactId, Artifact>,
         num_declared_actions: u64,
         num_declared_artifacts: u64,
         validations: Option<TransitiveValidations>,
@@ -72,7 +73,7 @@ impl AnalysisResult {
         self.analysis_values.provider_collection()
     }
 
-    pub fn promise_artifact_map(&self) -> &Arc<HashMap<PromiseArtifactId, Artifact>> {
+    pub fn promise_artifact_map(&self) -> &Arc<StdBuckHashMap<PromiseArtifactId, Artifact>> {
         &self.promise_artifact_map
     }
 

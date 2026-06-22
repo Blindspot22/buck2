@@ -44,8 +44,10 @@ SystemIncludeDirs = record(
 CPreprocessorArgs = record(
     # The arguments, [arglike things]
     args = field(list[typing.Any], []),
-    # File prefix args maps symlinks to source file location
+    # -fdebug-prefix-map args that map symlinks to source file location
     file_prefix_args = field(list[typing.Any], []),
+    # -fcoverage-prefix-map args (clang-only, separated so non-clang compilers can skip them)
+    coverage_prefix_args = field(list[typing.Any], []),
     # Arguments used for module precompilation, replacing args
     precompile_args = field(list[typing.Any], []),
 )
@@ -53,9 +55,11 @@ CPreprocessorArgs = record(
 HeaderUnit = record(
     name = field(str),
     module = field(Artifact),
+    stub = field(Artifact | None),
     include_dir = field(Artifact),
     import_include = field(str | None),
     clang_trace = field(Artifact | None),
+    diagnostics = field(Artifact | None, None),
 )
 
 # Note: Any generic attributes are assumed to be relative.
@@ -78,6 +82,10 @@ CPreprocessor = record(
     modulemap_artifact = field([Artifact, None], None),
     # Header units to load transitively and supporting args.
     header_units = field(list[HeaderUnit], []),
+    # Raw include directory strings from public_include_directories attr.
+    raw_include_dirs = field(list[str], []),
+    # Raw include directory strings from public_system_include_directories attr.
+    raw_system_include_dirs = field(list[str], []),
 )
 
 # Methods for transitive_sets must be declared prior to their use.
@@ -100,16 +108,24 @@ def _cpreprocessor_precompile_args(pres: list[CPreprocessor]):
         args.add(pre.args.precompile_args)
     return args
 
-def _cpreprocessor_header_units_args(pres: list[CPreprocessor]):
+def _cpreprocessor_header_units_args_impl(pres: list[CPreprocessor], stub: bool):
     args = cmd_args()
     for pre in pres:
         for h in pre.header_units:
-            args.add(cmd_args("-fmodule-file=", h.name, "=", h.module, delimiter = ""))
-            args.add(cmd_args(h.include_dir, format = "-I{}"))
-            args.add(cmd_args(h.include_dir, format = "-fmodule-map-file={}/module.modulemap"))
-            if h.import_include:
-                args.add(["-include", h.import_include])
+            artifact = h.stub if stub else h.module
+            if artifact:
+                args.add(cmd_args("-fmodule-file=", h.name, "=", artifact, delimiter = ""))
+                args.add(cmd_args(h.include_dir, format = "-I{}"))
+                args.add(cmd_args(h.include_dir, format = "-fmodule-map-file={}/module.modulemap"))
+                if h.import_include:
+                    args.add(["-include", h.import_include])
     return args
+
+def _cpreprocessor_header_units_args(pres: list[CPreprocessor]):
+    return _cpreprocessor_header_units_args_impl(pres, stub = False)
+
+def _cpreprocessor_header_unit_stubs_args(pres: list[CPreprocessor]):
+    return _cpreprocessor_header_units_args_impl(pres, stub = True)
 
 def _cpreprocessor_has_header_units_args(children: list[bool], pres: [list[CPreprocessor], None]):
     if pres:
@@ -122,6 +138,12 @@ def _cpreprocessor_file_prefix_args(pres: list[CPreprocessor]):
     args = cmd_args()
     for pre in pres:
         args.add(pre.args.file_prefix_args)
+    return args
+
+def _cpreprocessor_coverage_prefix_args(pres: list[CPreprocessor]):
+    args = cmd_args()
+    for pre in pres:
+        args.add(pre.args.coverage_prefix_args)
     return args
 
 def _cpreprocessor_include_dirs(pres: list[CPreprocessor]):
@@ -148,7 +170,9 @@ def _cpreprocessor_uses_modules(children: list[bool], pres: [list[CPreprocessor]
 CPreprocessorTSet = transitive_set(
     args_projections = {
         "args": _cpreprocessor_args,
+        "coverage_prefix_args": _cpreprocessor_coverage_prefix_args,
         "file_prefix_args": _cpreprocessor_file_prefix_args,
+        "header_unit_stubs_args": _cpreprocessor_header_unit_stubs_args,
         "header_units_args": _cpreprocessor_header_units_args,
         "include_dirs": _cpreprocessor_include_dirs,
         "modular_args": _cpreprocessor_modular_args,
@@ -160,9 +184,11 @@ CPreprocessorTSet = transitive_set(
     },
 )
 
-CPreprocessorInfo = provider(fields = {
-    "set": provider_field(typing.Any, default = None),  # "CPreprocessorTSet"
-})
+CPreprocessorInfo = provider(
+    fields = {
+        "set": provider_field(typing.Any, default = None),  # "CPreprocessorTSet"
+    }
+)
 
 # Defines the provider exposed by libraries to test targets,
 # so that tests can have access to the private headers of
@@ -180,10 +206,7 @@ CPreprocessorForTestsInfo = provider(
 )
 
 def cxx_attr_exported_preprocessor_flags(ctx: AnalysisContext) -> list[typing.Any]:
-    return (
-        ctx.attrs.exported_preprocessor_flags +
-        _by_language_cxx(ctx.attrs.exported_lang_preprocessor_flags)
-    )
+    return ctx.attrs.exported_preprocessor_flags + _by_language_cxx(ctx.attrs.exported_lang_preprocessor_flags)
 
 def cxx_inherited_preprocessor_infos(first_order_deps: list[Dependency]) -> list[CPreprocessorInfo]:
     # We filter out nones because some non-cxx rule without such providers could be a dependency, for example
@@ -211,10 +234,7 @@ def format_system_include_arg(path: cmd_args, compiler_type: str) -> list[cmd_ar
     else:
         return [cmd_args("-isystem"), path]
 
-def cxx_exported_preprocessor_info(
-        ctx: AnalysisContext,
-        headers_layout: CxxHeadersLayout,
-        extra_preprocessors: list[CPreprocessor] = []) -> CPreprocessor:
+def cxx_exported_preprocessor_info(ctx: AnalysisContext, headers_layout: CxxHeadersLayout, extra_preprocessors: list[CPreprocessor] = []) -> CPreprocessor:
     """
     This rule's preprocessor info which is both applied to the compilation of
     its source and propagated to the compilation of dependent's sources.
@@ -225,10 +245,7 @@ def cxx_exported_preprocessor_info(
     for pre in extra_preprocessors:
         exported_headers += pre.headers
 
-    exported_header_map = {
-        paths.join(h.namespace, h.name): h.artifact
-        for h in exported_headers
-    }
+    exported_header_map = {paths.join(h.namespace, h.name): h.artifact for h in exported_headers}
     raw_headers = []
     include_dirs = []
     system_include_dirs = []
@@ -255,10 +272,7 @@ def cxx_exported_preprocessor_info(
     if _attr_raw_headers_as_headers_mode(ctx) != RawHeadersAsHeadersMode("disabled"):
         if raw_headers:
             exported_headers = as_headers(ctx, raw_headers, ctx.attrs.public_include_directories + ctx.attrs.public_system_include_directories)
-            exported_header_map = {
-                paths.join(h.namespace, h.name): h.artifact
-                for h in exported_headers
-            }
+            exported_header_map = {paths.join(h.namespace, h.name): h.artifact for h in exported_headers}
             raw_headers.clear()
 
             # Force system exported header style if any system include directories are set.
@@ -279,16 +293,27 @@ def cxx_exported_preprocessor_info(
         header_units.extend(pre.header_units)
 
     return CPreprocessor(
-        args = CPreprocessorArgs(args = args.args, file_prefix_args = args.file_prefix_args, precompile_args = args.precompile_args),
+        args = CPreprocessorArgs(
+            args = args.args, file_prefix_args = args.file_prefix_args, coverage_prefix_args = args.coverage_prefix_args, precompile_args = args.precompile_args
+        ),
         headers = exported_headers,
         raw_headers = raw_headers,
         include_dirs = include_dirs,
         system_include_dirs = SystemIncludeDirs(compiler_type = compiler_type, include_dirs = system_include_dirs),
         modular_args = modular_args,
         header_units = header_units,
+        raw_include_dirs = ctx.attrs.public_include_directories,
+        raw_system_include_dirs = ctx.attrs.public_system_include_directories,
     )
 
-def get_exported_preprocessor_args(ctx: AnalysisContext, headers: dict[str, Artifact], style: HeaderStyle, compiler_type: str, raw_headers: list[Artifact], extra_preprocessors: list[CPreprocessor]) -> CPreprocessorArgs:
+def get_exported_preprocessor_args(
+    ctx: AnalysisContext,
+    headers: dict[str, Artifact],
+    style: HeaderStyle,
+    compiler_type: str,
+    raw_headers: list[Artifact],
+    extra_preprocessors: list[CPreprocessor],
+) -> CPreprocessorArgs:
     cxx_toolchain_info = get_cxx_toolchain_info(ctx)
     allow_cache_upload = cxx_attrs_get_allow_cache_upload(ctx.attrs)
     header_root = prepare_headers(
@@ -299,6 +324,7 @@ def get_exported_preprocessor_args(ctx: AnalysisContext, headers: dict[str, Arti
         map_val(HeaderMode, getattr(ctx.attrs, "header_mode", None)),
         allow_cache_upload = allow_cache_upload,
         uses_content_based_paths = True,
+        header_namespace = getattr(ctx.attrs, "header_namespace", None),
     )
     precompile_root = prepare_headers(
         ctx.actions,
@@ -328,11 +354,14 @@ def get_exported_preprocessor_args(ctx: AnalysisContext, headers: dict[str, Arti
 
     # Propagate the exported header tree.
     file_prefix_args = []
+    coverage_prefix_args = []
     if header_root != None:
         args.extend(_header_style_args(style, header_root.include_path, compiler_type))
         precompile_args.extend(_header_style_args(style, precompile_root.include_path, compiler_type))
         if header_root.file_prefix_args != None:
             file_prefix_args.append(header_root.file_prefix_args)
+        if header_root.coverage_prefix_args != None:
+            coverage_prefix_args.append(header_root.coverage_prefix_args)
 
     # Embed raw headers as hidden artifacts in our args.  This means downstream
     # cases which use these args don't also need to know to add raw headers.
@@ -348,15 +377,16 @@ def get_exported_preprocessor_args(ctx: AnalysisContext, headers: dict[str, Arti
         args.extend(pre.args.args)
         precompile_args.extend(pre.args.precompile_args)
 
-    return CPreprocessorArgs(args = args, file_prefix_args = file_prefix_args, precompile_args = precompile_args)
+    return CPreprocessorArgs(args = args, file_prefix_args = file_prefix_args, coverage_prefix_args = coverage_prefix_args, precompile_args = precompile_args)
 
 def cxx_private_preprocessor_info(
-        ctx: AnalysisContext,
-        headers_layout: CxxHeadersLayout,
-        raw_headers: list[Artifact] = [],
-        extra_preprocessors: list[CPreprocessor] = [],
-        non_exported_deps: list[Dependency] = [],
-        is_test: bool = False) -> (CPreprocessor, list[CPreprocessor]):
+    ctx: AnalysisContext,
+    headers_layout: CxxHeadersLayout,
+    raw_headers: list[Artifact] = [],
+    extra_preprocessors: list[CPreprocessor] = [],
+    non_exported_deps: list[Dependency] = [],
+    is_test: bool = False,
+) -> (CPreprocessor, list[CPreprocessor]):
     private_preprocessor = _cxx_private_preprocessor_info(ctx, headers_layout, raw_headers, extra_preprocessors)
 
     test_preprocessors = []
@@ -369,10 +399,8 @@ def cxx_private_preprocessor_info(
     return (private_preprocessor, test_preprocessors)
 
 def _cxx_private_preprocessor_info(
-        ctx: AnalysisContext,
-        headers_layout: CxxHeadersLayout,
-        raw_headers: list[Artifact],
-        extra_preprocessors: list[CPreprocessor]) -> CPreprocessor:
+    ctx: AnalysisContext, headers_layout: CxxHeadersLayout, raw_headers: list[Artifact], extra_preprocessors: list[CPreprocessor]
+) -> CPreprocessor:
     """
     This rule's preprocessor info which is only applied to the compilation of
     its source, and not propagated to dependents.
@@ -417,11 +445,12 @@ def _cxx_private_preprocessor_info(
     if all_raw_headers and _attr_raw_headers_as_headers_mode(ctx) != RawHeadersAsHeadersMode("disabled"):
         # private headers are also accessible via public_include_directories
         # same as exported_preprocessor_flags apply to the target itself.
-        headers = as_headers(ctx, all_raw_headers, ctx.attrs.include_directories + getattr(ctx.attrs, "public_include_directories", []) + getattr(ctx.attrs, "public_system_include_directories", []))
-        header_map = {
-            paths.join(h.namespace, h.name): h.artifact
-            for h in headers
-        }
+        headers = as_headers(
+            ctx,
+            all_raw_headers,
+            ctx.attrs.include_directories + getattr(ctx.attrs, "public_include_directories", []) + getattr(ctx.attrs, "public_system_include_directories", []),
+        )
+        header_map = {paths.join(h.namespace, h.name): h.artifact for h in headers}
         all_raw_headers.clear()
     else:
         include_dirs.extend([ctx.label.path.add(x) for x in ctx.attrs.include_directories])
@@ -429,25 +458,41 @@ def _cxx_private_preprocessor_info(
     args = _get_private_preprocessor_args(ctx, header_map, compiler_type, all_raw_headers)
 
     return CPreprocessor(
-        args = CPreprocessorArgs(args = args.args, file_prefix_args = args.file_prefix_args, precompile_args = args.precompile_args),
+        args = CPreprocessorArgs(
+            args = args.args, file_prefix_args = args.file_prefix_args, coverage_prefix_args = args.coverage_prefix_args, precompile_args = args.precompile_args
+        ),
         headers = headers,
         raw_headers = all_raw_headers,
         include_dirs = include_dirs,
         uses_modules = uses_modules,
     )
 
-def _get_private_preprocessor_args(ctx: AnalysisContext, headers: dict[str, Artifact], compiler_type: str, all_raw_headers: list[Artifact]) -> CPreprocessorArgs:
+def _get_private_preprocessor_args(
+    ctx: AnalysisContext, headers: dict[str, Artifact], compiler_type: str, all_raw_headers: list[Artifact]
+) -> CPreprocessorArgs:
     # Create private header tree and propagate via args.
     args = get_target_sdk_version_flags(ctx)
     cxx_toolchain_info = get_cxx_toolchain_info(ctx)
     file_prefix_args = []
+    coverage_prefix_args = []
     header_mode = map_val(HeaderMode, getattr(ctx.attrs, "header_mode", None))
     allow_cache_upload = cxx_attrs_get_allow_cache_upload(ctx.attrs)
-    header_root = prepare_headers(ctx.actions, cxx_toolchain_info, headers, "buck-private-headers", header_mode = header_mode, allow_cache_upload = allow_cache_upload, uses_content_based_paths = True)
+    header_root = prepare_headers(
+        ctx.actions,
+        cxx_toolchain_info,
+        headers,
+        "buck-private-headers",
+        header_mode = header_mode,
+        allow_cache_upload = allow_cache_upload,
+        uses_content_based_paths = True,
+        header_namespace = getattr(ctx.attrs, "header_namespace", None),
+    )
     if header_root != None:
         args.extend(_format_include_arg("-I", header_root.include_path, compiler_type))
         if header_root.file_prefix_args != None:
             file_prefix_args.append(header_root.file_prefix_args)
+        if header_root.coverage_prefix_args != None:
+            coverage_prefix_args.append(header_root.coverage_prefix_args)
 
     # Embed raw headers as hidden artifacts in our args.  This means downstream
     # cases which use these args don't also need to know to add raw headers.
@@ -456,7 +501,7 @@ def _get_private_preprocessor_args(ctx: AnalysisContext, headers: dict[str, Arti
         # appears to do the job (and not e.g. expand to `""`).
         args.append(cmd_args(hidden = all_raw_headers))
 
-    return CPreprocessorArgs(args = args, file_prefix_args = file_prefix_args)
+    return CPreprocessorArgs(args = args, file_prefix_args = file_prefix_args, coverage_prefix_args = coverage_prefix_args)
 
 def _by_language_cxx(x: dict[typing.Any, typing.Any]) -> list[typing.Any]:
     return cxx_by_language_ext(x, ".cpp")
@@ -522,12 +567,14 @@ def _remap_headers_to_basename(headers: list[CHeader]) -> list[CHeader]:
     remapped_headers = []
     for header in headers:
         if not header.named:
-            remapped_headers.append(CHeader(
-                artifact = header.artifact,
-                name = paths.basename(header.name),
-                namespace = "",
-                named = False,
-            ))
+            remapped_headers.append(
+                CHeader(
+                    artifact = header.artifact,
+                    name = paths.basename(header.name),
+                    namespace = "",
+                    named = False,
+                )
+            )
     return remapped_headers
 
 def get_flags_for_compiler_type(compiler_type: str) -> list[str]:

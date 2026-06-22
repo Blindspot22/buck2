@@ -8,12 +8,11 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
-
 use std::borrow::Cow;
 use std::fmt;
 
 pub mod action_key_owner;
+pub mod agent_context_keys;
 
 pub mod serialize_timestamp {
     use serde::Deserialize;
@@ -142,7 +141,7 @@ impl fmt::Display for DaemonShutdown {
         write!(f, "{}, caller:", self.reason)?;
 
         for caller in self.callers.iter() {
-            let max_len = 70;
+            let max_len = 200;
 
             let short_caller = if caller.len() > max_len {
                 Cow::Owned(

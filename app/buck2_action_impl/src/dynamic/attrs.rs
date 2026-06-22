@@ -17,9 +17,12 @@ use buck2_build_api::interpreter::rule_defs::artifact::starlark_output_artifact:
 use buck2_build_api::interpreter::rule_defs::artifact::unpack_artifact::UnpackNonPromiseInputArtifact;
 use buck2_core::deferred::dynamic::DynamicLambdaResultsKey;
 use buck2_error::buck2_error;
+use buck2_hash::BuckIndexSet;
 use dupe::Dupe;
-use indexmap::IndexSet;
+use starlark::StarlarkPagable;
 use starlark::collections::SmallSet;
+use starlark::pagable::SmallMapKeyDeserialize;
+use starlark::pagable::StarlarkPagable;
 use starlark::typing::Ty;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
@@ -43,7 +46,7 @@ use crate::context::dynamic_output::DynamicActionsOutputArtifactBinder;
 use crate::dynamic::dynamic_value::StarlarkDynamicValue;
 use crate::dynamic::resolved_dynamic_value::StarlarkResolvedDynamicValue;
 
-#[derive(Clone, Debug, derive_more::Display, Allocative)]
+#[derive(Clone, Debug, derive_more::Display, Allocative, StarlarkPagable)]
 pub(crate) enum DynamicAttrType {
     /// `OutputArtifact`.
     #[display("dynattrs.output()")]
@@ -71,8 +74,9 @@ pub(crate) enum DynamicAttrType {
     Dict(Box<(TypeCompiled<FrozenValue>, DynamicAttrType)>),
 }
 
-#[derive(Debug, Trace, Allocative)]
+#[derive(Debug, Trace, Allocative, StarlarkPagable)]
 #[trace(bound = "V: Trace<'v>")]
+#[starlark_pagable(bound = "V: StarlarkPagable + SmallMapKeyDeserialize")]
 pub(crate) enum DynamicAttrValue<
     // Starlark value passed as is from dynamic actions creation site to impl.
     V: ValueLifetimeless,
@@ -108,7 +112,8 @@ impl<V: ValueLifetimeless> Freeze for DynamicAttrValue<V> {
     }
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, StarlarkPagable)]
+#[starlark_pagable(bound = "V: StarlarkPagable + SmallMapKeyDeserialize")]
 pub struct DynamicAttrValues<V: ValueLifetimeless> {
     /// Indexed by attrs definitions in `DynamicActionCallable`.
     pub(crate) values: Box<[DynamicAttrValue<V>]>,
@@ -197,7 +202,7 @@ impl<'v> DynamicAttrValue<Value<'v>> {
 pub fn dedupe_output_artifacts<'v>(
     v: Vec<ValueTyped<'v, StarlarkOutputArtifact<'v>>>,
 ) -> Box<[ValueTyped<'v, StarlarkOutputArtifact<'v>>]> {
-    let mut found = IndexSet::new();
+    let mut found = BuckIndexSet::default();
     let mut outputs = Vec::new();
     for i in v {
         if found.insert(i.artifact()) {
@@ -228,7 +233,7 @@ impl<'v> DynamicAttrValues<Value<'v>> {
     }
 
     pub(crate) fn artifact_values(&self) -> Box<[Artifact]> {
-        let mut artifact_values = IndexSet::new();
+        let mut artifact_values = BuckIndexSet::default();
         self.for_each_node(&mut |value| {
             if let DynamicAttrValue::ArtifactValue(artifact) = value {
                 artifact_values.insert(artifact.dupe());

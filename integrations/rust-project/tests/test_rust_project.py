@@ -6,10 +6,11 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
-# pyre-unsafe
+# pyre-strict
 
 import json
 from pathlib import Path
+from typing import Any, Dict
 
 from buck2.tests.e2e_util.api.buck import Buck
 from buck2.tests.e2e_util.buck_workspace import buck_test
@@ -31,13 +32,13 @@ from buck2.tests.e2e_util.buck_workspace import buck_test
 # Skip on mac and windows to avoid having to deal with mode files
 @buck_test(inplace=True, skip_for_os=["darwin", "windows"])
 async def test_workspaces(buck: Buck) -> None:
-    result = await buck.bxl(
+    result_raw = await buck.bxl(
         "prelude//rust/rust-analyzer/resolve_deps.bxl:resolve_targets",
         "--",
         "--targets",
         "//buck2/integrations/rust-project/tests/targets/foo:e",
     )
-    result = json.load(open(result.stdout.rstrip()))
+    result: Dict[str, Any] = json.load(open(result_raw.stdout.rstrip()))
     assert result["expanded_targets"] == [
         "fbcode//buck2/integrations/rust-project/tests/targets/bar:d",
         "fbcode//buck2/integrations/rust-project/tests/targets/foo:a",
@@ -55,13 +56,13 @@ async def test_workspaces(buck: Buck) -> None:
     assert expected_subset.items() <= target_and_in_workspace.items()
 
     # The target being edited is not in any workspaces
-    result = await buck.bxl(
+    result_raw = await buck.bxl(
         "prelude//rust/rust-analyzer/resolve_deps.bxl:resolve_targets",
         "--",
         "--targets",
         "//buck2/integrations/rust-project/tests/targets/bar:c",
     )
-    result = json.load(open(result.stdout.rstrip()))
+    result: Dict[str, Any] = json.load(open(result_raw.stdout.rstrip()))
     assert result["expanded_targets"] == [
         "fbcode//buck2/integrations/rust-project/tests/targets/bar:c"
     ]
@@ -80,13 +81,13 @@ async def test_workspaces(buck: Buck) -> None:
 
 @buck_test(inplace=True, skip_for_os=["darwin", "windows"])
 async def test_alias(buck: Buck) -> None:
-    result = await buck.bxl(
+    result_raw = await buck.bxl(
         "prelude//rust/rust-analyzer/resolve_deps.bxl:resolve_targets",
         "--",
         "--targets",
         "fbcode//buck2/integrations/rust-project/tests/targets/alias/...",
     )
-    result = json.load(open(result.stdout.rstrip()))
+    result: Dict[str, Any] = json.load(open(result_raw.stdout.rstrip()))
     assert result["expanded_targets"] == [
         "fbcode//buck2/integrations/rust-project/tests/targets/alias:l",
         "fbcode//buck2/integrations/rust-project/tests/targets/alias:l_alias",
@@ -95,7 +96,7 @@ async def test_alias(buck: Buck) -> None:
 
 @buck_test(inplace=True, skip_for_os=["darwin", "windows"])
 async def test_resolve_owning_buildfile_no_extra_targets(buck: Buck) -> None:
-    result = await buck.bxl(
+    result_raw = await buck.bxl(
         "prelude//rust/rust-analyzer/resolve_deps.bxl:resolve_owning_buildfile",
         "--",
         "--max_extra_targets=0",
@@ -104,7 +105,7 @@ async def test_resolve_owning_buildfile_no_extra_targets(buck: Buck) -> None:
             Path("buck2/integrations/rust-project/tests/targets/foo/lib_f.rs").resolve()
         ),
     )
-    result = json.loads(result.stdout)
+    result: Dict[str, Any] = json.loads(result_raw.stdout)
     assert len(result) == 1
     buildfile_path, owners = result.popitem()
     assert buildfile_path.endswith(
@@ -119,14 +120,14 @@ async def test_resolve_owning_buildfile_no_extra_targets(buck: Buck) -> None:
 
 @buck_test(inplace=True, skip_for_os=["darwin", "windows"])
 async def test_exclude_workspaces(buck: Buck) -> None:
-    result = await buck.bxl(
+    result_raw = await buck.bxl(
         "prelude//rust/rust-analyzer/resolve_deps.bxl:resolve_targets",
         "--",
         "--targets",
         "//buck2/integrations/rust-project/tests/targets/foo:e",
         "--exclude_workspaces=true",
     )
-    result = json.load(open(result.stdout.rstrip()))
+    result: Dict[str, Any] = json.load(open(result_raw.stdout.rstrip()))
     assert result["expanded_targets"] == [
         "fbcode//buck2/integrations/rust-project/tests/targets/foo:e",
     ]
@@ -134,13 +135,13 @@ async def test_exclude_workspaces(buck: Buck) -> None:
 
 @buck_test(inplace=True, skip_for_os=["darwin", "windows"])
 async def test_fallback_compatible_with(buck: Buck) -> None:
-    result = await buck.bxl(
+    result_raw = await buck.bxl(
         "prelude//rust/rust-analyzer/resolve_deps.bxl:resolve_targets",
         "--",
         "--targets",
         "//buck2/integrations/rust-project/tests/targets/foo:g_with_compatibility",
     )
-    result = json.load(open(result.stdout.rstrip()))
+    result: Dict[str, Any] = json.load(open(result_raw.stdout.rstrip()))
 
     assert len(result["expanded_targets"]) > 0
     assert len(result["resolved_deps"]) > 0

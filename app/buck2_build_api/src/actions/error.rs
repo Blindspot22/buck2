@@ -24,6 +24,7 @@ pub struct ActionError {
     key: buck2_data::ActionKey,
     last_command: Option<buck2_data::CommandExecution>,
     error_diagnostics: Option<buck2_data::ActionErrorDiagnostics>,
+    infra_error_tag: Option<ErrorTag>,
 }
 
 impl From<ActionError> for buck2_error::Error {
@@ -37,7 +38,8 @@ impl From<ActionError> for buck2_error::Error {
 
         let mut tags = vec![];
         let mut string_tags = vec![];
-        let mut source_location = SourceLocation::new(std::file!()).with_type_name("ActionError");
+        let mut source_location =
+            SourceLocation::new(std::file!(), std::line!()).with_type_name("ActionError");
         match &this.execute_error {
             ExecuteError::CommandExecutionError { error, .. } => {
                 if let Some(err) = error {
@@ -60,7 +62,12 @@ impl From<ActionError> for buck2_error::Error {
                         }
                     }
 
-                    tags.push(ErrorTag::ActionCommandFailure)
+                    if let Some(stderr_tag) = this.infra_error_tag {
+                        tags.push(ErrorTag::ActionCommandInfraFailure);
+                        tags.push(stderr_tag);
+                    } else {
+                        tags.push(ErrorTag::ActionCommandFailure);
+                    }
                 }
             }
             // Returning extra outputs is a bug in the executor
@@ -102,6 +109,7 @@ impl ActionError {
         key: buck2_data::ActionKey,
         last_command: Option<buck2_data::CommandExecution>,
         error_diagnostics: Option<buck2_data::ActionErrorDiagnostics>,
+        infra_error_tag: Option<ErrorTag>,
     ) -> Self {
         Self {
             execute_error,
@@ -109,6 +117,7 @@ impl ActionError {
             key,
             last_command,
             error_diagnostics,
+            infra_error_tag,
         }
     }
 
@@ -204,6 +213,7 @@ mod tests {
                     },
                 )),
             },
+            None,
             None,
             None,
         );

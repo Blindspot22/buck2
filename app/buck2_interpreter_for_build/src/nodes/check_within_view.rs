@@ -20,6 +20,7 @@ use buck2_node::visibility::VisibilityPattern;
 use buck2_node::visibility::VisibilityPatternList;
 use buck2_node::visibility::WithinViewSpecification;
 use dupe::Dupe;
+use starlark::collections::SmallSet;
 
 fn indented_within_view(spec: &WithinViewSpecification) -> String {
     match &spec.0 {
@@ -30,6 +31,9 @@ fn indented_within_view(spec: &WithinViewSpecification) -> String {
                 s.push_str(&format!("  {item}\n"));
             }
             s
+        }
+        VisibilityPatternList::Intersection(_) => {
+            unreachable!("WithinViewSpecification cannot contain Intersection")
         }
     }
 }
@@ -52,6 +56,7 @@ pub(crate) fn check_within_view(
     pkg: PackageLabel,
     attr_type: &AttrType,
     within_view: &WithinViewSpecification,
+    default_deps: Option<&SmallSet<TargetLabel>>,
 ) -> buck2_error::Result<()> {
     if within_view == &WithinViewSpecification::PUBLIC {
         // Shortcut.
@@ -61,11 +66,15 @@ pub(crate) fn check_within_view(
     struct WithinViewCheckTraversal<'x> {
         pkg: PackageLabel,
         within_view: &'x WithinViewSpecification,
+        default_deps: &'x SmallSet<TargetLabel>,
     }
 
     impl<'x> WithinViewCheckTraversal<'x> {
         fn check_dep_within_view(&self, dep: &TargetLabel) -> buck2_error::Result<()> {
-            if self.pkg == dep.pkg() || self.within_view.0.matches_target(dep) {
+            if self.pkg == dep.pkg()
+                || self.default_deps.contains(dep)
+                || self.within_view.0.matches_target(dep)?
+            {
                 Ok(())
             } else {
                 Err(
@@ -90,6 +99,7 @@ pub(crate) fn check_within_view(
                 // Skip some configuration deps
                 ConfigurationDepKind::CompatibilityAttribute => (),
                 ConfigurationDepKind::SelectKey => (),
+                ConfigurationDepKind::DefaultTargetPlatform => (),
                 ConfigurationDepKind::ConfiguredDepPlatform | ConfigurationDepKind::Transition => {
                     self.check_dep_within_view(dep.target())?
                 }
@@ -104,7 +114,11 @@ pub(crate) fn check_within_view(
 
     attr.traverse(
         attr_type,
-        pkg.dupe(),
-        &mut WithinViewCheckTraversal { pkg, within_view },
+        Some(pkg),
+        &mut WithinViewCheckTraversal {
+            pkg,
+            within_view,
+            default_deps: default_deps.unwrap_or(&SmallSet::new()),
+        },
     )
 }

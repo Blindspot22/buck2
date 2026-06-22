@@ -34,7 +34,7 @@ enum FileLoaderError {
     NativeMustBeStruct,
 }
 
-#[derive(Default, Clone, Allocative, Debug)]
+#[derive(Default, Clone, Allocative, Debug, pagable::Pagable)]
 pub struct LoadedModules {
     pub map: OrderedMap<OwnedStarlarkModulePath, LoadedModule>,
 }
@@ -70,10 +70,10 @@ impl ModuleDeps {
     }
 }
 
-#[derive(Clone, Dupe, Allocative, Debug)]
+#[derive(Clone, Dupe, Allocative, Debug, pagable::Pagable)]
 pub struct LoadedModule(Arc<LoadedModuleData>);
 
-#[derive(Derivative, Allocative)]
+#[derive(Derivative, Allocative, pagable::Pagable)]
 #[derivative(Debug)]
 struct LoadedModuleData {
     path: OwnedStarlarkModulePath,
@@ -192,6 +192,7 @@ mod tests {
     use starlark::environment::Module;
 
     use super::*;
+    use crate::testing::Buck2TestHeapName;
 
     struct TestLoadResolver {}
 
@@ -224,7 +225,7 @@ mod tests {
         // patternlint-disable-next-line buck2-no-starlark-module: Test
         Module::with_temp_heap(|m| {
             m.set("name", m.heap().alloc(name.to_string()));
-            m.freeze()
+            m.freeze_named(Buck2TestHeapName::frozen_heap_name())
         })
         .unwrap()
     }
@@ -257,8 +258,12 @@ mod tests {
         let loader = InterpreterFileLoader::new(loaded_modules(), resolver());
         match loader.load(&path) {
             Ok(_) => panic!("Expected load failure for {path}"),
-            Err(_) => {
-                // TODO: verify the error is correct
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains(&path),
+                    "Error should reference the failed path: {msg}"
+                );
             }
         }
         Ok(())
@@ -275,8 +280,17 @@ mod tests {
         let loader = InterpreterFileLoader::new(loaded_modules, resolver);
         match loader.load(&path) {
             Ok(_) => panic!("Expected load failure for {path}"),
-            Err(_) => {
-                // TODO: verify the error is correct
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("Should have had an env"),
+                    "Error should indicate missing module: {msg}"
+                );
+                let id_str = id.to_string();
+                assert!(
+                    msg.contains(&id_str),
+                    "Error should reference the missing module {id_str}: {msg}"
+                );
             }
         }
         Ok(())

@@ -28,6 +28,7 @@ use crate::values::FreezeError;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
 use crate::values::FrozenValue;
+use crate::values::FrozenValueTyped;
 use crate::values::Heap;
 use crate::values::HeapSendable;
 use crate::values::StarlarkValue;
@@ -36,12 +37,12 @@ use crate::values::Tracer;
 use crate::values::Value;
 use crate::values::layout::avalue::AValue;
 use crate::values::layout::avalue::AValueImpl;
+use crate::values::layout::avalue::AValueSimpleBound;
 use crate::values::layout::avalue::heap_copy_impl;
 use crate::values::layout::avalue::try_freeze_directly;
 use crate::values::layout::heap::repr::AValueHeader;
 use crate::values::layout::heap::repr::AValueRepr;
 use crate::values::layout::heap::repr::ForwardPtr;
-use crate::values::layout::heap::send::HeapSyncable;
 
 #[derive(Debug, thiserror::Error)]
 enum AValueError {
@@ -54,7 +55,7 @@ struct AValueComplex<T>(PhantomData<T>);
 impl<'v, T> AValue<'v> for AValueComplex<T>
 where
     T: ComplexValue<'v>,
-    T::Frozen: StarlarkValue<'static> + HeapSendable<'static> + HeapSyncable<'static>,
+    T::Frozen: AValueSimpleBound<'static>,
 {
     type StarlarkValue = T;
 
@@ -85,7 +86,7 @@ where
             let res = x.freeze(freezer)?;
             r.fill(res);
             if TypeId::of::<T::Frozen>() == TypeId::of::<FrozenDef>() {
-                let frozen_def = fv.downcast_frozen_ref().unwrap();
+                let frozen_def = FrozenValueTyped::new(fv).unwrap();
                 freezer.frozen_defs.borrow_mut().push(frozen_def);
             }
             Ok(fv)
@@ -140,7 +141,7 @@ impl<'v> Heap<'v> {
     pub fn alloc_complex<T>(self, x: T) -> Value<'v>
     where
         T: ComplexValue<'v>,
-        T::Frozen: StarlarkValue<'static> + HeapSendable<'static> + HeapSyncable<'static>,
+        T::Frozen: AValueSimpleBound<'static>,
         T: HeapSendable<'v>,
     {
         assert!(!T::is_special(Private));

@@ -64,7 +64,7 @@ impl TransitionDepAttrType {
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Debug, Clone, Allocative)]
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Allocative, Pagable)]
 pub struct ConfiguredTransitionDep {
     pub dep: ConfiguredProvidersLabel,
     pub required_providers: ProviderIdSet,
@@ -145,7 +145,7 @@ impl CoercedTransitionDep {
                 traversal.configuration_dep(label, ConfigurationDepKind::Transition)?
             }
         };
-        traversal.transition_dep(&self.dep, &transition)
+        traversal.transition_dep(&self.dep, transition)
     }
 
     /// If there's a dynamic transition, return the target

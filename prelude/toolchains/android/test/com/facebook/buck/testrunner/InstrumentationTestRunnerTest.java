@@ -20,10 +20,12 @@ import com.facebook.buck.android.TestAndroidDevice;
 import com.facebook.buck.android.TestDevice;
 import com.facebook.buck.android.exopackage.AndroidDevice;
 import com.facebook.buck.testrunner.reportlayer.LogExtractorReportLayer;
+import com.facebook.buck.testrunner.reportlayer.PerfettoReportLayer;
 import com.facebook.buck.testrunner.reportlayer.TombstonesReportLayer;
 import com.facebook.buck.testrunner.reportlayer.VideoRecordingReportLayer;
 import com.facebook.buck.testutil.TemporaryPaths;
 import com.google.common.collect.ImmutableSet;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -191,7 +193,7 @@ public class InstrumentationTestRunnerTest {
     Assert.assertTrue(Files.exists(breadcrumbsTraAnnotation));
 
     Assert.assertEquals(
-        "{\"type\": {\"generic_text_log\": {}}, \"description\": \"Breadcrumbs\"}",
+        "{\"type\": {\"formatted_log\": {\"log_source\": 5}}, \"description\": \"Breadcrumbs\"}",
         Files.readString(breadcrumbsTraAnnotation));
   }
 
@@ -215,7 +217,7 @@ public class InstrumentationTestRunnerTest {
 
     Map<Path, byte[]> files = new HashMap<>();
     files.put(
-        Paths.get("/storage/emulated/0/Android/data/com.example.test/files/test-video-record.mp4"),
+        Paths.get("/sdcard/test_result/video_recordings/test-video-record.mp4"),
         "test-video-record.mp4".getBytes());
     InstrumentationTestRunner runner =
         createInstrumentationTestRunnerWithDevice(files, env, "--record-video");
@@ -319,6 +321,42 @@ public class InstrumentationTestRunnerTest {
   }
 
   @Test
+  public void collectPerfettoTraceToTRA() throws Throwable {
+    Map<String, String> env = new HashMap<>();
+    Path tra = Files.createTempDirectory("ait-tra-");
+    Path tra_annot = Files.createTempDirectory("ait-tra-annot-");
+    env.put("TEST_RESULT_ARTIFACTS_DIR", tra.toString());
+    env.put("TEST_RESULT_ARTIFACT_ANNOTATIONS_DIR", tra_annot.toString());
+
+    Map<Path, byte[]> files = new HashMap<>();
+    files.put(
+        Paths.get("/data/misc/perfetto-traces/ait_perfetto_trace.perfetto-trace"),
+        "fake perfetto trace data".getBytes());
+
+    // Mock shell command responses for PerfettoReportLayer
+    Map<String, String> mockResponses = new HashMap<>();
+    mockResponses.put(
+        "perfetto --txt --background --config /data/local/tmp/perfetto_config.txt"
+            + " --out /data/misc/perfetto-traces/ait_perfetto_trace.perfetto-trace",
+        "[123]");
+    mockResponses.put(
+        "ls -la /data/misc/perfetto-traces/ait_perfetto_trace.perfetto-trace",
+        "-rw-r--r-- 1 root root 1234 Jan 1 00:00 ait_perfetto_trace.perfetto-trace");
+
+    InstrumentationTestRunner runner =
+        createInstrumentationTestRunnerWithDevice(files, env, mockResponses, "--collect-perfetto");
+    runner.run();
+
+    Path traceFile = tra.resolve("ait_perfetto_trace.perfetto-trace");
+    Path traceAnnotation = tra_annot.resolve("ait_perfetto_trace.perfetto-trace.annotation");
+    Assert.assertTrue("Trace file should exist", Files.exists(traceFile));
+    Assert.assertTrue("Annotation file should exist", Files.exists(traceAnnotation));
+    Assert.assertEquals(
+        "{\"type\": {\"generic_blob\": {}}, \"description\": \"Perfetto trace\"}",
+        Files.readString(traceAnnotation));
+  }
+
+  @Test
   public void addsInstrumentationArgsFromPrefixedEnv() throws Throwable {
     Map<String, String> env = new HashMap<>();
     env.put("AIT_TEST_ONE", "foo");
@@ -346,6 +384,60 @@ public class InstrumentationTestRunnerTest {
     Assert.assertTrue(instrumentCommand.contains("-e TEST_ONE foo"));
     Assert.assertTrue(instrumentCommand.contains("-e TEST_TWO bar"));
     Assert.assertFalse(instrumentCommand.contains("RANDOM_ENV_VAR"));
+  }
+
+  @Test
+  public void perTestCoveragePullsArtifactsToWrapperDir() throws Throwable {
+    ArrayList<String> capturedShellCommands = new ArrayList<>();
+    Path hostCoverageDir = tmp.newFolder("wrapper_per_test_coverage").getPath();
+    String deviceCoverageDir =
+        "/sdcard/Android/data/com.example/files/Download/test_result/per_test_coverage/";
+
+    Map<String, String> env = new HashMap<>();
+    env.put(InstrumentationTestRunner.PER_TEST_COVERAGE_ENABLED_ENV, "true");
+    env.put(InstrumentationTestRunner.PER_TEST_COVERAGE_DIR_ENV, hostCoverageDir.toString());
+
+    Map<Path, byte[]> filesOnDevice = new HashMap<>();
+    filesOnDevice.put(
+        Paths.get(deviceCoverageDir, "manifest.jsonl"), "{\"test\":\"example\"}\n".getBytes());
+
+    InstrumentationTestRunner runner =
+        createInstrumentationTestRunnerWithDeviceForSdk(
+            "30", capturedShellCommands, filesOnDevice, env, new HashMap<>());
+    runner.run();
+
+    String instrumentCommand = findInstrumentationCommand(capturedShellCommands);
+    Assert.assertTrue(
+        instrumentCommand.contains(
+            "-e " + InstrumentationTestRunner.PER_TEST_COVERAGE_DIR_ARG + " " + deviceCoverageDir));
+    Assert.assertTrue(Files.exists(hostCoverageDir.resolve("manifest.jsonl")));
+  }
+
+  @Test
+  public void perTestCoverageFallsBackToTestArtifactsDir() throws Throwable {
+    ArrayList<String> capturedShellCommands = new ArrayList<>();
+    Path artifactsDir = tmp.newFolder("test_artifacts").getPath();
+    String deviceCoverageDir =
+        "/sdcard/Android/data/com.example/files/Download/test_result/per_test_coverage/";
+
+    Map<String, String> env = new HashMap<>();
+    env.put(InstrumentationTestRunner.PER_TEST_COVERAGE_ENABLED_ENV, "true");
+    env.put("TEST_RESULT_ARTIFACTS_DIR", artifactsDir.toString());
+
+    Map<Path, byte[]> filesOnDevice = new HashMap<>();
+    filesOnDevice.put(
+        Paths.get(deviceCoverageDir, "manifest.jsonl"), "{\"test\":\"example\"}\n".getBytes());
+
+    InstrumentationTestRunner runner =
+        createInstrumentationTestRunnerWithDeviceForSdk(
+            "30", capturedShellCommands, filesOnDevice, env, new HashMap<>());
+    runner.run();
+
+    String instrumentCommand = findInstrumentationCommand(capturedShellCommands);
+    Assert.assertTrue(
+        instrumentCommand.contains(
+            "-e " + InstrumentationTestRunner.PER_TEST_COVERAGE_DIR_ARG + " " + deviceCoverageDir));
+    Assert.assertTrue(Files.exists(artifactsDir.resolve("per_test_coverage/manifest.jsonl")));
   }
 
   @Test
@@ -387,6 +479,7 @@ public class InstrumentationTestRunnerTest {
             argsParser.apkUnderTestPath,
             argsParser.exopackageLocalPath,
             argsParser.apkUnderTestExopackageLocalPath,
+            argsParser.exopackageSecondaryDexLocalPath,
             argsParser.attemptUninstallApkUnderTest,
             argsParser.attemptUninstallInstrumentationApk,
             argsParser.debug,
@@ -661,6 +754,7 @@ public class InstrumentationTestRunnerTest {
             argsParser.apkUnderTestPath,
             argsParser.exopackageLocalPath,
             argsParser.apkUnderTestExopackageLocalPath,
+            argsParser.exopackageSecondaryDexLocalPath,
             argsParser.attemptUninstallApkUnderTest,
             argsParser.attemptUninstallInstrumentationApk,
             argsParser.debug,
@@ -677,8 +771,7 @@ public class InstrumentationTestRunnerTest {
             argsParser.extraApksToInstall,
             argsParser.userId) {
           @Override
-          protected IDevice getAndroidDevice(
-              boolean autoRunOnConnectedDevice, String deviceSerial) {
+          protected IDevice resolveIDevice(String serial) {
             return device;
           }
 
@@ -787,6 +880,7 @@ public class InstrumentationTestRunnerTest {
             argsParser.apkUnderTestPath,
             argsParser.exopackageLocalPath,
             argsParser.apkUnderTestExopackageLocalPath,
+            argsParser.exopackageSecondaryDexLocalPath,
             argsParser.attemptUninstallApkUnderTest,
             argsParser.attemptUninstallInstrumentationApk,
             argsParser.debug,
@@ -803,8 +897,7 @@ public class InstrumentationTestRunnerTest {
             argsParser.extraApksToInstall,
             argsParser.userId) {
           @Override
-          protected IDevice getAndroidDevice(
-              boolean autoRunOnConnectedDevice, String deviceSerial) {
+          protected IDevice resolveIDevice(String serial) {
             return device;
           }
 
@@ -1046,6 +1139,7 @@ public class InstrumentationTestRunnerTest {
         argsParser.apkUnderTestPath,
         argsParser.exopackageLocalPath,
         argsParser.apkUnderTestExopackageLocalPath,
+        argsParser.exopackageSecondaryDexLocalPath,
         argsParser.attemptUninstallApkUnderTest,
         argsParser.attemptUninstallInstrumentationApk,
         argsParser.debug,
@@ -1062,7 +1156,7 @@ public class InstrumentationTestRunnerTest {
         argsParser.extraApksToInstall,
         argsParser.userId) {
       @Override
-      protected IDevice getAndroidDevice(boolean autoRunOnConnectedDevice, String deviceSerial) {
+      protected IDevice resolveIDevice(String serial) {
         return device;
       }
 
@@ -1177,6 +1271,7 @@ public class InstrumentationTestRunnerTest {
             argsParser.apkUnderTestPath,
             argsParser.exopackageLocalPath,
             argsParser.apkUnderTestExopackageLocalPath,
+            argsParser.exopackageSecondaryDexLocalPath,
             argsParser.attemptUninstallApkUnderTest,
             argsParser.attemptUninstallInstrumentationApk,
             argsParser.debug,
@@ -1193,8 +1288,7 @@ public class InstrumentationTestRunnerTest {
             argsParser.extraApksToInstall,
             argsParser.userId) {
           @Override
-          protected IDevice getAndroidDevice(
-              boolean autoRunOnConnectedDevice, String deviceSerial) {
+          protected IDevice resolveIDevice(String serial) {
             // Return IDevice only for RemoteAndroidTestRunner compatibility
             return device;
           }
@@ -1251,6 +1345,17 @@ public class InstrumentationTestRunnerTest {
         capturedCommands, filesOnDevice, env, shellCommandMockResponses, extraArgs);
   }
 
+  private static String findInstrumentationCommand(List<String> capturedShellCommands) {
+    for (String command : capturedShellCommands) {
+      if (command.startsWith("am instrument")) {
+        return command;
+      }
+    }
+
+    Assert.fail("Expected to find 'am instrument' command");
+    return "";
+  }
+
   private InstrumentationTestRunner createInstrumentationTestRunnerWithDevice(
       List<String> capturedShellCommands,
       Map<Path, byte[]> filesOnDevice,
@@ -1258,7 +1363,18 @@ public class InstrumentationTestRunnerTest {
       Map<String, String> shellCommandMockResponses,
       String... extraArgs)
       throws Throwable {
+    return createInstrumentationTestRunnerWithDeviceForSdk(
+        "28", capturedShellCommands, filesOnDevice, env, shellCommandMockResponses, extraArgs);
+  }
 
+  private InstrumentationTestRunner createInstrumentationTestRunnerWithDeviceForSdk(
+      String sdkVersion,
+      List<String> capturedShellCommands,
+      Map<Path, byte[]> filesOnDevice,
+      Map<String, String> env,
+      Map<String, String> shellCommandMockResponses,
+      String... extraArgs)
+      throws Throwable {
     // Create a TestAndroidDevice as the primary device abstraction
     final AndroidDevice testAndroidDevice =
         new TestAndroidDevice() {
@@ -1270,7 +1386,7 @@ public class InstrumentationTestRunnerTest {
           @Override
           public String getProperty(String property) throws Exception {
             if ("ro.build.version.sdk".equals(property)) {
-              return "28"; // Android 9
+              return sdkVersion;
             }
             return null;
           }
@@ -1332,6 +1448,7 @@ public class InstrumentationTestRunnerTest {
             argsParser.apkUnderTestPath,
             argsParser.exopackageLocalPath,
             argsParser.apkUnderTestExopackageLocalPath,
+            argsParser.exopackageSecondaryDexLocalPath,
             argsParser.attemptUninstallApkUnderTest,
             argsParser.attemptUninstallInstrumentationApk,
             argsParser.debug,
@@ -1358,12 +1475,12 @@ public class InstrumentationTestRunnerTest {
 
               @Override
               public InputStream getInputStream() {
-                return null;
+                return new ByteArrayInputStream(new byte[0]);
               }
 
               @Override
               public InputStream getErrorStream() {
-                return null;
+                return new ByteArrayInputStream(new byte[0]);
               }
 
               @Override
@@ -1382,8 +1499,7 @@ public class InstrumentationTestRunnerTest {
           }
 
           @Override
-          protected IDevice getAndroidDevice(
-              boolean autoRunOnConnectedDevice, String deviceSerial) {
+          protected IDevice resolveIDevice(String serial) {
             // Return IDevice only for RemoteAndroidTestRunner compatibility
             return device;
           }
@@ -1470,6 +1586,9 @@ public class InstrumentationTestRunnerTest {
       runner.addReportLayer(new VideoRecordingReportLayer(runner));
     }
     runner.addReportLayer(new TombstonesReportLayer(runner, argsParser.collectTombstones));
+    if (argsParser.collectPerfetto) {
+      runner.addReportLayer(new PerfettoReportLayer(runner));
+    }
     if (!argsParser.logExtractors.isEmpty()) {
       runner.addReportLayer(new LogExtractorReportLayer(runner, argsParser.logExtractors));
     }

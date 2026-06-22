@@ -220,7 +220,7 @@
 //! ## Enable the `load` statement
 //!
 //! You can have Starlark load files imported by the user.
-//! That requires that the loaded modules are first frozen with [`Module.freeze`](environment::Module::freeze).
+//! That requires that the loaded modules are first frozen with [`Module.freeze_named`](environment::Module::freeze_named).
 //! There is no requirement that the files are on disk, but that would be a common pattern.
 //!
 //! ```
@@ -232,6 +232,7 @@
 //! use starlark::eval::ReturnFileLoader;
 //! use starlark::syntax::AstModule;
 //! use starlark::syntax::Dialect;
+//! use starlark::values::FrozenHeapName;
 //!
 //! // Get the file contents (for the demo), in reality use `AstModule::parse_file`.
 //! fn get_source(file: &str) -> &str {
@@ -269,7 +270,8 @@
 //!         }
 //!         // After creating a module we freeze it, preventing further mutation.
 //!         // It can now be used as the input for other Starlark modules.
-//!         Ok(module.freeze()?)
+//!         // Each frozen module is given a name to identify its heap.
+//!         Ok(module.freeze_named(FrozenHeapName::User(Box::new(file.to_owned())))?)
 //!     })
 //! }
 //!
@@ -339,6 +341,7 @@
 //! use starlark::values::Heap;
 //! use starlark::values::NoSerialize;
 //! use starlark::values::ProvidesStaticType;
+//! use starlark::values::StarlarkPagable;
 //! use starlark::values::StarlarkValue;
 //! use starlark::values::Value;
 //! use starlark::values::ValueError;
@@ -346,7 +349,15 @@
 //! use starlark_derive::starlark_value;
 //!
 //! // Define complex numbers
-//! #[derive(Debug, PartialEq, Eq, ProvidesStaticType, NoSerialize, Allocative)]
+//! #[derive(
+//!     Debug,
+//!     PartialEq,
+//!     Eq,
+//!     ProvidesStaticType,
+//!     NoSerialize,
+//!     StarlarkPagable,
+//!     Allocative
+//! )]
 //! struct Complex {
 //!     real: i32,
 //!     imaginary: i32,
@@ -406,7 +417,7 @@
 #![cfg_attr(rust_nightly, allow(internal_features))]
 #![cfg_attr(rust_nightly, feature(const_type_id))]
 #![cfg_attr(rust_nightly, feature(core_intrinsics))]
-#![cfg_attr(rust_nightly, feature(cfg_sanitize))]
+#![cfg_attr(all(test, rust_nightly), feature(cfg_sanitize))]
 #![cfg_attr(rust_nightly, feature(cold_path))]
 #![cfg_attr(rust_nightly, feature(const_type_name))]
 // Good reasons
@@ -439,7 +450,11 @@
 
 mod macros;
 
+pub use starlark_derive::StarlarkPagable;
+pub use starlark_derive::StarlarkPagablePanic;
+pub use starlark_derive::StarlarkPagableViaPagable;
 pub use starlark_derive::starlark_module;
+pub use starlark_derive::starlark_pagable_typetag;
 pub use starlark_derive::type_matcher;
 pub use starlark_syntax::Error;
 pub use starlark_syntax::ErrorKind;

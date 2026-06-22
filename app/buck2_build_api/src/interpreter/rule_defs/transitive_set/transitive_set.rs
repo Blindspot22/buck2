@@ -18,6 +18,7 @@ use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_error::BuckErrorContext;
+use buck2_error::buck2_error;
 use buck2_error::internal_error;
 use display_container::display_pair;
 use display_container::fmt_container;
@@ -25,6 +26,8 @@ use display_container::iter_display_chain;
 use dupe::Dupe;
 use either::Either;
 use gazebo::prelude::*;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use serde::Serialize;
 use serde::Serializer;
 use serde::ser::SerializeMap;
@@ -32,7 +35,6 @@ use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::type_matcher;
 use starlark::values::Freeze;
@@ -40,6 +42,7 @@ use starlark::values::FreezeResult;
 use starlark::values::Freezer;
 use starlark::values::FrozenValue;
 use starlark::values::FrozenValueTyped;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
@@ -53,6 +56,7 @@ use starlark::values::list::AllocList;
 use starlark::values::starlark_value;
 use starlark::values::typing::TypeInstanceId;
 use starlark::values::typing::TypeMatcher;
+use starlark::values::typing::TypeMatcherDyn;
 
 use crate::actions::impls::json::JsonUnpack;
 use crate::actions::impls::json::validate_json;
@@ -81,7 +85,8 @@ use crate::interpreter::rule_defs::transitive_set::transitive_set_definition::Tr
 use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetOrdering;
 use crate::interpreter::rule_defs::transitive_set::traversal::TransitiveSetTraversal;
 
-#[derive(Clone, Debug, Allocative)]
+#[derive(Clone, Debug, Allocative, Pagable)]
+#[pagable_typetag(TypeMatcherDyn)]
 pub(crate) struct TransitiveSetMatcher {
     pub(crate) type_instance_id: TypeInstanceId,
 }
@@ -110,10 +115,48 @@ impl TypeMatcher for TransitiveSetMatcher {
     }
 }
 
-#[derive(Debug, Clone, Trace, ProvidesStaticType, Allocative)]
+/// Compact bitfield for per-projection boolean flags, stored as a u64.
+#[derive(Debug, Clone, Copy, Trace, Allocative, PartialEq, Eq, StarlarkPagable)]
+pub(crate) struct ProjectionBitSet(u64);
+
+impl ProjectionBitSet {
+    const MAX_PROJECTIONS: usize = 64;
+
+    pub fn from_bools(bools: &[bool]) -> buck2_error::Result<Self> {
+        if bools.len() > Self::MAX_PROJECTIONS {
+            return Err(buck2_error!(
+                buck2_error::ErrorTag::Input,
+                "TransitiveSet has {} projections, but at most {} are supported",
+                bools.len(),
+                Self::MAX_PROJECTIONS,
+            ));
+        }
+        let mut bits: u64 = 0;
+        for (i, b) in bools.iter().enumerate() {
+            if *b {
+                bits |= 1u64 << i;
+            }
+        }
+        Ok(Self(bits))
+    }
+
+    pub fn get(self, index: usize) -> buck2_error::Result<bool> {
+        match self.0.checked_shr(index as u32) {
+            Some(shifted) => Ok(shifted & 1 != 0),
+            None => Err(internal_error!(
+                "Projection index {} out of range (max {})",
+                index,
+                Self::MAX_PROJECTIONS
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Trace, ProvidesStaticType, Allocative, StarlarkPagable)]
 #[repr(C)]
 pub struct TransitiveSetGen<V: ValueLifetimeless> {
     /// A Deferred key that maps back to this set. This is used to compute its inputs.
+    #[starlark_pagable(pagable)]
     pub key: TransitiveSetKey,
 
     /// The TransitiveSetCallable that this set uses.
@@ -126,17 +169,15 @@ pub struct TransitiveSetGen<V: ValueLifetimeless> {
     /// Pre-computed reductions. Those are arbitrary values based on the set's definition.
     pub(crate) reductions: Box<[V]>,
 
-    /// For each projection, whether it uses content based paths or not.
-    pub(crate) projection_path_resolution_may_require_artifact_value: Box<[bool]>,
+    pub(crate) projection_path_resolution_may_require_artifact_value: ProjectionBitSet,
 
-    /// For each projection, whether it uses configuration based paths or not.
-    pub(crate) projection_is_eligible_for_dedupe: Box<[bool]>,
+    pub(crate) projection_is_eligible_for_dedupe: ProjectionBitSet,
 
     /// Further transitive sets.
     pub children: Box<[V]>,
 }
 
-#[derive(Debug, Clone, Trace, Allocative)]
+#[derive(Debug, Clone, Trace, Allocative, StarlarkPagable)]
 #[repr(C)]
 pub struct NodeGen<V: ValueLifetimeless> {
     /// The value
@@ -280,8 +321,9 @@ impl FrozenTransitiveSet {
                         key: v.key().dupe(),
                         projection,
                     },
-                    v.projection_path_resolution_may_require_artifact_value[projection],
-                    v.projection_is_eligible_for_dedupe[projection],
+                    v.projection_path_resolution_may_require_artifact_value
+                        .get(projection)?,
+                    v.projection_is_eligible_for_dedupe.get(projection)?,
                 ),
             )));
         }
@@ -374,14 +416,15 @@ impl<'v> TransitiveSetLike<'v> for FrozenTransitiveSet {
 
 starlark_complex_value!(pub TransitiveSet);
 
+starlark::methods_static!(TRANSITIVE_SET_METHODS = transitive_set_methods);
+
 #[starlark_value(type = "TransitiveSet")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for TransitiveSetGen<V>
 where
     Self: ProvidesStaticType<'v> + TransitiveSetLike<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(transitive_set_methods)
+        Some(TRANSITIVE_SET_METHODS.methods())
     }
 }
 
@@ -402,8 +445,6 @@ impl<'v> Freeze for TransitiveSet<'v> {
         let node = node.try_map(|node| node.freeze(freezer))?;
         let children = children.freeze(freezer)?;
         let reductions = reductions.freeze(freezer)?;
-        let projection_path_resolution_may_require_artifact_value =
-            projection_path_resolution_may_require_artifact_value.freeze(freezer)?;
         Ok(TransitiveSetGen {
             key,
             definition,
@@ -500,31 +541,39 @@ impl<'v> TransitiveSet<'v> {
             })
             .collect::<Result<Box<[_]>, _>>()?;
 
-        struct InputVisitor {
-            target_platform: Option<ConfigurationData>,
+        let target_platform =
+            if let BaseDeferredKey::TargetLabel(configured_label) = key.holder_key().owner() {
+                Some(configured_label.cfg())
+            } else {
+                None
+            };
+
+        struct InputVisitor<'a> {
             path_resolution_may_require_artifact_value: bool,
             is_eligible_for_dedupe: bool,
+            target_platform: Option<&'a ConfigurationData>,
         }
 
-        impl InputVisitor {
-            fn new(target_platform: Option<ConfigurationData>) -> Self {
+        impl<'a> InputVisitor<'a> {
+            fn new(target_platform: Option<&'a ConfigurationData>) -> Self {
                 Self {
-                    target_platform,
                     path_resolution_may_require_artifact_value: false,
                     is_eligible_for_dedupe: true,
+                    target_platform,
                 }
             }
         }
 
-        impl<'v> CommandLineArtifactVisitor<'v> for InputVisitor {
+        impl<'a, 'v> CommandLineArtifactVisitor<'v> for InputVisitor<'a> {
             fn visit_input(&mut self, input: ArtifactGroup, _tags: Vec<&ArtifactTag>) {
                 if input.path_resolution_may_require_artifact_value() {
                     self.path_resolution_may_require_artifact_value = true;
                 }
 
                 if self.is_eligible_for_dedupe {
-                    self.is_eligible_for_dedupe =
-                        input.is_eligible_for_dedupe(self.target_platform.as_ref());
+                    self.is_eligible_for_dedupe = input
+                        .is_eligible_for_dedupe(self.target_platform)
+                        == buck2_data::EligibleForDedupe::Eligible;
                 }
             }
 
@@ -537,13 +586,6 @@ impl<'v> TransitiveSet<'v> {
 
             fn visit_frozen_output(&mut self, _artifact: Artifact, _tags: Vec<&ArtifactTag>) {}
         }
-
-        let owner = key.holder_key().owner();
-        let target_platform = if let BaseDeferredKey::TargetLabel(configured_label) = owner {
-            Some(configured_label.cfg().dupe())
-        } else {
-            None
-        };
 
         let (
             projection_path_resolution_may_require_artifact_value,
@@ -563,7 +605,7 @@ impl<'v> TransitiveSet<'v> {
                         .get(idx)
                         .ok_or_else(|| internal_error!("Invalid projection id"))?;
 
-                    let mut visitor = InputVisitor::new(target_platform.dupe());
+                    let mut visitor = InputVisitor::new(target_platform);
                     match spec.kind {
                         TransitiveSetProjectionKind::Args => {
                             TransitiveSetArgsProjection::as_command_line(*projection)?
@@ -582,33 +624,22 @@ impl<'v> TransitiveSet<'v> {
                 }
 
                 for child in children_sets.iter() {
-                    if *child
+                    if child
                         .projection_path_resolution_may_require_artifact_value
-                        .get(idx)
-                        .ok_or_else(|| internal_error!("Invalid projection id"))?
+                        .get(idx)?
                     {
                         path_resolution_may_require_artifact_value = true;
                     }
 
                     if is_eligible_for_dedupe
-                        && !*child
-                            .projection_is_eligible_for_dedupe
-                            .get(idx)
-                            .ok_or_else(|| internal_error!("Invalid projection id"))?
+                        && !child.projection_is_eligible_for_dedupe.get(idx)?
                     {
-                        let target_platform_ref = match target_platform {
-                            Some(ref target_platform) => target_platform,
-                            None => {
-                                is_eligible_for_dedupe = false;
-                                continue;
-                            }
-                        };
                         let is_child_eligible_for_dedupe = child
                             .key
                             .holder_key()
                             .owner()
                             .configured_label()
-                            .is_some_and(|l| l.cfg() != target_platform_ref);
+                            .is_some_and(|l| l.cfg().is_marked_as_exec_platform());
                         if !is_child_eligible_for_dedupe {
                             is_eligible_for_dedupe = false;
                         }
@@ -624,13 +655,16 @@ impl<'v> TransitiveSet<'v> {
             .into_iter()
             .unzip();
 
-        let (
-            projection_path_resolution_may_require_artifact_value,
-            projection_is_eligible_for_dedupe,
-        ) = (
-            projection_path_resolution_may_require_artifact_value.into_boxed_slice(),
-            projection_is_eligible_for_dedupe_iter.into_boxed_slice(),
-        );
+        let projection_path_resolution_may_require_artifact_value =
+            ProjectionBitSet::from_bools(&projection_path_resolution_may_require_artifact_value)
+                .with_buck_error_context(|| {
+                    format!("in transitive set {:?}", definition.as_debug())
+                })?;
+        let projection_is_eligible_for_dedupe =
+            ProjectionBitSet::from_bools(&projection_is_eligible_for_dedupe_iter)
+                .with_buck_error_context(|| {
+                    format!("in transitive set {:?}", definition.as_debug())
+                })?;
 
         // Cast lifetime from 'v to 'static
         let definition =

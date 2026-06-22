@@ -30,6 +30,8 @@ use buck2_common::legacy_configs::view::LegacyBuckConfigView;
 use buck2_core::configuration::compatibility::IncompatiblePlatformReason;
 use buck2_core::configuration::compatibility::IncompatiblePlatformReasonCause;
 use buck2_core::configuration::compatibility::MaybeCompatible;
+use buck2_core::configuration::compatibility::ResultMaybeCompatible;
+use buck2_core::configuration::compatibility::ResultMaybeCompatibleValueSerialize;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::configuration::pair::ConfigurationNoExec;
 use buck2_core::configuration::pair::ConfigurationWithExec;
@@ -75,16 +77,20 @@ use buck2_node::nodes::frontend::TargetGraphCalculation;
 use buck2_node::nodes::unconfigured::TargetNode;
 use buck2_node::nodes::unconfigured::TargetNodeRef;
 use buck2_node::rule::RuleIncomingTransition;
-use buck2_node::visibility::VisibilityError;
 use buck2_util::arc_str::ArcStr;
 use derive_more::Display;
 use dice::Demand;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use itertools::Itertools;
+use pagable::Pagable;
+use pagable::StaticStr;
+use pagable::pagable_typetag;
 use starlark_map::ordered_map::OrderedMap;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
@@ -161,6 +167,7 @@ enum PluginDepError {
 }
 
 fn unpack_target_compatible_with_attr(
+    target_label: &ConfiguredTargetLabel,
     target_node: TargetNodeRef,
     resolved_cfg: &MatchedConfigurationSettingKeysWithCfg,
     attr_id: AttributeId,
@@ -172,7 +179,9 @@ fn unpack_target_compatible_with_attr(
     };
 
     struct AttrConfigurationContextToResolveCompatibleWith<'c> {
+        target_label: &'c ConfiguredTargetLabel,
         resolved_cfg: &'c MatchedConfigurationSettingKeysWithCfg,
+        label: TargetLabel,
     }
 
     impl AttrConfigurationContext for AttrConfigurationContextToResolveCompatibleWith<'_> {
@@ -182,6 +191,10 @@ fn unpack_target_compatible_with_attr(
 
         fn cfg(&self) -> ConfigurationNoExec {
             self.resolved_cfg.cfg().dupe()
+        }
+
+        fn target_label(&self) -> Option<&TargetLabel> {
+            Some(&self.label)
         }
 
         fn base_exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec> {
@@ -212,11 +225,26 @@ fn unpack_target_compatible_with_attr(
                 LEGACY_TARGET_COMPATIBLE_WITH_ATTRIBUTE.name
             ))
         }
+
+        fn incompatible_platform_reason(
+            &self,
+            cause: IncompatiblePlatformReasonCause,
+        ) -> Arc<IncompatiblePlatformReason> {
+            Arc::new(IncompatiblePlatformReason {
+                target: self.target_label.dupe(),
+                cause,
+            })
+        }
     }
 
     let attr = attr
-        .configure(&AttrConfigurationContextToResolveCompatibleWith { resolved_cfg })
-        .with_buck_error_context(|| format!("Error configuring attribute `{}`", attr.name))?;
+        .configure(&AttrConfigurationContextToResolveCompatibleWith {
+            resolved_cfg,
+            label: target_node.label().dupe(),
+            target_label,
+        })
+        .with_buck_error_context(|| format!("Error configuring attribute `{}`", attr.name))
+        .require_compatible()?;
 
     match attr.value.unpack_list() {
         Some(values) => {
@@ -240,11 +268,13 @@ fn check_compatible(
     resolved_cfg: &MatchedConfigurationSettingKeysWithCfg,
 ) -> buck2_error::Result<MaybeCompatible<()>> {
     let target_compatible_with = unpack_target_compatible_with_attr(
+        target_label,
         target_node,
         resolved_cfg,
         TARGET_COMPATIBLE_WITH_ATTRIBUTE.id,
     )?;
     let legacy_compatible_with = unpack_target_compatible_with_attr(
+        target_label,
         target_node,
         resolved_cfg,
         LEGACY_TARGET_COMPATIBLE_WITH_ATTRIBUTE.id,
@@ -341,11 +371,9 @@ async fn check_plugin_deps(
                 return Err(PluginDepError::PluginDepIsToolchainRule(dep_label.dupe()).into());
             }
             if !dep_node.is_visible_to(target_label.unconfigured())? {
-                return Err(VisibilityError::NotVisibleTo(
-                    dep_label.dupe(),
-                    target_label.unconfigured().dupe(),
-                )
-                .into());
+                return Err(dep_node
+                    .not_visible_to_error(target_label.unconfigured().dupe())
+                    .into());
             }
         }
     }
@@ -368,7 +396,7 @@ impl ErrorsAndIncompatibilities {
     fn unpack_dep_into(
         &mut self,
         target_label: &TargetConfiguredTargetLabel,
-        result: buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>>,
+        result: ResultMaybeCompatible<ConfiguredTargetNode>,
         check_visibility: CheckVisibility,
         list: &mut Vec<ConfiguredTargetNode>,
     ) {
@@ -378,20 +406,20 @@ impl ErrorsAndIncompatibilities {
     fn unpack_dep(
         &mut self,
         target_label: &TargetConfiguredTargetLabel,
-        result: buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>>,
+        result: ResultMaybeCompatible<ConfiguredTargetNode>,
         check_visibility: CheckVisibility,
     ) -> Option<ConfiguredTargetNode> {
         match result {
-            Err(e) => {
+            ResultMaybeCompatible::Err(e) => {
                 self.errs.push(e);
             }
-            Ok(MaybeCompatible::Incompatible(reason)) => {
+            ResultMaybeCompatible::Incompatible(reason) => {
                 self.incompats.push(Arc::new(IncompatiblePlatformReason {
                     target: target_label.inner().dupe(),
                     cause: IncompatiblePlatformReasonCause::Dependency(reason.dupe()),
                 }));
             }
-            Ok(MaybeCompatible::Compatible(dep)) => {
+            ResultMaybeCompatible::Compatible(dep) => {
                 if CheckVisibility::No == check_visibility {
                     return Some(dep);
                 }
@@ -401,11 +429,8 @@ impl ErrorsAndIncompatibilities {
                     }
                     Ok(false) => {
                         self.errs.push(
-                            VisibilityError::NotVisibleTo(
-                                dep.label().unconfigured().dupe(),
-                                target_label.unconfigured().dupe(),
-                            )
-                            .into(),
+                            dep.not_visible_to_error(target_label.unconfigured().dupe())
+                                .into(),
                         );
                     }
                     Err(e) => {
@@ -418,15 +443,15 @@ impl ErrorsAndIncompatibilities {
     }
 
     /// Returns an error/incompatibility to return, if any, and `None` otherwise
-    pub(crate) fn finalize<T>(mut self) -> Option<buck2_error::Result<MaybeCompatible<T>>> {
+    pub(crate) fn finalize(mut self) -> ResultMaybeCompatible<()> {
         // FIXME(JakobDegen): Report all incompatibilities
         if let Some(incompat) = self.incompats.pop() {
-            return Some(Ok(MaybeCompatible::Incompatible(incompat)));
+            return ResultMaybeCompatible::Incompatible(incompat);
         }
         if let Some(err) = self.errs.pop() {
-            return Some(Err(err));
+            return ResultMaybeCompatible::Err(err);
         }
-        None
+        ResultMaybeCompatible::Compatible(())
     }
 }
 
@@ -443,7 +468,7 @@ pub(crate) async fn gather_deps(
     target_node: TargetNodeRef<'_>,
     attr_cfg_ctx: &(dyn AttrConfigurationContext + Sync),
     ctx: &mut DiceComputations<'_>,
-) -> buck2_error::Result<(GatheredDeps, ErrorsAndIncompatibilities)> {
+) -> ResultMaybeCompatible<(GatheredDeps, ErrorsAndIncompatibilities)> {
     #[derive(Default)]
     struct Traversal {
         deps: OrderedMap<ConfiguredProvidersLabel, SmallSet<PluginKindSet>>,
@@ -454,7 +479,7 @@ pub(crate) async fn gather_deps(
 
     impl ConfiguredAttrTraversal for Traversal {
         fn dep(&mut self, dep: &ConfiguredProvidersLabel) -> buck2_error::Result<()> {
-            self.deps.entry(dep.dupe()).or_insert_with(SmallSet::new);
+            self.deps.entry(dep.dupe()).or_default();
             Ok(())
         }
 
@@ -465,7 +490,7 @@ pub(crate) async fn gather_deps(
         ) -> buck2_error::Result<()> {
             self.deps
                 .entry(dep.dupe())
-                .or_insert_with(SmallSet::new)
+                .or_default()
                 .insert(plugin_kinds.dupe());
             Ok(())
         }
@@ -492,8 +517,9 @@ pub(crate) async fn gather_deps(
 
     let mut traversal = Traversal::default();
     for a in target_node.attrs(AttrInspectOptions::All) {
-        let configured_attr = a.configure(attr_cfg_ctx)?;
-        configured_attr.traverse(target_node.label().pkg(), &mut traversal)?;
+        a.configure(attr_cfg_ctx)?
+            .traverse(target_node.label().pkg(), &mut traversal)
+            .with_buck_error_context(|| format!("traversing attribute `{}`", a.name))?;
     }
 
     let dep_results = ctx
@@ -547,7 +573,7 @@ pub(crate) async fn gather_deps(
         }
     }
 
-    Ok((
+    ResultMaybeCompatible::Compatible((
         GatheredDeps {
             deps,
             exec_deps,
@@ -559,17 +585,20 @@ pub(crate) async fn gather_deps(
 }
 
 /// Resolves configured attributes of target node needed to compute transitions
-async fn resolve_transition_attrs<'a>(
+async fn resolve_transition_input_attrs<'a>(
+    target_label: &ConfiguredTargetLabel,
     transitions: impl Iterator<Item = &TransitionId>,
     target_node: &'a TargetNode,
     matched_cfg_keys: &MatchedConfigurationSettingKeysWithCfg,
     platform_cfgs: &OrderedMap<TargetLabel, ConfigurationData>,
     ctx: &mut DiceComputations<'_>,
-) -> buck2_error::Result<OrderedMap<&'a str, Arc<ConfiguredAttr>>> {
+) -> ResultMaybeCompatible<OrderedMap<&'a str, Arc<ConfiguredAttr>>> {
     struct AttrConfigurationContextToResolveTransitionAttrs<'c> {
+        target_label: &'c ConfiguredTargetLabel,
         matched_cfg_keys: &'c MatchedConfigurationSettingKeysWithCfg,
         toolchain_cfg: ConfigurationWithExec,
         platform_cfgs: &'c OrderedMap<TargetLabel, ConfigurationData>,
+        label: TargetLabel,
     }
 
     impl AttrConfigurationContext for AttrConfigurationContextToResolveTransitionAttrs<'_> {
@@ -579,6 +608,10 @@ async fn resolve_transition_attrs<'a>(
 
         fn cfg(&self) -> ConfigurationNoExec {
             self.matched_cfg_keys.cfg().dupe()
+        }
+
+        fn target_label(&self) -> Option<&TargetLabel> {
+            Some(&self.label)
         }
 
         fn base_exec_cfg(&self) -> buck2_error::Result<ConfigurationNoExec> {
@@ -601,24 +634,38 @@ async fn resolve_transition_attrs<'a>(
         fn resolved_transitions(
             &self,
         ) -> buck2_error::Result<&OrderedMap<Arc<TransitionId>, Arc<TransitionApplied>>> {
+            // TODO(cjhopman): Why is this an internal error? Doesn't it indicate an error in the
+            // rule or the target definition? Do we enforce it somewhere else as an input error?
             Err(internal_error!(
                 "resolved_transitions() can't be used before transition execution."
             ))
         }
+
+        fn incompatible_platform_reason(
+            &self,
+            cause: IncompatiblePlatformReasonCause,
+        ) -> Arc<IncompatiblePlatformReason> {
+            Arc::new(IncompatiblePlatformReason {
+                target: self.target_label.dupe(),
+                cause,
+            })
+        }
     }
 
     let cfg_ctx = AttrConfigurationContextToResolveTransitionAttrs {
+        target_label,
         matched_cfg_keys,
         platform_cfgs,
         toolchain_cfg: matched_cfg_keys
             .cfg()
             .make_toolchain(&ConfigurationNoExec::unbound_exec()),
+        label: target_node.label().dupe(),
     };
     let mut result = OrderedMap::default();
     for tr in transitions {
         let attrs = TRANSITION_ATTRS_PROVIDER
             .get()?
-            .transition_attrs(ctx, &tr)
+            .transition_attrs(ctx, tr)
             .await?;
         if let Some(attrs) = attrs {
             for attr in attrs.as_ref() {
@@ -627,23 +674,24 @@ async fn resolve_transition_attrs<'a>(
                     continue;
                 }
 
-                if let Some(coerced_attr) = target_node.attr(&attr, AttrInspectOptions::All)? {
+                if let Some(coerced_attr) = target_node.attr(attr, AttrInspectOptions::All)? {
                     let configured_attr = coerced_attr.configure(&cfg_ctx)?;
                     if let Some(old_val) =
                         result.insert(configured_attr.name, Arc::new(configured_attr.value))
                     {
-                        return Err(internal_error!(
+                        return internal_error!(
                             "Found duplicated value `{}` for attr `{}` on target `{}`",
                             &old_val.as_display_no_ctx(),
                             attr,
                             target_node.label()
-                        ));
+                        )
+                        .into();
                     }
                 }
             }
         }
     }
-    Ok(result)
+    ResultMaybeCompatible::Compatible(result)
 }
 
 /// Verifies if configured node's attributes are equal to the same attributes configured with pre-transition configuration.
@@ -688,7 +736,7 @@ async fn compute_configured_target_node_no_transition(
     target_label: &ConfiguredTargetLabel,
     target_node: TargetNode,
     ctx: &mut DiceComputations<'_>,
-) -> buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>> {
+) -> ResultMaybeCompatible<ConfiguredTargetNode> {
     let partial_target_label =
         &TargetConfiguredTargetLabel::new_without_exec_cfg(target_label.dupe());
     let target_cfg = target_label.cfg();
@@ -708,13 +756,14 @@ async fn compute_configured_target_node_no_transition(
     if let MaybeCompatible::Incompatible(reason) =
         check_compatible(target_label, target_node.as_ref(), &resolved_configuration)?
     {
-        return Ok(MaybeCompatible::Incompatible(reason));
+        return ResultMaybeCompatible::Incompatible(reason);
     }
 
     let platform_cfgs = compute_platform_cfgs(ctx, target_node.as_ref()).await?;
 
     let mut resolved_transitions = OrderedMap::new();
-    let attrs = resolve_transition_attrs(
+    let attrs = resolve_transition_input_attrs(
+        target_label,
         target_node.transition_deps().map(|(_, tr)| tr.as_ref()),
         &target_node,
         &resolved_configuration,
@@ -735,6 +784,7 @@ async fn compute_configured_target_node_no_transition(
     // configured so that we don't need to support propagate configuration errors on attr access.
     let unspecified_resolution = ExecutionPlatformResolution::unspecified();
     let attr_cfg_ctx = AttrConfigurationContextImpl::new(
+        target_label.dupe(),
         &resolved_configuration,
         // We have not yet done exec platform resolution so for now we just use `unspecified`
         // here. We only use this when collecting exec deps and toolchain deps. In both of those
@@ -742,7 +792,9 @@ async fn compute_configured_target_node_no_transition(
         &unspecified_resolution,
         &resolved_transitions,
         &platform_cfgs,
+        Some(target_label.unconfigured().dupe()),
     );
+
     let (gathered_deps, mut errors_and_incompats) = gather_deps(
         partial_target_label,
         target_node.as_ref(),
@@ -883,11 +935,9 @@ async fn compute_configured_target_node_no_transition(
         None => ExecutionPlatformResolution::unspecified(),
     };
 
-    if let Some(ret) = errors_and_incompats.finalize() {
-        return ret;
-    }
+    errors_and_incompats.finalize()?;
 
-    Ok(MaybeCompatible::Compatible(ConfiguredTargetNode::new(
+    ResultMaybeCompatible::Compatible(ConfiguredTargetNode::new(
         target_label.dupe(),
         target_node.dupe(),
         resolved_configuration,
@@ -897,13 +947,13 @@ async fn compute_configured_target_node_no_transition(
         exec_deps,
         platform_cfgs,
         gathered_deps.plugin_lists,
-    )))
+    ))
 }
 
 async fn compute_configured_target_node(
     key: &ConfiguredTargetNodeKey,
     ctx: &mut DiceComputations<'_>,
-) -> buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>> {
+) -> ResultMaybeCompatible<ConfiguredTargetNode> {
     let target_node = ctx
         .get_target_node(key.0.unconfigured())
         .await
@@ -916,16 +966,15 @@ async fn compute_configured_target_node(
 
     match key.0.exec_cfg() {
         None if target_node.is_toolchain_rule() => {
-            return Err(ToolchainDepError::ToolchainRuleUsedAsNormalDep(
-                key.0.unconfigured().dupe(),
-            )
-            .into());
+            return ResultMaybeCompatible::Err(
+                ToolchainDepError::ToolchainRuleUsedAsNormalDep(key.0.unconfigured().dupe()).into(),
+            );
         }
         Some(_) if !target_node.is_toolchain_rule() => {
-            return Err(ToolchainDepError::NonToolchainRuleUsedAsToolchainDep(
-                key.0.unconfigured().dupe(),
-            )
-            .into());
+            return ResultMaybeCompatible::Err(
+                ToolchainDepError::NonToolchainRuleUsedAsToolchainDep(key.0.unconfigured().dupe())
+                    .into(),
+            );
         }
         _ => {}
     }
@@ -956,7 +1005,7 @@ async fn compute_configured_forward_target_node(
     target_node: &TargetNode,
     transition_id: &TransitionId,
     ctx: &mut DiceComputations<'_>,
-) -> buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>> {
+) -> ResultMaybeCompatible<ConfiguredTargetNode> {
     let target_label_before_transition = &key.0;
     let platform_cfgs = compute_platform_cfgs(ctx, target_node.as_ref())
         .boxed()
@@ -972,7 +1021,8 @@ async fn compute_configured_forward_target_node(
         format!("Error resolving configuration deps of `{target_label_before_transition}`")
     })?;
 
-    let attrs = resolve_transition_attrs(
+    let attrs = resolve_transition_input_attrs(
+        target_label_before_transition,
         iter::once(transition_id),
         target_node,
         &matched_cfg_keys,
@@ -1018,34 +1068,32 @@ async fn compute_configured_forward_target_node(
         // to introduce a cycle, we depend on the dice cycle detection to identify it. Alternatively we could directly recompute
         // the node and check the attrs, but we'd still need to request the real node from dice and it doesn't seem worth
         // that extra cost just for a slightly improved error message.
-        if let MaybeCompatible::Compatible(node) = &transitioned_node {
-            // check that the attrs weren't changed first. This should be the only way that we can hit non-idempotence
-            // here and gives a better error than if we just give the general idempotence error.
-            verify_transitioned_attrs(&attrs, matched_cfg_keys.cfg().cfg(), node)?;
 
-            if let Some(forward) = node.forward_target() {
-                return Err(NodeCalculationError::TransitionNotIdempotent(
+        // check that the attrs weren't changed first. This should be the only way that we can hit non-idempotence
+        // here and gives a better error than if we just give the general idempotence error.
+        verify_transitioned_attrs(&attrs, matched_cfg_keys.cfg().cfg(), &transitioned_node)?;
+
+        if let Some(forward) = transitioned_node.forward_target() {
+            return ResultMaybeCompatible::Err(NodeCalculationError::TransitionNotIdempotent(
                     target_label_before_transition.unconfigured().dupe(),
                     target_label_before_transition.cfg().dupe(),
                     target_label_after_transition.cfg().dupe(),
                     forward.label().cfg().dupe(),
-                ))
+                ).into())
                 .internal_error("idempotence should have been enforced by transition idempotence and attr change checks");
-            }
         }
 
-        let configured_target_node = transitioned_node.try_map(|transitioned_node| {
-            ConfiguredTargetNode::new_forward(
-                target_label_before_transition.dupe(),
-                transitioned_node,
-            )
-        })?;
+        let configured_target_node = ConfiguredTargetNode::new_forward(
+            target_label_before_transition.dupe(),
+            transitioned_node,
+        )?;
 
-        Ok(configured_target_node)
+        ResultMaybeCompatible::Compatible(configured_target_node)
     }
 }
 
-#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 pub struct ConfiguredTargetNodeKey(pub ConfiguredTargetLabel);
 
 struct ConfiguredTargetNodeCalculationInstance;
@@ -1087,6 +1135,16 @@ impl LookingUpConfiguredNodeContext {
         res: buck2_error::Result<T>,
         target: ConfiguredTargetLabel,
     ) -> buck2_error::Result<T> {
+        res.compute_context(
+            |parent_ctx: Arc<Self>| Self::new(target.dupe(), Some(parent_ctx)),
+            || Self::new(target.dupe(), None),
+        )
+    }
+
+    pub(crate) fn add_context_rmc<T>(
+        res: ResultMaybeCompatible<T>,
+        target: ConfiguredTargetLabel,
+    ) -> ResultMaybeCompatible<T> {
         res.compute_context(
             |parent_ctx: Arc<Self>| Self::new(target.dupe(), Some(parent_ctx)),
             || Self::new(target.dupe(), None),
@@ -1139,7 +1197,7 @@ impl std::fmt::Display for LookingUpConfiguredNodeContext {
 
 #[async_trait]
 impl Key for ConfiguredTargetNodeKey {
-    type Value = buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>>;
+    type Value = ResultMaybeCompatible<ConfiguredTargetNode>;
     async fn compute(
         &self,
         ctx: &mut DiceComputations,
@@ -1150,21 +1208,25 @@ impl Key for ConfiguredTargetNodeKey {
             .await
             .into_result(ctx)
             .await??;
-        Ok(LookingUpConfiguredNodeContext::add_context(
-            res,
-            self.0.dupe(),
-        )?)
+        LookingUpConfiguredNodeContext::add_context_rmc(res, self.0.dupe())
     }
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         match (x, y) {
-            (Ok(x), Ok(y)) => x == y,
+            (ResultMaybeCompatible::Compatible(x), ResultMaybeCompatible::Compatible(y)) => x == y,
+            (ResultMaybeCompatible::Incompatible(x), ResultMaybeCompatible::Incompatible(y)) => {
+                x == y
+            }
             _ => false,
         }
     }
 
     fn provide<'a>(&'a self, demand: &mut Demand<'a>) {
         demand.provide_value_with(|| BuildSignalsNodeKey::new(self.dupe()))
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        ResultMaybeCompatibleValueSerialize::<ConfiguredTargetNode>::new()
     }
 }
 
@@ -1181,22 +1243,21 @@ impl ConfiguredTargetNodeCalculationImpl for ConfiguredTargetNodeCalculationInst
         ctx: &mut DiceComputations<'_>,
         target: &ConfiguredTargetLabel,
         check_dependency_incompatibility: bool,
-    ) -> buck2_error::Result<MaybeCompatible<ConfiguredTargetNode>> {
-        let maybe_compatible_node = ctx
-            .compute(&ConfiguredTargetNodeKey(target.dupe()))
-            .await??;
+    ) -> ResultMaybeCompatible<ConfiguredTargetNode> {
+        let maybe_compatible_result = ctx.compute(&ConfiguredTargetNodeKey(target.dupe())).await?;
         if check_dependency_incompatibility {
-            if let MaybeCompatible::Incompatible(reason) = &maybe_compatible_node {
+            if let ResultMaybeCompatible::Incompatible(reason) = &maybe_compatible_result {
                 if matches!(
                     &reason.cause,
                     &IncompatiblePlatformReasonCause::Dependency(_)
                 ) {
                     if check_error_on_incompatible_dep(ctx, target.unconfigured_label()).await? {
-                        return Err(reason.to_err());
+                        return ResultMaybeCompatible::Err(reason.to_err());
                     }
                     soft_error!(
                         "dep_only_incompatible_version_two", reason.to_soft_err(),
                         quiet: false,
+                        error_on_oss: true,
                         // Log at least one sample per unique package.
                         low_cardinality_key_for_additional_logview_samples: Some(Box::new(target.unconfigured().pkg())),
                     )?;
@@ -1212,15 +1273,22 @@ impl ConfiguredTargetNodeCalculationImpl for ConfiguredTargetNodeCalculationInst
                                 reason.to_soft_err(),
                                 quiet: true,
                                 task: false,
+                                error_on_oss: true,
                             )?;
                         }
                     }
                 }
             }
         }
-        Ok(maybe_compatible_node)
+        maybe_compatible_result
     }
 }
+
+pagable::static_str!(SECTION_BUCK2 = "buck2");
+pagable::static_str!(PROPERTY_ERROR_ON_DEP_ONLY_INCOMPATIBLE = "error_on_dep_only_incompatible");
+pagable::static_str!(
+    PROPERTY_ERROR_ON_DEP_ONLY_INCOMPATIBLE_EXCLUDED = "error_on_dep_only_incompatible_excluded"
+);
 
 async fn check_error_on_incompatible_dep(
     ctx: &mut DiceComputations<'_>,
@@ -1229,28 +1297,34 @@ async fn check_error_on_incompatible_dep(
     if check_target_enabled_for_config(
         ctx,
         target_label,
-        "buck2",
-        "error_on_dep_only_incompatible_excluded",
+        SECTION_BUCK2,
+        PROPERTY_ERROR_ON_DEP_ONLY_INCOMPATIBLE_EXCLUDED,
     )
     .await?
     {
         return Ok(false);
     }
-    check_target_enabled_for_config(ctx, target_label, "buck2", "error_on_dep_only_incompatible")
-        .await
+    check_target_enabled_for_config(
+        ctx,
+        target_label,
+        SECTION_BUCK2,
+        PROPERTY_ERROR_ON_DEP_ONLY_INCOMPATIBLE,
+    )
+    .await
 }
 
 async fn check_target_enabled_for_config(
     ctx: &mut DiceComputations<'_>,
     target_label: &TargetLabel,
-    section: &'static str,
-    property: &'static str,
+    section: StaticStr,
+    property: StaticStr,
 ) -> buck2_error::Result<bool> {
-    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
     #[display("ConfigPatternCalculation({section}, {property})")]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct ConfigPatternCalculation {
-        section: &'static str,
-        property: &'static str,
+        section: StaticStr,
+        property: StaticStr,
     }
 
     #[async_trait]
@@ -1259,7 +1333,7 @@ async fn check_target_enabled_for_config(
 
         async fn compute(
             &self,
-            mut ctx: &mut DiceComputations,
+            ctx: &mut DiceComputations,
             _cancellation: &CancellationContext,
         ) -> Self::Value {
             let cell_resolver = ctx.get_cell_resolver().await?;
@@ -1267,9 +1341,9 @@ async fn check_target_enabled_for_config(
             let alias_resolver = ctx.get_cell_alias_resolver(root_cell).await?;
             let root_conf = ctx.get_legacy_root_config_on_dice().await?;
             let patterns: Vec<String> = root_conf
-                .view(&mut ctx)
+                .view(ctx)
                 .parse_list(BuckconfigKeyRef {
-                    section: self.section,
+                    section: &self.section,
                     property: &self.property,
                 })?
                 .unwrap_or_default();
@@ -1292,10 +1366,17 @@ async fn check_target_enabled_for_config(
                 _ => false,
             }
         }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            OkPagableValueSerialize::<Self::Value>::new()
+        }
     }
 
     let patterns = ctx
-        .compute(&ConfigPatternCalculation { section, property })
+        .compute(&ConfigPatternCalculation {
+            section: section.into(),
+            property: property.into(),
+        })
         .await??;
     for pattern in patterns.iter() {
         if pattern.matches(target_label) {
@@ -1310,7 +1391,8 @@ async fn get_dep_only_incompatible_custom_soft_error(
     ctx: &mut DiceComputations<'_>,
     target_label: &TargetLabel,
 ) -> buck2_error::Result<Option<Vec<ArcStr>>> {
-    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct GetDepOnlyIncompatibleInfo;
 
     #[async_trait]
@@ -1319,14 +1401,14 @@ async fn get_dep_only_incompatible_custom_soft_error(
 
         async fn compute(
             &self,
-            mut ctx: &mut DiceComputations,
+            ctx: &mut DiceComputations,
             _cancellation: &CancellationContext,
         ) -> Self::Value {
             let cell_resolver = ctx.get_cell_resolver().await?;
             let root_cell = cell_resolver.root_cell();
             let alias_resolver = ctx.get_cell_alias_resolver(root_cell).await?;
             let root_conf = ctx.get_legacy_root_config_on_dice().await?;
-            let Some(target) = root_conf.view(&mut ctx).parse::<String>(BuckconfigKeyRef {
+            let Some(target) = root_conf.view(ctx).parse::<String>(BuckconfigKeyRef {
                 section: "buck2",
                 property: "dep_only_incompatible_info",
             })?
@@ -1353,6 +1435,10 @@ async fn get_dep_only_incompatible_custom_soft_error(
                 (Ok(x), Ok(y)) => x == y,
                 _ => false,
             }
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            OkPagableValueSerialize::<Self::Value>::new()
         }
     }
 

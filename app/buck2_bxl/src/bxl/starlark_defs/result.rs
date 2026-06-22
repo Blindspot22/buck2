@@ -16,7 +16,6 @@ use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_complex_values;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
@@ -49,7 +48,8 @@ enum BxlResultError {
     // TODO(nero): implement Serialize for StarlarkError
     NoSerialize,
     Allocative,
-    Trace
+    Trace,
+    starlark::StarlarkPagablePanic // badbadbad!!! todo!("bxl")
 )]
 #[display("bxl.Error({})", StarlarkStr::repr(&format!("{err:?}")))]
 pub(crate) struct StarlarkError {
@@ -64,11 +64,12 @@ impl StarlarkError {
 
 starlark_simple_value!(StarlarkError);
 
+starlark::methods_static!(BXL_ERROR_METHODS = error_methods);
+
 #[starlark_value(type = "bxl.Error")]
 impl<'v> StarlarkValue<'v> for StarlarkError {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(error_methods)
+        Some(BXL_ERROR_METHODS.methods())
     }
 }
 
@@ -89,7 +90,8 @@ fn error_methods(builder: &mut MethodsBuilder) {
     Trace,
     Freeze,
     ProvidesStaticType,
-    Allocative
+    Allocative,
+    starlark::StarlarkPagablePanic // badbadbad!!! todo!("bxl")
 )]
 #[repr(C)]
 pub(crate) enum StarlarkResultGen<T> {
@@ -126,10 +128,11 @@ where
     where
         Self: Sized,
     {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(result_methods)
+        Some(BXL_RESULT_METHODS.methods())
     }
 }
+
+starlark::methods_static!(BXL_RESULT_METHODS = result_methods);
 
 #[starlark_module]
 fn result_methods(builder: &mut MethodsBuilder) {

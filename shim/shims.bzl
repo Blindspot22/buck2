@@ -17,9 +17,7 @@ load("@shim//build_defs/lib:oss.bzl", "translate_target")
 
 prelude = native
 
-_C_SOURCE_EXTS = (
-    ".c",
-)
+_C_SOURCE_EXTS = (".c",)
 
 _CPP_SOURCE_EXTS = (
     ".cc",
@@ -77,12 +75,7 @@ def _get_headers_from_sources(srcs):
     ]
 
     # For e.g. foo.cpp grab a glob on foo.h, foo-inl.h, etc
-    headers = [
-        base + header_ext
-        for base, ext in split_srcs
-        if ext in _SOURCE_EXTS
-        for header_ext in _HEADER_SUFFIXES
-    ]
+    headers = [base + header_ext for base, ext in split_srcs if ext in _SOURCE_EXTS for header_ext in _HEADER_SUFFIXES]
 
     # Avoid a warning for an empty glob pattern if there are no headers.
     return glob(headers) if headers else []
@@ -113,42 +106,32 @@ def _update_headers_with_src_headers(src_headers, out_headers):
         out_headers.update({k: k for k in src_headers})
     return out_headers
 
-def prebuilt_cpp_library(
-        name,
-        headers = None,
-        linker_flags = None,
-        private_linker_flags = None,
-        **kwargs):
-    prelude.prebuilt_cxx_library(
-        name = name,
-        exported_headers = headers,
-        exported_linker_flags = linker_flags,
-        linker_flags = private_linker_flags,
-        **kwargs
-    )
+def prebuilt_cpp_library(name, headers = None, linker_flags = None, private_linker_flags = None, **kwargs):
+    prelude.prebuilt_cxx_library(name = name, exported_headers = headers, exported_linker_flags = linker_flags, linker_flags = private_linker_flags, **kwargs)
 
 def cpp_library(
-        name,
-        deps = [],
-        srcs = [],
-        external_deps = [],
-        exported_deps = [],
-        exported_external_deps = [],
-        undefined_symbols = None,
-        visibility = ["PUBLIC"],
-        auto_headers = None,
-        modular_headers = None,
-        arch_compiler_flags = None,
-        labels = None,
-        linker_flags = None,
-        private_linker_flags = None,
-        exported_linker_flags = None,
-        headers = None,
-        private_headers = None,
-        propagated_pp_flags = (),
-        feature = None,
-        preferred_linkage = None,
-        **kwargs):
+    name,
+    deps = [],
+    srcs = [],
+    external_deps = [],
+    exported_deps = [],
+    exported_external_deps = [],
+    undefined_symbols = None,
+    visibility = ["PUBLIC"],
+    auto_headers = None,
+    modular_headers = None,
+    arch_compiler_flags = None,
+    labels = None,
+    linker_flags = None,
+    private_linker_flags = None,
+    exported_linker_flags = None,
+    headers = None,
+    private_headers = None,
+    propagated_pp_flags = (),
+    feature = None,
+    preferred_linkage = None,
+    **kwargs,
+):
     base_path = native.package_name()
     oss_depends_on_folly = read_bool("oss_depends_on", "folly", False)
     header_base_path = base_path
@@ -193,26 +176,27 @@ def cpp_library(
         exported_linker_flags = linker_flags,
         linker_flags = private_linker_flags,
         header_namespace = header_base_path,
-        **kwargs
+        **kwargs,
     )
 
 def cpp_unittest(
-        name,
-        deps = [],
-        external_deps = [],
-        visibility = ["PUBLIC"],
-        supports_static_listing = None,
-        allocator = None,
-        owner = None,
-        labels = None,
-        emails = None,
-        extract_helper_lib = None,
-        compiler_specific_flags = None,
-        default_strip_mode = None,
-        resources = {},
-        test_main = None,
-        versions = None,
-        **kwargs):
+    name,
+    deps = [],
+    external_deps = [],
+    visibility = ["PUBLIC"],
+    supports_static_listing = None,
+    allocator = None,
+    owner = None,
+    labels = None,
+    emails = None,
+    extract_helper_lib = None,
+    compiler_specific_flags = None,
+    default_strip_mode = None,
+    resources = {},
+    test_main = None,
+    versions = None,
+    **kwargs,
+):
     _unused = (supports_static_listing, allocator, owner, labels, emails, extract_helper_lib, compiler_specific_flags, default_strip_mode, versions)  # @unused
     if test_main != None:
         deps = deps + [test_main]
@@ -222,60 +206,44 @@ def cpp_unittest(
         deps = deps + CPP_UNITTEST_DEPS
 
     prelude.cxx_test(
-        name = name,
-        deps = _fix_deps(deps + external_deps_to_targets(external_deps)),
-        visibility = visibility,
-        resources = _fix_resources(resources),
-        **kwargs
+        name = name, deps = _fix_deps(deps + external_deps_to_targets(external_deps)), visibility = visibility, resources = _fix_resources(resources), **kwargs
     )
 
 def cpp_binary(
-        name,
-        deps = [],
-        external_deps = [],
-        visibility = ["PUBLIC"],
-        dlopen_enabled = None,
-        compiler_specific_flags = None,
-        os_linker_flags = None,
-        allocator = None,
-        modules = None,
-        **kwargs):
+    name,
+    deps = [],
+    external_deps = [],
+    visibility = ["PUBLIC"],
+    dlopen_enabled = None,
+    compiler_specific_flags = None,
+    os_linker_flags = None,
+    allocator = None,
+    modules = None,
+    **kwargs,
+):
     _unused = (dlopen_enabled, compiler_specific_flags, os_linker_flags, allocator, modules)  # @unused
-    prelude.cxx_binary(
-        name = name,
-        deps = _fix_deps(deps + external_deps_to_targets(external_deps)),
-        visibility = visibility,
-        **kwargs
-    )
+    prelude.cxx_binary(name = name, deps = _fix_deps(deps + external_deps_to_targets(external_deps)), visibility = visibility, **kwargs)
 
-def java_binary(
-        name,
-        jar_style = None,
-        runtime = None,
-        *args,
-        **kwargs):
+def java_binary(name, jar_style = None, runtime = None, *args, **kwargs):
     _unused = (jar_style, runtime)  # @unused
-    return prelude.java_binary(
-        name = name,
-        *args,
-        **kwargs
-    )
+    return prelude.java_binary(name = name, *args, **kwargs)
 
 def rust_library(
-        name,
-        edition = None,
-        rustc_flags = [],
-        deps = [],
-        named_deps = None,
-        test_deps = None,
-        test_env = None,
-        autocargo = None,
-        unittests = None,
-        mapped_srcs = {},
-        cpp_deps = None,
-        cxx_bridge = None,
-        visibility = ["PUBLIC"],
-        **kwargs):
+    name,
+    edition = None,
+    rustc_flags = [],
+    deps = [],
+    named_deps = None,
+    test_deps = None,
+    test_env = None,
+    autocargo = None,
+    unittests = None,
+    mapped_srcs = {},
+    cpp_deps = None,
+    cxx_bridge = None,
+    visibility = ["PUBLIC"],
+    **kwargs,
+):
     _unused = (test_deps, test_env, named_deps, autocargo, unittests, visibility, cpp_deps, cxx_bridge)  # @unused
     deps = _fix_deps(deps)
     mapped_srcs = _maybe_select_map(mapped_srcs, _fix_mapped_srcs)
@@ -290,72 +258,51 @@ def rust_library(
         deps = deps,
         visibility = visibility,
         mapped_srcs = mapped_srcs,
-        **kwargs
+        **kwargs,
     )
 
 def rust_binary(
-        name,
-        edition = None,
-        rustc_flags = [],
-        deps = [],
-        autocargo = None,
-        unittests = None,
-        allocator = None,
-        default_strip_mode = None,
-        visibility = ["PUBLIC"],
-        **kwargs):
+    name, edition = None, rustc_flags = [], deps = [], autocargo = None, unittests = None, allocator = None, default_strip_mode = None, visibility = ["PUBLIC"], **kwargs
+):
     _unused = (unittests, allocator, default_strip_mode, autocargo)  # @unused
     deps = _fix_deps(deps)
 
     # @lint-ignore BUCKLINT: avoid "Direct usage of native rules is not allowed."
     prelude.rust_binary(
-        name = name,
-        edition = edition or _default_rust_edition(),
-        rustc_flags = rustc_flags + [_CFG_BUCK_BUILD],
-        deps = deps,
-        visibility = visibility,
-        **kwargs
+        name = name, edition = edition or _default_rust_edition(), rustc_flags = rustc_flags + [_CFG_BUCK_BUILD], deps = deps, visibility = visibility, **kwargs
     )
 
-def rust_unittest(
-        name,
-        edition = None,
-        rustc_flags = [],
-        deps = [],
-        visibility = ["PUBLIC"],
-        **kwargs):
+def rust_unittest(name, edition = None, rustc_flags = [], deps = [], visibility = ["PUBLIC"], **kwargs):
     deps = _fix_deps(deps)
 
     prelude.rust_test(
-        name = name,
-        edition = edition or _default_rust_edition(),
-        rustc_flags = rustc_flags + [_CFG_BUCK_BUILD],
-        deps = deps,
-        visibility = visibility,
-        **kwargs
+        name = name, edition = edition or _default_rust_edition(), rustc_flags = rustc_flags + [_CFG_BUCK_BUILD], deps = deps, visibility = visibility, **kwargs
     )
 
 def rust_protobuf_library(
-        name,
-        srcs,
-        build_script,
-        protos = None,  # Pass a list of files. They'll be placed in the cwd. Prefer using proto_srcs.
-        deps = None,
-        test_deps = None,
-        doctests = True,
-        build_env = None,
-        proto_srcs = None,
-        crate_name = None):  # Use a proto_srcs() target, path is exposed as BUCK_PROTO_SRCS.
+    name,
+    srcs,
+    build_script,
+    protos = None,  # Pass a list of files. They'll be placed in the cwd. Prefer using proto_srcs.
+    deps = None,
+    test_deps = None,
+    doctests = True,
+    build_env = None,
+    proto_srcs = None,
+    crate_name = None,
+):  # Use a proto_srcs() target, path is exposed as BUCK_PROTO_SRCS.
     _rust_protobuf_library(
         name,
         srcs,
         build_script,
         "buck2_protoc_dev",
-        "prost",
-        "prost-types",
-        "tonic",
+        "0.14",
         protos,
-        deps,
+        [
+            "fbsource//third-party/rust:tonic",
+            "fbsource//third-party/rust:tonic-prost",
+        ]
+        + (deps or []),
         test_deps,
         doctests,
         build_env,
@@ -363,82 +310,53 @@ def rust_protobuf_library(
         crate_name,
     )
 
-def rust_protobuf_library_prost_0134(
-        name,
-        srcs,
-        build_script,
-        protos = None,  # Pass a list of files. They'll be placed in the cwd. Prefer using proto_srcs.
-        deps = None,
-        test_deps = None,
-        doctests = True,
-        build_env = None,
-        proto_srcs = None,
-        crate_name = None):
-    # Use a proto_srcs() target, path is exposed as BUCK_PROTO_SRCS.
-    _rust_protobuf_library(
-        name,
-        srcs,
-        build_script,
-        "buck2_protoc_dev-tonic-0-12-3",
-        "prost-0-13-4",
-        "prost-types-0-13-4",
-        "tonic-0-12-3",
-        protos,
-        deps,
-        test_deps,
-        doctests,
-        build_env,
-        proto_srcs,
-        crate_name,
+    native.alias(
+        name = name,
+        actual = ":" + name + "_prost",
+        visibility = ["PUBLIC"],
     )
 
 def _rust_protobuf_library(
-        name,
-        srcs,
-        build_script,
-        buck2_protoc_dev,
-        versioned_prost_target,
-        versioned_prost_types_target,
-        versioned_tonic_target,
-        protos,  # Pass a list of files. They'll be placed in the cwd. Prefer using proto_srcs.
-        deps,
-        test_deps,
-        doctests,
-        build_env,
-        proto_srcs,
-        crate_name):  # Use a proto_srcs() target, path is exposed as BUCK_PROTO_SRCS.
-    build_name = name + "-build"
-    proto_name = name + "-proto"
-
-    deps = (deps or []) + [
-        "fbsource//third-party/rust:" + versioned_prost_target,
-        "fbsource//third-party/rust:" + versioned_prost_types_target,
-        "fbsource//third-party/rust:" + versioned_tonic_target,
-    ]
+    name,
+    srcs,
+    build_script,
+    buck2_protoc_dev,
+    prost_version,
+    protos,  # Pass a list of files. They'll be placed in the cwd. Prefer using proto_srcs.
+    deps,
+    test_deps,
+    doctests,
+    build_env,
+    proto_srcs,
+    crate_name,
+):  # Use a proto_srcs() target, path is exposed as BUCK_PROTO_SRCS.
+    versioned_prost_target = {
+        "0.14": "prost",
+    }[prost_version]
+    build_name = name + "-build-" + versioned_prost_target
+    proto_name = name + "-proto-" + versioned_prost_target
 
     rust_binary(
         name = build_name,
         srcs = [build_script],
         crate_root = build_script,
         deps = [
-            "fbsource//third-party/rust:" + versioned_tonic_target,
             "//buck2/app/buck2_protoc_dev:" + buck2_protoc_dev,
         ],
     )
 
     build_env = build_env or {}
-    build_env.update(
-        {
-            "PROTOC": "$(exe shim//third-party/proto:protoc)",
-            "PROTOC_INCLUDE": "$(location shim//third-party/proto:google_protobuf)",
-        },
-    )
+    build_env.update({
+        "PROTOC": "$(exe shim//third-party/proto:protoc)",
+        "PROTOC_INCLUDE": "$(location shim//third-party/proto:google_protobuf)",
+    })
     if proto_srcs:
         build_env["BUCK_PROTO_SRCS"] = "$(location {})".format(proto_srcs)
 
     prelude.genrule(
         name = proto_name,
-        srcs = (protos or []) + [
+        srcs = (protos or [])
+        + [
             "shim//third-party/proto:google_protobuf",
         ],
         out = ".",
@@ -446,17 +364,27 @@ def _rust_protobuf_library(
         env = build_env,
     )
 
+    new_deps = [
+        {
+            "0.14": "fbsource//third-party/rust:prost",
+        }[prost_version]
+    ] + (deps or [])
+
     rust_library(
-        name = name,
+        name = name + "_" + versioned_prost_target,
+        crate = crate_name or name,
         srcs = srcs,
         doctests = doctests,
         env = {
             # This is where prost looks for generated .rs files
             "OUT_DIR": "$(location :{})".format(proto_name),
         },
+        named_deps = {
+            "generated_prost_target": ":{}".format(proto_name),
+        },
+        deps = new_deps,
         test_deps = test_deps,
-        deps = deps,
-        crate = crate_name or name,
+        rustc_flags = ["-Aunused-crate-dependencies"],
     )
 
 ProtoSrcsInfo = provider(fields = ["srcs"])
@@ -468,7 +396,7 @@ def _proto_srcs_impl(ctx):
             if src.basename in srcs:
                 fail("Duplicate src:", src.basename)
             srcs[src.basename] = src
-    out = ctx.actions.copied_dir(ctx.attrs.name, srcs)
+    out = ctx.actions.copied_dir(ctx.attrs.name, srcs, has_content_based_path = False)
     return [DefaultInfo(default_output = out), ProtoSrcsInfo(srcs = srcs.values())]
 
 proto_srcs = rule(
@@ -479,19 +407,10 @@ proto_srcs = rule(
     },
 )
 
-def ocaml_binary(
-        name,
-        deps = [],
-        visibility = ["PUBLIC"],
-        **kwargs):
+def ocaml_binary(name, deps = [], visibility = ["PUBLIC"], **kwargs):
     deps = _fix_deps(deps)
 
-    prelude.ocaml_binary(
-        name = name,
-        deps = deps,
-        visibility = visibility,
-        **kwargs
-    )
+    prelude.ocaml_binary(name = name, deps = deps, visibility = visibility, **kwargs)
 
 _CFG_BUCK_BUILD = "--cfg=buck_build"
 
@@ -532,22 +451,14 @@ def _default_rust_edition():
     if package:
         split = package.split("/")
         for i in range(len(split)):
-            parent_directory = "/".join(split[:len(split) - i])
+            parent_directory = "/".join(split[: len(split) - i])
             edition = read_config("rust", "default_edition:" + parent_directory)
             if edition != None:
                 return edition
 
     return read_config("rust", "default_edition")
 
-def thrift_library(
-        name,
-        thrift_srcs,
-        languages,
-        deps = [],
-        py_base_module = None,
-        rust_deps = [],
-        thrift_rust_options = [],
-        **kwargs):
+def thrift_library(name, thrift_srcs, languages, deps = [], py_base_module = None, rust_deps = [], thrift_rust_options = [], **kwargs):
     for l in languages:
         if False:
             pass

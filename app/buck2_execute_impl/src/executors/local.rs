@@ -63,6 +63,7 @@ use buck2_execute::execute::request::CommandExecutionOutput;
 use buck2_execute::execute::request::CommandExecutionOutputRef;
 use buck2_execute::execute::request::CommandExecutionRequest;
 use buck2_execute::execute::request::ExecutorPreference;
+use buck2_execute::execute::request::NetworkAccess;
 use buck2_execute::execute::result::CommandExecutionMetadata;
 use buck2_execute::execute::result::CommandExecutionResult;
 use buck2_execute::knobs::ExecutorGlobalKnobs;
@@ -82,6 +83,7 @@ use buck2_fs::async_fs_util;
 use buck2_fs::fs_util;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_fs::paths::abs_path::AbsPath;
+use buck2_hash::BuckIndexMap;
 use buck2_resource_control::ActionFreezeEvent;
 use buck2_resource_control::ActionFreezeEventReceiver;
 use buck2_resource_control::CommandType;
@@ -104,7 +106,6 @@ use gazebo::prelude::*;
 use host_sharing::HostSharingBroker;
 use host_sharing::HostSharingRequirements;
 use host_sharing::host_sharing::HostSharingGuard;
-use indexmap::IndexMap;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::info;
 
@@ -190,11 +191,12 @@ impl LocalExecutor {
         disable_miniperf: bool,
         cgroup: Option<CgroupPathBuf>,
         freeze_rx: impl ActionFreezeEventReceiver,
+        network_access: Option<NetworkAccess>,
     ) -> impl futures::future::Future<Output = buck2_error::Result<CommandResult>> + Send + 'a {
         async move {
             let working_directory = self.root.join_cow(working_directory);
 
-            match &self.forkserver {
+            let result = match &self.forkserver {
                 #[cfg(unix)]
                 ForkserverAccess::Client(forkserver) => {
                     unix::exec_via_forkserver(
@@ -209,11 +211,13 @@ impl LocalExecutor {
                         self.knobs.enable_miniperf && !disable_miniperf,
                         cgroup,
                         freeze_rx,
+                        network_access,
                     )
                     .await
                 }
                 ForkserverAccess::None => {
                     let _disable_miniperf = disable_miniperf;
+                    let _network_access = network_access;
                     let exe = maybe_absolutize_exe(exe, &working_directory)?;
                     let mut cmd = background_command(exe.as_ref());
                     cmd.current_dir(working_directory.as_path());
@@ -244,7 +248,22 @@ impl LocalExecutor {
                     decode_command_event_stream(stream).await
                 }
                 .with_buck_error_context(|| format!("Failed to gather output from command: {exe}")),
+            }?;
+
+            if !result.orphan_processes.is_empty() {
+                buck2_events::dispatch::instant_event(buck2_data::OrphanProcessesKilled {
+                    orphan_processes: result
+                        .orphan_processes
+                        .iter()
+                        .map(|o| buck2_data::orphan_processes_killed::OrphanProcess {
+                            pid: o.pid,
+                            comm: o.comm.clone(),
+                        })
+                        .collect(),
+                });
             }
+
+            buck2_error::Ok(result)
         }
     }
 
@@ -261,6 +280,7 @@ impl LocalExecutor {
         env: &[(&str, StrOrOsStr<'_>)],
         cgroup: Option<CgroupPathBuf>,
         freeze_rx: impl ActionFreezeEventReceiver,
+        network_access: Option<NetworkAccess>,
     ) -> Result<
         (
             TimeSpan,
@@ -283,7 +303,7 @@ impl LocalExecutor {
                         self.blocking_executor.dupe(),
                         cancellations,
                     ),
-                    prep_scratch_path(&scratch_path, &self.artifact_fs),
+                    prep_scratch_path(scratch_path, &self.artifact_fs),
                 )
                 .buck_error_context("Error creating output directories")?;
 
@@ -353,6 +373,7 @@ impl LocalExecutor {
                         request.disable_miniperf(),
                         cgroup,
                         freeze_rx,
+                        network_access,
                     )
                     .await
                 };
@@ -382,6 +403,7 @@ impl LocalExecutor {
         args: &[String],
         worker: Option<&WorkerHandle>,
         env: &[(&str, StrOrOsStr<'_>)],
+        network_access: Option<NetworkAccess>,
     ) -> Result<
         (
             TimeSpan,
@@ -391,28 +413,29 @@ impl LocalExecutor {
         ),
         CommandExecutionResult,
     > {
-        let (cgroup_session, mut start_future) = if worker.is_some() {
-            (None, None)
-        } else {
-            let command_type = if request.is_test() {
-                CommandType::Test
+        let (cgroup_session, mut start_future) =
+            if worker.is_some() || request.skip_resource_control() {
+                (None, None)
             } else {
-                CommandType::Build
+                let command_type = if request.is_test() {
+                    CommandType::Test
+                } else {
+                    CommandType::Build
+                };
+                let disable_kill_and_retry_suspend = !request.outputs_cleanup;
+                match ActionCgroupSession::maybe_create(
+                    self.memory_tracker.dupe(),
+                    command_type,
+                    Some(action_digest.to_string()),
+                    disable_kill_and_retry_suspend,
+                )
+                .await
+                {
+                    Ok(Some((session, start_future))) => (Some(session), Some(start_future)),
+                    Ok(None) => (None, None),
+                    Err(e) => return Err(manager.error("initializing_resource_control", e)),
+                }
             };
-            let disable_kill_and_retry_suspend = !request.outputs_cleanup;
-            match ActionCgroupSession::maybe_create(
-                self.memory_tracker.dupe(),
-                command_type,
-                Some(action_digest.to_string()),
-                disable_kill_and_retry_suspend,
-            )
-            .await
-            {
-                Ok(Some((session, start_future))) => (Some(session), Some(start_future)),
-                Ok(None) => (None, None),
-                Err(e) => return Err(manager.error("initializing_resource_control", e)),
-            }
-        };
 
         let liveliness_observer: Arc<dyn LivelinessObserver> = Arc::new(liveliness_observer);
 
@@ -469,6 +492,7 @@ impl LocalExecutor {
                     env,
                     cgroup_session.as_ref().map(|s| s.path.clone()),
                     freeze_rx,
+                    network_access,
                 )
                 .await;
 
@@ -509,6 +533,7 @@ impl LocalExecutor {
         cancellations: &CancellationContext,
         digest_config: DigestConfig,
         local_resource_holders: &[LocalResourceHolder],
+        network_access: Option<NetworkAccess>,
     ) -> CommandExecutionResult {
         let args = &request.all_args_vec();
         if args.is_empty() {
@@ -676,6 +701,7 @@ impl LocalExecutor {
                 args,
                 worker.as_deref(),
                 &env,
+                network_access,
             )
             .await
         {
@@ -688,6 +714,7 @@ impl LocalExecutor {
             stdout,
             stderr,
             cgroup_result,
+            ..
         } = res;
 
         let std_streams = CommandStdStreams::Local { stdout, stderr };
@@ -710,6 +737,14 @@ impl LocalExecutor {
                 exit_code,
                 execution_stats,
             } => {
+                // N.B. calculate_and_declare_output_values ignores missing
+                // output files in order to guarantee we run the accounting
+                // checks below. If the output is missing because the action
+                // failed, we'll run the `exit_code != 0` branch below, allowing
+                // us to detect corrupted materializer state in check_inputs. If
+                // the output is just missing because the action didn't produce
+                // it, that's detected when BuckActionExecutor.execute validates
+                // that all outputs were actually returned.
                 let (outputs, hashing_time) = match self
                     .calculate_and_declare_output_values(request, digest_config)
                     .boxed()
@@ -854,7 +889,10 @@ impl LocalExecutor {
         &self,
         request: &CommandExecutionRequest,
         digest_config: DigestConfig,
-    ) -> buck2_error::Result<(IndexMap<CommandExecutionOutput, ArtifactValue>, HashingInfo)> {
+    ) -> buck2_error::Result<(
+        BuckIndexMap<CommandExecutionOutput, ArtifactValue>,
+        HashingInfo,
+    )> {
         let mut builder = inputs_directory(request.inputs(), digest_config, &self.artifact_fs)?;
 
         // Read outputs from disk and add them to the builder
@@ -886,7 +924,7 @@ impl LocalExecutor {
         }
 
         let mut to_declare = vec![];
-        let mut mapped_outputs = IndexMap::with_capacity(entries.len());
+        let mut mapped_outputs = BuckIndexMap::with_capacity(entries.len());
         let mut configuration_path_to_content_based_path_symlinks = vec![];
         let mut output_path_to_content_based_path_copies = vec![];
 
@@ -894,10 +932,7 @@ impl LocalExecutor {
             let value = extract_artifact_value(&builder, &output_path, digest_config)?;
             if let Some(value) = value {
                 match output {
-                    CommandExecutionOutput::BuildArtifact {
-                        supports_incremental_remote,
-                        ..
-                    } => {
+                    CommandExecutionOutput::BuildArtifact { .. } => {
                         // For content-based paths, things are a bit complicated here, because (a) the action
                         // wrote outputs at "placeholder" paths, not the final content-based paths (because
                         // they are not know until the output is produced), and (b) other actions can declare
@@ -930,14 +965,18 @@ impl LocalExecutor {
                                 &configuration_hash_path,
                             )?;
                             let symlink_value = builder.build(&configuration_hash_path)?;
-                            configuration_path_to_content_based_path_symlinks
-                                .push((configuration_hash_path, symlink_value));
-
+                            let cfg_path = if self.materializer.is_eager_materialization_enabled() {
+                                Some(configuration_hash_path.clone())
+                            } else {
+                                None
+                            };
                             to_declare.push(DeclareArtifactPayload {
                                 path: output_path.clone(),
                                 artifact: value.dupe(),
-                                persist_full_directory_structure: supports_incremental_remote,
+                                configuration_path: None,
                             });
+                            configuration_path_to_content_based_path_symlinks
+                                .push((configuration_hash_path, symlink_value));
                             output_path_to_content_based_path_copies.push((
                                 hashed_path.clone(),
                                 value.dupe(),
@@ -947,12 +986,13 @@ impl LocalExecutor {
                                     dest_entry: value.entry().dupe().map_dir(|d| d.as_immutable()),
                                     executable_bit_override: None,
                                 }],
+                                cfg_path,
                             ));
                         } else {
                             to_declare.push(DeclareArtifactPayload {
                                 path: output_path,
                                 artifact: value.dupe(),
-                                persist_full_directory_structure: supports_incremental_remote,
+                                configuration_path: None,
                             });
                         }
                     }
@@ -974,16 +1014,16 @@ impl LocalExecutor {
             .collect();
         self.materializer.declare_existing(to_declare).await?;
         buck2_util::future::try_join_all(output_path_to_content_based_path_copies.into_iter().map(
-            |(path, value, copied_artifacts)| {
+            |(path, value, copied_artifacts, cfg_path)| {
                 self.materializer
-                    .declare_copy(path, value, copied_artifacts)
+                    .declare_copy(path, value, copied_artifacts, cfg_path)
             },
         ))
         .await?;
         buck2_util::future::try_join_all(
             configuration_path_to_content_based_path_symlinks
                 .into_iter()
-                .map(|(path, value)| self.materializer.declare_copy(path, value, vec![])),
+                .map(|(path, value)| self.materializer.declare_copy(path, value, vec![], None)),
         )
         .await?;
 
@@ -1135,7 +1175,7 @@ impl LocalExecutor {
             .iter()
             .map(|path| {
                 self.artifact_fs
-                    .resolve_build(&path, Some(&ContentBasedPathHash::OutputArtifact))
+                    .resolve_build(path, Some(&ContentBasedPathHash::OutputArtifact))
             })
             .collect::<buck2_error::Result<Vec<_>>>()?;
 
@@ -1155,7 +1195,7 @@ impl LocalExecutor {
             .buck_error_context("Failed to cleanup output directory")?;
 
         if let Some(state) =
-            get_incremental_path_map(&self.incremental_db_state, &request.run_action_key())
+            get_incremental_path_map(&self.incremental_db_state, request.run_action_key())
         {
             let mut copy_futs = Vec::new();
 
@@ -1257,6 +1297,7 @@ impl PreparedCommandExecutor for LocalExecutor {
                     cancellations,
                     *digest_config,
                     &local_resource_holders,
+                    prepared_action.network_access,
                 )
             })
             .await
@@ -1264,6 +1305,10 @@ impl PreparedCommandExecutor for LocalExecutor {
 
     fn is_local_execution_possible(&self, _executor_preference: ExecutorPreference) -> bool {
         true
+    }
+
+    fn is_full_hybrid_enabled(&self) -> bool {
+        false
     }
 }
 
@@ -1378,7 +1423,7 @@ pub async fn materialize_inputs(
     buck2_util::future::try_join_all(
         configuration_path_to_content_based_path_symlinks
             .into_iter()
-            .map(|(path, value)| materializer.declare_copy(path, value, vec![])),
+            .map(|(path, value)| materializer.declare_copy(path, value, vec![], None)),
     )
     .await?;
 
@@ -1642,6 +1687,7 @@ mod unix {
         enable_miniperf: bool,
         cgroup_path: Option<CgroupPathBuf>,
         freeze_rx: impl ActionFreezeEventReceiver,
+        network_access: Option<NetworkAccess>,
     ) -> buck2_error::Result<CommandResult> {
         let exe = exe.as_ref();
 
@@ -1660,6 +1706,7 @@ mod unix {
             std_redirects: None,
             graceful_shutdown_timeout_s: None,
             command_cgroup: cgroup_path.map(|p| p.to_string()),
+            network_access: network_access.map(|n| n.into()),
         };
         apply_local_execution_environment(&mut req, working_directory, env, env_inheritance);
         forkserver
@@ -1717,7 +1764,6 @@ mod unix {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::str;
 
     use assert_matches::assert_matches;
@@ -1730,6 +1776,7 @@ mod tests {
     use buck2_core::fs::project::ProjectRootTemp;
     use buck2_execute::execute::blocking::testing::DummyBlockingExecutor;
     use buck2_execute::materialize::nodisk::NoDiskMaterializer;
+    use buck2_hash::StdBuckHashMap;
     use host_sharing::HostSharingStrategy;
 
     use super::*;
@@ -1781,7 +1828,7 @@ mod tests {
             .exec(
                 interpreter,
                 ["-c", "echo $PWD; pwd"],
-                &HashMap::<String, String>::default(),
+                &StdBuckHashMap::<String, String>::default(),
                 ProjectRelativePath::empty(),
                 None,
                 None,
@@ -1789,6 +1836,7 @@ mod tests {
                 false,
                 None,
                 futures::stream::pending(),
+                None,
             )
             .await?;
         assert_matches!(status, GatherOutputStatus::Finished { exit_code, .. } if exit_code == 0);
@@ -1814,11 +1862,16 @@ mod tests {
         let (executor, _, _tmpdir) = test_executor()?;
 
         let interpreter = if cfg!(windows) { "powershell" } else { "sh" };
+        let command = if cfg!(windows) {
+            "Start-Sleep -Seconds 2"
+        } else {
+            "sleep 2"
+        };
         let CommandResult { status, .. } = executor
             .exec(
                 interpreter,
-                ["-c", "sleep 2s"],
-                &HashMap::<String, String>::default(),
+                ["-c", command],
+                &StdBuckHashMap::<String, String>::default(),
                 ProjectRelativePath::empty(),
                 Some(Duration::from_secs(1)),
                 None,
@@ -1826,6 +1879,7 @@ mod tests {
                 false,
                 None,
                 futures::stream::pending(),
+                None,
             )
             .await?;
         assert_matches!(status, GatherOutputStatus::TimedOut ( duration ) if duration == Duration::from_secs(1));
@@ -1844,7 +1898,7 @@ mod tests {
             .exec(
                 "sh",
                 ["-c", "echo $USER"],
-                &HashMap::<String, String>::default(),
+                &StdBuckHashMap::<String, String>::default(),
                 ProjectRelativePath::empty(),
                 None,
                 Some(&EnvironmentInheritance::empty()),
@@ -1852,6 +1906,7 @@ mod tests {
                 false,
                 None,
                 futures::stream::pending(),
+                None,
             )
             .await?;
         assert_matches!(status, GatherOutputStatus::Finished { exit_code, .. } if exit_code == 0);

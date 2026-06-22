@@ -16,11 +16,12 @@ use allocative::Allocative;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_fs::paths::relative_path::Component;
+use buck2_fs::paths::relative_path::RelativePath;
 use dupe::Dupe;
 use once_cell::sync::Lazy;
 use pagable::Pagable;
 use regex::Regex;
-use relative_path::RelativePath;
 use serde::Serialize;
 
 use crate::cells::CellAliasResolver;
@@ -67,7 +68,7 @@ enum TargetPatternParseError {
     #[error("Package is empty")]
     PackageIsEmpty,
     #[error(
-        "Must be absolute. Starting with either `//` for a cell alias or `:` for a relative target."
+        "Target pattern must be absolute (e.g. `//package:target`). Relative patterns like `:target` are not permitted in this context."
     )]
     AbsoluteRequired,
     #[error(
@@ -341,29 +342,8 @@ impl<T: PatternType> ParsedPattern<T> {
             pattern,
         )
         .with_buck_error_context(|| {
-            format!("Invalid absolute target pattern `{pattern}` is not allowed")
+            format!("Error parsing target pattern `{pattern}`, expected an absolute pattern")
         })?;
-
-        Self::from_parsed_pattern_with_modifiers(pattern_with_modifiers)
-    }
-
-    pub fn parse_not_relaxed(
-        pattern: &str,
-        relative: TargetParsingRel<'_>,
-        cell_resolver: &CellResolver,
-        cell_alias_resolver: &CellAliasResolver,
-    ) -> buck2_error::Result<Self> {
-        let pattern_with_modifiers = parse_target_pattern(
-            cell_resolver,
-            cell_alias_resolver,
-            TargetParsingOptions {
-                relative,
-                infer_target: false,
-                strip_package_trailing_slash: false,
-            },
-            pattern,
-        )
-        .with_buck_error_context(|| format!("Invalid target pattern `{pattern}` is not allowed"))?;
 
         Self::from_parsed_pattern_with_modifiers(pattern_with_modifiers)
     }
@@ -398,6 +378,27 @@ impl<T: PatternType> ParsedPattern<T> {
             pattern,
         )
         .with_buck_error_context(|| format!("Parsing target pattern `{pattern}`"))?;
+
+        Self::from_parsed_pattern_with_modifiers(pattern_with_modifiers)
+    }
+
+    pub fn parse_not_relaxed(
+        pattern: &str,
+        relative: TargetParsingRel<'_>,
+        cell_resolver: &CellResolver,
+        cell_alias_resolver: &CellAliasResolver,
+    ) -> buck2_error::Result<Self> {
+        let pattern_with_modifiers = parse_target_pattern(
+            cell_resolver,
+            cell_alias_resolver,
+            TargetParsingOptions {
+                relative,
+                infer_target: false,
+                strip_package_trailing_slash: false,
+            },
+            pattern,
+        )
+        .with_buck_error_context(|| format!("Error parsing target pattern `{pattern}`"))?;
 
         Self::from_parsed_pattern_with_modifiers(pattern_with_modifiers)
     }
@@ -481,7 +482,7 @@ impl<T: PatternType> ParsedPatternWithModifiers<T> {
             pattern,
         )
         .with_buck_error_context(|| {
-            format!("Invalid absolute target pattern `{pattern}` is not allowed")
+            format!("Error parsing target pattern `{pattern}`, expected an absolute pattern")
         })
     }
 
@@ -526,11 +527,11 @@ impl<T: PatternType> ParsedPatternWithModifiers<T> {
             },
             pattern,
         )
-        .with_buck_error_context(|| format!("Invalid target pattern `{pattern}` is not allowed"))
+        .with_buck_error_context(|| format!("Error parsing target pattern `{pattern}`"))
     }
 }
 
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Allocative)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Allocative, Pagable)]
 pub enum ParsedPatternPredicate<T: PatternType> {
     Any,
     AnyOf(Vec<ParsedPattern<T>>),
@@ -637,10 +638,12 @@ where
                 let package = normalize_package(pattern, strip_package_trailing_slash)?;
 
                 let target = package
-                    .file_name()
+                    .components()
+                    .next_back()
+                    .and_then(Component::as_normal)
                     .ok_or(TargetPatternParseError::PackageIsEmpty)?;
 
-                let target_name = TargetName::new(target)?;
+                let target_name = TargetName::new(target.as_str())?;
 
                 Ok(PatternData::TargetInPackage {
                     package,
@@ -808,13 +811,13 @@ fn lex_provider_pattern(
         None => {
             if let Some(package) = strip_suffix_ascii(pattern, AsciiStr::new("/...")) {
                 PatternData::Recursive {
-                    package: RelativePath::new(package),
+                    package: RelativePath::unchecked_new(package),
                     modifiers,
                 }
                 .into()
             } else if pattern == "..." {
                 PatternData::Recursive {
-                    package: RelativePath::new(""),
+                    package: RelativePath::empty(),
                     modifiers,
                 }
                 .into()
@@ -864,43 +867,69 @@ fn lex_configuration_predicate(pattern: &str) -> buck2_error::Result<Configurati
     }
 }
 
-/// Split target pattern and configuration preserving parentheses for better diagnostics.
-fn split_cfg(s: &str) -> Option<(&str, &str)> {
-    // Fast path.
-    if !s.contains(' ') {
+/// Split target pattern and configuration predicate(s).
+///
+/// Configuration predicates appear as parenthesized suffixes: `target (cfg)`.
+/// `ConfiguredTargetLabel::fmt` can also produce two groups for toolchain deps:
+/// `target (cfg) (exec_cfg)`. This function handles both forms.
+///
+/// Since parentheses are disallowed in both target names (`TargetName::verify`)
+/// and configuration labels (`BoundConfigurationLabel::new`, which is also the
+/// validation path for labels produced by config transitions via
+/// `ConfigurationData::from_platform`), there cannot be nested parentheses in
+/// valid patterns. We simply find the last `(` preceded by a space, split
+/// there, and then check if the remainder also ends with a parenthesized
+/// group (the cfg, with the already-split group being exec_cfg).
+///
+/// Returns `(target, cfg, Option<exec_cfg>)` where cfg and exec_cfg include
+/// the surrounding parentheses.
+fn split_cfg(s: &str) -> Option<(&str, &str, Option<&str>)> {
+    // Configuration predicates are parenthesized and must be at the end of the string.
+    if !s.ends_with(')') {
         return None;
     }
 
-    let mut braces: u32 = 0;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => braces += 1,
-            ')' => match braces.checked_sub(1) {
-                Some(b) => braces = b,
-                None => {
-                    // Pattern is invalid, let parser fail elsewhere.
-                    return None;
-                }
-            },
-            ' ' if braces == 0 => return Some((&s[..i], &s[i + 1..])),
-            _ => {}
+    // Parentheses are disallowed in target names and configuration labels,
+    // so there are no nested parens to worry about. Just find the last '('.
+    let i = s.rfind('(')?;
+    if i == 0 || s.as_bytes()[i - 1] != b' ' {
+        return None;
+    }
+
+    let last_group = &s[i..];
+    let remainder = &s[..i - 1];
+
+    // Check if the remainder also ends with a parenthesized group preceded by
+    // a space. This handles the `target (cfg) (exec_cfg)` format produced by
+    // ConfiguredTargetLabel::fmt for toolchain deps.
+    if remainder.ends_with(')') {
+        if let Some(j) = remainder.rfind('(') {
+            if j > 0 && remainder.as_bytes()[j - 1] == b' ' {
+                return Some((&remainder[..j - 1], &remainder[j..], Some(last_group)));
+            }
         }
     }
-    None
+
+    Some((remainder, last_group, None))
 }
 
 pub fn lex_configured_providers_pattern(
     pattern: &str,
     strip_package_trailing_slash: bool,
 ) -> buck2_error::Result<PatternParts<'_, ConfiguredProvidersPatternExtra>> {
-    let (provider_pattern, cfg) = match split_cfg(pattern) {
-        Some((providers, cfg)) => {
+    let (provider_pattern, cfg, exec_cfg) = match split_cfg(pattern) {
+        Some((providers, cfg, exec_cfg)) => {
             let provider_pattern = lex_provider_pattern(providers, strip_package_trailing_slash)?;
             let cfg = lex_configuration_predicate(cfg)?;
-            (provider_pattern, cfg)
+            let exec_cfg = match exec_cfg {
+                Some(e) => lex_configuration_predicate(e)?,
+                None => ConfigurationPredicate::Any,
+            };
+            (provider_pattern, cfg, exec_cfg)
         }
         None => (
             lex_provider_pattern(pattern, strip_package_trailing_slash)?,
+            ConfigurationPredicate::Any,
             ConfigurationPredicate::Any,
         ),
     };
@@ -925,7 +954,11 @@ pub fn lex_configured_providers_pattern(
     }
 
     provider_pattern.try_map(|ProvidersPatternExtra { providers }| {
-        Ok(ConfiguredProvidersPatternExtra { providers, cfg })
+        Ok(ConfiguredProvidersPatternExtra {
+            providers,
+            cfg,
+            exec_cfg,
+        })
     })
 }
 
@@ -954,7 +987,7 @@ fn normalize_package(
     // Strip or reject trailing `/`, such as in `foo/:bar`.
     if let Some(stripped) = strip_suffix_ascii(package, AsciiChar::new('/')) {
         if strip_package_trailing_slash {
-            return Ok(RelativePath::new(stripped));
+            return Ok(RelativePath::unchecked_new(stripped));
         } else {
             return Err(buck2_error::Error::from(
                 TargetPatternParseError::PackageTrailingSlash,
@@ -962,7 +995,7 @@ fn normalize_package(
         }
     }
 
-    Ok(RelativePath::new(package))
+    Ok(RelativePath::unchecked_new(package))
 }
 
 #[derive(Clone, Dupe)]
@@ -1242,10 +1275,10 @@ pub enum PackageSpec<T: PatternType> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::marker::PhantomData;
 
     use assert_matches::assert_matches;
+    use buck2_hash::StdBuckHashMap;
     use dupe::Dupe;
     use gazebo::prelude::*;
     use test_case::test_case;
@@ -1331,7 +1364,11 @@ mod tests {
     ) -> ParsedPattern<ConfiguredProvidersPatternExtra> {
         mk_providers(cell, path, target, providers)
             .try_map(|ProvidersPatternExtra { providers }| {
-                Ok(ConfiguredProvidersPatternExtra { providers, cfg })
+                Ok(ConfiguredProvidersPatternExtra {
+                    providers,
+                    cfg,
+                    exec_cfg: ConfigurationPredicate::Any,
+                })
             })
             .unwrap()
     }
@@ -1395,7 +1432,7 @@ mod tests {
                     CellRootPathBuf::testing_new("cell2"),
                 ),
             ],
-            HashMap::from_iter([
+            StdBuckHashMap::from_iter([
                 (
                     NonEmptyCellAlias::testing_new("cell1"),
                     CellName::testing_new("cell1"),
@@ -1717,7 +1754,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("Invalid target pattern `:target` is not allowed"),
+                .contains("Error parsing target pattern `:target`"),
             "{}",
             err
         );
@@ -2288,7 +2325,7 @@ mod tests {
                 &resolver(),
                 &alias_resolver(),
             ),
-            &["Invalid target pattern `../sibling:target` is not allowed"],
+            &["Error parsing target pattern `../sibling:target`"],
         );
 
         fails(
@@ -2304,7 +2341,7 @@ mod tests {
                 &resolver(),
                 &alias_resolver(),
             ),
-            &["Invalid target pattern `../../not_allowed:target` is not allowed"],
+            &["Error parsing target pattern `../../not_allowed:target`"],
         );
 
         Ok(())
@@ -2557,5 +2594,60 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_split_cfg_with_spaces_in_path() {
+        use super::split_cfg;
+
+        // Paths with spaces should not be split.
+        assert_eq!(
+            split_cfg("//fbobjc/Xcode Templates/File Templates/foo/..."),
+            None,
+        );
+        assert_eq!(split_cfg("//path/dir name/sub dir/..."), None,);
+
+        // Paths with spaces and parentheses mid-path should not be split.
+        assert_eq!(split_cfg("//path/dir (stuff)/foo/..."), None,);
+        assert_eq!(split_cfg("//path/dir(v2)/foo/..."), None,);
+
+        // Target ending with parentheses but no space should not be split.
+        assert_eq!(split_cfg("//path:target(v2)"), None,);
+
+        // No spaces at all should not be split.
+        assert_eq!(split_cfg("//path/to:target"), None,);
+
+        // Configuration suffix should still be split correctly.
+        assert_eq!(
+            split_cfg("//pkg:target (cfg:platform#abc123)"),
+            Some(("//pkg:target", "(cfg:platform#abc123)", None)),
+        );
+        assert_eq!(
+            split_cfg("//pkg:target (<unbound>)"),
+            Some(("//pkg:target", "(<unbound>)", None)),
+        );
+
+        // Space in path with configuration suffix at end.
+        assert_eq!(
+            split_cfg("//path/Xcode Templates/foo:target (cfg:platform)"),
+            Some(("//path/Xcode Templates/foo:target", "(cfg:platform)", None)),
+        );
+
+        // ConfiguredTargetLabel::fmt produces two groups for toolchain deps:
+        // `target (cfg) (exec_cfg)`. Both are split out.
+        assert_eq!(
+            split_cfg("//pkg:target (cfg1) (cfg2)"),
+            Some(("//pkg:target", "(cfg1)", Some("(cfg2)"))),
+        );
+
+        // Two groups with spaces in path.
+        assert_eq!(
+            split_cfg("//path/Xcode Templates/foo:target (cfg) (exec_cfg)"),
+            Some((
+                "//path/Xcode Templates/foo:target",
+                "(cfg)",
+                Some("(exec_cfg)")
+            )),
+        );
     }
 }

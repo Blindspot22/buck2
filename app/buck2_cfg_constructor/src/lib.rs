@@ -8,8 +8,6 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
-
 pub(crate) mod calculation;
 pub(crate) mod registration;
 
@@ -45,6 +43,8 @@ use calculation::CfgConstructorCalculationInstance;
 use dice::DiceComputations;
 use dice_futures::cancellation::CancellationContext;
 use futures::FutureExt;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark::collections::SmallMap;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::UnpackValue;
@@ -63,7 +63,7 @@ enum CfgConstructorError {
     PostConstraintAnalysisRefsMustBeConfigurationRules(String),
 }
 
-#[derive(Allocative, Debug)]
+#[derive(Allocative, Debug, Pagable)]
 pub(crate) struct CfgConstructor {
     pub(crate) cfg_constructor_pre_constraint_analysis: OwnedFrozenValue,
     pub(crate) cfg_constructor_post_constraint_analysis: OwnedFrozenValue,
@@ -186,6 +186,7 @@ fn eval_post_constraint_analysis<'v>(
     params: Value<'v>,
     eval: &mut ReentrantStarlarkEvaluator<'v, '_, '_>,
     refs_providers_map: SmallMap<String, FrozenProviderCollectionValue>,
+    is_marked_as_exec_platform: bool,
 ) -> buck2_error::Result<ConfigurationData> {
     eval.with_evaluator(|eval| -> buck2_error::Result<ConfigurationData> {
         let post_constraint_analysis_args = vec![
@@ -215,7 +216,8 @@ fn eval_post_constraint_analysis<'v>(
         )?;
 
         // Type check + unpack
-        <&PlatformInfo>::unpack_value_err(post_constraint_analysis_result)?.to_configuration()
+        <&PlatformInfo>::unpack_value_err(post_constraint_analysis_result)?
+            .to_configuration(is_marked_as_exec_platform)
     })
 }
 
@@ -278,6 +280,7 @@ async fn eval_underlying(
             params,
             &mut reentrant_eval,
             refs_providers_map,
+            cfg.is_marked_as_exec_platform(),
         )?;
 
         let finished_eval = reentrant_eval.finish_evaluation();
@@ -288,6 +291,7 @@ async fn eval_underlying(
     .await
 }
 
+#[pagable_typetag]
 #[async_trait]
 impl CfgConstructorImpl for CfgConstructor {
     fn eval<'a>(

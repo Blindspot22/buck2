@@ -32,21 +32,37 @@ CompileWithArgsFileCmdOutput = record(
     error_deserializer = field(RunInfo | None),
 )
 
+ENFORCED_CATEGORIES = [
+    "swiftmodule_compile_with_explicit_mods",
+    "swiftmodule_compile",
+    "swift_compile_with_explicit_mods",
+    "swift_compile",
+]
+
+# def _get_should_expect_eligible_for_dedupe(ctx: AnalysisContext, category: str) -> bool:
+#     uses_content_based_paths = get_uses_content_based_paths(ctx)
+#     toolchain = get_swift_toolchain_info(ctx)
+#
+#     expect_eligible_for_dedupe = toolchain.enforce_dedupe_eligibility and uses_content_based_paths and category in ENFORCED_CATEGORIES
+#
+#     return expect_eligible_for_dedupe
+
 def compile_with_argsfile_cmd(
-        ctx: AnalysisContext,
-        category: str,
-        shared_flags: cmd_args,
-        srcs: list[CxxSrcWithFlags],
-        additional_flags: cmd_args,
-        toolchain: SwiftToolchainInfo,
-        output_file_map: dict,
-        supports_output_file_map: bool,
-        supports_serialized_errors: bool,
-        skip_incremental_outputs: bool,
-        incremental_remote_outputs: bool,
-        objects: list[Artifact],
-        incremental_artifacts: IncrementalCompilationInput | None,
-        artifact_tag: ArtifactTag | None) -> CompileWithArgsFileCmdOutput:
+    ctx: AnalysisContext,
+    category: str,
+    shared_flags: cmd_args,
+    srcs: list[CxxSrcWithFlags],
+    additional_flags: cmd_args,
+    toolchain: SwiftToolchainInfo,
+    output_file_map: dict,
+    supports_output_file_map: bool,
+    supports_serialized_errors: bool,
+    skip_incremental_outputs: bool,
+    incremental_remote_outputs: bool,
+    objects: list[Artifact],
+    incremental_artifacts: IncrementalCompilationInput | None,
+    artifact_tag: ArtifactTag | None,
+) -> CompileWithArgsFileCmdOutput:
     object_outputs = [obj.as_output() for obj in objects]
 
     uses_content_based_paths = get_uses_content_based_paths(ctx)
@@ -81,7 +97,13 @@ def compile_with_argsfile_cmd(
         # that uses placeholders instead of content-based paths, which is not tagged for dep-files
         # and therefore causes a dep-file miss if it changes.
         argsfile, _ = ctx.actions.write(".{}_argsfile".format(category), shell_quoted_args, allow_args = True, has_content_based_path = uses_content_based_paths)
-        placeholder_argsfile, _ = ctx.actions.write(".{}_argsfile_placeholder".format(category), shell_quoted_args, allow_args = True, use_dep_files_placeholder_for_content_based_paths = True, has_content_based_path = uses_content_based_paths)
+        placeholder_argsfile, _ = ctx.actions.write(
+            ".{}_argsfile_placeholder".format(category),
+            shell_quoted_args,
+            allow_args = True,
+            use_dep_files_placeholder_for_content_based_paths = True,
+            has_content_based_path = uses_content_based_paths,
+        )
         cmd.add(cmd_args(hidden = placeholder_argsfile))
         argsfile_cmd_form = cmd_args(artifact_tag.tag_artifacts(argsfile), format = "@{}", delimiter = "", hidden = shared_flags)
     else:
@@ -95,7 +117,9 @@ def compile_with_argsfile_cmd(
 
         # This path needs to be kept in sync with the _SWIFT_FILES_ARGSFILE
         # variable in swift_exec.py.
-        swift_files, _ = ctx.actions.write(".{}_swift_srcs".format(category), swift_quoted_files, allow_args = True, has_content_based_path = uses_content_based_paths)
+        swift_files, _ = ctx.actions.write(
+            ".{}_swift_srcs".format(category), swift_quoted_files, allow_args = True, has_content_based_path = uses_content_based_paths
+        )
         swift_files_cmd_form = cmd_args(swift_files, format = "@{}", delimiter = "", hidden = swift_quoted_files)
         cmd.add(swift_files_cmd_form)
 
@@ -157,26 +181,27 @@ def compile_with_argsfile_cmd(
     )
 
 def compile_with_argsfile(
-        ctx: AnalysisContext,
-        category: str,
-        shared_flags: cmd_args,
-        srcs: list[CxxSrcWithFlags],
-        additional_flags: cmd_args,
-        toolchain: SwiftToolchainInfo,
-        num_threads: int = 1,
-        dep_files: dict[str, ArtifactTag] = {},
-        output_file_map: dict = {},
-        allow_cache_upload = False,
-        local_only = False,
-        prefer_local = False,
-        no_outputs_cleanup = False,
-        supports_output_file_map = True,
-        supports_serialized_errors = True,
-        skip_incremental_outputs = False,
-        incremental_remote_outputs = False,
-        objects = [],
-        incremental_artifacts: IncrementalCompilationInput | None = None,
-        artifact_tag: ArtifactTag | None = None) -> (CompileArgsfile, Artifact | None):
+    ctx: AnalysisContext,
+    category: str,
+    shared_flags: cmd_args,
+    srcs: list[CxxSrcWithFlags],
+    additional_flags: cmd_args,
+    toolchain: SwiftToolchainInfo,
+    num_threads: int = 1,
+    dep_files: dict[str, ArtifactTag] = {},
+    output_file_map: dict = {},
+    allow_cache_upload = False,
+    local_only = False,
+    prefer_local = False,
+    no_outputs_cleanup = False,
+    supports_output_file_map = True,
+    supports_serialized_errors = True,
+    skip_incremental_outputs = False,
+    incremental_remote_outputs = False,
+    objects = [],
+    incremental_artifacts: IncrementalCompilationInput | None = None,
+    artifact_tag: ArtifactTag | None = None,
+) -> (CompileArgsfile, Artifact | None):
     cmd_output = compile_with_argsfile_cmd(
         ctx = ctx,
         category = category,
@@ -194,6 +219,9 @@ def compile_with_argsfile(
         artifact_tag = artifact_tag,
     )
 
+    # TODO(xcshen): Re-enable when content-based paths for PCMs no longer
+    # leak into .swiftmodule files, breaking @_implementationOnly blast radius.
+    expect_eligible_for_dedupe = False  # _get_should_expect_eligible_for_dedupe(ctx, category)
     ctx.actions.run(
         cmd_output.cmd,
         allow_cache_upload = allow_cache_upload,
@@ -208,6 +236,7 @@ def compile_with_argsfile(
         prefer_local = prefer_local,
         unique_input_inodes = True,
         weight = num_threads,
+        expect_eligible_for_dedupe = expect_eligible_for_dedupe,
     )
 
     argsfile = CompileArgsfile(

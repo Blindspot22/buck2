@@ -18,14 +18,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use buck2_fs::fs_util;
+use buck2_fs::paths::abs_path::AbsPath;
 use buck2_fs::paths::file_name::FileName;
 use buck2_fs::paths::file_name::FileNameBuf;
 use dupe::Dupe;
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 
+use crate::OrphanProcessInfo;
 use crate::cgroup_files::CgroupFile;
+use crate::cgroup_files::CgroupFileMode;
 use crate::cgroup_files::MemoryStat;
+use crate::cgroup_files::ResourcePressure;
 use crate::path::CgroupPath;
 use crate::path::CgroupPathBuf;
 
@@ -34,6 +39,10 @@ use crate::path::CgroupPathBuf;
 enum CgroupError {
     #[error("{msg} IO error: {io_err}")]
     Io { msg: String, io_err: std::io::Error },
+}
+
+fn is_process_gone_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(nix::libc::ESRCH)
 }
 
 /// Resource constraints inherited from ancestor cgroups in the hierarchy.
@@ -132,7 +141,7 @@ impl<M: MemoryMonitoring, K: CgroupKind> Cgroup<M, K> {
         let controllers_file = CgroupFile::open(
             self.dir.dupe(),
             FileNameBuf::unchecked_new("cgroup.controllers"),
-            false,
+            CgroupFileMode::ReadOnly,
         )
         .await?;
         let controllers = controllers_file.read_to_string().await?;
@@ -149,7 +158,7 @@ impl<M: MemoryMonitoring, K: CgroupKind> Cgroup<M, K> {
         CgroupFile::open(
             self.dir.dupe(),
             FileNameBuf::unchecked_new("memory.high"),
-            true,
+            CgroupFileMode::ReadWrite,
         )
         .await?
         .write(memory_high.to_owned())
@@ -161,10 +170,26 @@ impl<M: MemoryMonitoring, K: CgroupKind> Cgroup<M, K> {
         CgroupFile::open(
             self.dir.dupe(),
             FileNameBuf::unchecked_new("memory.max"),
-            true,
+            CgroupFileMode::ReadWrite,
         )
         .await?
         .write(memory_max.to_owned())
+        .await
+    }
+
+    /// Set the cpuset.cpus value for this cgroup, restricting which CPU cores
+    /// processes in this cgroup can run on.
+    ///
+    /// `value` is a comma/range list of CPU IDs (e.g., `"0-3"` or `"0,1,2,3"`).
+    /// An empty string clears the value and the leaf inherits from its parent.
+    pub async fn set_cpuset_cpus(&self, value: &str) -> buck2_error::Result<()> {
+        CgroupFile::open(
+            self.dir.dupe(),
+            FileNameBuf::unchecked_new("cpuset.cpus"),
+            CgroupFileMode::ReadWrite,
+        )
+        .await?
+        .write(value.to_owned())
         .await
     }
 
@@ -177,7 +202,7 @@ impl<M: MemoryMonitoring, K: CgroupKind> Cgroup<M, K> {
         CgroupFile::open(
             self.dir.dupe(),
             FileNameBuf::unchecked_new("memory.oom.group"),
-            true,
+            CgroupFileMode::ReadWrite,
         )
         .await?
         .write("1")
@@ -186,7 +211,12 @@ impl<M: MemoryMonitoring, K: CgroupKind> Cgroup<M, K> {
 
     async fn read_resource_constraints(&self) -> buck2_error::Result<EffectiveResourceConstraints> {
         let read = |f| async move {
-            let f = CgroupFile::open(self.dir.dupe(), FileNameBuf::unchecked_new(f), false).await?;
+            let f = CgroupFile::open(
+                self.dir.dupe(),
+                FileNameBuf::unchecked_new(f),
+                CgroupFileMode::ReadOnly,
+            )
+            .await?;
             buck2_error::Ok(f.read_max_or_int().await?)
         };
         let (memory_high, memory_max, memory_swap_high, memory_swap_max) = tokio::try_join!(
@@ -196,10 +226,10 @@ impl<M: MemoryMonitoring, K: CgroupKind> Cgroup<M, K> {
             read("memory.swap.max"),
         )?;
         Ok(EffectiveResourceConstraints {
-            memory_high,
             memory_max,
-            memory_swap_high,
+            memory_high,
             memory_swap_max,
+            memory_swap_high,
         })
     }
 
@@ -245,11 +275,52 @@ impl<M: MemoryMonitoring, K: CgroupKind> Cgroup<M, K> {
         CgroupFile::open(
             self.dir.dupe(),
             FileNameBuf::unchecked_new("pids.current"),
-            false,
+            CgroupFileMode::ReadOnly,
         )
         .await?
         .read_int()
         .await
+    }
+
+    /// Kill all remaining processes in the cgroup and return information about what was killed.
+    ///
+    /// The kill behavior is "race free," ie no risk of racing against forks or whatever. However, the output reporting is not race free.
+    pub async fn kill_remaining_pids(&self) -> buck2_error::Result<Vec<OrphanProcessInfo>> {
+        let procs = CgroupFile::open(
+            self.dir.dupe(),
+            FileNameBuf::unchecked_new("cgroup.procs"),
+            CgroupFileMode::ReadOnly,
+        )
+        .await?;
+        let procs_content = procs.read_to_string().await?;
+        let pids: Vec<u32> = procs_content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| l.parse().ok())
+            .collect();
+
+        let orphans: Vec<OrphanProcessInfo> = pids
+            .into_iter()
+            .map(|pid| {
+                let comm =
+                    fs_util::read_to_string(AbsPath::new(&format!("/proc/{}/comm", pid)).unwrap())
+                        .map(|s| s.trim().to_owned())
+                        .unwrap_or_default();
+                OrphanProcessInfo { pid, comm }
+            })
+            .collect();
+
+        let f = CgroupFile::open(
+            self.dir.dupe(),
+            FileNameBuf::unchecked_new("cgroup.kill"),
+            CgroupFileMode::WriteOnly,
+        )
+        .await?;
+        // TODO: Is there something we ought to be doing to ensure this is
+        // "completed" before reusing the cgroup?
+        f.write("1").await?;
+
+        Ok(orphans)
     }
 }
 
@@ -289,7 +360,7 @@ impl Cgroup<NoMemoryMonitoring, CgroupKindUndecided> {
                     CgroupFile::open(
                         self.dir.dupe(),
                         FileNameBuf::unchecked_new("cgroup.procs"),
-                        true,
+                        CgroupFileMode::ReadWrite,
                     )
                     .await?,
                 ),
@@ -300,6 +371,72 @@ impl Cgroup<NoMemoryMonitoring, CgroupKindUndecided> {
         })
     }
 
+    /// Move all processes in this cgroup (other than the current process) to a child cgroup.
+    ///
+    /// This is needed before enabling subtree control, because cgroupv2 enforces a
+    /// no-internal-process constraint: a cgroup cannot have both processes in cgroup.procs
+    /// AND controllers enabled in cgroup.subtree_control.
+    ///
+    /// Processes may end up in this cgroup if they were spawned before prep_current_process()
+    /// moved the daemon to a child cgroup
+    pub(crate) async fn drain_to_child(
+        &self,
+        child: &CgroupMinimal,
+    ) -> buck2_error::Result<Vec<OrphanProcessInfo>> {
+        let procs = CgroupFile::open(
+            self.dir.dupe(),
+            FileNameBuf::unchecked_new("cgroup.procs"),
+            CgroupFileMode::ReadOnly,
+        )
+        .await?;
+        let procs_content = procs.read_to_string().await?;
+        let my_pid = std::process::id();
+        let pids: Vec<u32> = procs_content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| l.parse().ok())
+            .filter(|pid| *pid != my_pid)
+            .collect();
+
+        if pids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let child_procs = CgroupFile::open(
+            child.dir.dupe(),
+            FileNameBuf::unchecked_new("cgroup.procs"),
+            CgroupFileMode::ReadWrite,
+        )
+        .await?;
+
+        let orphans = tokio::task::spawn_blocking(move || {
+            let mut orphans = Vec::new();
+            for pid in pids {
+                match child_procs.sync_write(pid.to_string().as_bytes()) {
+                    Ok(()) => {
+                        let comm = fs_util::read_to_string(
+                            AbsPath::new(&format!("/proc/{}/comm", pid)).unwrap(),
+                        )
+                        .map(|s| s.trim().to_owned())
+                        .unwrap_or_default();
+                        orphans.push(OrphanProcessInfo { pid, comm });
+                    }
+                    // Ignore the expected race where a process exits after we read cgroup.procs but
+                    // before we move it.
+                    Err(e) if is_process_gone_error(&e) => {}
+                    Err(e) => {
+                        return Err(buck2_error::Error::from(e)
+                            .context(format!("Writing cgroup file cgroup.procs for pid {pid}")));
+                    }
+                }
+            }
+            buck2_error::Ok(orphans)
+        })
+        .await??;
+
+        Ok(orphans)
+    }
+
     /// Enable subtree controllers on this cgroup as specified and convert to an internal cgroup
     pub(crate) async fn enable_subtree_control_and_into_internal(
         self,
@@ -308,7 +445,7 @@ impl Cgroup<NoMemoryMonitoring, CgroupKindUndecided> {
         let subtree_control = CgroupFile::open(
             self.dir.dupe(),
             FileNameBuf::unchecked_new("cgroup.subtree_control"),
-            true,
+            CgroupFileMode::ReadWrite,
         )
         .await?;
         for controller in &*enabled_controllers.0 {
@@ -485,7 +622,14 @@ impl<K: CgroupKind> Cgroup<NoMemoryMonitoring, K> {
     ) -> buck2_error::Result<Cgroup<WithMemoryMonitoring, K>> {
         let open = |f| {
             let d = &self.dir;
-            async move { CgroupFile::open(d.dupe(), FileNameBuf::unchecked_new(f), false).await }
+            async move {
+                CgroupFile::open(
+                    d.dupe(),
+                    FileNameBuf::unchecked_new(f),
+                    CgroupFileMode::ReadOnly,
+                )
+                .await
+            }
         };
         let (memory_stat, memory_current, memory_swap_current, memory_pressure) = tokio::try_join!(
             open("memory.stat"),
@@ -569,6 +713,10 @@ impl<K: CgroupKind> Cgroup<WithMemoryMonitoring, K> {
         handle.total = new_total;
         Ok(pressure)
     }
+
+    pub async fn read_memory_pressure(&self) -> buck2_error::Result<ResourcePressure> {
+        self.memory.memory_pressure.read_resource_pressure().await
+    }
 }
 
 pub struct MemoryPressureHandle {
@@ -600,7 +748,7 @@ impl<M: MemoryMonitoring, K: CgroupKind> Cgroup<M, K> {
         let f = CgroupFile::open(
             self.dir.dupe(),
             FileNameBuf::unchecked_new("cgroup.freeze"),
-            true,
+            CgroupFileMode::ReadWrite,
         )
         .await?;
         f.write(b"1").await?;
@@ -618,14 +766,45 @@ impl CgroupMinimal {
             return None;
         }
 
+        // Skip if `systemd-run --user --slice-inherit` doesn't work here (e.g. CI has no
+        // user systemd session). `prep_cgroup.sh` runs the same command and would panic.
+        let probe_ok = background_command("systemd-run")
+            .args([
+                "--user",
+                "--slice-inherit",
+                "--scope",
+                "--quiet",
+                "--",
+                "/bin/true",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !probe_ok {
+            return None;
+        }
+
         let prep_script = std::env::var("PREP_CGROUP_SCRIPT").unwrap();
-        let path = background_command(&prep_script)
+        let output = background_command(&prep_script)
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .output()
-            .unwrap()
-            .stdout;
-        let path = String::from_utf8(path).unwrap();
-        let path = CgroupPath::new(AbsNormPath::new(path.trim()).unwrap());
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "PREP_CGROUP_SCRIPT failed with status {}.\nStderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let path = String::from_utf8(output.stdout).unwrap();
+        let path = path.trim();
+        assert!(
+            !path.is_empty(),
+            "PREP_CGROUP_SCRIPT produced no output on stdout",
+        );
+        let path = CgroupPath::new(AbsNormPath::new(path).unwrap());
 
         // Attempt to actually spawn a process into the cgroup, see below for why
         let cgroup = Self::try_from_path(path.to_buf())
@@ -728,6 +907,7 @@ impl Cgroup<NoMemoryMonitoring, CgroupKindInternal> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::process::ExitStatusExt;
     use std::time::Duration;
 
     use buck2_fs::fs_util::uncategorized as fs_util;
@@ -735,9 +915,24 @@ mod tests {
     use buck2_util::process::background_command;
     use dupe::Dupe;
 
+    use super::is_process_gone_error;
     use crate::cgroup::Cgroup;
     use crate::cgroup::MemoryPressureHandle;
     use crate::cgroup_files::CgroupFile;
+    use crate::cgroup_files::CgroupFileMode;
+
+    #[test]
+    fn test_is_process_gone_error() {
+        assert!(is_process_gone_error(&std::io::Error::from_raw_os_error(
+            nix::libc::ESRCH,
+        )));
+        assert!(!is_process_gone_error(&std::io::Error::from_raw_os_error(
+            nix::libc::EBUSY,
+        )));
+        assert!(!is_process_gone_error(&std::io::Error::from_raw_os_error(
+            nix::libc::EPERM,
+        )));
+    }
 
     #[tokio::test]
     async fn self_test_harness() {
@@ -799,7 +994,7 @@ mod tests {
         CgroupFile::open(
             subg1.dir.dupe(),
             FileNameBuf::unchecked_new("memory.high"),
-            true,
+            CgroupFileMode::ReadWrite,
         )
         .await
         .unwrap()
@@ -809,7 +1004,7 @@ mod tests {
         CgroupFile::open(
             subg1.dir.dupe(),
             FileNameBuf::unchecked_new("memory.max"),
-            true,
+            CgroupFileMode::ReadWrite,
         )
         .await
         .unwrap()
@@ -824,7 +1019,7 @@ mod tests {
         CgroupFile::open(
             subg2.dir.dupe(),
             FileNameBuf::unchecked_new("memory.high"),
-            true,
+            CgroupFileMode::ReadWrite,
         )
         .await
         .unwrap()
@@ -895,9 +1090,110 @@ mod tests {
             .read_memory_pressure_total(&mut pressure_handle)
             .await
             .unwrap();
-        assert!(memory_pressure > 20.0, "{:?}", memory_pressure);
+        let check_memory_pressure;
+        #[cfg(fbcode_build)]
+        {
+            if environment::is_on_demand() {
+                // In OD environments, memory pressure may be lower due to different cgroup configurations
+                // or resource constraints, so skip this assertion there.
+                check_memory_pressure = false;
+            } else {
+                check_memory_pressure = true;
+            }
+        }
+        #[cfg(not(fbcode_build))]
+        {
+            check_memory_pressure = true;
+        }
+        if check_memory_pressure {
+            assert!(memory_pressure > 20.0, "{:?}", memory_pressure);
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_drain_to_child() {
+        let Some(cgroup) = Cgroup::create_minimal_for_test().await else {
+            return;
+        };
+        let controllers = cgroup.read_enabled_controllers().await.unwrap();
+        let parent = cgroup
+            .enable_subtree_control_and_into_internal(controllers)
+            .await
+            .unwrap();
+
+        let source = parent
+            .make_child(FileNameBuf::unchecked_new("source"))
+            .await
+            .unwrap();
+        let dest = parent
+            .make_child(FileNameBuf::unchecked_new("dest"))
+            .await
+            .unwrap();
+
+        // Empty cgroup should drain nothing
+        let orphans = source.drain_to_child(&dest).await.unwrap();
+        assert!(orphans.is_empty());
+
+        // Spawn a process into source via the filesystem
+        let mut cmd = background_command("sleep");
+        cmd.arg("300");
+        let mut child = cmd.spawn().unwrap();
+        let child_pid = child.id();
+        let source_procs_path = source.path().as_abs_path().join("cgroup.procs");
+        std::fs::write(&source_procs_path, child_pid.to_string()).unwrap();
+
+        assert_eq!(source.read_pid_count().await.unwrap(), 1);
+        assert_eq!(dest.read_pid_count().await.unwrap(), 0);
+
+        // Drain should move the process to dest
+        let orphans = source.drain_to_child(&dest).await.unwrap();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].pid, child_pid);
+        assert_eq!(orphans[0].comm, "sleep");
+
+        assert_eq!(source.read_pid_count().await.unwrap(), 0);
+        assert_eq!(dest.read_pid_count().await.unwrap(), 1);
+
+        // Draining again should be a no-op
+        let orphans = source.drain_to_child(&dest).await.unwrap();
+        assert!(orphans.is_empty());
 
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_kill_remaining_pids() {
+        let Some(cgroup) = Cgroup::create_leaf_for_test().await else {
+            return;
+        };
+
+        // Empty cgroup should have no PIDs
+        assert_eq!(cgroup.read_pid_count().await.unwrap(), 0);
+
+        // Spawn a long-running process into the cgroup
+        let mut cmd = background_command("sleep");
+        cmd.arg("300");
+        cgroup.setup_command(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+
+        assert_eq!(cgroup.read_pid_count().await.unwrap(), 1);
+
+        let orphans = cgroup.kill_remaining_pids().await.unwrap();
+        assert!(!orphans.is_empty(), "Should have found orphan processes");
+        assert_eq!(orphans[0].pid, child.id());
+        assert_eq!(orphans[0].comm, "sleep");
+
+        // Verify the process was killed by SIGKILL (signal 9) from cgroup.kill.
+        // sleep 300 wouldn't exit on its own and we never called child.kill(),
+        // so this confirms kill_remaining_pids actually worked.
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+        assert_eq!(status.signal(), Some(9));
+
+        // Killing again should report no remaining PIDs.
+        assert!(cgroup.kill_remaining_pids().await.unwrap().is_empty());
     }
 }

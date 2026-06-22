@@ -33,6 +33,7 @@ def _generate_framework_and_dsym_select_maps(prebuilt_xcframework_args, platform
                 bash = bash_cmd,
                 out = framework_name + ".framework",
                 default_target_platform = default_target_platform,
+                has_content_based_path = True,
             )
 
             dsym_artifacts = selects.apply(
@@ -41,7 +42,7 @@ def _generate_framework_and_dsym_select_maps(prebuilt_xcframework_args, platform
             )
 
             for arch in platform["archs"]:
-                if arch not in ["arm64", "x86_64"]:
+                if arch not in ["arm64", "arm64e", "x86_64"]:
                     fail("Unsupported " + platform["platform"] + " arch: " + arch)
 
                 config_key = "ovr_config//cpu:" + arch
@@ -72,6 +73,7 @@ def _generate_dsym_artifact(name, platform_folder, xcframework, default_target_p
         bash = bash_cmd_dsyms,
         out = dsym_filename,
         default_target_platform = default_target_platform,
+        has_content_based_path = True,
     )
     return ":" + dsym_name
 
@@ -81,7 +83,7 @@ def _generate_iphonesimulator_select_maps(prebuilt_xcframework_args, **kwargs):
         platform_filter = lambda platform: platform["platform"] == "ios" and platform["isSimulator"] and not platform["isCatalyst"],
         default_arch = AppleArch("arm64"),
         default_target_platform = "ovr_config//platform/iphoneos:iphonesimulator-arm64",
-        **kwargs
+        **kwargs,
     )
 
 def _generate_iphone_select_maps(prebuilt_xcframework_args, **kwargs):
@@ -90,7 +92,7 @@ def _generate_iphone_select_maps(prebuilt_xcframework_args, **kwargs):
         platform_filter = lambda platform: platform["platform"] == "ios" and not platform["isSimulator"] and not platform["isCatalyst"],
         default_arch = None,
         default_target_platform = "ovr_config//platform/iphoneos:iphoneos-arm64",
-        **kwargs
+        **kwargs,
     )
 
 def _generate_mac_select_maps(prebuilt_xcframework_args, **kwargs):
@@ -99,7 +101,7 @@ def _generate_mac_select_maps(prebuilt_xcframework_args, **kwargs):
         platform_filter = lambda platform: platform["platform"] == "macos",
         default_arch = None,
         default_target_platform = "ovr_config//platform/macos:arm64-fbsource",
-        **kwargs
+        **kwargs,
     )
 
 def _generate_maccatalyst_select_maps(prebuilt_xcframework_args, **kwargs):
@@ -108,10 +110,20 @@ def _generate_maccatalyst_select_maps(prebuilt_xcframework_args, **kwargs):
         platform_filter = lambda platform: platform["platform"] == "ios" and not platform["isSimulator"] and platform["isCatalyst"],
         default_arch = None,
         default_target_platform = "ovr_config//platform/macos:arm64-catalyst",
-        **kwargs
+        **kwargs,
     )
 
-def prebuilt_apple_xcframework_macro_impl(prebuilt_apple_framework_rule, filegroup_rule, name, xcframework, framework_name, framework_platforms, framework_platforms_to_dsym_filenames = {}, default_target_platform = None, **kwargs):
+def prebuilt_apple_xcframework_macro_impl(
+    prebuilt_apple_framework_rule,
+    filegroup_rule,
+    name,
+    xcframework,
+    framework_name,
+    framework_platforms,
+    framework_platforms_to_dsym_filenames = {},
+    default_target_platform = None,
+    **kwargs,
+):
     compatible_with = kwargs.pop("compatible_with", None)
 
     parsed_platforms = [_parse_platform(platform) for platform in framework_platforms]
@@ -227,7 +239,7 @@ def prebuilt_apple_xcframework_macro_impl(prebuilt_apple_framework_rule, filegro
         dsyms = select(dsym_select_map),
         default_target_platform = default_target_platform,
         compatible_with = compatible_with,
-        **kwargs
+        **kwargs,
     )
 
 def _parse_platform(name):
@@ -247,9 +259,11 @@ def _parse_platform(name):
         isSimulator = substrings[2] == "simulator"
         isCatalyst = substrings[2] == "maccatalyst"
     archs = []
-    for arch in ["arm64", "x86_64", "arm64_32"]:
-        if arch in substrings[1]:
+    remaining = substrings[1]
+    for arch in ["arm64e", "arm64_32", "arm64", "x86_64"]:
+        if arch in remaining:
             archs.append(arch)
+            remaining = remaining.replace(arch, "")
     if not archs:
         fail("Failed to parse architectures for xcframework platform " + name)
 

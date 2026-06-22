@@ -28,10 +28,10 @@ use starlark::collections::StarlarkHasher;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::Heap;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::UnpackValue;
@@ -40,7 +40,6 @@ use starlark::values::ValueError;
 use starlark::values::ValueLike;
 use starlark::values::list::UnpackList;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
 use crate::types::cell_path::StarlarkCellPath;
@@ -60,10 +59,12 @@ use crate::types::package_path::StarlarkPackagePath;
     From,
     ProvidesStaticType,
     Serialize,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[serde(transparent)]
 pub struct StarlarkTargetLabel {
+    #[starlark_pagable(pagable)]
     label: TargetLabel,
 }
 
@@ -79,11 +80,12 @@ impl StarlarkTargetLabel {
     }
 }
 
+starlark::methods_static!(TARGET_LABEL_METHODS = label_methods);
+
 #[starlark_value(type = "TargetLabel")]
 impl<'v> StarlarkValue<'v> for StarlarkTargetLabel {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(label_methods)
+        Some(TARGET_LABEL_METHODS.methods())
     }
 
     fn write_hash(&self, hasher: &mut StarlarkHasher) -> starlark::Result<()> {
@@ -178,10 +180,12 @@ fn label_methods(builder: &mut MethodsBuilder) {
     From,
     ProvidesStaticType,
     Serialize,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[serde(transparent)]
 pub struct StarlarkConfiguredTargetLabel {
+    #[starlark_pagable(pagable)]
     label: ConfiguredTargetLabel,
 }
 
@@ -197,11 +201,12 @@ impl StarlarkConfiguredTargetLabel {
     }
 }
 
+starlark::methods_static!(CONFIGURED_TARGET_LABEL_METHODS = configured_label_methods);
+
 #[starlark_value(type = "ConfiguredTargetLabel")]
 impl<'v> StarlarkValue<'v> for StarlarkConfiguredTargetLabel {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(configured_label_methods)
+        Some(CONFIGURED_TARGET_LABEL_METHODS.methods())
     }
 
     fn write_hash(&self, hasher: &mut StarlarkHasher) -> starlark::Result<()> {
@@ -348,8 +353,8 @@ impl<'v> LabelArg<'v> {
 }
 
 #[starlark_module]
-pub fn register_target_label(globals: &mut GlobalsBuilder) {
-    const TargetLabel: StarlarkValueAsType<StarlarkTargetLabel> = StarlarkValueAsType::new();
-    const ConfiguredTargetLabel: StarlarkValueAsType<StarlarkConfiguredTargetLabel> =
-        StarlarkValueAsType::new();
-}
+#[starlark_types(
+    StarlarkTargetLabel as TargetLabel,
+    StarlarkConfiguredTargetLabel as ConfiguredTargetLabel
+)]
+pub fn register_target_label(globals: &mut GlobalsBuilder) {}

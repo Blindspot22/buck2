@@ -6,7 +6,6 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
-# pyre-unsafe
 
 import typing
 
@@ -38,7 +37,7 @@ async def get_detailed_metrics(buck: Buck) -> typing.Any:
 def parse_metrics(metrics: typing.Any) -> tuple[typing.Any, dict[str, typing.Any]]:
     all_targets = metrics["all_targets_build_metrics"]
 
-    def stringify(t):
+    def stringify(t) -> str:
         t = t["label"]
         return f"{t['package']}:{t['name']}"
 
@@ -90,6 +89,56 @@ async def test_incomplete_graph(buck: Buck) -> None:
 
 
 @buck_test()
+async def test_wall_clock_completion(buck: Buck) -> None:
+    await buck.build("//:foo4", "-c", "buck2.detailed_aggregated_metrics=true")
+    message = await get_detailed_metrics(buck)
+    assert message is not None
+    _all_targets_metrics, per_target_metrics = parse_metrics(message)
+    wall_clock = per_target_metrics["root//:foo4"]["wall_clock_completion_ms"]
+    assert wall_clock is not None
+    assert wall_clock > 0
+
+
+@buck_test()
+async def test_wall_clock_completion_on_timeout(buck: Buck) -> None:
+    await expect_failure(
+        buck.build(
+            "//:slow",
+            "-c",
+            "buck2.detailed_aggregated_metrics=true",
+            "--overall-timeout",
+            "1s",
+        ),
+        stderr_regex="Build timed out",
+    )
+    message = await get_detailed_metrics(buck)
+    assert message is not None
+    _all_targets_metrics, per_target_metrics = parse_metrics(message)
+    wall_clock = per_target_metrics["root//:slow"]["wall_clock_completion_ms"]
+    assert wall_clock is not None
+    assert wall_clock > 0
+
+
+@buck_test()
+async def test_wall_clock_completion_on_failure(buck: Buck) -> None:
+    await expect_failure(
+        buck.build(
+            "//:foo4",
+            "-c",
+            "buck2.detailed_aggregated_metrics=true",
+            "-c",
+            "user.dyn_input_good=0",
+        )
+    )
+    message = await get_detailed_metrics(buck)
+    assert message is not None
+    _all_targets_metrics, per_target_metrics = parse_metrics(message)
+    wall_clock = per_target_metrics["root//:foo4"]["wall_clock_completion_ms"]
+    assert wall_clock is not None
+    assert wall_clock > 0
+
+
+@buck_test()
 async def test_amortization(buck: Buck) -> None:
     await buck.build(
         "//:foo4", "//:foo5", "-c", "buck2.detailed_aggregated_metrics=true"
@@ -116,3 +165,19 @@ async def test_amortization(buck: Buck) -> None:
         pytest.approx(12.0),
         pytest.approx(7.5),
     ]
+
+
+@buck_test(allow_soft_errors=True)
+async def test_enabled_after_analysis_soft_errors(buck: Buck) -> None:
+    # First command runs analysis with collection off; enabling it on a later
+    # command can't produce complete metrics, so we expect a soft error and empty
+    # metrics rather than partial ones.
+    await buck.build("//:foo4")
+    await buck.build("//:foo4", "-c", "buck2.detailed_aggregated_metrics=true")
+    log = (await buck.log("show")).stdout
+    assert "detailed_aggregated_metrics_enabled_after_analysis" in log
+    message = await get_detailed_metrics(buck)
+    assert message is not None
+    all_targets_metrics, per_target_metrics = parse_metrics(message)
+    assert per_target_metrics == {}
+    assert all_targets_metrics.get("action_graph_size") is None

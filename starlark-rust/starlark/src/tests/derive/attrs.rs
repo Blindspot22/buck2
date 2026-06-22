@@ -18,6 +18,7 @@
 use allocative::Allocative;
 use derive_more::Display;
 use starlark_derive::NoSerialize;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_attrs;
 use starlark_derive::starlark_value;
 
@@ -36,7 +37,8 @@ fn test_derive_attrs() {
         Display,
         ProvidesStaticType,
         NoSerialize,
-        Allocative
+        Allocative,
+        StarlarkPagable
     )]
     #[display("{:?}", self)]
     struct Example {
@@ -62,7 +64,8 @@ fn test_derive_attrs() {
         Display,
         ProvidesStaticType,
         NoSerialize,
-        Allocative
+        Allocative,
+        StarlarkPagable
     )]
     #[display("{}", foo)]
     struct Nested {

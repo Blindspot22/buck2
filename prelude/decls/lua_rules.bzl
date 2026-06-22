@@ -63,16 +63,15 @@ cxx_lua_extension = prelude_rule(
     further = None,
     attrs = (
         # @unsorted-dict-items
-        lua_common.base_module_arg() |
-        cxx_common.srcs_arg() |
-        cxx_common.headers_arg() |
-        cxx_common.header_namespace_arg() |
-        cxx_common.preprocessor_flags_arg() |
-        cxx_common.compiler_flags_arg() |
-        cxx_common.linker_flags_arg() |
-        {
+        lua_common.base_module_arg()
+        | cxx_common.srcs_arg()
+        | cxx_common.headers_arg()
+        | cxx_common.header_namespace_arg()
+        | cxx_common.preprocessor_flags_arg()
+        | cxx_common.compiler_flags_arg()
+        | cxx_common.linker_flags_arg()
+        | {
             "cxx_runtime_type": attrs.option(attrs.enum(CxxRuntimeType), default = None),
-            "default_host_platform": attrs.option(attrs.configuration_label(), default = None),
             "default_platform": attrs.option(attrs.string(), default = None),
             "defaults": attrs.dict(key = attrs.string(), value = attrs.string(), sorted = False, default = {}),
             "deps": attrs.list(attrs.dep(), default = []),
@@ -89,18 +88,18 @@ cxx_lua_extension = prelude_rule(
             "prefix_header": attrs.option(attrs.source(), default = None),
             "raw_headers": attrs.set(attrs.source(), sorted = True, default = []),
             "version_universe": attrs.option(attrs.string(), default = None),
-        } |
-        buck.licenses_arg() |
-        buck.labels_arg() |
-        buck.contacts_arg()
+        }
+        | buck.licenses_arg()
+        | buck.labels_arg()
+        | buck.contacts_arg()
     ),
 )
 
 lua_binary = prelude_rule(
     name = "lua_binary",
     docs = """
-        A `lua_library()` rule is used to group together Lua sources
-        to be packaged into a top-level `lua_binary()` rule.
+        A `lua_binary()` rule is used to build an executable that uses Lua
+        sources from all transitive `lua_library()` dependencies.
     """,
     examples = """
         ```
@@ -122,20 +121,26 @@ lua_binary = prelude_rule(
     attrs = (
         # @unsorted-dict-items
         {
-            "main_module": attrs.string(default = "", doc = """
+            "main_module": attrs.string(
+                default = "",
+                doc = """
                 The module which serves as the entry point for this rule.
-            """),
-            "deps": attrs.list(attrs.dep(), default = [], doc = """
+            """,
+            ),
+            "deps": attrs.list(
+                attrs.dep(),
+                default = [],
+                doc = """
                 `lua_library()` rules to this binary will access.
-            """),
-            "default_host_platform": attrs.option(attrs.configuration_label(), default = None),
+            """,
+            ),
             "native_starter_library": attrs.option(attrs.dep(), default = None),
             "package_style": attrs.option(attrs.enum(LuaPlatformPackageStyle), default = None),
             "platform": attrs.option(attrs.string(), default = None),
-        } |
-        buck.licenses_arg() |
-        buck.labels_arg() |
-        buck.contacts_arg()
+        }
+        | buck.licenses_arg()
+        | buck.labels_arg()
+        | buck.contacts_arg()
     ),
 )
 
@@ -165,18 +170,21 @@ lua_library = prelude_rule(
     further = None,
     attrs = (
         # @unsorted-dict-items
-        lua_common.srcs_arg() |
-        lua_common.base_module_arg() |
-        {
-            "deps": attrs.list(attrs.dep(), default = [], doc = """
+        lua_common.srcs_arg()
+        | lua_common.base_module_arg()
+        | {
+            "deps": attrs.list(
+                attrs.dep(),
+                default = [],
+                doc = """
                 Other `lua_library()` rules which list `srcs` from
                  which this rule imports modules.
-            """),
-            "default_host_platform": attrs.option(attrs.configuration_label(), default = None),
-        } |
-        buck.licenses_arg() |
-        buck.labels_arg() |
-        buck.contacts_arg()
+            """,
+            ),
+        }
+        | buck.licenses_arg()
+        | buck.labels_arg()
+        | buck.contacts_arg()
     ),
 )
 

@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
 #![feature(trait_alias)]
 #![feature(try_blocks)]
 #![feature(never_type)]
@@ -34,7 +33,7 @@ pub fn init_late_bindings() {
 
 #[test]
 fn init_late_bindings_for_test() {
-    #[ctor::ctor]
+    #[ctor::ctor(unsafe)]
     fn init() {
         init_late_bindings();
     }

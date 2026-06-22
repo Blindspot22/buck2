@@ -295,7 +295,7 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                 "Test {} -- discovering tests",
                 discovery.suite_name
             )),
-            Data::TestStart(start) => match &start.suite {
+            Data::TestRun(start) => match &start.suite {
                 Some(suite) => {
                     let tests = {
                         if suite.test_names.len() < 100 {
@@ -396,7 +396,10 @@ pub fn display_event(event: &BuckEvent, opts: TargetDisplayOptions) -> buck2_err
                 Ok(format!("Connecting to installer on port {tcp_port}"))
             }
             Data::Fake(fake) => Ok(format!("{} -- speak of the devil", fake.caramba)),
-            Data::LocalResources(..) => Ok("Local resources setup".to_owned()),
+            Data::LocalResources(res) => {
+                let target = display_configured_target_label_opt(res.target_label.as_ref(), opts)?;
+                Ok(format!("{target} -- Local resources setup"))
+            }
             Data::ReleaseLocalResources(..) => Ok("Releasing local resources".to_owned()),
             Data::BxlEnsureArtifacts(..) => Err(ParseEventError::UnexpectedEvent.into()),
             Data::ActionErrorHandlerExecution(..) => {
@@ -447,6 +450,8 @@ pub fn display_file_watcher_end(file_watcher_end: &buck2_data::FileWatcherEnd) -
         // duplicates on the same file, then our "additional file change events" count is slightly high.
         // Shouldn't be a big deal in practice, since it is rare, and fairly big numbers already.
 
+        let is_fresh_instance = stats.fresh_instance;
+
         let mut to_print = OrderedSet::new();
         for x in &stats.events {
             to_print.insert((&x.path, x.kind()));
@@ -456,7 +461,11 @@ pub fn display_file_watcher_end(file_watcher_end: &buck2_data::FileWatcherEnd) -
                 FileWatcherKind::Directory => "Directory",
                 FileWatcherKind::File | FileWatcherKind::Symlink => "File",
             };
-            res.push(format!("{kind} changed: {path}"));
+            if is_fresh_instance {
+                res.push(format!("{kind} changed (since mergebase): {path}"));
+            } else {
+                res.push(format!("{kind} changed: {path}"));
+            }
         }
         let unprinted_paths =
             // those we have the names of but didn't print
@@ -464,7 +473,13 @@ pub fn display_file_watcher_end(file_watcher_end: &buck2_data::FileWatcherEnd) -
                 // plus those we didn't get the names for
                 (stats.events_processed as usize).saturating_sub(stats.events.len());
         if unprinted_paths > 0 {
-            res.push(format!("{unprinted_paths} additional file change events"));
+            if is_fresh_instance {
+                res.push(format!(
+                    "{unprinted_paths} additional file change events (since mergebase)"
+                ));
+            } else {
+                res.push(format!("{unprinted_paths} additional file change events"));
+            }
         }
 
         if let Some(fresh_instance) = &stats.fresh_instance_data {
@@ -649,12 +664,27 @@ fn strip_trailing_newline(stream_contents: &str) -> &str {
     }
 }
 
+/// Controls whether stdout/stderr stream contents are included in action error
+/// formatting.
+#[derive(Copy, Clone, Debug)]
+pub enum ActionErrorOutputFormat {
+    /// Include stdout/stderr stream contents in the output.
+    IncludeOutputStreams,
+    /// Exclude stdout/stderr stream contents (metadata only).
+    ExcludeOutputStreams,
+    /// Exclude stdout/stderr and append a substitute message (e.g. output limit exceeded).
+    SubstituteOutputStreams(&'static str),
+}
+
 impl ActionErrorDisplay<'_> {
     /// Format the error message in a way that is suitable for use with the build report
     ///
     /// The output may include terminal colors that need to be sanitized.
     pub fn simple_format_for_build_report(&self) -> String {
-        let s = self.simple_format_inner(None::<&'static mut dyn for<'x> FnMut(&'x str) -> String>);
+        let s = self.simple_format_inner(
+            None::<&'static mut dyn for<'x> FnMut(&'x str) -> String>,
+            ActionErrorOutputFormat::IncludeOutputStreams,
+        );
         sanitize_output_colors(s.as_bytes())
     }
 
@@ -664,13 +694,15 @@ impl ActionErrorDisplay<'_> {
     pub fn simple_format_with_timestamps(
         &self,
         with_timestamps: impl FnMut(&str) -> String,
+        output_format: ActionErrorOutputFormat,
     ) -> String {
-        self.simple_format_inner(Some(with_timestamps))
+        self.simple_format_inner(Some(with_timestamps), output_format)
     }
 
     fn simple_format_inner(
         &self,
         mut with_timestamps: Option<impl FnMut(&str) -> String>,
+        output_format: ActionErrorOutputFormat,
     ) -> String {
         let mut s = String::new();
         macro_rules! append {
@@ -726,6 +758,15 @@ impl ActionErrorDisplay<'_> {
             };
         }
 
+        match output_format {
+            ActionErrorOutputFormat::IncludeOutputStreams => {}
+            ActionErrorOutputFormat::ExcludeOutputStreams => return s,
+            ActionErrorOutputFormat::SubstituteOutputStreams(msg) => {
+                append!("{msg}");
+                return s;
+            }
+        }
+
         let mut append_stream = |name, contents: &str| {
             if contents.is_empty() {
                 append!("{name}: <empty>");
@@ -773,6 +814,14 @@ impl ActionErrorDisplay<'_> {
             };
         }
         s
+    }
+
+    /// Returns an estimate of the stdout/stderr byte count in this error.
+    pub fn output_stream_byte_count(&self) -> usize {
+        let Some(command) = &self.command else {
+            return 0;
+        };
+        command.cmd_stdout.len() + command.cmd_stderr.len()
     }
 }
 
@@ -973,7 +1022,24 @@ impl<'a> CriticalPathEntryDisplay<'a> {
                     Some(Target::StandardTarget(t)) => display_configured_target_label(t, opts)?,
                     None => "unknown".to_owned(),
                 };
-                ("analysis", name, None, None, None)
+                let kind = match analysis.part {
+                    Some(1) => "analysis[part1]",
+                    Some(2) => "analysis[part2]",
+                    _ => "analysis",
+                };
+                (kind, name, None, None, None)
+            }
+            Entry::AnonAnalysis(anon_analysis) => {
+                let name = match &anon_analysis.anon_target {
+                    Some(t) => display_anon_target(t)?,
+                    None => "unknown".to_owned(),
+                };
+                let kind = match anon_analysis.part {
+                    Some(1) => "anon_analysis[part1]",
+                    Some(2) => "anon_analysis[part2]",
+                    _ => "anon_analysis",
+                };
+                (kind, name, None, None, None)
             }
             Entry::DynamicAnalysis(analysis) => {
                 use buck2_data::critical_path_entry2::dynamic_analysis::Target;
@@ -1046,6 +1112,13 @@ impl<'a> CriticalPathEntryDisplay<'a> {
                 };
                 ("test-listing", name, None, None, None)
             }
+            Entry::EnsureTransitiveSetProjection(..) => (
+                "ensure-transitive-set-projection",
+                String::new(),
+                None,
+                None,
+                None,
+            ),
         };
 
         Ok(Some(CriticalPathEntryDisplay {

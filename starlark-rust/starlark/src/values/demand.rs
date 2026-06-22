@@ -69,6 +69,7 @@ pub(crate) fn request_value_impl<'v, T: AnyLifetime<'v>>(value: Value<'v>) -> Op
 mod tests {
     use allocative::Allocative;
     use starlark_derive::NoSerialize;
+    use starlark_derive::StarlarkPagable;
     use starlark_derive::starlark_value;
 
     use crate as starlark;
@@ -92,7 +93,8 @@ mod tests {
         derive_more::Display,
         Debug,
         NoSerialize,
-        Allocative
+        Allocative,
+        StarlarkPagable
     )]
     #[display("SomeType")]
     struct MyValue {

@@ -41,9 +41,11 @@ use buck2_execute::materialize::http::http_download;
 use buck2_execute::materialize::http::http_head;
 use buck2_execute::materialize::materializer::DeclareArtifactPayload;
 use buck2_execute::materialize::materializer::HttpDownloadInfo;
+use buck2_hash::BuckIndexSet;
 use buck2_http::HttpClient;
 use dupe::Dupe;
-use indexmap::IndexSet;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark::values::OwnedFrozenValue;
 
 use crate::actions::impls::offline;
@@ -59,7 +61,7 @@ enum DownloadFileActionError {
     ContentBasedPathWithoutMetadata(BuildArtifactPath),
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub(crate) struct UnregisteredDownloadFileAction {
     checksum: Checksum,
     size_bytes: Option<u64>,
@@ -78,8 +80,8 @@ impl UnregisteredDownloadFileAction {
     ) -> Self {
         Self {
             checksum,
-            url,
             size_bytes,
+            url,
             vpnless_url,
             is_executable,
         }
@@ -89,7 +91,7 @@ impl UnregisteredDownloadFileAction {
 impl UnregisteredAction for UnregisteredDownloadFileAction {
     fn register(
         self: Box<Self>,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         _starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
@@ -97,7 +99,7 @@ impl UnregisteredAction for UnregisteredDownloadFileAction {
     }
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 struct DownloadFileAction {
     outputs: Box<[BuildArtifact]>,
     inner: UnregisteredDownloadFileAction,
@@ -105,7 +107,7 @@ struct DownloadFileAction {
 
 impl DownloadFileAction {
     fn new(
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         inner: UnregisteredDownloadFileAction,
     ) -> buck2_error::Result<Self> {
         if outputs.len() != 1 {
@@ -224,6 +226,7 @@ impl DownloadFileAction {
     }
 }
 
+#[pagable_typetag]
 #[async_trait]
 impl Action for DownloadFileAction {
     fn kind(&self) -> buck2_data::ActionKind {
@@ -285,6 +288,10 @@ impl Action for DownloadFileAction {
                         .as_ref(),
                     )?;
 
+                    let configuration_path = ctx
+                        .materializer()
+                        .maybe_eager_configuration_path(ctx.fs(), self.output().get_path())?;
+
                     // Fast path: download later via the materializer.
                     ctx.materializer()
                         .declare_http(
@@ -295,6 +302,7 @@ impl Action for DownloadFileAction {
                                 metadata,
                                 owner: ctx.target().owner().dupe(),
                             },
+                            configuration_path,
                         )
                         .await?;
 
@@ -337,7 +345,7 @@ impl Action for DownloadFileAction {
                         .declare_existing(vec![DeclareArtifactPayload {
                             path: rel_path,
                             artifact: ArtifactValue::file(metadata.dupe()),
-                            persist_full_directory_structure: false,
+                            configuration_path: None,
                         }])
                         .await?;
 

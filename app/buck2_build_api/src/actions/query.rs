@@ -31,6 +31,7 @@ use buck2_core::package::PackageLabel;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::BuckIndexMap;
 use buck2_node::attrs::configured_attr::ConfiguredAttr;
 use buck2_query::query::environment::QueryTarget;
 use buck2_query::query::graph::node::LabeledNode;
@@ -41,8 +42,8 @@ use dice::DiceComputations;
 use dupe::Dupe;
 use either::Either;
 use gazebo::variants::VariantName;
-use indexmap::IndexMap;
 use internment::ArcIntern;
+use pagable::Pagable;
 use ref_cast::RefCast;
 use serde::Serialize;
 use starlark::values::Heap;
@@ -54,7 +55,7 @@ use crate::artifact_groups::TransitiveSetProjectionKey;
 use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValue;
 
-#[derive(Debug, derive_more::Display, RefCast, Serialize, Allocative)]
+#[derive(Debug, derive_more::Display, RefCast, Serialize, Allocative, Pagable)]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct OwnedActionAttr(pub String);
@@ -235,7 +236,7 @@ pub struct ActionData {
 }
 
 impl ActionData {
-    fn attrs(&self) -> IndexMap<String, String> {
+    fn attrs(&self) -> BuckIndexMap<String, String> {
         let mut attrs = self.action.action().aquery_attributes(
             &ExecutorFs::new(
                 &self.fs,

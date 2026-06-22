@@ -33,6 +33,105 @@ def _replace_hash(s: str) -> str:
 
 
 @buck_test(data_dir="bxl_simple")
+async def test_uquery_none(buck: Buck) -> None:
+    await expect_failure(
+        buck.uquery("""none"""),
+        stderr_regex="Error parsing target pattern `none`",
+    )
+
+    await expect_failure(
+        buck.uquery("""None"""),
+        stderr_regex="expected value of type `targets`, got `None`:",
+    )
+
+    result = await buck.uquery(""":none""")
+    assert result.stdout == "root//:none\n"
+
+    result = await buck.uquery(""":None""")
+    assert result.stdout == "root//:None\n"
+
+    result = await buck.uquery("""':none'""")
+    assert result.stdout == "root//:none\n"
+
+    result = await buck.uquery("""':None'""")
+    assert result.stdout == "root//:None\n"
+
+    await expect_failure(
+        buck.uquery("""set(none)"""),
+        stderr_regex="Error parsing target pattern `none`",
+    )
+
+    await expect_failure(
+        buck.uquery("""set(None)"""),
+        # stderr_regex="expected value of type `targets`, got `None`:",
+        stderr_regex="Error parsing target pattern `None`",
+    )
+
+    await expect_failure(
+        buck.uquery("""set('none')"""),
+        stderr_regex="Error parsing target pattern `none`",
+    )
+
+    await expect_failure(
+        buck.uquery("""set('None')"""),
+        stderr_regex="Error parsing target pattern `None`",
+    )
+
+    await expect_failure(
+        buck.uquery("""filter('', none)"""),
+        stderr_regex="Error parsing target pattern `none`",
+    )
+
+    await expect_failure(
+        buck.uquery("""filter('', None)"""),
+        stderr_regex=re.escape(
+            "None is not a valid value for function `filter` argument [1] `set: *target or file expression*`"
+        ),
+    )
+
+    result = await buck.uquery("""filter(none, :none)""")
+    assert result.stdout == "root//:none\n"
+
+    await expect_failure(
+        buck.uquery("""filter(None, :None)"""),
+        stderr_regex=re.escape(
+            "None is not a valid value for function `filter` argument [0] `regex: *string*`"
+        ),
+    )
+
+    result = await buck.uquery("""filter('none', :none)""")
+    assert result.stdout == "root//:none\n"
+
+    result = await buck.uquery("""filter('None', :None)""")
+    assert result.stdout == "root//:None\n"
+
+    result = await buck.uquery("""filter(none, ':none')""")
+    assert result.stdout == "root//:none\n"
+
+    await expect_failure(
+        buck.uquery("""filter(None, ':None')"""),
+        stderr_regex=re.escape(
+            "None is not a valid value for function `filter` argument [0] `regex: *string*`"
+        ),
+    )
+
+    result = await buck.uquery("""filter('none', ':none')""")
+    assert result.stdout == "root//:none\n"
+
+    result = await buck.uquery("""filter('None', ':None')""")
+    assert result.stdout == "root//:None\n"
+
+    await expect_failure(
+        buck.uquery("""none()"""),
+        stderr_regex="unknown function `none`:",
+    )
+    await expect_failure(
+        buck.uquery("""None()"""),
+        stderr_regex="in Eof",
+    )
+
+
+@buck_test(data_dir="bxl_simple")
 async def test_uquery_inputs(buck: Buck) -> None:
     result = await buck.uquery("""inputs(set(root//bin:the_binary //lib:file1))""")
     assert result.stdout == "bin/TARGETS.fixture\n"
@@ -279,7 +378,7 @@ async def test_attributes(buck: Buck) -> None:
             "buck.package": "root//bin:TARGETS.fixture",
             "buck.tree_modifiers": ["cfg//os:linux"],
             "buck.type": "_foo_binary",
-            "buck.configuration_deps": ["root//bin:my_config"],
+            "buck.configuration_deps": ["root//bin:my_platform", "root//bin:my_config"],
             "buck.oncall": None,
             "deps": ["root//lib:lib1", "root//lib:lib2", "root//lib:lib3"],
             "srcs": ["root//bin/TARGETS.fixture"],
@@ -289,7 +388,7 @@ async def test_attributes(buck: Buck) -> None:
             "buck.package": "root//lib:TARGETS.fixture",
             "buck.tree_modifiers": ["cfg//os:linux"],
             "buck.type": "_foo_genrule",
-            "buck.configuration_deps": [],
+            "buck.configuration_deps": ["root//platforms:platform1"],
             "buck.oncall": None,
         },
     } == attrs_json_out

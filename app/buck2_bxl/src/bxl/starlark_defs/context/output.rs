@@ -32,6 +32,7 @@ use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_error::starlark_error::from_starlark_with_options;
 use buck2_execute::path::artifact_path::ArtifactPath;
+use buck2_hash::BuckIndexSet;
 use buck2_server_ctx::bxl::BxlStreamingTracker;
 use buck2_server_ctx::bxl::GetBxlStreamingTracker;
 use derivative::Derivative;
@@ -40,7 +41,6 @@ use dupe::Dupe;
 use either::Either;
 use futures::FutureExt;
 use gazebo::prelude::VecExt;
-use indexmap::IndexSet;
 use itertools::Itertools;
 use serde::Serialize;
 use serde::Serializer;
@@ -49,7 +49,6 @@ use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallSet;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
@@ -123,11 +122,11 @@ pub(crate) struct OutputStreamState {
 pub(crate) struct OutputStreamOutcome {
     /// set of artifacts that need to be materialized, flattened from
     /// the original EnsuredArtifactOrGroup entries.
-    pub(crate) ensured_artifacts: IndexSet<ArtifactGroup>,
+    pub(crate) ensured_artifacts: BuckIndexSet<ArtifactGroup>,
     pub(crate) output: Vec<u8>,
     pub(crate) streaming: Vec<u8>,
     pub(crate) error: Vec<u8>,
-    pub(crate) pending_streaming_outputs: Vec<(IndexSet<ArtifactGroup>, Vec<u8>)>,
+    pub(crate) pending_streaming_outputs: Vec<(BuckIndexSet<ArtifactGroup>, Vec<u8>)>,
 }
 
 #[derive(
@@ -199,7 +198,7 @@ impl OutputStreamState {
             .into_iter()
             .map(EnsuredArtifactOrGroup::into_artifact_groups)
             .flatten_ok()
-            .collect::<buck2_error::Result<IndexSet<ArtifactGroup>>>()?;
+            .collect::<buck2_error::Result<BuckIndexSet<ArtifactGroup>>>()?;
         let pending_streaming_outputs = state
             .pending_streaming_outputs
             .into_iter()
@@ -208,10 +207,10 @@ impl OutputStreamState {
                     .into_iter()
                     .map(|ensured_artifact| ensured_artifact.into_artifact_groups())
                     .flatten_ok()
-                    .collect::<buck2_error::Result<IndexSet<ArtifactGroup>>>()?;
+                    .collect::<buck2_error::Result<BuckIndexSet<ArtifactGroup>>>()?;
                 Ok((artifacts, output_str))
             })
-            .collect::<buck2_error::Result<Vec<(IndexSet<ArtifactGroup>, Vec<u8>)>>>()?;
+            .collect::<buck2_error::Result<Vec<(BuckIndexSet<ArtifactGroup>, Vec<u8>)>>>()?;
         Ok(OutputStreamOutcome {
             ensured_artifacts: artifacts,
             output: state.output,
@@ -559,11 +558,17 @@ impl StarlarkOutputStream {
     }
 }
 
-#[starlark_value(type = "bxl.OutputStream", StarlarkTypeRepr, UnpackValue)]
+starlark::methods_static!(OUTPUT_STREAM_METHODS = output_stream_methods);
+
+#[starlark_value(
+    type = "bxl.OutputStream",
+    StarlarkTypeRepr,
+    UnpackValue,
+    ty_vtable_no_freeze
+)]
 impl<'v> StarlarkValue<'v> for StarlarkOutputStream {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(output_stream_methods)
+        Some(OUTPUT_STREAM_METHODS.methods())
     }
 }
 
@@ -876,8 +881,8 @@ fn output_stream_methods(builder: &mut MethodsBuilder) {
     }
 }
 
-pub(crate) fn get_cmd_line_inputs<'v>(
-    cmd_line: &'v dyn CommandLineArgLike,
+pub(crate) fn get_cmd_line_inputs(
+    cmd_line: &dyn CommandLineArgLike,
 ) -> buck2_error::Result<StarlarkCommandLineInputs> {
     let mut visitor = SimpleCommandLineArtifactVisitor::new();
     cmd_line.visit_artifacts(&mut visitor)?;
@@ -912,7 +917,7 @@ fn get_artifacts_from_bxl_build_result(
             .outputs
             .iter()
             .filter_map(|built| {
-                built.as_ref().ok().map(|artifacts| {
+                built.inner.as_ref().ok().map(|artifacts| {
                     artifacts
                         .values
                         .iter()

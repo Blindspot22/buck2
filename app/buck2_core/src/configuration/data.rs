@@ -14,12 +14,11 @@ use std::hash::Hasher;
 
 use allocative::Allocative;
 use buck2_data::ToProtoMessage;
-use buck2_util::hash::BuckHasher;
+use buck2_hash::BuckHasher;
 use buck2_util::strong_hasher::Blake3StrongHasher;
 use dupe::Dupe;
 use equivalent::Equivalent;
 use once_cell::sync::Lazy;
-use once_cell::sync::OnceCell;
 use pagable::Pagable;
 use serde::Serialize;
 use serde::Serializer;
@@ -51,8 +50,6 @@ enum ConfigurationError {
         "Attempted to access the configuration data for the \"unspecified_exec\" platform. This platform is used when no execution platform was resolved for a target."
     )]
     UnspecifiedExec,
-    #[error("Internal error: DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT is already initialized")]
-    DeconflictContentBasedPathsRolloutAlreadyInitialized,
 }
 
 #[derive(Debug, buck2_error::Error)]
@@ -68,18 +65,6 @@ enum ConfigurationLookupError {
         "Found configuration `{0}` by hash, but label mismatched from what is requested: `{1}`"
     )]
     ConfigFoundByHashLabelMismatch(ConfigurationData, BoundConfigurationId),
-}
-
-pub static DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT: OnceCell<bool> = OnceCell::new();
-
-pub fn init_deconflict_content_based_paths_rollout(
-    rollout: Option<bool>,
-) -> buck2_error::Result<()> {
-    let rollout = rollout.unwrap_or(false);
-    DECONFLICT_CONTENT_BASED_PATHS_ROLLOUT
-        .set(rollout)
-        .map_err(|_| ConfigurationError::DeconflictContentBasedPathsRolloutAlreadyInitialized)?;
-    Ok(())
 }
 
 fn emit_configuration_instant_event(cfg: &ConfigurationData) -> buck2_error::Result<()> {
@@ -142,10 +127,14 @@ interner!(INTERNER, BuckHasher, HashedConfigurationPlatform);
 
 impl ConfigurationData {
     /// Produces a "bound" configuration for a platform. The label should be a unique identifier for the data.
-    pub fn from_platform(label: String, data: ConfigurationDataData) -> buck2_error::Result<Self> {
+    pub fn from_platform(
+        label: String,
+        data: ConfigurationDataData,
+        is_marked_as_exec_platform: bool,
+    ) -> buck2_error::Result<Self> {
         let label = BoundConfigurationLabel::new(label)?;
         let (cfg, disposition) = Self::from_data(HashedConfigurationPlatform::new(
-            ConfigurationPlatform::Bound(label, data),
+            ConfigurationPlatform::Bound(label, data, is_marked_as_exec_platform),
         ));
         if let InternDisposition::Computed = disposition {
             emit_configuration_instant_event(&cfg)?;
@@ -215,6 +204,7 @@ impl ConfigurationData {
                 ConfigurationDataData {
                     constraints: BTreeMap::new(),
                 },
+                false,
             ),
         ))
         .0
@@ -265,7 +255,7 @@ impl ConfigurationData {
 
     pub fn label(&self) -> buck2_error::Result<&str> {
         match &self.0.configuration_platform {
-            ConfigurationPlatform::Bound(label, _) => Ok(label.as_str()),
+            ConfigurationPlatform::Bound(label, _, _) => Ok(label.as_str()),
             _ => Err(ConfigurationError::NotBound(self.to_string()).into()),
         }
     }
@@ -278,7 +268,7 @@ impl ConfigurationData {
             ConfigurationPlatform::Builtin(builtin) => {
                 Err(ConfigurationError::Builtin(*builtin).into())
             }
-            ConfigurationPlatform::Bound(_, data) => Ok(data),
+            ConfigurationPlatform::Bound(_, data, _) => Ok(data),
         }
     }
 
@@ -291,7 +281,7 @@ impl ConfigurationData {
 
     pub fn bound(&self) -> Option<&BoundConfigurationLabel> {
         match &self.0.configuration_platform {
-            ConfigurationPlatform::Bound(label, _) => Some(label),
+            ConfigurationPlatform::Bound(label, _, _) => Some(label),
             _ => None,
         }
     }
@@ -307,6 +297,13 @@ impl ConfigurationData {
         matches!(
             &self.0.configuration_platform,
             ConfigurationPlatform::Bound(..)
+        )
+    }
+
+    pub fn is_marked_as_exec_platform(&self) -> bool {
+        matches!(
+            &self.0.configuration_platform,
+            ConfigurationPlatform::Bound(_, _, true)
         )
     }
 
@@ -348,14 +345,15 @@ impl ToProtoMessage for ConfigurationData {
 )]
 enum ConfigurationPlatform {
     /// This represents the normal case where a platform has been defined by a `platform()` (or similar) target.
-    Bound(BoundConfigurationLabel, ConfigurationDataData),
+    /// The `bool` indicates whether the user provided a modifier constraint to mark this as an execution platform.
+    Bound(BoundConfigurationLabel, ConfigurationDataData, bool),
     Builtin(BuiltinPlatform),
 }
 
 impl ConfigurationPlatform {
     fn label(&self) -> &str {
         match self {
-            ConfigurationPlatform::Bound(label, _) => label.as_str(),
+            ConfigurationPlatform::Bound(label, _, _) => label.as_str(),
             ConfigurationPlatform::Builtin(builtin) => builtin.label(),
         }
     }
@@ -444,13 +442,14 @@ impl StrongHash for HashedConfigurationPlatform {
 
 impl HashedConfigurationPlatform {
     fn new(configuration_platform: ConfigurationPlatform) -> Self {
-        let mut hasher = Blake3StrongHasher::new();
-        configuration_platform.strong_hash(&mut hasher);
-        let output_hash = hasher.finish();
-        let output_hash = ConfigurationHash::new(output_hash);
+        let output_hash = {
+            let mut hasher = Blake3StrongHasher::new();
+            configuration_platform.strong_hash(&mut hasher);
+            ConfigurationHash::new(hasher.finish())
+        };
 
         let full_name = match &configuration_platform {
-            ConfigurationPlatform::Bound(label, _cfg) => {
+            ConfigurationPlatform::Bound(label, _cfg, _) => {
                 format!("{label:#}#{output_hash}")
             }
             ConfigurationPlatform::Builtin(builtin) => builtin.label().to_owned(),
@@ -492,13 +491,14 @@ mod tests {
                     ),
                 ]),
             },
+            false,
         )
         .unwrap();
 
-        assert_eq!(configuration.output_hash().as_str(), "6770d7f2ebfc0845");
+        assert_eq!(configuration.output_hash().as_str(), "39f3b844d3613e4f");
         assert_eq!(
             configuration.to_string(),
-            "cfg_for//:testing_exec#6770d7f2ebfc0845"
+            "cfg_for//:testing_exec#39f3b844d3613e4f"
         );
 
         Ok(())
@@ -520,10 +520,11 @@ mod tests {
                     ),
                 ]),
             },
+            false,
         )
         .unwrap();
 
-        let expected_cfg_str = "cfg_for//:testing_exec#6770d7f2ebfc0845";
+        let expected_cfg_str = "cfg_for//:testing_exec#39f3b844d3613e4f";
         assert_eq!(expected_cfg_str, configuration.to_string());
 
         let looked_up =

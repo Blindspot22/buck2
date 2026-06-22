@@ -38,6 +38,7 @@ use buck2_util::arc_str::ArcStr;
 use dupe::Dupe;
 use either::Either;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
 use starlark_map::Hashed;
 use starlark_map::ordered_map::OrderedMap;
 
@@ -81,12 +82,12 @@ use crate::rule_type::StarlarkRuleType;
 /// in the node, instead the node just stores the base TargetNode and a configuration for
 /// resolving the attributes. This saves memory, but users should try avoid repeatedly
 /// requesting the same information.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Allocative)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Allocative, Pagable)]
 pub struct ConfiguredTargetNode(triomphe::Arc<Hashed<ConfiguredTargetNodeData>>);
 
 impl Dupe for ConfiguredTargetNode {}
 
-#[derive(Debug, Eq, PartialEq, Hash, Allocative)]
+#[derive(Debug, Eq, PartialEq, Hash, Allocative, Pagable)]
 enum TargetNodeOrForward {
     TargetNode(TargetNode),
     // Coerced attr is always a dependency.
@@ -145,6 +146,13 @@ impl TargetNodeOrForward {
         }
     }
 
+    fn not_visible_to_error(&self, consumer: TargetLabel) -> crate::visibility::VisibilityError {
+        match self {
+            TargetNodeOrForward::TargetNode(node) => node.not_visible_to_error(consumer),
+            TargetNodeOrForward::Forward(_, forward) => forward.not_visible_to_error(consumer),
+        }
+    }
+
     fn oncall(&self) -> Option<&str> {
         match self {
             TargetNodeOrForward::TargetNode(node) => node.oncall(),
@@ -178,7 +186,7 @@ impl TargetNodeOrForward {
 //  1. we iterate over and configure the attributes multiple times, that could be improved in a bunch of ways
 //  2. we store the same resolvedconfiguration probably in a bunch of nodes, that could be made smaller or shared
 //  3. deps could probably be approximated a diff against the targetnode's deps
-#[derive(Eq, PartialEq, Hash, Allocative)]
+#[derive(Eq, PartialEq, Hash, Allocative, Pagable)]
 struct ConfiguredTargetNodeData {
     label: Hashed<ConfiguredTargetLabel>,
     target_node: TargetNodeOrForward,
@@ -315,8 +323,10 @@ impl ConfiguredTargetNode {
     }
 
     pub(crate) fn actual_attribute() -> &'static Attribute {
-        static ATTRIBUTE: Lazy<Attribute> =
-            Lazy::new(|| Attribute::new(None, "", AttrType::configured_dep(ProviderIdSet::EMPTY)));
+        static ATTRIBUTE: Lazy<Attribute> = Lazy::new(|| {
+            Attribute::new(None, "", AttrType::configured_dep(ProviderIdSet::EMPTY))
+                .expect("static Attribute::new failed")
+        });
         &ATTRIBUTE
     }
 
@@ -452,6 +462,13 @@ impl ConfiguredTargetNode {
         self.0.target_node.is_visible_to(target)
     }
 
+    pub fn not_visible_to_error(
+        &self,
+        consumer: TargetLabel,
+    ) -> crate::visibility::VisibilityError {
+        self.0.target_node.not_visible_to_error(consumer)
+    }
+
     #[inline]
     pub fn special_attr_or_none(&self, key: &str) -> Option<ConfiguredAttr> {
         self.as_ref().special_attr_or_none(key)
@@ -557,7 +574,7 @@ impl ConfiguredTargetNode {
 
 /// The representation of the deps for a ConfiguredTargetNode. Provides the operations we require
 /// (iteration, eq, and hash), but guarantees those aren't recursive of the dep nodes' data.
-#[derive(Allocative)]
+#[derive(Allocative, Pagable)]
 struct ConfiguredTargetNodeDeps {
     /// Number of deps, excluding exec deps. Used as an index to retrieve exec_deps
     deps_count: usize,
@@ -667,10 +684,12 @@ impl<'a> ConfiguredTargetNodeRef<'a> {
 
     fn attr_configuration_context(self) -> AttrConfigurationContextImpl<'a> {
         AttrConfigurationContextImpl::new(
+            self.label().dupe(),
             &self.0.get().resolved_configuration,
             &self.0.get().execution_platform_resolution,
             &self.0.get().resolved_transition_configurations,
             &self.0.get().platform_cfgs,
+            Some(self.0.get().label.key().unconfigured().dupe()),
         )
     }
 
@@ -740,14 +759,14 @@ impl<'a> ConfiguredTargetNodeRef<'a> {
     ) -> impl Iterator<Item = ConfiguredAttrFull<'a>> + 'a {
         self.0.get().target_node.attrs(opts).map(move |a| {
             a.configure(&self.attr_configuration_context())
-                .expect("checked attr configuration in constructor")
+                .expect_compatible("checked attr configuration in constructor")
         })
     }
 
     pub fn get(self, attr: &str, opts: AttrInspectOptions) -> Option<ConfiguredAttrFull<'a>> {
         self.0.get().target_node.attr_or_none(attr, opts).map(|v| {
             v.configure(&self.attr_configuration_context())
-                .expect("checked attr configuration in constructor")
+                .expect_compatible("checked attr configuration in constructor")
         })
     }
 

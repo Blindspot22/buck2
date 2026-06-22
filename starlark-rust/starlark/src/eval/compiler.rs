@@ -42,7 +42,7 @@ use crate::eval::compiler::scope::ModuleScopeData;
 use crate::eval::compiler::scope::ScopeId;
 use crate::eval::compiler::scope::ScopeNames;
 use crate::eval::runtime::frame_span::FrameSpan;
-use crate::values::FrozenRef;
+use crate::values::any::FrozenAnyValue;
 
 #[cold]
 #[inline(never)]
@@ -65,7 +65,7 @@ pub(crate) fn expr_throw<'v, T>(
 ) -> Result<T, EvalException> {
     match r {
         Ok(v) => Ok(v),
-        Err(e) => Err(add_span_to_expr_error(e.into(), span, eval)),
+        Err(e) => Err(add_span_to_expr_error(e, span, eval)),
     }
 }
 
@@ -86,8 +86,8 @@ pub(crate) struct Compiler<'v, 'a, 'e, 'x> {
     pub(crate) eval: &'x mut Evaluator<'v, 'a, 'e>,
     pub(crate) scope_data: ModuleScopeData<'x>,
     pub(crate) locals: Vec<ScopeId>,
-    pub(crate) globals: FrozenRef<'static, Globals>,
-    pub(crate) codemap: FrozenRef<'static, CodeMap>,
+    pub(crate) globals: FrozenAnyValue<Globals>,
+    pub(crate) codemap: FrozenAnyValue<CodeMap>,
     pub(crate) check_types: bool,
     pub(crate) top_level_stmt_count: usize,
     /// Set with `@starlark-rust: typecheck`.

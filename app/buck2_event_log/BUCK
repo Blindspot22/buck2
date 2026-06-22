@@ -8,6 +8,7 @@ rust_library(
     test_deps = [
         "fbsource//third-party/rust:maplit",
         "fbsource//third-party/rust:tempfile",
+        "//buck2/app/buck2_hash:buck2_hash",
     ],
     deps = [
         "fbsource//third-party/rust:async-compression",
@@ -15,8 +16,8 @@ rust_library(
         "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:itertools",
         "fbsource//third-party/rust:pin-project",
-        "fbsource//third-party/rust:prost-0-13-4",
-        "fbsource//third-party/rust:prost-types-0-13-4",
+        "fbsource//third-party/rust:prost",
+        "fbsource//third-party/rust:prost-types",
         "fbsource//third-party/rust:regex",
         "fbsource//third-party/rust:serde",
         "fbsource//third-party/rust:serde_json",

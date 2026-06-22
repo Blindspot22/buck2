@@ -73,12 +73,12 @@ use crate::stdlib::breakpoint::RealBreakpointConsole;
 use crate::stdlib::extra::PrintHandler;
 use crate::stdlib::extra::StderrPrintHandler;
 use crate::values::FrozenHeap;
-use crate::values::FrozenRef;
 use crate::values::Heap;
 use crate::values::Trace;
 use crate::values::Tracer;
 use crate::values::Value;
 use crate::values::ValueLike;
+use crate::values::any::FrozenAnyValue;
 use crate::values::function::NativeFunction;
 use crate::values::layout::value_captured::FrozenValueCaptured;
 use crate::values::layout::value_captured::ValueCaptured;
@@ -143,7 +143,8 @@ pub struct Evaluator<'v, 'a, 'e> {
     pub(crate) loader: Option<&'a dyn FileLoader>,
     // `DefInfo` of currently executed module.
     // `DefInfo` of currently execution function can be obtained from call stack.
-    pub(crate) module_def_info: FrozenRef<'static, DefInfo>,
+    // `None` only during `Evaluator` construction, before `eval_module` sets it.
+    pub(crate) module_def_info: Option<FrozenAnyValue<DefInfo>>,
     // Should we enable heap profiling or not
     pub(crate) heap_profile: HeapProfile,
     // Should we enable flame profiling or not
@@ -191,6 +192,9 @@ pub struct Evaluator<'v, 'a, 'e> {
     // The Starlark-level call-stack of functions.
     // Must go last because it's quite a big structure
     pub(crate) call_stack: CheapCallStack<'v>,
+    /// Stack of parent `BcFramePtr`s, pushed/popped in `alloca_frame`.
+    /// Used by the debugger to read local variables of non-top stack frames.
+    pub(crate) frame_stack: Vec<BcFramePtr<'v>>,
     /// Function to check if evaluation should be cancelled early
     pub(crate) is_cancelled: Box<dyn Fn() -> bool + 'a>,
     /// A counter to track when to perform "infrequent" checks like cancellation, timeouts, etc
@@ -282,7 +286,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
             typecheck_profile: TypecheckProfile::default(),
             time_flame_profile: TimeFlameProfile::new(),
             eval_instrumentation: EvaluationInstrumentation::new(),
-            module_def_info: DefInfo::empty(), // Will be replaced before it is used
+            module_def_info: None, // Will be replaced before it is used
             string_pool: StringPool::default(),
             breakpoint_handler: None,
             print_handler: &StderrPrintHandler,
@@ -292,6 +296,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
             max_callstack_size: None,
             max_heap_size: None,
             max_tick_count: None,
+            frame_stack: Vec::with_capacity(DEFAULT_STACK_SIZE),
             is_cancelled: Box::new(|| false),
             infrequent_instr_check_counter: 0,
             total_tick_count_at_last_infrequent_check: 0,
@@ -527,7 +532,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
     pub(crate) fn with_call_stack<R>(
         &mut self,
         function: Value<'v>,
-        span: Option<FrozenRef<'static, FrameSpan>>,
+        span: Option<&'static FrameSpan>,
         within: impl FnOnce(&mut Self) -> crate::Result<R>,
     ) -> crate::Result<R> {
         #[cold]
@@ -727,20 +732,22 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
         }
     }
 
-    fn func_to_def_info(&self, func: Value<'_>) -> crate::Result<FrozenRef<'_, DefInfo>> {
+    fn func_to_def_info(&self, func: Value<'_>) -> crate::Result<FrozenAnyValue<DefInfo>> {
         if let Some(func) = func.downcast_ref::<Def>() {
             Ok(func.def_info)
         } else if let Some(func) = func.downcast_ref::<FrozenDef>() {
             Ok(func.def_info)
         } else if func.is_none() {
-            // For module, it is `None`.
-            Ok(self.module_def_info)
+            // Module top-level has no Def (pushes `None` on the call stack),
+            // so DefInfo comes from module_def_info, set by `eval_module`.
+            self.module_def_info
+                .ok_or_else(|| internal_error!("module_def_info must be set during eval_module"))
         } else {
             Err(crate::Error::new_other(EvaluatorError::TopFrameNotDef))
         }
     }
 
-    pub(crate) fn top_frame_def_info(&self) -> crate::Result<FrozenRef<'_, DefInfo>> {
+    pub(crate) fn top_frame_def_info(&self) -> crate::Result<FrozenAnyValue<DefInfo>> {
         let func = self.call_stack.top_nth_function(0)?;
         self.func_to_def_info(func)
     }
@@ -748,7 +755,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
     pub(crate) fn top_frame_def_frozen_module(
         &self,
         for_debugger: bool,
-    ) -> anyhow::Result<Option<FrozenRef<'static, FrozenModuleData>>> {
+    ) -> anyhow::Result<Option<FrozenAnyValue<FrozenModuleData>>> {
         let func = self.top_frame_maybe_for_debugger(for_debugger)?;
         if let Some(func) = func.downcast_ref::<FrozenDef>() {
             Ok(func.module.load_relaxed())
@@ -771,7 +778,7 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
 
     /// Gets the "top frame" for debugging. If the real top frame is `breakpoint` or `debug_evaluate`
     /// it will be skipped. This should only be used for the starlark debugger.
-    pub(crate) fn top_frame_def_info_for_debugger(&self) -> crate::Result<FrozenRef<'_, DefInfo>> {
+    pub(crate) fn top_frame_def_info_for_debugger(&self) -> crate::Result<FrozenAnyValue<DefInfo>> {
         let func = self.top_frame_maybe_for_debugger(true)?;
         self.func_to_def_info(func)
     }
@@ -787,6 +794,11 @@ impl<'v, 'a, 'e: 'a> Evaluator<'v, 'a, 'e> {
             .record_call_enter(const_frozen_string!("trace/walk").to_value());
         self.module_env.trace(tracer);
         self.current_frame.trace(tracer);
+        for frame in &mut self.frame_stack {
+            if frame.is_inititalized() {
+                frame.trace(tracer);
+            }
+        }
         self.call_stack.trace(tracer);
         self.time_flame_profile.record_call_exit();
         self.time_flame_profile

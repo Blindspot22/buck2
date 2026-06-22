@@ -38,9 +38,13 @@ use crate as starlark;
 use crate::any::ProvidesStaticType;
 use crate::environment::Methods;
 use crate::environment::MethodsBuilder;
-use crate::environment::MethodsStatic;
 use crate::eval::Arguments;
 use crate::eval::Evaluator;
+use crate::pagable::starlark_deserialize::StarlarkDeserialize;
+use crate::pagable::starlark_deserialize::StarlarkDeserializeContext;
+use crate::pagable::starlark_serialize::StarlarkSerialize;
+use crate::pagable::starlark_serialize::StarlarkSerializeContext;
+use crate::register_avalue_simple_frozen;
 use crate::typing::ParamSpec;
 use crate::typing::Ty;
 use crate::typing::callable::TyCallable;
@@ -66,6 +70,7 @@ use crate::values::enumeration::ty_enum_type::TyEnumData;
 use crate::values::function::FUNCTION_TYPE;
 use crate::values::index::convert_index;
 use crate::values::list::AllocList;
+use crate::values::types::type_instance_id::StarlarkTypeIdDomain;
 use crate::values::types::type_instance_id::TypeInstanceId;
 use crate::values::typing::type_compiled::type_matcher_factory::TypeMatcherFactory;
 
@@ -170,14 +175,41 @@ pub type EnumType<'v> = EnumTypeGen<Value<'v>>;
 /// Frozen enum type.
 pub type FrozenEnumType = EnumTypeGen<FrozenValue>;
 
+impl StarlarkSerialize for EnumTypeGen<FrozenValue> {
+    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+        use pagable::PagableSerialize;
+        self.id.starlark_serialize(ctx)?;
+        self.ty_enum_data.pagable_serialize(ctx.pagable())?;
+        self.elements().starlark_serialize(ctx)?;
+        Ok(())
+    }
+}
+
+impl StarlarkDeserialize for EnumTypeGen<FrozenValue> {
+    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
+        use pagable::PagableDeserialize;
+        let id = TypeInstanceId::starlark_deserialize(ctx)?;
+        let ty_enum_data =
+            <FrozenValue as EnumCell>::TyEnumDataOpt::pagable_deserialize(ctx.pagable())?;
+        let elements = SmallMap::starlark_deserialize(ctx)?;
+        Ok(EnumTypeGen {
+            id,
+            ty_enum_data,
+            elements: UnsafeCell::new(elements),
+        })
+    }
+}
+
+register_avalue_simple_frozen!(FrozenEnumType);
+
 impl<'v> EnumType<'v> {
     pub(crate) fn new(
         elements: Vec<StringValue<'v>>,
         heap: Heap<'v>,
+        id: TypeInstanceId,
     ) -> crate::Result<ValueTyped<'v, EnumType<'v>>> {
         // We are constructing the enum and all elements in one go.
         // They both point at each other, which adds to the complexity.
-        let id = TypeInstanceId::r#gen();
         let typ = heap.alloc_typed(EnumType {
             id,
             ty_enum_data: OnceCell::new(),
@@ -234,6 +266,8 @@ where
         }
     }
 }
+
+starlark::methods_static!(ENUM_TYPE_METHODS = enum_type_methods);
 
 #[starlark_value(type = FUNCTION_TYPE)]
 impl<'v, V> StarlarkValue<'v> for EnumTypeGen<V>
@@ -305,8 +339,7 @@ where
     unsafe fn iter_stop(&self) {}
 
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(enum_type_methods)
+        Some(ENUM_TYPE_METHODS.methods())
     }
 
     fn eval_type(&self) -> Option<Ty> {
@@ -349,7 +382,7 @@ where
             let ty_enum_type = Ty::custom(TyUser::new(
                 format!("enum[{variable_name}]"),
                 TyStarlarkValue::new::<EnumType>(),
-                TypeInstanceId::r#gen(),
+                TypeInstanceId::from_identity(StarlarkTypeIdDomain::EnumTypeOfType, &self.id),
                 TyUserParams {
                     fields: TyUserFields {
                         known: fields_map,

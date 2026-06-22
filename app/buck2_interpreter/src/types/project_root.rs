@@ -13,28 +13,36 @@ use derive_more::Display;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::starlark_module;
+use starlark::static_starlark_value;
 use starlark::values::AllocFrozenValue;
-use starlark::values::AllocStaticSimple;
 use starlark::values::AllocValue;
 use starlark::values::FrozenHeap;
 use starlark::values::FrozenValue;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Value;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
-#[derive(Debug, PartialEq, Display, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(
+    Debug,
+    PartialEq,
+    Display,
+    ProvidesStaticType,
+    NoSerialize,
+    Allocative,
+    StarlarkPagable
+)]
 pub struct StarlarkProjectRoot;
 
 #[starlark_value(type = "ProjectRoot", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkProjectRoot {}
 
+static_starlark_value!(STARLARK_PROJECT_ROOT: StarlarkProjectRoot = StarlarkProjectRoot);
+
 fn instance() -> FrozenValue {
-    static INSTANCE: AllocStaticSimple<StarlarkProjectRoot> =
-        AllocStaticSimple::alloc(StarlarkProjectRoot);
-    INSTANCE.to_frozen_value()
+    STARLARK_PROJECT_ROOT.to_frozen_value()
 }
 
 impl<'v> AllocValue<'v> for StarlarkProjectRoot {
@@ -50,6 +58,5 @@ impl AllocFrozenValue for StarlarkProjectRoot {
 }
 
 #[starlark_module]
-pub fn register_project_root(globals: &mut GlobalsBuilder) {
-    const ProjectRoot: StarlarkValueAsType<StarlarkProjectRoot> = StarlarkValueAsType::new();
-}
+#[starlark_types(StarlarkProjectRoot as ProjectRoot)]
+pub fn register_project_root(globals: &mut GlobalsBuilder) {}

@@ -21,7 +21,6 @@ use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Arguments;
 use starlark::eval::Evaluator;
 use starlark::eval::ParametersSpec;
@@ -40,6 +39,7 @@ use starlark::values::FrozenValue;
 use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
@@ -59,12 +59,14 @@ use crate::dynamic::dynamic_actions::StarlarkDynamicActionsData;
 pub struct DynamicActionsCallbackParamSpec;
 
 pub struct DynamicActionsCallbackParam {
-    pub name: &'static str,
+    pub name: pagable::StaticStr,
     pub ty: LazyLock<Ty>,
 }
 
+pagable::static_str!(P_ACTIONS_NAME = "actions");
+
 pub(crate) static P_ACTIONS: DynamicActionsCallbackParam = DynamicActionsCallbackParam {
-    name: "actions",
+    name: P_ACTIONS_NAME,
     ty: LazyLock::new(AnalysisActions::starlark_type_repr),
 };
 
@@ -106,7 +108,7 @@ enum DynamicActionCallableError {
 )]
 #[display(
     "DynamicActionCallable[{}]",
-    self.name.get().map(|s| s.as_str()).unwrap_or("(unbound)")
+    self.name.get().map_or("(unbound)", |s| s.as_str())
 )]
 pub struct DynamicActionsCallable<'v> {
     pub(crate) self_ty: Ty,
@@ -121,10 +123,12 @@ pub struct DynamicActionsCallable<'v> {
     NoSerialize,
     ProvidesStaticType,
     Allocative,
-    derive_more::Display
+    derive_more::Display,
+    StarlarkPagable
 )]
 #[display("DynamicActionsCallable[{}]", name)]
 pub struct FrozenStarlarkDynamicActionsCallable {
+    #[starlark_pagable(pagable)]
     pub(crate) self_ty: Ty,
     pub(crate) implementation:
         FrozenStarlarkCallable<DynamicActionsCallbackParamSpec, DynamicActionsCallbackReturnType>,
@@ -132,6 +136,8 @@ pub struct FrozenStarlarkDynamicActionsCallable {
     name: String,
     signature: ParametersSpec<FrozenValue>,
 }
+
+starlark::methods_static!(DYNAMIC_ACTION_CALLABLE_METHODS = dynamic_action_callable_methods);
 
 #[starlark_value(type = "DynamicActionCallable")]
 impl<'v> StarlarkValue<'v> for DynamicActionsCallable<'v> {
@@ -162,8 +168,7 @@ impl<'v> StarlarkValue<'v> for DynamicActionsCallable<'v> {
 
     // used for docs of `DynamicActionCallable`
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(dynamic_action_callable_methods)
+        Some(DYNAMIC_ACTION_CALLABLE_METHODS.methods())
     }
 }
 

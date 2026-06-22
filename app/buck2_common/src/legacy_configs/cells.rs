@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -29,8 +28,10 @@ use buck2_error::BuckErrorContext;
 use buck2_fs::paths::RelativePath;
 use buck2_fs::paths::abs_path::AbsPath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+use buck2_hash::StdBuckHashSet;
 use dice::DiceComputations;
 use dupe::Dupe;
+use pagable::Pagable;
 
 use crate::dice::cells::HasCellResolver;
 use crate::dice::data::HasIoProvider;
@@ -57,7 +58,7 @@ use crate::legacy_configs::path::ProjectConfigSource;
 
 /// Buckconfigs can partially be loaded from within dice. However, some parts of what makes up the
 /// buckconfig comes from outside the buildgraph, and this type represents those parts.
-#[derive(Clone, PartialEq, Eq, Allocative)]
+#[derive(Clone, PartialEq, Eq, Allocative, Pagable)]
 pub struct ExternalBuckconfigData {
     // The result of parsing the buckconfigs coming from either global (e.g. /etc/buckconfig.d) or
     // user (e.g. ~/.buckconfig.d or $home_dir/.buckconfig.local) files/dirs outside of the repo
@@ -68,7 +69,7 @@ pub struct ExternalBuckconfigData {
     args: Vec<ResolvedLegacyConfigArg>,
 }
 
-#[derive(PartialEq, Eq, Allocative, Clone)]
+#[derive(PartialEq, Eq, Allocative, Clone, Pagable)]
 pub struct ExternalPathBuckconfigData {
     pub(crate) parse_state: LegacyConfigParser,
     pub(crate) origin_path: ConfigPath,
@@ -121,7 +122,7 @@ impl ExternalBuckconfigData {
         };
         let mut local_config_components = Vec::new();
         if let Ok(legacy_cells) =
-            BuckConfigBasedCells::parse_with_config_args(&project_root, &[]).await
+            BuckConfigBasedCells::parse_with_config_args(project_root, &[]).await
         {
             let path = ForwardRelativePath::new(DOT_BUCKCONFIG_LOCAL).expect(
                 "Internal error: .buckconfig.local should always be a valid forward relative path",
@@ -192,7 +193,7 @@ impl ExternalBuckconfigData {
 pub struct BuckConfigBasedCells {
     pub cell_resolver: CellResolver,
     pub root_config: LegacyBuckConfig,
-    pub config_paths: HashSet<ConfigPath>,
+    pub config_paths: StdBuckHashSet<ConfigPath>,
     pub external_data: ExternalBuckconfigData,
 }
 
@@ -288,7 +289,7 @@ impl BuckConfigBasedCells {
         // Tracing file ops to record config file accesses on command invocation.
         struct TracingFileOps<'a> {
             inner: &'a mut dyn ConfigParserFileOps,
-            trace: HashSet<ConfigPath>,
+            trace: StdBuckHashSet<ConfigPath>,
         }
 
         #[async_trait::async_trait]
@@ -320,7 +321,7 @@ impl BuckConfigBasedCells {
         };
 
         // NOTE: This will _not_ perform IO unless it needs to.
-        let processed_config_args = resolve_config_args(&config_args, &mut file_ops).await?;
+        let processed_config_args = resolve_config_args(config_args, &mut file_ops).await?;
 
         let external_paths = get_external_buckconfig_paths(&mut file_ops).await?;
         let started_parse = LegacyBuckConfig::start_parse_for_external_files(
@@ -357,7 +358,7 @@ impl BuckConfigBasedCells {
             for (alias, alias_path) in repositories.iter() {
                 let alias_path = CellRootPathBuf::new(
                     root_path.as_project_relative_path()
-                        .join_normalized(RelativePath::new(alias_path.as_str()))
+                        .join_normalized(RelativePath::unchecked_new(alias_path.as_str()))
                         .with_buck_error_context(|| {
                             format!(
                                 "expected alias path to be a relative path, but found `{}` for `{}`",

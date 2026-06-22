@@ -8,33 +8,40 @@
  * above-listed licenses.
  */
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
+use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::FileDigestConfig;
+use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_error::Ok;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest::CasDigestToReExt;
+use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::directory::ActionDirectoryEntry;
 use buck2_execute::directory::ActionDirectoryMember;
 use buck2_execute::directory::ActionSharedDirectory;
 use buck2_execute::re::manager::UnconfiguredRemoteExecutionClient;
+use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_hash::StdBuckHashSet;
 use buck2_test_api::data::RemoteStorageConfig;
 use dupe::Dupe;
+use remote_execution::NamedDigest;
 use remote_execution::TDigest;
 
 type CacheKey = TDigest;
 
 pub struct ReClientWithCache {
     client: UnconfiguredRemoteExecutionClient,
-    cache: Mutex<HashSet<Arc<CacheKey>>>,
+    cache: Mutex<StdBuckHashSet<Arc<CacheKey>>>,
 }
 
 impl ReClientWithCache {
     pub fn new(client: UnconfiguredRemoteExecutionClient) -> Self {
         Self {
             client,
-            cache: Mutex::new(HashSet::new()),
+            cache: Mutex::new(StdBuckHashSet::default()),
         }
     }
 
@@ -79,6 +86,51 @@ impl ReClientWithCache {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Upload a raw local file to CAS by its absolute path.
+    ///
+    /// Computes the file's digest, uploads it to CAS, and returns the RE digest.
+    /// Called by the `upload_to_cas` RPC handler when tpx requests CAS upload
+    /// of a local test artifact file.
+    pub async fn upload_local_file(
+        &self,
+        local_path: &str,
+        digest_config: DigestConfig,
+        ttl_seconds: i64,
+        use_case: &str,
+    ) -> buck2_error::Result<TDigest> {
+        let file_config = FileDigestConfig::build(digest_config.cas_digest_config());
+        let file_path = AbsPathBuf::new(local_path)?;
+        let tracked_digest =
+            tokio::task::spawn_blocking(move || FileDigest::from_file(&file_path, file_config))
+                .await??;
+        let re_digest = tracked_digest.to_re();
+
+        let re_use_case = RemoteExecutorUseCase::new(use_case.to_owned());
+
+        let managed_client = self.client.dupe().with_use_case(re_use_case);
+
+        managed_client
+            .upload_files_and_directories(
+                vec![NamedDigest {
+                    name: local_path.to_owned(),
+                    digest: re_digest.clone(),
+                    ..Default::default()
+                }],
+                vec![],
+                vec![],
+            )
+            .await?;
+
+        managed_client
+            .extend_digest_ttl(
+                vec![re_digest.clone()],
+                Duration::from_secs(ttl_seconds as u64),
+            )
+            .await?;
+
+        Ok(re_digest)
     }
 }
 
@@ -144,7 +196,7 @@ mod tests {
         let digests = match value.entry() {
             ActionDirectoryEntry::Dir(dir) => {
                 expected.push(dir.fingerprint().to_re());
-                collect_digests(&value.entry())
+                collect_digests(value.entry())
             }
             _ => vec![],
         };

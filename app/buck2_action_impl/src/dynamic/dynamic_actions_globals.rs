@@ -19,7 +19,6 @@ use starlark::typing::ParamIsRequired;
 use starlark::typing::ParamSpec;
 use starlark::typing::Ty;
 use starlark::util::ArcStr;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::typing::StarlarkCallableChecked;
 use starlark_map::small_map::SmallMap;
@@ -43,7 +42,7 @@ pub fn new_dynamic_actions_callable<'v>(
     attrs: SmallMap<String, &'v StarlarkDynamicAttrType>,
     callback_param: &DynamicActionsCallbackParam,
 ) -> buck2_error::Result<DynamicActionsCallable<'v>> {
-    if attrs.contains_key(callback_param.name) {
+    if attrs.contains_key(callback_param.name.as_str()) {
         return Err(buck2_error!(
             buck2_error::ErrorTag::Input,
             "Cannot define `actions` attribute"
@@ -63,7 +62,7 @@ pub fn new_dynamic_actions_callable<'v>(
         .0
         .check_callable_with(
             [],
-            iter::once((callback_param.name, &*callback_param.ty))
+            iter::once((callback_param.name.as_str(), &*callback_param.ty))
                 .chain(attr_args.iter().map(|(name, ty)| (*name, ty))),
             None,
             None,
@@ -92,13 +91,17 @@ pub fn new_dynamic_actions_callable<'v>(
 }
 
 #[starlark_module]
+#[starlark_types(
+    StarlarkDynamicActions<'_> as DynamicActions,
+    FrozenStarlarkDynamicActionsCallable as DynamicActionsCallable
+)]
 pub(crate) fn register_dynamic_actions(globals: &mut GlobalsBuilder) {
     /// Create new dynamic action callable. Returned object will be callable,
     /// and the result of calling it can be passed to `ctx.actions.dynamic_output_new`.
     ///
     /// Be aware that the context argument of the called impl function differs between
-    /// [`dynamic_actions`](../#dynamic_actions) where it is [`actions: AnalysisActions`](./AnalysisActions)
-    /// and [`bxl.dynamic_actions`](../../bxl/#dynamic_actions)
+    /// [`dynamic_actions`](#dynamic_actions) where it is [`actions: AnalysisActions`](./AnalysisActions)
+    /// and [`bxl.dynamic_actions`](../bxl/#dynamic_actions)
     /// where it is [`bxl_ctx: bxl.Context`](../bxl/Context).
     fn dynamic_actions<'v>(
         #[starlark(require = named)] r#impl: StarlarkCallableChecked<
@@ -110,8 +113,4 @@ pub(crate) fn register_dynamic_actions(globals: &mut GlobalsBuilder) {
     ) -> starlark::Result<DynamicActionsCallable<'v>> {
         Ok(new_dynamic_actions_callable(r#impl, attrs, &P_ACTIONS)?)
     }
-
-    const DynamicActions: StarlarkValueAsType<StarlarkDynamicActions> = StarlarkValueAsType::new();
-    const DynamicActionsCallable: StarlarkValueAsType<FrozenStarlarkDynamicActionsCallable> =
-        StarlarkValueAsType::new();
 }

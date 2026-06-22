@@ -9,13 +9,19 @@
  */
 
 use std::hash::BuildHasherDefault;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use allocative::Allocative;
-use base64::write::EncoderWriter;
+use buck2_sketches::TypedSketch;
 use buck2_util::strong_hasher::Blake3StrongHasher;
 use derivative::Derivative;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::PagableDeserialize;
+use pagable::PagableDeserializer;
+use pagable::PagableSerialize;
+use pagable::PagableSerializer;
 use ref_cast::RefCast;
 use setsketch::SetSketchParams;
 use setsketch::SetSketcher;
@@ -31,34 +37,92 @@ pub(crate) trait Sketcher<T> {
 /// This is a struct representing graph sketches returned from DICE call to compute sketches.
 /// It satisfies 2 properties.
 /// (1) It can be merged with other sketches via VersionedSketcher's `merge` method. It does
-/// so by holding directly onto the `SetSketcher` type.
+/// so by holding directly onto the `SetSketch` type.
 /// (2) It implements Dupe, Hash, and Eq. Hash and Eq are implemented by precomputing and holding
 /// onto a signature of the sketch.
-#[derive(Clone, Dupe, Derivative, Allocative)]
+///
+/// The type parameter `S` is a [`TypedSketch`] marker that determines what kind
+/// of typed sketch this mergeable sketch represents (e.g. `DependencyGraphSketch`,
+/// `MemoryUsageSketch`, `ActionGraphSketch`).  The marker is used by `serialize`
+/// to produce a correctly-typed versioned base64 string.
+#[derive(Derivative)]
 #[derivative(Debug)]
-pub struct MergeableGraphSketch<T: StrongHash> {
+pub struct MergeableGraphSketch<T: StrongHash, S: TypedSketch> {
     version: SketchVersion,
     #[derivative(Debug = "ignore", PartialEq = "ignore", Hash = "ignore")]
-    #[allocative(skip)] // TODO(scottcao): Figure out how to implement allocative properly
-    sketcher: Arc<SetSketcher<UseStrongHashing<T>, Blake3StrongHasher>>,
+    sketch: Arc<S>,
+    #[derivative(Debug = "ignore", PartialEq = "ignore", Hash = "ignore")]
+    _phantom: PhantomData<fn(T) -> S>,
 }
 
-impl<T: StrongHash> PartialEq for MergeableGraphSketch<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.version == other.version
-            && self.sketcher.get_registers() == other.sketcher.get_registers()
+// Manual impl because Allocative derive adds S: Allocative bound
+impl<T: StrongHash, S: TypedSketch> Allocative for MergeableGraphSketch<T, S> {
+    fn visit<'a, 'b: 'a>(&self, visitor: &'a mut allocative::Visitor<'b>) {
+        let mut visitor = visitor.enter_self_sized::<Self>();
+        visitor.visit_field(allocative::Key::new("version"), &self.version);
+        // sketcher field skipped (TODO: implement allocative for SetSketcher)
+        visitor.exit();
     }
 }
 
-impl<T: StrongHash> Eq for MergeableGraphSketch<T> {}
+impl<T: StrongHash, S: TypedSketch> Clone for MergeableGraphSketch<T, S> {
+    fn clone(&self) -> Self {
+        Self {
+            version: self.version,
+            sketch: self.sketch.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
 
-impl<T: StrongHash> MergeableGraphSketch<T> {
+impl<T: StrongHash, S: TypedSketch> PagableSerialize for MergeableGraphSketch<T, S> {
+    fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> pagable::Result<()> {
+        self.version.pagable_serialize(serializer)?;
+        self.sketch
+            .inner()
+            .get_registers()
+            .pagable_serialize(serializer)?;
+        Ok(())
+    }
+}
+
+impl<'de, T: StrongHash, S: TypedSketch> PagableDeserialize<'de> for MergeableGraphSketch<T, S> {
+    fn pagable_deserialize<D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> pagable::Result<Self> {
+        let version = SketchVersion::pagable_deserialize(deserializer)?;
+        let registers: Vec<u16> = PagableDeserialize::pagable_deserialize(deserializer)?;
+        let sketch = Arc::new(S::from_recommended_registers(registers));
+        Ok(Self {
+            version,
+            sketch,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl<T: StrongHash, S: TypedSketch> Dupe for MergeableGraphSketch<T, S> {}
+
+impl<T: StrongHash, S: TypedSketch> PartialEq for MergeableGraphSketch<T, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.sketch.inner().get_registers() == other.sketch.inner().get_registers()
+    }
+}
+
+impl<T: StrongHash, S: TypedSketch> Eq for MergeableGraphSketch<T, S> {}
+
+impl<T: StrongHash, S: TypedSketch> MergeableGraphSketch<T, S> {
     pub(crate) fn new(
         version: SketchVersion,
         sketcher: SetSketcher<UseStrongHashing<T>, Blake3StrongHasher>,
     ) -> Self {
-        let sketcher = Arc::new(sketcher);
-        Self { version, sketcher }
+        let sketch = Arc::new(S::from_inner(sketcher.into_sketch()));
+        Self {
+            version,
+            sketch,
+            _phantom: PhantomData,
+        }
     }
 
     /// Returns true if the sketch is effectively empty (all registers are zero).
@@ -66,20 +130,18 @@ impl<T: StrongHash> MergeableGraphSketch<T> {
     /// long string of 'A's in base64. Detecting this allows callers to omit the
     /// sketch from output to avoid wasting storage.
     pub fn is_empty(&self) -> bool {
-        self.sketcher.get_registers().iter().all(|&v| v == 0)
+        self.sketch.inner().get_registers().iter().all(|&v| v == 0)
+    }
+
+    /// Returns the estimated cardinality of the sketched set.
+    /// For unweighted sketches, this is the approximate number of distinct items.
+    /// For weighted sketches, this is the approximate sum of weights.
+    pub(crate) fn estimated_cardinality(&self) -> f64 {
+        self.sketch.inner().cardinality()
     }
 
     pub fn serialize(&self) -> String {
-        let mut res = format!("{}:", self.version).into_bytes();
-        let mut enc =
-            EncoderWriter::new(&mut res, &base64::engine::general_purpose::STANDARD_NO_PAD);
-        for v in self.sketcher.get_registers() {
-            use std::io::Write;
-            enc.write_all(&v.to_ne_bytes()).unwrap();
-        }
-        enc.finish().unwrap();
-        drop(enc);
-        String::from_utf8(res).unwrap()
+        self.sketch.to_base64_versioned()
     }
 }
 
@@ -92,6 +154,7 @@ impl<T: StrongHash> MergeableGraphSketch<T> {
     Hash,
     PartialEq,
     Allocative,
+    Pagable,
     derive_more::Display
 )]
 pub(crate) enum SketchVersion {
@@ -101,7 +164,7 @@ pub(crate) enum SketchVersion {
 pub(crate) static DEFAULT_SKETCH_VERSION: SketchVersion = SketchVersion::V1;
 
 impl SketchVersion {
-    pub(crate) fn create_sketcher<T: StrongHash>(self) -> VersionedSketcher<T> {
+    pub(crate) fn create_sketcher<T: StrongHash, S: TypedSketch>(self) -> VersionedSketcher<T, S> {
         let sketcher = match self {
             Self::V1 => SetSketcher::new(
                 SetSketchParams::recommended(),
@@ -112,16 +175,18 @@ impl SketchVersion {
         VersionedSketcher {
             version: self,
             sketcher,
+            _phantom: PhantomData,
         }
     }
 }
 
-pub(crate) struct VersionedSketcher<T: StrongHash> {
+pub(crate) struct VersionedSketcher<T: StrongHash, S: TypedSketch> {
     version: SketchVersion,
     sketcher: SetSketcher<UseStrongHashing<T>, Blake3StrongHasher>,
+    _phantom: PhantomData<fn() -> S>,
 }
 
-impl<T: StrongHash> Sketcher<T> for VersionedSketcher<T> {
+impl<T: StrongHash, S: TypedSketch> Sketcher<T> for VersionedSketcher<T, S> {
     fn sketch(&mut self, t: &T) {
         self.sketcher.sketch(UseStrongHashing::ref_cast(t));
     }
@@ -146,14 +211,14 @@ impl<T, S: Sketcher<T>> Sketcher<T> for Option<S> {
     }
 }
 
-impl<T: StrongHash> VersionedSketcher<T> {
-    pub(crate) fn into_mergeable_graph_sketch(self) -> MergeableGraphSketch<T> {
+impl<T: StrongHash, S: TypedSketch> VersionedSketcher<T, S> {
+    pub(crate) fn into_mergeable_graph_sketch(self) -> MergeableGraphSketch<T, S> {
         MergeableGraphSketch::new(self.version, self.sketcher)
     }
 
-    pub(crate) fn merge(&mut self, other: &MergeableGraphSketch<T>) -> buck2_error::Result<()> {
+    pub(crate) fn merge(&mut self, other: &MergeableGraphSketch<T, S>) -> buck2_error::Result<()> {
         if self.version == other.version {
-            self.sketcher.merge(&other.sketcher);
+            self.sketcher.merge(&other.sketch.inner());
             Ok(())
         } else {
             Err(buck2_error::internal_error!(

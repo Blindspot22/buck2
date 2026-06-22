@@ -19,17 +19,23 @@ use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future::join3;
+use pagable::PagablePanic;
+use pagable::pagable_typetag;
 use tokio::sync::Mutex;
 
+use crate::DiceKeyDyn;
 use crate::api::computations::DiceComputations;
 use crate::api::data::DiceData;
 use crate::api::key::Key;
+use crate::api::key::NoValueSerialize;
+use crate::api::key::ValueSerialize;
 use crate::impls::dice::Dice;
 
 #[tokio::test]
 async fn concurrent_identical_requests_are_deduped() -> anyhow::Result<()> {
-    #[derive(Allocative, Clone, Debug, Display)]
+    #[derive(Allocative, Clone, Debug, Display, PagablePanic)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct ComputeOnce(#[allocative(skip)] Arc<Mutex<u8>>);
 
     impl PartialEq for ComputeOnce {
@@ -60,9 +66,13 @@ async fn concurrent_identical_requests_are_deduped() -> anyhow::Result<()> {
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             true
         }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
     }
 
-    let dice = Dice::new(DiceData::new());
+    let dice = Dice::new(DiceData::new(), None);
 
     let guard = Arc::new(Mutex::new(0));
     let _g = guard.lock().await;
@@ -93,8 +103,9 @@ async fn concurrent_identical_requests_are_deduped() -> anyhow::Result<()> {
 fn different_requests_are_spawned_in_parallel() -> anyhow::Result<()> {
     let n_thread = 10usize;
 
-    #[derive(Allocative, Clone, Debug, Display)]
+    #[derive(Allocative, Clone, Debug, Display, PagablePanic)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     // purposely use a sync barrier to see that our compute is spawned
     struct ComputeParallel(#[allocative(skip)] Arc<std::sync::Barrier>);
 
@@ -127,6 +138,10 @@ fn different_requests_are_spawned_in_parallel() -> anyhow::Result<()> {
         fn equality(_x: &Self::Value, _y: &Self::Value) -> bool {
             true
         }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -138,7 +153,7 @@ fn different_requests_are_spawned_in_parallel() -> anyhow::Result<()> {
     let barrier = Arc::new(std::sync::Barrier::new(n_thread));
 
     rt.block_on(async move {
-        let dice = Dice::new(DiceData::new());
+        let dice = Dice::new(DiceData::new(), None);
 
         let ctx = &dice.updater().commit().await;
         let k = &ComputeParallel(barrier.dupe());

@@ -9,7 +9,7 @@
  */
 
 #![feature(decl_macro)]
-#![feature(error_generic_member_access)]
+#![cfg_attr(not(windows), feature(linkage))]
 #![feature(once_cell_try)]
 #![feature(used_with_arg)]
 
@@ -19,12 +19,12 @@ pub mod commas;
 pub mod cycle_detector;
 pub mod future;
 pub mod golden_test_helper;
-pub mod hash;
 pub mod indent;
 pub mod late_binding;
 pub mod network_speed_average;
 pub mod os;
 pub mod per_thread_instruction_counter;
+pub mod pgo;
 pub mod process;
 pub mod process_stats;
 pub mod properly_reaped_child;

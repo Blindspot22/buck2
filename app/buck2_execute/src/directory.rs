@@ -8,8 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Debug;
 use std::path::Path;
@@ -43,6 +41,7 @@ use buck2_directory::directory::find::find;
 use buck2_directory::directory::fingerprinted_directory::FingerprintedDirectory;
 use buck2_directory::directory::immutable_directory::ImmutableDirectory;
 use buck2_directory::directory::shared_directory::SharedDirectory;
+use buck2_directory::directory::shared_directory::SharedDirectoryInternable;
 use buck2_directory::directory::walk::unordered_entry_walk;
 use buck2_error::internal_error;
 use buck2_fs::paths::RelativePathBuf;
@@ -50,11 +49,14 @@ use buck2_fs::paths::file_name::FileName;
 use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use chrono::DateTime;
 use chrono::Utc;
 use derive_more::Display;
 use dupe::Dupe;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
 use ref_cast::RefCast;
 use remote_execution as RE;
 use starlark_map::small_map::SmallMap;
@@ -69,11 +71,27 @@ use crate::re::manager::ManagedRemoteExecutionClient;
 pub static INTERNER: Lazy<DashMapDirectoryInterner<ActionDirectoryMember, TrackedFileDigest>> =
     Lazy::new(DashMapDirectoryInterner::new);
 
-#[derive(Clone, Debug, Dupe, PartialEq, Eq, Display, Allocative)]
+impl SharedDirectoryInternable<TrackedFileDigest> for ActionDirectoryMember {
+    fn interner() -> DashMapDirectoryInterner<Self, TrackedFileDigest> {
+        INTERNER.dupe()
+    }
+}
+
+#[derive(Clone, Debug, Dupe, PartialEq, Eq, Display, Allocative, Pagable)]
 pub enum ActionDirectoryMember {
     File(FileMetadata),
     Symlink(Arc<Symlink>),
     ExternalSymlink(Arc<ExternalSymlink>),
+}
+
+impl ActionDirectoryMember {
+    pub fn size(&self) -> u64 {
+        match self {
+            ActionDirectoryMember::File(f) => f.digest.size(),
+            ActionDirectoryMember::Symlink(_) => 0,
+            ActionDirectoryMember::ExternalSymlink(_) => 0,
+        }
+    }
 }
 
 pub type ActionDirectoryEntry<D> = DirectoryEntry<D, ActionDirectoryMember>;
@@ -106,7 +124,7 @@ pub struct ReDirectorySerializer {
 impl ReDirectorySerializer {
     fn create_re_directory<'a, D, I>(
         entries: I,
-        directory_renamer: Option<&dyn Fn(&str) -> Option<String>>,
+        directory_renamer: Option<&dyn Fn(&FileName) -> Option<FileNameBuf>>,
     ) -> RE::Directory
     where
         I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ActionDirectoryMember>)>,
@@ -119,15 +137,16 @@ impl ReDirectorySerializer {
         for (name, entry) in entries {
             match entry {
                 DirectoryEntry::Dir(d) => {
-                    let name = match directory_renamer {
-                        Some(renamer) => renamer(name.as_str()).unwrap_or(name.as_str().into()),
-                        None => name.as_str().into(),
-                    };
+                    let name = directory_renamer
+                        .and_then(|f| f(name))
+                        .unwrap_or_else(|| name.to_owned());
                     directories.push(RE::DirectoryNode {
-                        name,
+                        name: name.as_str().to_owned(),
                         digest: Some(d.as_fingerprinted_dyn().fingerprint().to_grpc()),
                     });
                 }
+                // OSS vs internal divergence.
+                #[allow(clippy::needless_update)]
                 DirectoryEntry::Leaf(ActionDirectoryMember::File(f)) => {
                     files.push(RE::FileNode {
                         name: name.as_str().into(),
@@ -136,16 +155,19 @@ impl ReDirectorySerializer {
                         ..Default::default()
                     });
                 }
+                // OSS vs internal divergence.
+                #[allow(clippy::needless_update)]
                 DirectoryEntry::Leaf(ActionDirectoryMember::Symlink(s)) => {
                     let target = if let Some(renamer) = directory_renamer {
-                        let mut target = None;
-                        for segment in s.target().iter() {
-                            if let Some(renamed_segment) = renamer(segment) {
-                                let current = target.as_deref().unwrap_or(s.target().as_str());
-                                target = Some(current.replace(segment, &renamed_segment));
+                        let mut target = RelativePathBuf::with_capacity(s.target().as_str().len());
+                        for comp in s.target().components() {
+                            if let Some(renamed) = comp.as_normal().and_then(renamer) {
+                                target.push(&renamed);
+                            } else {
+                                target.push(comp.as_relative_path());
                             }
                         }
-                        target.unwrap_or(s.to_string())
+                        target.as_str().to_owned()
                     } else {
                         s.to_string()
                     };
@@ -155,6 +177,8 @@ impl ReDirectorySerializer {
                         ..Default::default()
                     });
                 }
+                // OSS vs internal divergence.
+                #[allow(clippy::needless_update)]
                 DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(s)) => {
                     symlinks.push(RE::SymlinkNode {
                         name: name.as_str().into(),
@@ -181,6 +205,8 @@ impl ReDirectorySerializer {
         });
         symlinks.sort_by(|a, b| a.name.cmp(&b.name));
 
+        // OSS vs internal divergence.
+        #[allow(clippy::needless_update)]
         RE::Directory {
             files,
             directories,
@@ -199,7 +225,7 @@ impl ReDirectorySerializer {
 
     pub fn rename_and_serialize_entries<'a, D, I>(
         entries: I,
-        directory_renamer: &dyn Fn(&str) -> Option<String>,
+        directory_renamer: &dyn Fn(&FileName) -> Option<FileNameBuf>,
     ) -> Vec<u8>
     where
         I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ActionDirectoryMember>)>,
@@ -225,11 +251,7 @@ impl DirectoryDigester<ActionDirectoryMember, TrackedFileDigest> for ReDirectory
     }
 
     fn leaf_size(&self, leaf: &ActionDirectoryMember) -> u64 {
-        match leaf {
-            ActionDirectoryMember::File(f) => f.digest.size(),
-            ActionDirectoryMember::Symlink(_) => 0,
-            ActionDirectoryMember::ExternalSymlink(_) => 0,
-        }
+        leaf.size()
     }
 }
 
@@ -241,7 +263,7 @@ pub fn new_symlink<T: AsRef<Path>>(target: T) -> buck2_error::Result<ActionDirec
         )))
     } else {
         Ok(ActionDirectoryMember::Symlink(Arc::new(Symlink::new(
-            RelativePathBuf::from_path(target).unwrap(),
+            RelativePathBuf::from_system_path(target).unwrap(),
         ))))
     }
 }
@@ -315,7 +337,7 @@ pub fn re_tree_to_directory(
     /// but the pointers are hashes, so we need to first see a hash before we can work out what
     /// hashing mechanism to use here.
     struct DirMap<'a> {
-        by_kind: SmallMap<DigestAlgorithm, HashMap<FileDigest, &'a RE::Directory>>,
+        by_kind: SmallMap<DigestAlgorithm, StdBuckHashMap<FileDigest, &'a RE::Directory>>,
         directories: &'a [RE::Directory],
     }
 
@@ -692,7 +714,7 @@ pub fn expand_selector_for_dependencies(
     // thing.
     let mut paths_to_visit = paths_to_take.clone();
 
-    let mut all_known_symlinks = HashSet::new();
+    let mut all_known_symlinks = StdBuckHashSet::default();
 
     while !paths_to_visit.is_empty() {
         let mut next_paths_to_visit = DirectorySelector::empty();
@@ -1209,8 +1231,11 @@ mod tests {
     }
 
     #[test]
-    //Test that a symlink created with a windows path doesn't get interpreted as an invalid sylink
-    //TODO(lmvasquezg) Update symlinks to store a normalized, OS-independent path
+    // Test that a `Symlink` (relative-target) created with a Windows path doesn't get
+    // interpreted as an invalid symlink. The `ExternalSymlink` (absolute-target) case
+    // is covered separately by `external_symlink_serializer_*` above and by
+    // `normalize_target_for_re_*` in `buck2_common::external_symlink`, which together
+    // ensure both arms store POSIX-style targets when uploaded to CAS.
     fn test_unnormalized_symlinks() -> buck2_error::Result<()> {
         if !cfg!(windows) {
             return Ok(());
@@ -1235,6 +1260,82 @@ mod tests {
         Ok(())
     }
 
+    /// Pins the contract that `ReDirectorySerializer::create_re_directory`
+    /// is a passthrough for `ExternalSymlink::target_str()`: whatever string
+    /// is stored on the symlink ends up verbatim in `RE::SymlinkNode.target`
+    /// on the wire. This is the load-bearing assumption behind fixing the
+    /// Windows→Linux RE backslash bug at the `ExternalSymlink` constructor
+    /// rather than at the serializer — if this test ever fails, the fix
+    /// site must be re-evaluated.
+    #[test]
+    fn external_symlink_serializer_preserves_target_str_verbatim() -> buck2_error::Result<()> {
+        let digest_config = DigestConfig::testing_default();
+
+        let mut builder = ActionDirectoryBuilder::empty();
+        let sym = Arc::new(ExternalSymlink::new(
+            PathBuf::from("/mnt/gvfs/openssl/lib"),
+            ForwardRelativePathBuf::default(),
+        )?);
+        insert_entry(
+            &mut builder,
+            path("openssl"),
+            DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(sym.dupe())),
+        )?;
+
+        let dir = builder.fingerprint(digest_config.as_directory_serializer());
+        let re_dir = ReDirectorySerializer::create_re_directory(dir.as_ref().entries(), None);
+
+        assert_eq!(re_dir.symlinks.len(), 1, "Expected exactly one symlink");
+        assert_eq!(re_dir.symlinks[0].name, "openssl");
+        assert_eq!(
+            re_dir.symlinks[0].target,
+            sym.target_str(),
+            "Serializer must round-trip target_str verbatim",
+        );
+        assert_eq!(re_dir.symlinks[0].target, "/mnt/gvfs/openssl/lib");
+        Ok(())
+    }
+
+    /// Defense-in-depth round-trip: an `ExternalSymlink` constructed with a
+    /// backslash-bearing target on a non-Windows host (the `cfg!(windows)`
+    /// gate is false, so the constructor's normalizer is a no-op) must
+    /// produce the SAME backslashed string in `RE::SymlinkNode.target`.
+    /// Together with the constructor's unit tests this proves the bug
+    /// surfaces *only* at the constructor site — nothing downstream
+    /// reintroduces or hides the problem. On Windows the constructor would
+    /// have normalized away the backslashes before reaching the serializer.
+    #[cfg(not(windows))]
+    #[test]
+    fn external_symlink_serializer_does_not_hide_backslashes_on_non_windows()
+    -> buck2_error::Result<()> {
+        let digest_config = DigestConfig::testing_default();
+
+        let mut builder = ActionDirectoryBuilder::empty();
+        let sym = Arc::new(ExternalSymlink::new(
+            PathBuf::from(r"\mnt\gvfs\openssl\lib"),
+            ForwardRelativePathBuf::default(),
+        )?);
+        // Sanity-check the precondition: on non-Windows the constructor is
+        // a no-op so the stored target retains its backslashes.
+        assert_eq!(sym.target_str(), r"\mnt\gvfs\openssl\lib");
+
+        insert_entry(
+            &mut builder,
+            path("openssl"),
+            DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(sym.dupe())),
+        )?;
+
+        let dir = builder.fingerprint(digest_config.as_directory_serializer());
+        let re_dir = ReDirectorySerializer::create_re_directory(dir.as_ref().entries(), None);
+
+        assert_eq!(re_dir.symlinks.len(), 1);
+        assert_eq!(
+            re_dir.symlinks[0].target, r"\mnt\gvfs\openssl\lib",
+            "Serializer is a passthrough; the only fix site is the constructor",
+        );
+        Ok(())
+    }
+
     struct TestSerializer {
         pub cas_digest_config: CasDigestConfig,
     }
@@ -1245,9 +1346,9 @@ mod tests {
             I: IntoIterator<Item = (&'a FileName, DirectoryEntry<D, &'a ActionDirectoryMember>)>,
             D: ActionFingerprintedDirectoryRef<'a>,
         {
-            fn rename(file_name: &str) -> Option<String> {
-                if file_name == "a" || file_name == "b" {
-                    Some("replaced".into())
+            fn rename(file_name: &FileName) -> Option<FileNameBuf> {
+                if file_name.as_str() == "a" || file_name.as_str() == "b" {
+                    Some(FileNameBuf::unchecked_new("replaced"))
                 } else {
                     None
                 }

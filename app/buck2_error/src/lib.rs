@@ -9,7 +9,6 @@
  */
 
 #![feature(error_generic_member_access)]
-#![feature(trait_alias)]
 
 pub mod any;
 pub mod classify;
@@ -36,6 +35,7 @@ pub mod starlark_error;
 #[doc(inline)]
 pub use classify::Tier;
 pub use context::BuckErrorContext;
+pub use context_value::ContextValue;
 pub use context_value::TypedContext;
 pub use conversion::serde::BuckErrorSerde;
 pub use error::DynLateFormat;

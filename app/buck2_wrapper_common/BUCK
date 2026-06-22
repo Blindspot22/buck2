@@ -12,11 +12,11 @@ rust_library(
     deps = [
         "fbsource//third-party/rust:derive_more",
         "fbsource//third-party/rust:serde",
-        "fbsource//third-party/rust:shlex",
         "fbsource//third-party/rust:sysinfo",
         "fbsource//third-party/rust:uuid",
         "//buck2/allocative/allocative:allocative",
         "//buck2/app/buck2_error:buck2_error",
+        "//buck2/app/buck2_hash:buck2_hash",
         "//buck2/gazebo/dupe:dupe",
     ] + select({
         "DEFAULT": [],
@@ -27,7 +27,7 @@ rust_library(
             "fbsource//third-party/rust:nix",
         ],
         "ovr_config//os:windows": [
-            "fbsource//third-party/rust:winapi",
+            "fbsource//third-party/rust:windows-sys",
         ],
     }),
 )

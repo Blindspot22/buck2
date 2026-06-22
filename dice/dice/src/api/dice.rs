@@ -26,6 +26,11 @@
 //!     use std::sync::Arc;
 //!     use allocative::Allocative;
 //!     use dice_futures::cancellation::CancellationContext;
+//!     use dice::DiceKeyDyn;
+//!     use dice::ValueSerialize;
+//!     use dice::NoValueSerialize;
+//!     use pagable::Pagable;
+//!     use pagable::pagable_typetag;
 //!
 //!     /// A configuration computation that consists of values that are pre-computed outside of DICE
 //!     pub struct InjectConfigs<'compute, 'd>(&'compute mut DiceComputations<'d>);
@@ -36,8 +41,9 @@
 //!         }
 //!     }
 //!
-//!     #[derive(Clone, Debug, Display, Eq, Hash, PartialEq, Allocative)]
+//!     #[derive(Clone, Debug, Display, Eq, Hash, PartialEq, Allocative, Pagable)]
 //!     #[display("{:?}", self)]
+//!     #[pagable_typetag(DiceKeyDyn)]
 //!     struct ConfigKey;
 //!
 //!     #[async_trait]
@@ -47,6 +53,10 @@
 //!         fn equality(x: &Self::Value,y: &Self::Value) -> bool {
 //!             x == y
 //!         }
+//!         
+//!         fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+//!             NoValueSerialize::<Self::Value>::new()
+//!         }
 //!     }
 //!
 //!     pub struct MyComputation<'compute, 'd>(pub &'compute mut DiceComputations<'d>);
@@ -54,8 +64,9 @@
 //!     impl<'compute, 'd> MyComputation<'compute, 'd> {
 //!         // declaring a computation function
 //!         pub async fn compute_a(&mut self, a: usize, s: String) -> Arc<String> {
-//!             #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+//!             #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 //!             #[display("{:?}", self)]
+//!             #[pagable_typetag(DiceKeyDyn)]
 //!             struct ComputeA(usize, String);
 //!
 //!             #[async_trait]
@@ -71,6 +82,10 @@
 //!                 fn equality(x: &Self::Value,y: &Self::Value) -> bool {
 //!                     x == y
 //!                 }
+//!
+//!                 fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+//!                     NoValueSerialize::<Self::Value>::new()
+//!                 }
 //!             }
 //!
 //!             self.0.compute(&ComputeA(a, s)).await.unwrap()
@@ -82,8 +97,9 @@
 //!         }
 //!     }
 //!
-//!     #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+//!     #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 //!     #[display("{:?}", self)]
+//!     #[pagable_typetag(DiceKeyDyn)]
 //!     struct ComputeB(usize);
 //!
 //!     #[async_trait]
@@ -96,6 +112,10 @@
 //!
 //!         fn equality(x: &Self::Value,y: &Self::Value) -> bool {
 //!             x == y
+//!         }
+//!
+//!         fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+//!             NoValueSerialize::<Self::Value>::new()
 //!         }
 //!     }
 //!

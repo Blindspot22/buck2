@@ -41,12 +41,14 @@ use std::sync::Arc;
 use allocative::Allocative;
 use dupe::Dupe;
 use once_cell::sync::Lazy;
+use pagable::Pagable;
+use pagable::StaticValue;
 
 use crate::fast_string;
 
 /// A small, `Copy`, value representing a position in a `CodeMap`'s file.
 #[derive(
-    Copy, Clone, Dupe, Hash, Eq, PartialEq, PartialOrd, Ord, Debug, Default, Allocative
+    Copy, Clone, Dupe, Hash, Eq, PartialEq, PartialOrd, Ord, Debug, Default, Allocative, Pagable
 )]
 pub struct Pos(u32);
 
@@ -84,7 +86,7 @@ impl AddAssign<u32> for Pos {
 
 /// A range of text within a CodeMap.
 #[derive(
-    Copy, Dupe, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug, Default, Allocative
+    Copy, Dupe, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug, Default, Allocative, Pagable
 )]
 pub struct Span {
     /// The position in the codemap representing the first byte of the span.
@@ -201,15 +203,15 @@ impl CodeMapId {
     pub const EMPTY: CodeMapId = CodeMapId(ptr::null());
 }
 
-#[derive(Clone, Dupe, Allocative)]
+#[derive(Clone, Dupe, Allocative, Pagable)]
 enum CodeMapImpl {
     Real(Arc<CodeMapData>),
     #[allocative(skip)]
-    Native(&'static NativeCodeMap),
+    Native(StaticValue<NativeCodeMap>),
 }
 
 /// A data structure recording a source code file for position lookup.
-#[derive(Clone, Dupe, Allocative)]
+#[derive(Clone, Dupe, Allocative, Pagable)]
 pub struct CodeMap(CodeMapImpl);
 
 /// Multiple [`CodeMap`].
@@ -243,7 +245,7 @@ impl CodeMaps {
 }
 
 /// A `CodeMap`'s record of a source file.
-#[derive(Allocative)]
+#[derive(Allocative, Pagable)]
 struct CodeMapData {
     /// The filename as it would be displayed in an error message.
     filename: String,
@@ -254,6 +256,7 @@ struct CodeMapData {
 }
 
 /// "Codemap" for `.rs` files.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct NativeCodeMap {
     filename: &'static str,
     start: ResolvedPos,
@@ -277,10 +280,12 @@ impl NativeCodeMap {
         }
     }
 
-    pub const fn to_codemap(&'static self) -> CodeMap {
-        CodeMap(CodeMapImpl::Native(self))
+    pub const fn to_codemap(self_: StaticValue<NativeCodeMap>) -> CodeMap {
+        CodeMap(CodeMapImpl::Native(self_))
     }
 }
+
+pagable::declare_static_value_type!(NativeCodeMap, NativeCodeMapStaticEntry);
 
 impl Default for CodeMap {
     fn default() -> Self {
@@ -331,7 +336,9 @@ impl CodeMap {
     pub fn id(&self) -> CodeMapId {
         match &self.0 {
             CodeMapImpl::Real(data) => CodeMapId(Arc::as_ptr(data) as *const ()),
-            CodeMapImpl::Native(data) => CodeMapId(*data as *const NativeCodeMap as *const ()),
+            CodeMapImpl::Native(data) => {
+                CodeMapId(data.value() as *const NativeCodeMap as *const ())
+            }
         }
     }
 
@@ -511,7 +518,7 @@ pub struct FileSpanRef<'a> {
 }
 
 /// A file, and a line and column range within it.
-#[derive(Clone, Dupe, Eq, PartialEq, Debug, Hash, Allocative)]
+#[derive(Clone, Dupe, Eq, PartialEq, Debug, Hash, Allocative, Pagable)]
 pub struct FileSpan {
     pub file: CodeMap,
     pub span: Span,
@@ -856,7 +863,8 @@ mod tests {
     #[test]
     fn test_native_code_map() {
         static NATIVE_CODEMAP: NativeCodeMap = NativeCodeMap::new("test.rs", 100, 200);
-        static CODEMAP: CodeMap = NATIVE_CODEMAP.to_codemap();
+        pagable::static_value!(NATIVE_CODEMAP_STATIC: NativeCodeMap = &NATIVE_CODEMAP, NativeCodeMapStaticEntry);
+        static CODEMAP: CodeMap = NativeCodeMap::to_codemap(NATIVE_CODEMAP_STATIC);
         assert_eq!(NativeCodeMap::SOURCE, CODEMAP.source());
         assert_eq!(NativeCodeMap::SOURCE, CODEMAP.source_line(100));
         assert_eq!(

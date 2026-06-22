@@ -16,36 +16,62 @@ use derive_more::Display;
 use dice::DetectCycles;
 use dice::Dice;
 use dice::DiceComputations;
+use dice::DiceKeyDyn;
 use dice::InjectedKey;
 use dice::Key;
+use dice::NoValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
+use pagable::Pagable;
+use pagable::PagableTagged;
+use pagable::pagable_typetag;
 
 #[tokio::test]
 async fn test_a_multiversion_bug() {
-    #[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash)]
+    #[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash, Pagable)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct Leaf;
 
     #[async_trait]
     impl InjectedKey for Leaf {
         type Value = u32;
 
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
+
         fn equality(x: &Self::Value, y: &Self::Value) -> bool {
             x == y
         }
     }
 
-    #[derive(Allocative, Clone, Copy, Debug, Display, Eq, PartialEq, Hash)]
+    #[derive(Allocative, Clone, Copy, Debug, Display, Eq, PartialEq, Hash, Pagable)]
     enum Derived {
         #[display("Derived::Top")]
         Top,
         #[display("Derived::Mid")]
         Mid,
     }
+    impl PagableTagged for Derived {
+        fn pagable_type_tag(&self) -> &'static str {
+            "Derived"
+        }
+        fn pagable_serialize_body(
+            &self,
+            ser: &mut dyn pagable::PagableSerializer,
+        ) -> pagable::Result<()> {
+            <Self as pagable::PagableSerialize>::pagable_serialize(self, ser)
+        }
+    }
 
     #[async_trait]
     impl Key for Derived {
         type Value = u32;
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
 
         async fn compute(
             &self,

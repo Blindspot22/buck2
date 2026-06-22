@@ -48,54 +48,47 @@ fn insert_config_value(dict: &mut BTreeMap<String, String>, config: &buck2_data:
     );
 }
 
-fn insert_config_values(
-    mut dict: &mut BTreeMap<String, String>,
-    configs: &[buck2_data::ConfigValue],
-) {
+fn insert_config_values(dict: &mut BTreeMap<String, String>, configs: &[buck2_data::ConfigValue]) {
     configs
         .iter()
-        .for_each(|config_value| insert_config_value(&mut dict, config_value))
+        .for_each(|config_value| insert_config_value(dict, config_value))
 }
 
-fn process_buckconfig_data(mut dict: &mut BTreeMap<String, String>, event: &buck2_data::BuckEvent) {
+fn process_buckconfig_data(dict: &mut BTreeMap<String, String>, event: &buck2_data::BuckEvent) {
     use buck2_data::buckconfig_component::Data::ConfigFile;
     use buck2_data::buckconfig_component::Data::ConfigValue;
     use buck2_data::buckconfig_component::Data::GlobalExternalConfigFile;
     use buck2_data::config_file::Data::GlobalExternalConfig;
     use buck2_data::config_file::Data::ProjectRelativePath;
 
-    event.data.as_ref().into_iter().for_each(|data| match data {
-        buck2_data::buck_event::Data::Instant(end) => {
-            end.data.as_ref().into_iter().for_each(|data| match data {
-                buck2_data::instant_event::Data::BuckconfigInputValues(input) => input
-                    .components
-                    .iter()
-                    .for_each(|component| match component.data.as_ref() {
-                        Some(ConfigValue(config_value)) => {
-                            insert_config_value(&mut dict, config_value)
-                        }
-                        Some(ConfigFile(config_file)) => config_file
-                            .data
-                            .as_ref()
-                            .into_iter()
-                            .for_each(|data| match data {
-                                ProjectRelativePath(p) => {
-                                    dict.insert(p.clone(), "".to_owned());
-                                }
-                                GlobalExternalConfig(external_config_values) => {
-                                    insert_config_values(&mut dict, &external_config_values.values)
-                                }
-                            }),
-                        Some(GlobalExternalConfigFile(external_config_file)) => {
-                            insert_config_values(&mut dict, &external_config_file.values)
-                        }
-                        _ => {}
-                    }),
-                _ => {}
-            })
+    if let Some(buck2_data::buck_event::Data::Instant(end)) = event.data.as_ref() {
+        if let Some(buck2_data::instant_event::Data::BuckconfigInputValues(input)) =
+            end.data.as_ref()
+        {
+            input
+                .components
+                .iter()
+                .for_each(|component| match component.data.as_ref() {
+                    Some(ConfigValue(config_value)) => insert_config_value(dict, config_value),
+                    Some(ConfigFile(config_file)) => config_file
+                        .data
+                        .as_ref()
+                        .into_iter()
+                        .for_each(|data| match data {
+                            ProjectRelativePath(p) => {
+                                dict.insert(p.clone(), "".to_owned());
+                            }
+                            GlobalExternalConfig(external_config_values) => {
+                                insert_config_values(dict, &external_config_values.values)
+                            }
+                        }),
+                    Some(GlobalExternalConfigFile(external_config_file)) => {
+                        insert_config_values(dict, &external_config_file.values)
+                    }
+                    _ => {}
+                });
         }
-        _ => {}
-    });
+    }
 }
 
 async fn get_external_buckconfig_dict(
@@ -103,11 +96,8 @@ async fn get_external_buckconfig_dict(
 ) -> buck2_error::Result<BTreeMap<String, String>> {
     let mut dict: BTreeMap<String, String> = BTreeMap::new();
     while let Some(event) = events.try_next().await? {
-        match event {
-            StreamValue::Event(event) => {
-                process_buckconfig_data(&mut dict, &event);
-            }
-            _ => {}
+        if let StreamValue::Event(event) = event {
+            process_buckconfig_data(&mut dict, &event);
         }
     }
     Ok(dict)

@@ -14,29 +14,31 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
 use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Value;
 use starlark::values::ValueTyped;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
 #[derive(
     Debug,
     derive_more::Display,
     Allocative,
     NoSerialize,
-    ProvidesStaticType
+    ProvidesStaticType,
+    StarlarkPagable
 )]
 #[display("ResolvedDynamicValue<{}>", self.value)]
 pub struct StarlarkResolvedDynamicValue {
     pub(crate) value: FrozenValueTyped<'static, FrozenProviderCollection>,
 }
+
+starlark::methods_static!(RESOLVED_DYNAMIC_VALUE_METHODS = resolved_dynamic_value_methods);
 
 #[starlark_value(type = "ResolvedDynamicValue")]
 impl<'v> StarlarkValue<'v> for StarlarkResolvedDynamicValue
@@ -44,8 +46,7 @@ where
     Self: ProvidesStaticType<'v>,
 {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(resolved_dynamic_value_methods)
+        Some(RESOLVED_DYNAMIC_VALUE_METHODS.methods())
     }
 }
 
@@ -84,7 +85,7 @@ fn resolved_dynamic_value_methods(method: &mut MethodsBuilder) {
 }
 
 #[starlark_module]
-pub(crate) fn register_resolved_dynamic_value(globals: &mut GlobalsBuilder) {
-    const ResolvedDynamicValue: StarlarkValueAsType<StarlarkResolvedDynamicValue> =
-        StarlarkValueAsType::new();
-}
+#[starlark_types(
+    StarlarkResolvedDynamicValue as ResolvedDynamicValue
+)]
+pub(crate) fn register_resolved_dynamic_value(globals: &mut GlobalsBuilder) {}

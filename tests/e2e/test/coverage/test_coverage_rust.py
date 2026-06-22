@@ -141,6 +141,9 @@ async def test_rust_test_coverage_of_cpp_file_filtering_by_file_with_cxx(
         file_filter=[file_to_collect_coverage],
     )
 
+    # cxx.h is a CXX bridge framework header whose buck-out path now resolves
+    # to a source path due to -fcoverage-prefix-map; filter it out.
+    paths = [p for p in paths if not p.endswith("/cxx.h")]
     assert paths == [file_to_collect_coverage], str(paths)
 
 
@@ -157,6 +160,7 @@ async def test_rust_test_coverage_of_cpp_file_filtering_by_file_with_cxx_through
         file_filter=[file_to_collect_coverage],
     )
 
+    paths = [p for p in paths if not p.endswith("/cxx.h")]
     assert paths == [file_to_collect_coverage], str(paths)
 
 
@@ -173,6 +177,7 @@ async def test_rust_test_coverage_of_cpp_file_filtering_by_file_with_cxx_on_auto
         file_filter=[file_to_collect_coverage],
     )
 
+    paths = [p for p in paths if not p.endswith("/cxx.h")]
     assert paths == [file_to_collect_coverage], str(paths)
 
 
@@ -231,6 +236,9 @@ async def test_rust_test_coverage_of_cpp_file_filtering_by_header_with_cxx(
         ],
     )
 
+    # cxx.h is a CXX bridge framework header whose buck-out path now resolves
+    # to a source path due to -fcoverage-prefix-map; filter it out.
+    paths = [p for p in paths if not p.endswith("/cxx.h")]
     assert len(paths) == 3, str(paths)
     assert (
         "fbcode/testing_frameworks/code_coverage/rust/AdderWithHeaderCode.cpp" in paths

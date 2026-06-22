@@ -18,8 +18,13 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use allocative::Allocative;
 use dupe::Dupe;
+use starlark_derive::NoSerialize;
+use starlark_derive::ProvidesStaticType;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_module;
+use starlark_derive::starlark_value;
 use starlark_map::small_map::SmallMap;
 use starlark_syntax::golden_test_template::golden_test_template;
 
@@ -39,8 +44,12 @@ use crate::typing::Ty;
 use crate::typing::callable_param::ParamIsRequired;
 use crate::typing::interface::Interface;
 use crate::util::ArcStr;
+use crate::values::AllocValue;
+use crate::values::Heap;
+use crate::values::StarlarkValue;
 use crate::values::Value;
 use crate::values::ValueOfUnchecked;
+use crate::values::layout::heap::heap_type::StarlarkTestHeapName;
 use crate::values::none::NoneType;
 use crate::values::typing::StarlarkCallable;
 use crate::values::typing::StarlarkCallableParamSpec;
@@ -59,19 +68,52 @@ struct TypeCheck {
     loads: HashMap<String, (Interface, FrozenModule)>,
 }
 
+/// A simple custom type for testing `StarlarkValueAsType` parameterization errors.
+#[derive(
+    derive_more::Display,
+    Debug,
+    NoSerialize,
+    Allocative,
+    ProvidesStaticType,
+    StarlarkPagable
+)]
+#[display("MyType")]
+struct MyCustomType;
+
+#[starlark_value(type = "my_custom_type")]
+impl<'v> StarlarkValue<'v> for MyCustomType {}
+
+impl<'v> AllocValue<'v> for MyCustomType {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc_simple(self)
+    }
+}
+
 struct NamedXy;
+
+pagable::static_str!(NAMED_XY_X = "x");
+pagable::static_str!(NAMED_XY_Y = "y");
 
 impl StarlarkCallableParamSpec for NamedXy {
     fn params() -> ParamSpec {
         ParamSpec::new_named_only([
-            (ArcStr::new_static("x"), ParamIsRequired::Yes, Ty::string()),
-            (ArcStr::new_static("y"), ParamIsRequired::Yes, Ty::int()),
+            (
+                ArcStr::new_static(NAMED_XY_X),
+                ParamIsRequired::Yes,
+                Ty::string(),
+            ),
+            (
+                ArcStr::new_static(NAMED_XY_Y),
+                ParamIsRequired::Yes,
+                Ty::int(),
+            ),
         ])
         .unwrap()
     }
 }
 
 #[starlark_module]
+#[starlark_types(MyCustomType as MyCustomType)]
 fn register_typecheck_globals(globals: &mut GlobalsBuilder) {
     fn accepts_iterable<'v>(
         #[starlark(require = pos)] xs: ValueOfUnchecked<'v, StarlarkIter<Value<'v>>>,
@@ -197,7 +239,7 @@ impl TypeCheck {
                 // Help borrow checker.
                 drop(eval);
 
-                module.freeze()
+                module.freeze_named(StarlarkTestHeapName::frozen_heap_name())
             })
             .unwrap()
         };

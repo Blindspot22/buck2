@@ -8,6 +8,8 @@
  * above-listed licenses.
  */
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use buck2_analysis::analysis::calculation::AnalysisKey;
@@ -15,6 +17,7 @@ use buck2_build_signals::env::CriticalPathBackendName;
 use buck2_build_signals::env::NodeDuration;
 use buck2_build_signals::env::WaitingData;
 use buck2_build_signals::error::CriticalPathError;
+use buck2_build_signals::node_key::BuildSignalsNodeKey;
 use buck2_core::soft_error;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_critical_path::AddEdgesError;
@@ -22,14 +25,18 @@ use buck2_critical_path::Graph;
 use buck2_critical_path::GraphBuilder;
 use buck2_critical_path::OptionalVertexId;
 use buck2_critical_path::PushError;
+use buck2_critical_path::TopoSortError;
 use buck2_critical_path::VertexData;
+use buck2_critical_path::VertexId;
 use buck2_critical_path::VertexKeys;
 use buck2_critical_path::compute_critical_path_potentials;
 use buck2_error::internal_error;
 use buck2_events::span::SpanId;
 use dupe::Dupe;
+use itertools::Itertools;
 use smallvec::SmallVec;
 
+use crate::AnalysisFinishNodeKey;
 use crate::BuildInfo;
 use crate::DetailedCriticalPath;
 use crate::DetailedCriticalPathEntry;
@@ -81,8 +88,8 @@ impl BuildListenerBackend for LongestPathGraphBackend {
             NodeData {
                 extra_data,
                 duration,
-                span_ids,
                 waiting_data,
+                span_ids,
             },
         );
 
@@ -111,21 +118,41 @@ impl BuildListenerBackend for LongestPathGraphBackend {
         })
     }
 
-    fn finish(self) -> Result<BuildInfo, CriticalPathError> {
+    fn finish(
+        self,
+        anon_target_discovery_edges: HashMap<NodeKey, NodeKey>,
+    ) -> Result<BuildInfo, CriticalPathError> {
         let (graph, keys, data) = {
             let (graph, keys, data) = self.builder?.finish();
 
             let mut first_analysis = graph.allocate_vertex_data(OptionalVertexId::none());
             let mut n = 0;
 
+            // Add discovery edges for top-level targets: artifact nodes depend on the
+            // top-level analysis that first discovered them. The top-level command
+            // doesn't know about any actions until the top-level analysis has finished.
             for top_level_target in &self.top_level_targets {
                 // This is a bit wasteful, but transient and the volume is small.
-                let analysis = NodeKey::AnalysisKey(AnalysisKey(top_level_target.target.dupe()));
+                let analysis_key =
+                    NodeKey::AnalysisKey(AnalysisKey(top_level_target.target.dupe()));
                 let artifacts = &top_level_target.artifacts;
 
-                let analysis = match keys.get(&analysis) {
+                // If the analysis was split due to anon targets, prefer the finish key
+                // (Part 2) since that represents the full completion of analysis.
+                let finish_key = NodeKey::Dyn(
+                    "AnalysisFinishKey",
+                    BuildSignalsNodeKey::new(AnalysisFinishNodeKey {
+                        target: top_level_target.target.dupe(),
+                        target_rule_type_name: None,
+                    }),
+                );
+
+                let analysis = match keys.get(&finish_key) {
                     Some(k) => k,
-                    None => continue, // Nothing depends on this,
+                    None => match keys.get(&analysis_key) {
+                        Some(k) => k,
+                        None => continue, // Nothing depends on this,
+                    },
                 };
 
                 let mut queue = Vec::new();
@@ -169,6 +196,23 @@ impl BuildListenerBackend for LongestPathGraphBackend {
                 }
             }
 
+            // Add discovery edges for anon targets: each anon target node depends on
+            // the analysis Part 1 that first discovered it.
+            for (anon_target_key, discovering_analysis_key) in &anon_target_discovery_edges {
+                let anon_vertex = match keys.get(anon_target_key) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let analysis_vertex = match keys.get(discovering_analysis_key) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if !first_analysis[anon_vertex].is_some() {
+                    first_analysis[anon_vertex] = analysis_vertex.into();
+                    n += 1;
+                }
+            }
+
             let graph = match graph.add_edges(&first_analysis, n) {
                 Ok(g) => g,
                 Err(AddEdgesError::Overflow) => {
@@ -199,6 +243,7 @@ impl BuildListenerBackend for LongestPathGraphBackend {
             (slow, cp)
         });
 
+        let slowest_path = slowest_path?;
         let (critical_path, critical_path_for_top_level_targets) = cp_res?;
 
         Ok(BuildInfo {
@@ -223,7 +268,8 @@ fn compute_critical_paths(
     top_level_targets: &[TopLevelTarget],
 ) -> Result<(DetailedCriticalPath, Vec<(ConfiguredTargetLabel, Duration)>), CriticalPathError> {
     let (critical_path, critical_path_cost, replacement_durations, critical_path_accessor) =
-        compute_critical_path_potentials(graph, &durations)?;
+        compute_critical_path_potentials(graph, &durations)
+            .map_err(|e| format_topo_sort_cycle_error(e, keys))?;
 
     let critical_path_for_top_level_targets = top_level_targets
         .iter()
@@ -301,7 +347,7 @@ fn compute_slowest_paths(
     graph: &Graph,
     keys: &VertexKeys<NodeKey>,
     data: &VertexData<NodeData>,
-) -> DetailedCriticalPath {
+) -> Result<DetailedCriticalPath, CriticalPathError> {
     let mut last = None;
 
     for d in graph.iter_vertices() {
@@ -311,9 +357,14 @@ fn compute_slowest_paths(
         }
     }
 
+    let mut visited: HashSet<VertexId> = HashSet::new();
     let mut slowest_path = Vec::new();
     let mut node = last.unzip().1;
     while let Some(curr) = node {
+        if !visited.insert(curr) {
+            return Err(format_slowest_path_cycle_error(keys, &slowest_path, curr));
+        }
+
         let mut prev = None;
         for d in graph.iter_edges(curr) {
             let d_end = data[d].duration.total.end();
@@ -335,5 +386,41 @@ fn compute_slowest_paths(
 
     slowest_path.reverse();
 
-    DetailedCriticalPath::new(slowest_path)
+    Ok(DetailedCriticalPath::new(slowest_path))
+}
+
+fn format_topo_sort_cycle_error(
+    error: TopoSortError,
+    keys: &VertexKeys<NodeKey>,
+) -> CriticalPathError {
+    let TopoSortError::Cycle(cycle_vertices) = error;
+    let cycle_desc = cycle_vertices.iter().map(|v| &keys[*v]).join(" -> ");
+    CriticalPathError::CycleDetected(format!(
+        "{} nodes in cycle: {}",
+        cycle_vertices.len(),
+        cycle_desc
+    ))
+}
+
+fn format_slowest_path_cycle_error(
+    keys: &VertexKeys<NodeKey>,
+    path: &[DetailedCriticalPathEntry],
+    cycle_target: VertexId,
+) -> CriticalPathError {
+    let cycle_target_key = &keys[cycle_target];
+
+    let cycle_start_idx = path
+        .iter()
+        .position(|e| &e.key == cycle_target_key)
+        .unwrap_or(0);
+
+    let cycle_nodes = &path[cycle_start_idx..];
+    let cycle_len = cycle_nodes.len() + 1;
+    let cycle_desc = cycle_nodes
+        .iter()
+        .map(|e| &e.key)
+        .chain(std::iter::once(cycle_target_key))
+        .join(" -> ");
+
+    CriticalPathError::CycleDetected(format!("{} nodes in cycle: {}", cycle_len, cycle_desc))
 }

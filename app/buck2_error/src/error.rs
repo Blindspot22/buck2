@@ -167,7 +167,7 @@ impl Error {
                 // If type name available, include it and exclude source location.
                 Some(type_name.to_owned())
             } else {
-                Some(self.source_location().to_string())
+                Some(self.source_location().category_str())
             };
 
             (
@@ -228,9 +228,7 @@ impl Error {
     }
 
     pub fn exit_code(&self) -> ExitCode {
-        best_tag(self.tags())
-            .map(|t| t.exit_code())
-            .unwrap_or(ExitCode::UnknownFailure)
+        best_tag(self.tags()).map_or(ExitCode::UnknownFailure, |t| t.exit_code())
     }
 
     /// All tags unsorted and with duplicates.
@@ -281,7 +279,7 @@ impl Error {
         self.tags_unsorted().any(|t| t == tag)
     }
 
-    pub(crate) fn compute_context<
+    pub fn compute_context<
         TC: TypedContext,
         C1: Into<ContextValue>,
         C2: Into<ContextValue>,

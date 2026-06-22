@@ -26,11 +26,13 @@ pub enum CancellationReason {
     WorkerFinished,
     Cached,
     AllDependentsDropped,
-    AllObserversDropped,
     TransactionCancelled,
     TransactionDropped,
     /// Used by test code that manually cancels things.
     ByTest,
     /// Indicates the DiceTaskHandle was dropped without producing any result or (other) cancellation.
     HandleDropped,
+    /// Hydrating a paged-out value via `DiceStorage` failed (e.g. backing-store I/O error
+    /// or deserialization failure). Treated like `Rejected` — the worker terminates cleanly.
+    HydrationFailure,
 }

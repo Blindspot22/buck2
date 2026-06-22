@@ -13,8 +13,10 @@ package com.facebook.buck.testrunner;
 import com.facebook.buck.testresultsoutput.TestResultsOutputEvent.TestStatus;
 import com.facebook.buck.testresultsoutput.TestResultsOutputSender;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * TpxStandardOutputTestListener sends test results to the TPX standard output format. Meant to be
@@ -24,6 +26,7 @@ public class TpxStandardOutputTestListener {
   private final TestResultsOutputSender sender;
 
   private Map<String, TestIdentifierStatus> testIdentifierStatuses = new HashMap<>();
+  private Set<String> finishedTests = new HashSet<>();
 
   private class TestIdentifierStatus {
     private long startTime;
@@ -41,6 +44,11 @@ public class TpxStandardOutputTestListener {
 
     public void setSkipped(String trace) {
       this.status = TestStatus.SKIP;
+      this.trace = trace;
+    }
+
+    public void setOmitted(String trace) {
+      this.status = TestStatus.OMIT;
       this.trace = trace;
     }
   }
@@ -75,6 +83,9 @@ public class TpxStandardOutputTestListener {
    * @param test identifies the test
    */
   public void testStarted(String identifier) {
+    if (testIdentifierStatuses.containsKey(identifier)) {
+      return;
+    }
     long startedTime = System.currentTimeMillis();
     registerTest(identifier, startedTime);
     sendTestStart(identifier, startedTime);
@@ -119,13 +130,18 @@ public class TpxStandardOutputTestListener {
    * @param test identifies the test
    */
   public void testIgnored(String identifier) {
+    String reason =
+        "Test ignored, generally because the test method is annotated with org.junit.Ignore";
     TestIdentifierStatus status = testIdentifierStatuses.get(identifier);
     if (status == null) {
-      throw new IllegalStateException("testIgnored called without testStarted");
+      // Android instrumentation and JUnit may call testIgnored() without testStarted()
+      // for DISABLED_ prefixed tests and @Ignore annotated tests. Synthesize a complete
+      // start/finish sequence rather than crashing the entire test run.
+      testOmitted(identifier, reason);
+      return;
     }
 
-    status.setSkipped(
-        "Test ignored, generally because the test method is annotated with org.junit.Ignore");
+    status.setOmitted(reason);
   }
 
   /**
@@ -143,6 +159,33 @@ public class TpxStandardOutputTestListener {
   }
 
   /**
+   * Appends captured stdout/stderr to the test's result message so it is surfaced inline alongside
+   * the failure trace (e.g. in the terminal when running {@code buck test}). The output is
+   * attributed to this specific test, so it does not duplicate across tests the way raw
+   * process-level output did. No-op if the test is unknown or the output is empty.
+   *
+   * <p>Must be called before {@link #testFinished(String)} so the appended output is included in
+   * the finish event.
+   *
+   * @param identifier identifies the test
+   * @param output the captured output to append to the test's message
+   */
+  public void appendTestOutput(String identifier, String output) {
+    if (output == null || output.isEmpty()) {
+      return;
+    }
+    TestIdentifierStatus status = testIdentifierStatuses.get(identifier);
+    if (status == null) {
+      return;
+    }
+    if (status.trace == null || status.trace.isEmpty()) {
+      status.trace = output;
+    } else {
+      status.trace = status.trace + "\n\n" + output;
+    }
+  }
+
+  /**
    * Reports the execution end of an individual test case.
    *
    * <p>If {@link #testFailed} was not invoked, this test passed. Also returns any key/value metrics
@@ -153,10 +196,14 @@ public class TpxStandardOutputTestListener {
    */
   public void testFinished(String identifier) {
     long endedTime = System.currentTimeMillis();
-    TestIdentifierStatus testIdentifierStatus = testIdentifierStatuses.get(identifier);
+    TestIdentifierStatus testIdentifierStatus = testIdentifierStatuses.remove(identifier);
     if (testIdentifierStatus == null) {
-      throw new IllegalStateException("testEnded called without testStarted");
+      if (finishedTests.contains(identifier)) {
+        return;
+      }
+      throw new IllegalStateException("testEnded called without testStarted for: " + identifier);
     }
+    finishedTests.add(identifier);
 
     long duration = endedTime - testIdentifierStatus.startTime;
     TestStatus resultStatus = TestStatus.PASS;

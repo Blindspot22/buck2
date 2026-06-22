@@ -12,7 +12,9 @@ use std::thread;
 
 use dice_error::result::CancellableResult;
 use dice_error::result::CancellationReason;
+use dupe::Dupe;
 use gazebo::prelude::SliceExt;
+use pagable::DataKey;
 
 use super::graph::types::RejectedReason;
 use crate::api::key::InvalidationSourcePriority;
@@ -20,6 +22,7 @@ use crate::api::storage_type::StorageType;
 use crate::arc::Arc;
 use crate::impls::cache::SharedCache;
 use crate::impls::core::graph::introspection::VersionedGraphIntrospectable;
+use crate::impls::core::graph::nodes::VersionedGraphNode;
 use crate::impls::core::graph::storage::InvalidateKind;
 use crate::impls::core::graph::storage::ValueReusable;
 use crate::impls::core::graph::storage::VersionedGraph;
@@ -154,6 +157,80 @@ impl CoreState {
             .expect("failed to spawn thread");
     }
 
+    /// Drop in-memory values for nodes that already have an on-disk copy.
+    /// These nodes have both a `DataKey` and a resident value; after this call
+    /// only the `DataKey` remains.
+    pub(super) fn evict_cached_values(&mut self) {
+        for node in self.graph.nodes.values_mut() {
+            let VersionedGraphNode::Occupied(occ) = node else {
+                continue;
+            };
+            if let Some(data_key) = occ.val().data_key() {
+                if occ.val().as_hydrated().is_some() {
+                    occ.set_paged_out(data_key);
+                }
+            }
+        }
+    }
+
+    /// Evict in-memory values for the given nodes, marking them as paged out
+    /// with their `DataKey`s. Skips nodes that are missing, vacant, or injected.
+    pub(super) fn evict_keys(&mut self, keys: Vec<(DiceKey, DataKey)>) {
+        for (key, data_key) in keys {
+            if let Some(VersionedGraphNode::Occupied(occ)) = self.graph.nodes.get_mut(&key) {
+                occ.set_paged_out(data_key);
+            }
+        }
+    }
+
+    /// Returns nodes whose value is resident in memory but has no on-disk
+    /// copy yet. These need serialization before they can be paged out.
+    pub(super) fn keys_to_page_out(&self) -> Vec<(DiceKey, DiceValidValue)> {
+        let mut keys = Vec::new();
+        for (key, node) in &self.graph.nodes {
+            let VersionedGraphNode::Occupied(occ) = node else {
+                continue;
+            };
+            if occ.val().data_key().is_some() {
+                continue;
+            }
+            let Some(value) = occ.val().as_hydrated() else {
+                continue;
+            };
+            keys.push((*key, value.dupe()));
+        }
+        keys
+    }
+
+    /// Returns the list of `(DiceKey, DataKey)` pairs for every paged-out
+    /// `OccupiedGraphNode`. The caller performs the actual (async) hydration
+    /// outside the core state thread and sends rehydrate messages back.
+    pub(super) fn paged_out_keys(&self) -> Vec<(DiceKey, DataKey)> {
+        let mut keys = Vec::new();
+        for (key, node) in &self.graph.nodes {
+            let VersionedGraphNode::Occupied(occ) = node else {
+                continue;
+            };
+            if occ.val().as_hydrated().is_some() {
+                continue;
+            }
+            let Some(data_key) = occ.val().data_key() else {
+                continue;
+            };
+            keys.push((*key, data_key));
+        }
+        keys
+    }
+
+    /// Replaces the paged-out value at `key` with its hydrated form. No-op if the node
+    /// is missing, vacant, injected, or already hydrated.
+    pub(super) fn rehydrate(&mut self, key: DiceKey, value: DiceValidValue) {
+        if let Some(VersionedGraphNode::Occupied(occ)) = self.graph.nodes.get_mut(&key) {
+            occ.rehydrate(value);
+        }
+    }
+
+    /// Returns some metrics about the current state of DICE. Don't do expensive things here.
     pub(super) fn metrics(&self) -> Metrics {
         let mut currently_running_key_count = 0;
         let mut active_transaction_count = 0;
@@ -192,11 +269,16 @@ mod tests {
     use dice_futures::spawner::TokioSpawner;
     use dupe::Dupe;
     use futures::FutureExt;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
     use tokio::sync::Semaphore;
 
+    use crate::DiceKeyDyn;
     use crate::api::computations::DiceComputations;
     use crate::api::key::InvalidationSourcePriority;
     use crate::api::key::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
     use crate::arc::Arc;
     use crate::impls::cache::DiceTaskRef;
     use crate::impls::core::graph::storage::ValueReusable;
@@ -206,17 +288,15 @@ mod tests {
     use crate::impls::core::versions::VersionEpoch;
     use crate::impls::deps::graph::SeriesParallelDeps;
     use crate::impls::key::DiceKey;
-    use crate::impls::key::ParentKey;
     use crate::impls::task::dice::DiceTask;
     use crate::impls::task::spawn_dice_task;
     use crate::impls::transaction::ChangeType;
     use crate::impls::value::DiceComputedValue;
     use crate::impls::value::DiceKeyValue;
     use crate::impls::value::DiceValidValue;
-    use crate::impls::value::MaybeValidDiceValue;
     use crate::impls::value::TrackedInvalidationPaths;
+    use crate::testing_helpers::make_completed_task;
     use crate::versions::VersionNumber;
-    use crate::versions::VersionRanges;
 
     #[test]
     fn update_state_gets_next_version() {
@@ -299,27 +379,6 @@ mod tests {
         assert_eq!(res.err(), Some(CancellationReason::OutdatedEpoch));
     }
 
-    async fn make_completed_task(key: DiceKey, val: usize) -> DiceTask {
-        let task = spawn_dice_task(key, &TokioSpawner, &(), |handle| {
-            async move {
-                handle.finished(DiceComputedValue::new(
-                    MaybeValidDiceValue::valid(DiceValidValue::testing_new(
-                        DiceKeyValue::<K>::new(val),
-                    )),
-                    Arc::new(VersionRanges::new()),
-                    TrackedInvalidationPaths::clean(),
-                ));
-
-                Box::new(()) as Box<dyn Any + Send>
-            }
-            .boxed()
-        });
-
-        task.depended_on_by(ParentKey::None).unwrap().await.unwrap();
-
-        task
-    }
-
     async fn make_finished_cancelling_task(key: DiceKey) -> DiceTask {
         let finished_cancelling_tasks = spawn_dice_task(key, &TokioSpawner, &(), |handle| {
             async move {
@@ -400,8 +459,8 @@ mod tests {
 
         let (_epoch, cache) = core.ctx_at_version(v);
 
-        let completed_task1 = make_completed_task(DiceKey { index: 10 }, 1).await;
-        let completed_task2 = make_completed_task(DiceKey { index: 20 }, 2).await;
+        let completed_task1 = make_completed_task::<K>(DiceKey { index: 10 }, 1).await;
+        let completed_task2 = make_completed_task::<K>(DiceKey { index: 20 }, 2).await;
 
         let finished_cancelling_tasks1 = make_finished_cancelling_task(DiceKey { index: 30 }).await;
         let finished_cancelling_tasks2 = make_finished_cancelling_task(DiceKey { index: 40 }).await;
@@ -465,7 +524,8 @@ mod tests {
         assert_eq!(core.get_tasks_pending_cancellation().len(), 2);
     }
 
-    #[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash)]
+    #[derive(Allocative, Clone, Debug, Display, Eq, PartialEq, Hash, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct K;
 
     #[async_trait]
@@ -482,6 +542,10 @@ mod tests {
 
         fn equality(_: &Self::Value, _: &Self::Value) -> bool {
             true
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 }

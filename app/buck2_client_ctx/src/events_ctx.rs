@@ -57,6 +57,13 @@ use crate::ticker::Ticker;
 /// Other than tick() calls, implementations will only be notified when new events arrive.
 const TICKS_PER_SECOND: u32 = 10;
 
+/// The client message processing loop will try to yield if this much time has
+/// passed since the last yield. This guarantees that any outer futures get
+/// polled occasionally, notably the Ctrl-C-detecting future, allowing the
+/// client loop future to get dropped when the user interrupts us, even if we're
+/// processing continuous streams of messages from the server.
+const STREAM_PROCESSING_YIELD_INTERVAL: Duration = Duration::from_millis(125);
+
 #[derive(Debug, buck2_error::Error)]
 #[allow(clippy::large_enum_variant)]
 enum BuckdCommunicationError {
@@ -133,6 +140,17 @@ pub struct DaemonEventsCtx<'a> {
 }
 
 impl<'a> DaemonEventsCtx<'a> {
+    async fn yield_if_stream_processing_took_too_long(
+        last_yield: &mut Instant,
+        _location: &'static str,
+    ) {
+        let elapsed = Instant::now() - *last_yield;
+        if elapsed >= STREAM_PROCESSING_YIELD_INTERVAL {
+            tokio::task::yield_now().await;
+            *last_yield = Instant::now();
+        }
+    }
+
     pub(crate) fn new(
         client: &mut BuckdClient,
         events_ctx: &'a mut EventsCtx,
@@ -158,6 +176,7 @@ impl<'a> DaemonEventsCtx<'a> {
         partial_result_handler: &mut Handler,
         next: Option<Vec<buck2_error::Result<StreamValue>>>,
         shutdown: &mut Option<buck2_data::DaemonShutdown>,
+        last_yield: &mut Instant,
     ) -> buck2_error::Result<ControlFlow<Box<CommandResult>, ()>>
     where
         Handler: PartialResultHandler,
@@ -169,7 +188,20 @@ impl<'a> DaemonEventsCtx<'a> {
                 Ok(next) => next,
                 Err(e) => {
                     self.inner.handle_events(events, shutdown).await?;
-                    return Err(e).buck_error_context("Buck daemon event bus encountered an error, the root cause (if available) is displayed above this message.").tag(ErrorTag::ClientGrpcStream);
+                    let is_oom = self.inner.is_daemon_oom_killed().await?;
+                    return if is_oom {
+                        Err(e)
+                            .buck_error_context(
+                                "Buck2 daemon was killed by an OOM killer due to high memory pressure. \
+                                Common causes are large or numerous build or test targets or \
+                                too many Buck2 daemons running simultaneously.")
+                            .tag(ErrorTag::ClientGrpcStream)
+                            .tag(ErrorTag::DaemonOomKilled)
+                    } else {
+                        Err(e)
+                            .buck_error_context("Buck daemon event bus encountered an error, the root cause (if available) is displayed above this message.")
+                            .tag(ErrorTag::ClientGrpcStream)
+                    };
                 }
             };
             match next {
@@ -199,6 +231,8 @@ impl<'a> DaemonEventsCtx<'a> {
                     return Ok(ControlFlow::Break(res));
                 }
             }
+
+            Self::yield_if_stream_processing_took_too_long(last_yield, "handle_stream_next").await;
         }
         self.inner.handle_events(events, shutdown).await?;
         Ok(ControlFlow::Continue(()))
@@ -237,6 +271,7 @@ impl<'a> DaemonEventsCtx<'a> {
         // NOTE: When unpacking the stream we capture any shutdown event we encounter. If we fail
         // to unpack the stream to completion, we'll use that later.
         let mut shutdown = None;
+        let mut last_yield = Instant::now();
 
         let command_result: buck2_error::Result<CommandResult> = try {
             loop {
@@ -246,7 +281,8 @@ impl<'a> DaemonEventsCtx<'a> {
                         match self.handle_stream_next(
                             partial_result_handler,
                             next,
-                            &mut shutdown
+                            &mut shutdown,
+                            &mut last_yield,
                         ).await? {
                             ControlFlow::Continue(()) => {}
                             ControlFlow::Break(res) => break *res,
@@ -260,6 +296,11 @@ impl<'a> DaemonEventsCtx<'a> {
                     }
                     tick = self.ticker.tick() => {
                         self.inner.tick(&tick).await?;
+                        if let Some(tps) = self.inner.desired_ticks_per_second() {
+                            self.ticker.set_ticks_per_second(tps);
+                        } else {
+                            self.ticker.set_ticks_per_second(TICKS_PER_SECOND);
+                        }
                     }
                 }
             }
@@ -364,6 +405,11 @@ impl<'a> DaemonEventsCtx<'a> {
                 }
                 tick = self.ticker.tick() => {
                     self.inner.tick(&tick).await?;
+                    if let Some(tps) = self.inner.desired_ticks_per_second() {
+                        self.ticker.set_ticks_per_second(tps);
+                    } else {
+                        self.ticker.set_ticks_per_second(TICKS_PER_SECOND);
+                    }
                 }
             }
         }
@@ -418,6 +464,16 @@ pub struct EventsCtx {
     pub command_report_path: Option<AbsPathBuf>,
     // Internal commands triggered by other commands should not log an invocation record.
     pub log_invocation_record: bool,
+    // This is the daemon process's cgroup path read from /proc/{pid}/cgroup by the client,
+    // which is always available. This differs from `daemon_cgroup_path` in buck2_resource_control
+    // which is a child cgroup created under the root cgroup (i.e. {root}/daemon) and is only
+    // available when daemon cgroup mode is enabled.
+    pub cgroup_path_of_buck2_daemon: Option<String>,
+    /// Whether a superconsole was actually constructed for this command.
+    /// Set by `streaming.rs` from the authoritative answer returned by
+    /// `get_console_with_root`. Defaults to `false` for non-streaming entry
+    /// points (e.g. log replay) that don't go through that path.
+    pub used_superconsole: bool,
 }
 
 impl EventsCtx {
@@ -432,6 +488,23 @@ impl EventsCtx {
             buck_log_dir: None,
             command_report_path: None,
             log_invocation_record: true,
+            cgroup_path_of_buck2_daemon: None,
+            used_superconsole: false,
+        }
+    }
+
+    pub(crate) async fn is_daemon_oom_killed(&self) -> buck2_error::Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(path) = self.cgroup_path_of_buck2_daemon.as_deref() else {
+                return Ok(false);
+            };
+            let daemon_disconnect_time = SystemTime::now();
+            crate::subscribers::oom::check_daemon_oom_killed(path, daemon_disconnect_time).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(false)
         }
     }
 
@@ -501,6 +574,23 @@ impl EventsCtx {
             .await
     }
 
+    /// Return the highest desired tick rate from any subscriber, or `None`
+    /// if no subscriber has an opinion.
+    fn desired_ticks_per_second(&self) -> Option<u32> {
+        let mut result: Option<u32> = None;
+        if let Some(recorder) = &self.recorder {
+            if let Some(tps) = recorder.desired_ticks_per_second() {
+                result = Some(result.map_or(tps, |r: u32| r.max(tps)));
+            }
+        }
+        for s in &self.subscribers {
+            if let Some(tps) = s.desired_ticks_per_second() {
+                result = Some(result.map_or(tps, |r: u32| r.max(tps)));
+            }
+        }
+        result
+    }
+
     /// Helper method to abstract the process of applying an `EventSubscriber` method to all of the subscribers.
     /// Quits on the first error encountered.
     pub(crate) async fn try_for_each_subscriber<'b, Fut>(
@@ -568,41 +658,42 @@ impl EventsCtx {
         .await
     }
 
-    pub async fn finalize(&mut self) -> Vec<String> {
+    pub async fn finalize(self) -> Vec<String> {
         let mut errors = Vec::new();
 
-        async fn finalize(subscriber: &mut dyn EventSubscriber, errors: &mut Vec<String>) {
+        async fn finalize(subscriber: Box<dyn EventSubscriber>, errors: &mut Vec<String>) {
             let start = Instant::now();
+            let name = subscriber.name().to_owned();
             let res = subscriber.finalize().await;
             let elapsed = Instant::now() - start;
             if elapsed > Duration::from_millis(1000) {
-                tracing::warn!("Finalizing \'{}\' took {:?}", subscriber.name(), elapsed);
+                tracing::warn!("Finalizing \'{}\' took {:?}", name, elapsed);
             } else {
-                tracing::info!("Finalizing \'{}\' took {:?}", subscriber.name(), elapsed);
+                tracing::info!("Finalizing \'{}\' took {:?}", name, elapsed);
             };
 
             if let Err(e) = res {
                 errors.push(format!(
                     "{:?}",
-                    e.context(format!("\'{}\' failed to finalize", subscriber.name()))
+                    e.context(format!("\'{}\' failed to finalize", name))
                 ));
             }
         }
 
-        for subscriber in &mut self.subscribers {
-            finalize(subscriber.as_mut(), &mut errors).await;
+        for subscriber in self.subscribers.into_iter() {
+            finalize(subscriber, &mut errors).await;
         }
 
         if self.log_invocation_record
-            && let Some(recorder) = self.recorder.as_mut()
+            && let Some(recorder) = self.recorder
         {
-            finalize(recorder.as_mut(), &mut errors).await;
+            finalize(recorder, &mut errors).await;
         }
         errors
     }
 
     pub fn finalize_events(
-        &mut self,
+        mut self,
         trace_id: TraceId,
         result: ExitResult,
         runtime: &Runtime,

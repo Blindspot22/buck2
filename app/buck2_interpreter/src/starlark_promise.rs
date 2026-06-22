@@ -21,7 +21,6 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::typing::Ty;
@@ -37,7 +36,6 @@ use starlark::values::ValueTyped;
 use starlark::values::list::AllocList;
 use starlark::values::list_or_tuple::UnpackListOrTuple;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 use starlark::values::type_repr::StarlarkTypeRepr;
 use starlark::values::typing::StarlarkCallable;
 
@@ -303,11 +301,12 @@ impl<'v> UnpackValue<'v> for &'v StarlarkPromise<'v> {
     }
 }
 
+starlark::methods_static!(PROMISE_METHODS = promise_methods);
+
 #[starlark_value(type = "Promise")]
 impl<'v> StarlarkValue<'v> for StarlarkPromise<'v> {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(promise_methods)
+        Some(PROMISE_METHODS.methods())
     }
 }
 
@@ -338,9 +337,8 @@ fn promise_methods(builder: &mut MethodsBuilder) {
 }
 
 #[starlark_module]
-pub fn register_promise(globals: &mut GlobalsBuilder) {
-    const Promise: StarlarkValueAsType<StarlarkPromise> = StarlarkValueAsType::new();
-}
+#[starlark_types(StarlarkPromise<'_> as Promise)]
+pub fn register_promise(globals: &mut GlobalsBuilder) {}
 
 #[cfg(test)]
 mod tests {
@@ -403,7 +401,7 @@ mod tests {
         }
     }
 
-    fn alloc_promises<'v>(modu: &Module<'v>) {
+    fn alloc_promises(modu: &Module) {
         modu.set(
             "__promises__",
             modu.heap().alloc_complex_no_freeze(Promises::default()),
@@ -431,6 +429,7 @@ mod tests {
         Ok(res)
     }
 
+    #[allow(clippy::needless_lifetimes)]
     fn assert_promise_err<'v>(modu: &Module<'v>, content: &str, err: &str) -> buck2_error::Error {
         match assert_promise(modu, content) {
             Ok(_) => panic!("Expected an error, got a result"),

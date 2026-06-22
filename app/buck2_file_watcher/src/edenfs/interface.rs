@@ -8,8 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str;
 use std::sync::Arc;
@@ -36,6 +34,8 @@ use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use dice::DiceTransactionUpdater;
 use edenfs::ChangeNotification;
 use edenfs::ChangesSinceV2Params;
@@ -96,10 +96,11 @@ pub(crate) struct EdenFsFileWatcher {
     cells: CellResolver,
     // The project root, relative to the eden mount point
     project_root: ForwardRelativePathBuf,
-    ignore_specs: HashMap<CellName, IgnoreSet>,
+    ignore_specs: StdBuckHashMap<CellName, IgnoreSet>,
     mergebase: RwLock<Option<MergebaseDetails>>,
     last_mergebase: RwLock<Option<MergebaseDetails>>,
     mergebase_with: Option<String>,
+    dice_clear_on_mergebase_change: bool,
     eden_version: RwLock<Option<String>>,
 }
 
@@ -109,8 +110,8 @@ impl EdenFsFileWatcher {
         project_root: &ProjectRoot,
         root_config: &LegacyBuckConfig,
         cells: CellResolver,
-        ignore_specs: HashMap<CellName, IgnoreSet>,
-    ) -> Result<Self, EdenFsWatcherError> {
+        ignore_specs: StdBuckHashMap<CellName, IgnoreSet>,
+    ) -> buck2_error::Result<Self> {
         let manager = EdenConnectionManager::new(
             fb,
             project_root,
@@ -137,6 +138,9 @@ impl EdenFsFileWatcher {
             })
             .map(|s| s.to_owned());
 
+        let dice_clear_on_mergebase_change =
+            crate::file_watcher::dice_clear_on_mergebase_change(root_config)?;
+
         Ok(Self {
             manager,
             mount_point,
@@ -148,6 +152,7 @@ impl EdenFsFileWatcher {
             mergebase: RwLock::new(None),
             last_mergebase: RwLock::new(None),
             mergebase_with,
+            dice_clear_on_mergebase_change,
             eden_version: RwLock::new(None),
         })
     }
@@ -170,8 +175,7 @@ impl EdenFsFileWatcher {
             .with_eden(|eden| eden.changesSinceV2(&changes_since_v2_params))
             .await
             .buck_error_context("Failed to query EdenFS for changes since last position.")?;
-        let mut position = self.position.write().await;
-        *position = result.toPosition;
+        let new_position = result.toPosition;
 
         let mut file_change_tracker = FileChangeTracker::new();
         let base_stats = self.base_file_watcher_stats().await?;
@@ -181,7 +185,7 @@ impl EdenFsFileWatcher {
         // This can happen as we receive file changes from a commit transitions and from an explicit notification.
         // Also eden will report duplicates if there were another changes between changes on the same file.
         // We want to ignore duplicates, so we store unique changes in the set
-        let mut processed_changes: HashSet<EdenFsEvent> = HashSet::new();
+        let mut processed_changes: StdBuckHashSet<EdenFsEvent> = StdBuckHashSet::default();
         for change in result.changes {
             // Once a large or unknown change is detected, we need to invalidate DICE. Therefore,
             // skip processing the rest of the changes and continue to propagate true.
@@ -208,7 +212,12 @@ impl EdenFsFileWatcher {
                 .buck_error_context("Failed to handle large or unknown change.")?;
         }
 
+        // The journal position isn't updated until we have successfully written the changes to DICE.
+        // Writing it before that's the case risks DICE's state not matching the filesystem's if we
+        // return early due to an error above. This way, at worst we re-invalidate DICE keys, but we
+        // still ensure that it remains in sync with the repository state.
         file_change_tracker.write_to_dice(&mut dice)?;
+        *self.position.write().await = new_position;
         Ok((stats.finish(), dice))
     }
 
@@ -217,7 +226,7 @@ impl EdenFsFileWatcher {
         change: &ChangeNotification,
         tracker: &mut FileChangeTracker,
         stats: &mut FileWatcherStats,
-        processed_changes: &mut HashSet<EdenFsEvent>,
+        processed_changes: &mut StdBuckHashSet<EdenFsEvent>,
     ) -> buck2_error::Result<ProcessChangeStatus> {
         let large_or_unknown_change = match change {
             ChangeNotification::smallChange(small_change) => match small_change {
@@ -437,7 +446,7 @@ impl EdenFsFileWatcher {
         kind: Kind,
         event: Type,
         path: &[u8],
-        processed_changes: &mut HashSet<EdenFsEvent>,
+        processed_changes: &mut StdBuckHashSet<EdenFsEvent>,
     ) -> buck2_error::Result<()> {
         let eden_rel_path = PathBuf::from(str::from_utf8(path)?);
 
@@ -469,6 +478,13 @@ impl EdenFsFileWatcher {
             // we ignore any changes that are not relative to the project root
             Err(_) => return Ok(()),
         };
+
+        // Watchman cookie files are synchronization markers, not real source changes.
+        if crate::is_watchman_cookie(project_rel_path) {
+            stats.add_ignored(1);
+            return Ok(());
+        }
+
         let cell_path = self.cells.get_cell_path(project_rel_path);
 
         let ignore = self
@@ -520,7 +536,7 @@ impl EdenFsFileWatcher {
         stats: &mut FileWatcherStats,
         from: &str,
         to: Option<&str>,
-        processed_changes: &mut HashSet<EdenFsEvent>,
+        processed_changes: &mut StdBuckHashSet<EdenFsEvent>,
     ) -> buck2_error::Result<ProcessChangeStatus> {
         // `sl status` only reports added/removed/modified files, not directories.
         // we use `sl debugdiffdirs` to get changes for directories
@@ -549,7 +565,7 @@ impl EdenFsFileWatcher {
         stats: &mut FileWatcherStats,
         from: &str,
         to: Option<&str>,
-        processed_changes: &mut HashSet<EdenFsEvent>,
+        processed_changes: &mut StdBuckHashSet<EdenFsEvent>,
     ) -> buck2_error::Result<ProcessChangeStatus> {
         // limit results to MAX_SAPLING_STATUS_CHANGES
         match get_status(&self.eden_root, &from, to, MAX_SAPLING_STATUS_CHANGES)
@@ -608,7 +624,7 @@ impl EdenFsFileWatcher {
         stats: &mut FileWatcherStats,
         from: &str,
         to: Option<&str>,
-        processed_changes: &mut HashSet<EdenFsEvent>,
+        processed_changes: &mut StdBuckHashSet<EdenFsEvent>,
     ) -> buck2_error::Result<ProcessChangeStatus> {
         // limit results to MAX_SAPLING_STATUS_CHANGES
         match get_dir_diff(&self.eden_root, &from, to, MAX_SAPLING_STATUS_CHANGES)
@@ -671,18 +687,20 @@ impl EdenFsFileWatcher {
         stats: &mut FileWatcherStats,
         from: &str,
         to: &str,
-        processed_changes: &mut HashSet<EdenFsEvent>,
+        processed_changes: &mut StdBuckHashSet<EdenFsEvent>,
     ) -> buck2_error::Result<ProcessChangeStatus> {
-        if self
-            .update_mergebase(&to)
+        let mergebase_changed = self
+            .update_mergebase(to)
             .await
-            .buck_error_context("Failed to update mergebase.")?
-        {
+            .buck_error_context("Failed to update mergebase.")?;
+
+        if mergebase_changed && self.dice_clear_on_mergebase_change {
             // Mergebase has changed - invalidate DICE.
             Ok(ProcessChangeStatus::LargeOrUnknown)
         } else {
-            // Mergebase has not changed - compute changes form source control
-            self.process_source_control_changes(tracker, stats, &from, Some(to), processed_changes)
+            // Mergebase has not changed (or dice_clear_on_mergebase_change is disabled) -
+            // compute changes from source control
+            self.process_source_control_changes(tracker, stats, from, Some(to), processed_changes)
                 .await
         }
     }
@@ -735,7 +753,7 @@ impl EdenFsFileWatcher {
         if let Some(mergebase) = mergebase_info.map(|m| m.mergebase) {
             let mut tracker = FileChangeTracker::new();
             let mut stats = FileWatcherStats::new(base_stats, 0);
-            let mut processed_changes: HashSet<EdenFsEvent> = HashSet::new();
+            let mut processed_changes: StdBuckHashSet<EdenFsEvent> = StdBuckHashSet::default();
             self.process_source_control_changes(
                 &mut tracker,
                 &mut stats,

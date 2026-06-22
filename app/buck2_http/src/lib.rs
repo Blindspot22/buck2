@@ -8,9 +8,6 @@
  * above-listed licenses.
  */
 
-#![feature(error_generic_member_access)]
-#![feature(if_let_guard)]
-
 use buck2_error::ErrorTag;
 use hyper::StatusCode;
 

@@ -35,7 +35,7 @@ def _build_tset_tree(ctx, artifacts, nodes_per_tset):
     # Group into sub-tsets of size nodes_per_tset
     sub_tsets = []
     for i in range(0, len(leaf_tsets), nodes_per_tset):
-        chunk = leaf_tsets[i:i + nodes_per_tset]
+        chunk = leaf_tsets[i : i + nodes_per_tset]
         if len(chunk) == 1:
             sub_tsets.append(chunk[0])
         else:
@@ -84,6 +84,7 @@ def _artifact_generator_impl(ctx: AnalysisContext) -> list[Provider]:
         art = ctx.actions.write(
             "artifact_{}.txt".format(i),
             "content_{}_{}".format(ctx.label.name, i),
+            has_content_based_path = False,
         )
         artifacts.append(art)
 
@@ -91,7 +92,7 @@ def _artifact_generator_impl(ctx: AnalysisContext) -> list[Provider]:
     tset = _build_tset_tree(ctx, artifacts, nodes_per_tset * artifacts_per_node)
 
     # Create root output that depends on all artifacts via tset
-    out = ctx.actions.declare_output("out")
+    out = ctx.actions.declare_output("out", has_content_based_path = False)
     if tset:
         ctx.actions.run(
             cmd_args(

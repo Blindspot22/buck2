@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 
@@ -38,21 +37,33 @@ use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use buck2_wrapper_common::BUCK_WRAPPER_START_TIME_ENV_VAR;
 use buck2_wrapper_common::BUCK_WRAPPER_UUID_ENV_VAR;
 use buck2_wrapper_common::BUCK2_WRAPPER_ENV_VAR;
 use serde::Serialize;
 
+use crate::commands::build::print_buck_ui_and_rating;
 use crate::commands::build::print_build_failed;
 use crate::commands::build::print_build_result;
 use crate::commands::build::print_build_succeeded;
 
 /// Build and run the selected target.
 ///
+/// Use `--` to separate arguments to the target from arguments to buck2:
+///
+/// buck2 run //my/target -- --arg1 --arg2
+///
 /// The Build ID for the underlying build execution is made available to the target in
 /// the `BUCK_RUN_BUILD_ID` environment variable.
 #[derive(Debug, clap::Parser)]
-#[clap(name = "run", trailing_var_arg = true)]
+// FIXME(JakobDegen): Remove usage override once soft error is removed
+#[clap(
+    name = "run",
+    trailing_var_arg = true,
+    override_usage = "buck2 run [OPTIONS] <TARGET> [-- <TARGET_ARGS>...]"
+)]
 pub struct RunCommand {
     #[clap(
         long = "command-args-file",
@@ -104,7 +115,10 @@ impl StreamingCommand for RunCommand {
         events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let run_args_missing_separator =
-            !self.extra_run_args.is_empty() && !std::env::args().any(|arg| arg == "--");
+            // We will soon require a separator before the start of the runs args.
+            // Check that the expanded argv has a separator (so we catch them in @ files), 
+            // and if not print a warning.
+            !self.extra_run_args.is_empty() && !ctx.expanded_argv_has_separator();
 
         let context = ctx.client_context(matches, &self)?;
         let has_target_universe = !self.target_cfg.target_universe.is_empty();
@@ -176,6 +190,7 @@ impl StreamingCommand for RunCommand {
             None
         };
 
+        print_buck_ui_and_rating(&console, ctx, events_ctx.used_superconsole)?;
         print_build_succeeded(&console, ctx, extra)?;
 
         // Special case for recursive invocations of buck; `BUCK2_WRAPPER` is set by wrapper scripts that execute
@@ -248,7 +263,7 @@ impl StreamingCommand for RunCommand {
     }
 
     fn sanitize_argv(&self, argv: Argv) -> SanitizedArgv {
-        let to_redact: std::collections::HashSet<_> = self.extra_run_args.iter().collect();
+        let to_redact: StdBuckHashSet<_> = self.extra_run_args.iter().collect();
         argv.redacted(to_redact)
     }
 }
@@ -257,7 +272,7 @@ impl StreamingCommand for RunCommand {
 struct CommandArgsFile {
     path: String,
     argv: Vec<String>,
-    envp: HashMap<String, String>,
+    envp: StdBuckHashMap<String, String>,
     // Not used. For buck_v1 back compatibility only.
     is_fix_script: bool,
     // Not used. For buck_v1 back compatibility only.

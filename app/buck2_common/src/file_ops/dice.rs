@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -19,16 +18,21 @@ use buck2_core::cells::cell_path::CellPath;
 use buck2_core::cells::cell_path::CellPathRef;
 use buck2_core::cells::name::CellName;
 use buck2_fs::paths::file_name::FileNameBuf;
+use buck2_hash::StdBuckHashSet;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::DiceTransactionUpdater;
 use dice::InvalidationSourcePriority;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
-use futures::future::BoxFuture;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 
 use crate::buildfiles::HasBuildfiles;
+use crate::file_ops::delegate::FileOpsDelegateWithIgnores;
 use crate::file_ops::delegate::get_delegated_file_ops;
 use crate::file_ops::error::FileReadError;
 use crate::file_ops::error::extended_ignore_error;
@@ -92,10 +96,10 @@ impl DiceFileComputations {
         ctx: &mut DiceComputations<'_>,
         path: CellPathRef<'_>,
     ) -> buck2_error::Result<Option<String>> {
-        (ctx.compute(&ReadFileKey(Arc::new(path.to_owned())))
+        ctx.compute(&ReadFileKey(Arc::new(path.to_owned())))
             .await??
-            .0)()
-        .await
+            .read_file_if_exists(ctx)
+            .await
     }
 
     /// Does not check if the path is ignored
@@ -146,7 +150,9 @@ impl DiceFileComputations {
     }
 }
 
-#[derive(Debug, Display, Clone, Dupe, Copy, PartialEq, Eq, Hash, Allocative)]
+#[derive(
+    Debug, Display, Clone, Dupe, Copy, PartialEq, Eq, Hash, Allocative, Pagable
+)]
 pub(crate) enum CheckIgnores {
     Yes,
     No,
@@ -154,12 +160,12 @@ pub(crate) enum CheckIgnores {
 
 #[derive(Allocative)]
 pub struct FileChangeTracker {
-    files_to_dirty: HashSet<ReadFileKey>,
-    dirs_to_dirty: HashSet<ReadDirKey>,
-    paths_to_dirty: HashSet<PathMetadataKey>,
-    exists_matching_exact_case_to_dirty: HashSet<ExistsMatchingExactCaseKey>,
+    files_to_dirty: StdBuckHashSet<ReadFileKey>,
+    dirs_to_dirty: StdBuckHashSet<ReadDirKey>,
+    paths_to_dirty: StdBuckHashSet<PathMetadataKey>,
+    exists_matching_exact_case_to_dirty: StdBuckHashSet<ExistsMatchingExactCaseKey>,
 
-    maybe_modified_dirs: HashSet<CellPath>,
+    maybe_modified_dirs: StdBuckHashSet<CellPath>,
 }
 
 impl FileChangeTracker {
@@ -254,48 +260,47 @@ impl FileChangeTracker {
 
 /// The return value of a `ReadFileKey` computation.
 ///
-/// Instead of the actual file contents, this is a closure that reads the actual file contents from
-/// disk when invoked. This is done to ensure that we don't store the file contents in memory.
-// FIXME(JakobDegen): `ReadFileKey` is not marked as transient if this returns an error, which is
-// unfortunate.
-#[derive(Clone, Dupe, Allocative)]
-pub struct ReadFileProxy(
-    #[allocative(skip)]
-    Arc<dyn Fn() -> BoxFuture<'static, buck2_error::Result<Option<String>>> + Send + Sync>,
-);
+/// Instead of the actual file contents, this holds a `FileOpsDelegateWithIgnores`
+/// and the path to read. The actual file read happens when the caller invokes
+/// `read_file_if_exists` on this value. This ensures we don't store file
+/// contents in memory.
+#[derive(Clone, Dupe, Allocative, Pagable)]
+pub struct ReadFileValue {
+    file_ops: FileOpsDelegateWithIgnores,
+    path: Arc<CellPath>,
+}
 
-impl ReadFileProxy {
-    /// This is a convenience method that avoids a little bit of boilerplate around boxing, and
-    /// cloning the captures
-    pub fn new_with_captures<D, F>(data: D, c: impl Fn(D) -> F + Send + Sync + 'static) -> Self
-    where
-        D: Clone + Send + Sync + 'static,
-        F: Future<Output = buck2_error::Result<Option<String>>> + Send + 'static,
-    {
-        use futures::FutureExt;
-
-        Self(Arc::new(move || {
-            let data = data.clone();
-            c(data).boxed()
-        }))
+impl ReadFileValue {
+    // FIXME: `ReadFileKey` is not marked as transient if this returns an error, which is
+    // unfortunate.
+    // A reasonable fix would be to take a dep on an always transient key in the error case.
+    pub async fn read_file_if_exists(
+        &self,
+        ctx: &mut DiceComputations<'_>,
+    ) -> buck2_error::Result<Option<String>> {
+        self.file_ops
+            .read_file_if_exists(ctx, self.path.path())
+            .await
     }
 }
 
-#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct ReadFileKey(Arc<CellPath>);
 
 #[async_trait]
 impl Key for ReadFileKey {
-    type Value = buck2_error::Result<ReadFileProxy>;
+    type Value = buck2_error::Result<ReadFileValue>;
     async fn compute(
         &self,
         ctx: &mut DiceComputations,
         _cancellations: &CancellationContext,
     ) -> Self::Value {
-        get_delegated_file_ops(ctx, self.0.cell(), CheckIgnores::No)
-            .await?
-            .read_file_if_exists(ctx, self.0.path())
-            .await
+        let file_ops = get_delegated_file_ops(ctx, self.0.cell(), CheckIgnores::No).await?;
+        Ok(ReadFileValue {
+            file_ops,
+            path: self.0.dupe(),
+        })
     }
 
     fn equality(_: &Self::Value, _: &Self::Value) -> bool {
@@ -305,10 +310,15 @@ impl Key for ReadFileKey {
     fn invalidation_source_priority() -> InvalidationSourcePriority {
         InvalidationSourcePriority::High
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
-#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
 #[display("{}", path)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct ReadDirKey {
     path: CellPath,
     check_ignores: CheckIgnores,
@@ -336,10 +346,15 @@ impl Key for ReadDirKey {
     fn validity(x: &Self::Value) -> bool {
         x.is_ok()
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
-#[derive(Clone, Display, Allocative, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Display, Allocative, Debug, Eq, Hash, PartialEq, Pagable)]
 #[display("{}", _0)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct ExistsMatchingExactCaseKey(CellPath);
 
 #[async_trait]
@@ -366,9 +381,14 @@ impl Key for ExistsMatchingExactCaseKey {
     fn validity(x: &Self::Value) -> bool {
         x.is_ok()
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
-#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+#[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct PathMetadataKey(CellPath);
 
 #[async_trait]
@@ -384,15 +404,13 @@ impl Key for PathMetadataKey {
             .read_path_metadata_if_exists(ctx, self.0.as_ref().path())
             .await?;
 
-        match res {
-            Some(RawPathMetadata::Symlink {
-                at: ref path,
-                to: _,
-            }) => {
-                ctx.compute(&ReadFileKey(path.dupe())).await??;
-            }
-            _ => (),
-        };
+        if let Some(RawPathMetadata::Symlink {
+            at: ref path,
+            to: _,
+        }) = res
+        {
+            ctx.compute(&ReadFileKey(path.dupe())).await??;
+        }
 
         Ok(res)
     }
@@ -410,6 +428,10 @@ impl Key for PathMetadataKey {
 
     fn invalidation_source_priority() -> InvalidationSourcePriority {
         InvalidationSourcePriority::High
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
     }
 }
 

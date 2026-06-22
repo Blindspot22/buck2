@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use allocative::Allocative;
@@ -21,32 +20,37 @@ use buck2_core::cells::paths::CellRelativePathBuf;
 use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::StdBuckHashMap;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use ref_cast::RefCast;
 
 use crate::legacy_configs::dice::HasLegacyConfigs;
 use crate::legacy_configs::key::BuckconfigKeyRef;
 
 #[derive(PartialEq, Allocative)]
-pub struct PackageBoundaryExceptions(HashMap<CellName, CellPackageBoundaryExceptions>);
+pub struct PackageBoundaryExceptions(StdBuckHashMap<CellName, CellPackageBoundaryExceptions>);
 
-#[derive(PartialEq, Allocative)]
+#[derive(PartialEq, Allocative, Pagable)]
 struct CellPackageBoundaryExceptions {
     // The reason we avoid a trie is that there's not a convenient `TrieSet` implementation to use,
     // and tries will likely have worse performance because most exception paths are very short.
     // Instead, we use a HashMap of first directory of the path to the rest of the path.
-    prefix_to_subpaths: HashMap<FileNameBuf, Vec<ForwardRelativePathBuf>>,
+    prefix_to_subpaths: StdBuckHashMap<FileNameBuf, Vec<ForwardRelativePathBuf>>,
     // Sometimes we want to say everything is allowed
     allow_everything: bool,
 }
 
 impl CellPackageBoundaryExceptions {
     fn new(s: &str) -> buck2_error::Result<Self> {
-        let mut prefix_to_subpaths = HashMap::new();
+        let mut prefix_to_subpaths = StdBuckHashMap::default();
         let mut allow_everything = false;
         for path_str in s.split(',') {
             let path_str = path_str.trim();
@@ -95,8 +99,9 @@ impl CellPackageBoundaryExceptions {
     }
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Dupe, Display, Debug, Allocative)]
+#[derive(Hash, Eq, PartialEq, Clone, Dupe, Display, Debug, Allocative, Pagable)]
 #[display("{:?}", self)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 struct CellPackageBoundaryExceptionsKey(CellName);
 
 #[async_trait]
@@ -134,6 +139,10 @@ impl Key for CellPackageBoundaryExceptionsKey {
             _ => false,
         }
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
 #[async_trait]
@@ -150,8 +159,11 @@ impl HasPackageBoundaryExceptions for DiceComputations<'_> {
         &mut self,
         path: CellPathRef<'async_trait>,
     ) -> buck2_error::Result<Option<Arc<CellPath>>> {
-        #[derive(Hash, Eq, PartialEq, Clone, Display, Debug, RefCast, Allocative)]
+        #[derive(
+            Hash, Eq, PartialEq, Clone, Display, Debug, RefCast, Allocative, Pagable
+        )]
         #[repr(transparent)]
+        #[pagable_typetag(dice::DiceKeyDyn)]
         struct PackageBoundaryExceptionKey(CellPath);
 
         #[async_trait]
@@ -183,6 +195,10 @@ impl HasPackageBoundaryExceptions for DiceComputations<'_> {
                     (Ok(x), Ok(y)) => x == y,
                     _ => false,
                 }
+            }
+
+            fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+                OkPagableValueSerialize::<Self::Value>::new()
             }
         }
 

@@ -42,6 +42,7 @@ def _get_analysis_input_artifacts(ctx, artifacts: ArtifactTSet) -> dict[Label, l
                 "artifacts-{}.txt".format(identifier),
                 info.artifacts,
                 with_inputs = True,
+                has_content_based_path = False,
             )
             results.setdefault(info.label, []).append(
                 _AnalysisInput(argsfile = argsfile, identifier = identifier),
@@ -49,15 +50,11 @@ def _get_analysis_input_artifacts(ctx, artifacts: ArtifactTSet) -> dict[Label, l
             identifier += 1
     return results
 
-def _analyze_artifacts(
-        ctx,
-        key: str,
-        analysis_tool: RunInfo,
-        label_to_artifacts: dict[Label, list[_AnalysisInput]]) -> dict[Label, list[Artifact]]:
+def _analyze_artifacts(ctx, key: str, analysis_tool: RunInfo, label_to_artifacts: dict[Label, list[_AnalysisInput]]) -> dict[Label, list[Artifact]]:
     label_to_analysis = {}
     for label, inputs in label_to_artifacts.items():
         for input in inputs:
-            output = ctx.actions.declare_output("{}_{}.json".format(key, input.identifier))
+            output = ctx.actions.declare_output("{}_{}.json".format(key, input.identifier), has_content_based_path = False)
             ctx.actions.run(
                 cmd_args([
                     analysis_tool,
@@ -73,18 +70,15 @@ def _analyze_artifacts(
 
     return label_to_analysis
 
-def _reduce_analysis_artifacts(
-        ctx,
-        key: str,
-        reducer_tool: RunInfo,
-        label_to_artifacts: dict[Label, list[Artifact]]) -> Artifact:
+def _reduce_analysis_artifacts(ctx, key: str, reducer_tool: RunInfo, label_to_artifacts: dict[Label, list[Artifact]]) -> Artifact:
     input_json = ctx.actions.write_json(
         "{}_reducer_args.json".format(key),
         label_to_artifacts,
         with_inputs = True,
+        has_content_based_path = False,
     )
 
-    output = ctx.actions.declare_output("{}.json".format(key))
+    output = ctx.actions.declare_output("{}.json".format(key), has_content_based_path = False)
     ctx.actions.run(
         cmd_args([
             reducer_tool,

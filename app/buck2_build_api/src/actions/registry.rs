@@ -34,10 +34,11 @@ use buck2_error::internal_error;
 use buck2_execute::execute::request::OutputType;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::BuckIndexSet;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
 use gazebo::prelude::SliceExt;
-use indexmap::IndexSet;
+use pagable::Pagable;
 use starlark::codemap::FileSpan;
 use starlark::collections::SmallMap;
 use starlark::collections::SmallSet;
@@ -50,6 +51,7 @@ use crate::actions::RegisteredAction;
 use crate::actions::UnregisteredAction;
 use crate::analysis::registry::AnalysisValueFetcher;
 use crate::deferred::calculation::ActionLookup;
+use crate::interpreter::rule_defs::artifact_tagging::ArtifactTag;
 
 /// The actions registry for a particular analysis of a rule, dynamic actions, anon target, BXL.
 #[derive(Allocative, Trace)]
@@ -63,6 +65,8 @@ pub struct ActionsRegistry<'v> {
     pending: Vec<ActionToBeRegistered>,
     pub execution_platform: ExecutionPlatformResolution,
     claimed_output_paths: DirectoryBuilder<Option<FileSpan>, NoDigest>,
+    /// Per-analysis counter feeding deterministic `ArtifactTag` identities.
+    artifact_tag_count: u64,
 }
 
 impl<'v> ActionsRegistry<'v> {
@@ -74,7 +78,17 @@ impl<'v> ActionsRegistry<'v> {
             pending: Default::default(),
             execution_platform,
             claimed_output_paths: DirectoryBuilder::empty(),
+            artifact_tag_count: 0,
         }
+    }
+
+    /// Mint an `ArtifactTag` with a content-deterministic identity (this
+    /// analysis's `owner` plus a per-analysis sequence number), so it serializes
+    /// identically across daemon processes. See [`ArtifactTag::from_identity`].
+    pub fn next_artifact_tag(&mut self) -> ArtifactTag {
+        let index = self.artifact_tag_count;
+        self.artifact_tag_count += 1;
+        ArtifactTag::from_identity(&self.owner, index)
     }
 
     pub fn declare_dynamic_output(
@@ -195,7 +209,7 @@ impl<'v> ActionsRegistry<'v> {
     pub fn register<A: UnregisteredAction + 'static>(
         &mut self,
         self_key: &DeferredHolderKey,
-        outputs: IndexSet<OutputArtifact>,
+        outputs: BuckIndexSet<OutputArtifact>,
         action: A,
     ) -> buck2_error::Result<ActionKey> {
         let key = ActionKey::new(
@@ -207,7 +221,7 @@ impl<'v> ActionsRegistry<'v> {
                 (self.declared_dynamic_outputs.len() + self.pending.len()).try_into()?,
             ),
         );
-        let mut bound_outputs = IndexSet::with_capacity(outputs.len());
+        let mut bound_outputs = BuckIndexSet::with_capacity(outputs.len());
         for output in outputs {
             let bound = output.bind(key.dupe())?.as_base_artifact().dupe();
             bound_outputs.insert(bound);
@@ -247,9 +261,8 @@ impl<'v> ActionsRegistry<'v> {
                 let action = a.register(starlark_data, error_handler)?;
                 match (action.category(), action.identifier()) {
                     (category, Some(identifier)) => {
-                        let existing_identifiers = observed_names
-                            .entry(category.to_owned())
-                            .or_insert_with(HashSet::<String>::new);
+                        let existing_identifiers =
+                            observed_names.entry(category.to_owned()).or_default();
                         // false -> identifier was already present in the set
                         if !existing_identifiers.insert(identifier.to_owned()) {
                             return Err(ActionErrors::ActionCategoryIdentifierNotUnique(
@@ -307,7 +320,7 @@ impl<'v> ActionsRegistry<'v> {
     }
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub struct RecordedActions {
     /// Vec of actions indexed by ActionKey::id.
     ///

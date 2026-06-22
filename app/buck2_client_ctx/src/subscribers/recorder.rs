@@ -10,8 +10,6 @@
 
 use std::cmp::max;
 use std::cmp::min;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::io::Write;
 use std::ops::Sub;
 use std::sync::Arc;
@@ -60,6 +58,8 @@ use buck2_events::sink::remote::new_remote_event_sink_if_enabled;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use buck2_util::network_speed_average::NetworkSpeedAverage;
 use buck2_util::sliding_window::SlidingWindow;
 use buck2_wrapper_common::BUCK_WRAPPER_START_TIME_ENV_VAR;
@@ -72,6 +72,7 @@ use itertools::Itertools;
 use termwiz::istty::IsTty;
 use tokio::sync::mpsc::Receiver;
 
+use crate::agent_context::AgentContextEntry;
 use crate::client_ctx::ClientCommandContext;
 use crate::client_metadata::ClientMetadata;
 use crate::common::CommonBuildConfigurationOptions;
@@ -172,9 +173,9 @@ pub struct InvocationRecorder {
     initial_sink_dropped_count: Option<u64>,
     initial_sink_bytes_written: Option<u64>,
     sink_max_buffer_depth: u64,
-    soft_error_categories: HashSet<SoftError>,
+    soft_error_categories: StdBuckHashSet<SoftError>,
     concurrent_command_blocking_duration: Option<Duration>,
-    metadata: HashMap<String, String>,
+    metadata: StdBuckHashMap<String, String>,
     analysis_count: u64,
     load_count: u64,
     daemon_in_memory_state_is_corrupted: bool,
@@ -208,12 +209,13 @@ pub struct InvocationRecorder {
     initial_hedwig_download_bytes: Option<u64>,
     initial_hedwig_upload_queries: Option<u64>,
     initial_hedwig_upload_bytes: Option<u64>,
-    concurrent_command_ids: HashSet<String>,
+    concurrent_command_ids: StdBuckHashSet<String>,
     daemon_connection_failure: bool,
     /// Daemon started by this command.
     daemon_was_started: Option<buck2_data::DaemonWasStartedReason>,
     should_restart: bool,
     client_metadata: Vec<buck2_data::ClientMetadata>,
+    agent_context: Vec<buck2_data::AgentContextEntry>,
     command_errors: Vec<ErrorReport>,
     exit_code: Option<u32>,
     exit_result_name: Option<String>,
@@ -228,7 +230,9 @@ pub struct InvocationRecorder {
     peak_process_memory_bytes: Option<u64>,
     has_new_buckconfigs: bool,
     peak_used_disk_space_bytes: Option<u64>,
-    active_networks_kinds: HashSet<i32>,
+    peak_normalized_system_load1: Option<f64>,
+    peak_normalized_system_load5: Option<f64>,
+    active_networks_kinds: StdBuckHashSet<i32>,
     target_cfg: Option<TargetCfg>,
     hg_revision: Option<String>,
     has_local_changes: Option<bool>,
@@ -242,7 +246,7 @@ pub struct InvocationRecorder {
     previous_uuid_with_mismatched_config: Option<String>,
     file_watcher: Option<String>,
     health_check_tags_receiver: Option<Receiver<Vec<String>>>,
-    health_check_tags: HashSet<String>,
+    health_check_tags: StdBuckHashSet<String>,
     exec_time_ms: u64,
     initial_local_cache_hits_files_from_memory_cache: Option<i64>,
     initial_local_cache_hits_files_from_filesystem_cache: Option<i64>,
@@ -259,7 +263,7 @@ pub struct InvocationRecorder {
     current_in_progress_remote_uploads: u64,
     max_in_progress_remote_uploads: u64,
     // Track executor stage types by span ID to know which counter to decrement on end
-    executor_stages_by_span: HashMap<u64, ExecutorStageType>,
+    executor_stages_by_span: StdBuckHashMap<u64, ExecutorStageType>,
     // Track maximum buck2 daemon anon memory usage
     memory_max_anon_allprocs: Option<u64>,
     // Track maximum buck2 forkserver anon memory usage
@@ -268,6 +272,12 @@ pub struct InvocationRecorder {
     memory_max_total_allprocs: Option<u64>,
     // Track maximum total buck2 forkserver memory usage (anon+file+kernel)
     memory_max_total_forkserver_actions: Option<u64>,
+    // Track peak allprocs swap usage (bytes)
+    memory_max_swap_bytes_allprocs: Option<u64>,
+    // Track peak allprocs memory pressure (PSI full avg10 %)
+    memory_max_pressure_10s_avg_allprocs: Option<f64>,
+    // Track peak allprocs memory pressure (PSI full avg60 %)
+    memory_max_pressure_60s_avg_allprocs: Option<f64>,
     // CommandOptions data
     command_options: Option<buck2_data::CommandOptions>,
     // Initial IO counters captured at invocation start
@@ -289,6 +299,7 @@ pub struct InvocationRecorder {
     initial_io_write_count: Option<u32>,
     initial_io_canonicalize_count: Option<u32>,
     initial_io_eden_settle_count: Option<u32>,
+    repo_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -375,7 +386,7 @@ impl InvocationRecorder {
             initial_sink_dropped_count: None,
             initial_sink_bytes_written: None,
             sink_max_buffer_depth: 0,
-            soft_error_categories: HashSet::new(),
+            soft_error_categories: StdBuckHashSet::default(),
             concurrent_command_blocking_duration: None,
             // Use a null daemon_id here initially - if we later get metadata back from the daemon,
             // we'll overwrite this then
@@ -413,11 +424,12 @@ impl InvocationRecorder {
             initial_hedwig_download_bytes: None,
             initial_hedwig_upload_queries: None,
             initial_hedwig_upload_bytes: None,
-            concurrent_command_ids: HashSet::new(),
+            concurrent_command_ids: StdBuckHashSet::default(),
             daemon_connection_failure: false,
             daemon_was_started: None,
             should_restart: false,
             client_metadata: Vec::new(),
+            agent_context: Vec::new(),
             command_errors: Vec::new(),
             exit_code: None,
             exit_result_name: None,
@@ -439,7 +451,9 @@ impl InvocationRecorder {
             peak_process_memory_bytes: None,
             has_new_buckconfigs: false,
             peak_used_disk_space_bytes: None,
-            active_networks_kinds: HashSet::new(),
+            peak_normalized_system_load1: None,
+            peak_normalized_system_load5: None,
+            active_networks_kinds: StdBuckHashSet::default(),
             target_cfg: None,
             hg_revision: None,
             has_local_changes: None,
@@ -453,7 +467,7 @@ impl InvocationRecorder {
             previous_uuid_with_mismatched_config: None,
             file_watcher: None,
             health_check_tags_receiver: None,
-            health_check_tags: HashSet::new(),
+            health_check_tags: StdBuckHashSet::default(),
             exec_time_ms: 0,
             initial_local_cache_hits_files_from_memory_cache: None,
             initial_local_cache_hits_files_from_filesystem_cache: None,
@@ -469,11 +483,14 @@ impl InvocationRecorder {
             max_in_progress_remote_actions: 0,
             current_in_progress_remote_uploads: 0,
             max_in_progress_remote_uploads: 0,
-            executor_stages_by_span: HashMap::new(),
+            executor_stages_by_span: StdBuckHashMap::default(),
             memory_max_anon_allprocs: None,
             memory_max_anon_forkserver_actions: None,
             memory_max_total_allprocs: None,
             memory_max_total_forkserver_actions: None,
+            memory_max_swap_bytes_allprocs: None,
+            memory_max_pressure_10s_avg_allprocs: None,
+            memory_max_pressure_60s_avg_allprocs: None,
             command_options: None,
             initial_io_copy_count: None,
             initial_io_symlink_count: None,
@@ -493,6 +510,7 @@ impl InvocationRecorder {
             initial_io_write_count: None,
             initial_io_canonicalize_count: None,
             initial_io_eden_settle_count: None,
+            repo_path: None,
         }
     }
 
@@ -519,6 +537,13 @@ impl InvocationRecorder {
                 client_id_from_client_metadata.to_owned(),
             );
         }
+
+        self.agent_context = ctx
+            .agent_context
+            .iter()
+            .map(AgentContextEntry::to_proto)
+            .collect();
+
         self.command_name = Some(command_name);
     }
 
@@ -571,6 +596,7 @@ impl InvocationRecorder {
         self.compressed_event_log_size_bytes = log_size_counter_bytes;
         self.health_check_tags_receiver = health_check_tags_receiver;
         self.preemptible = build_config_opts.and_then(|opts| opts.preemptible);
+        self.repo_path = paths.map(|p| p.project_root().root().to_string());
     }
 
     async fn build_count(
@@ -940,15 +966,11 @@ impl InvocationRecorder {
         let mut metadata = Self::default_metadata();
         metadata.strings.extend(std::mem::take(&mut self.metadata));
 
-        let preemptible = self
-            .preemptible
-            .take()
-            .map(|p| match p {
-                PreemptibleWhen::Never => "NEVER",
-                PreemptibleWhen::Always => "ALWAYS",
-                PreemptibleWhen::OnDifferentState => "ON_DIFFERENT_STATE",
-            })
-            .unwrap_or("UNSPECIFIED");
+        let preemptible = self.preemptible.take().map_or("UNSPECIFIED", |p| match p {
+            PreemptibleWhen::Never => "NEVER",
+            PreemptibleWhen::Always => "ALWAYS",
+            PreemptibleWhen::OnDifferentState => "ON_DIFFERENT_STATE",
+        });
 
         let errors = self.finalize_errors();
 
@@ -1093,8 +1115,11 @@ impl InvocationRecorder {
             daemon_was_started: self.daemon_was_started.map(|t| t as i32),
             should_restart: Some(self.should_restart),
             client_metadata: std::mem::take(&mut self.client_metadata),
+            agent_context: std::mem::take(&mut self.agent_context),
             errors,
-            target_rule_type_names: std::mem::take(&mut self.target_rule_type_names),
+            target_rule_type_names: unique_and_sorted(
+                std::mem::take(&mut self.target_rule_type_names).into_iter(),
+            ),
             new_configs_used: Some(self.has_new_buckconfigs),
             re_max_download_speed: self
                 .re_max_download_speeds
@@ -1115,6 +1140,8 @@ impl InvocationRecorder {
             event_log_manifold_ttl_s: manifold_event_log_ttl().ok().map(|t| t.as_secs()),
             total_disk_space_bytes: self.system_info.total_disk_space_bytes.take(),
             peak_used_disk_space_bytes: self.peak_used_disk_space_bytes.take(),
+            peak_normalized_system_load1: self.peak_normalized_system_load1.take(),
+            peak_normalized_system_load5: self.peak_normalized_system_load5.take(),
             zdb_download_queries,
             zdb_download_bytes,
             zdb_upload_queries,
@@ -1167,6 +1194,13 @@ impl InvocationRecorder {
             memory_max_anon_forkserver_actions: self.memory_max_anon_forkserver_actions,
             memory_max_total_allprocs: self.memory_max_total_allprocs,
             memory_max_total_forkserver_actions: self.memory_max_total_forkserver_actions,
+            memory_max_swap_bytes_allprocs: self.memory_max_swap_bytes_allprocs.unwrap_or(0),
+            memory_max_pressure_10s_avg_allprocs: self
+                .memory_max_pressure_10s_avg_allprocs
+                .unwrap_or(0.0),
+            memory_max_pressure_60s_avg_allprocs: self
+                .memory_max_pressure_60s_avg_allprocs
+                .unwrap_or(0.0),
             command_options: self.command_options,
             io_copy_count,
             io_symlink_count,
@@ -1186,6 +1220,7 @@ impl InvocationRecorder {
             io_write_count,
             io_canonicalize_count,
             io_eden_settle_count,
+            repo_path: self.repo_path.take(),
         };
 
         let event = BuckEvent::new(
@@ -1240,11 +1275,11 @@ impl InvocationRecorder {
     // Collects client-side state and data, suitable for telemetry.
     // NOTE: If data is visible from the daemon, put it in cli::metadata::collect()
     fn default_metadata() -> buck2_data::TypedMetadata {
-        let mut ints = HashMap::new();
+        let mut ints = StdBuckHashMap::default();
         ints.insert("is_tty".to_owned(), std::io::stderr().is_tty() as i64);
         buck2_data::TypedMetadata {
             ints,
-            strings: HashMap::new(),
+            strings: StdBuckHashMap::default(),
         }
     }
 
@@ -1481,10 +1516,8 @@ impl InvocationRecorder {
                 }
                 _ => {}
             },
-            Some(buck2_data::executor_stage_start::Stage::Local(local_stage)) => match &local_stage
-                .stage
-            {
-                Some(buck2_data::local_stage::Stage::Execute(_)) => {
+            Some(buck2_data::executor_stage_start::Stage::Local(local_stage)) => {
+                if let Some(buck2_data::local_stage::Stage::Execute(_)) = &local_stage.stage {
                     self.executor_stages_by_span
                         .insert(span_id.into(), ExecutorStageType::LocalAction);
                     self.current_in_progress_local_actions =
@@ -1496,8 +1529,7 @@ impl InvocationRecorder {
                     self.time_to_first_command_execution_start
                         .get_or_insert_with(|| duration_since(event.timestamp(), self.start_time));
                 }
-                _ => {}
-            },
+            }
             _ => {}
         }
         Ok(())
@@ -1976,6 +2008,20 @@ impl InvocationRecorder {
             update.used_disk_space_bytes,
         );
 
+        if let Some(ref unix_stats) = update.unix_system_stats {
+            let num_cores = self.system_info.num_cores.unwrap_or(1) as f64;
+            let normalized_load1 = unix_stats.load1 / num_cores;
+            let normalized_load5 = unix_stats.load5 / num_cores;
+            self.peak_normalized_system_load1 = Some(
+                self.peak_normalized_system_load1
+                    .map_or(normalized_load1, |v| f64::max(v, normalized_load1)),
+            );
+            self.peak_normalized_system_load5 = Some(
+                self.peak_normalized_system_load5
+                    .map_or(normalized_load5, |v| f64::max(v, normalized_load5)),
+            );
+        }
+
         // Track maximum buck2 daemon memory usage from cgroup
         if let Some(allprocs_cgroup) = &update.allprocs_cgroup {
             self.memory_max_anon_allprocs =
@@ -1984,6 +2030,23 @@ impl InvocationRecorder {
                 allprocs_cgroup.anon + allprocs_cgroup.file + allprocs_cgroup.kernel;
             self.memory_max_total_allprocs =
                 max(self.memory_max_total_allprocs, Some(total_daemon_memory));
+            // Track peak allprocs swap usage
+            self.memory_max_swap_bytes_allprocs = max(
+                self.memory_max_swap_bytes_allprocs,
+                Some(allprocs_cgroup.swap_bytes),
+            );
+            // Track peak allprocs memory pressure (avg10 from PSI)
+            let pct = allprocs_cgroup.memory_pressure_10s_avg;
+            self.memory_max_pressure_10s_avg_allprocs = Some(
+                self.memory_max_pressure_10s_avg_allprocs
+                    .map_or(pct, |v| f64::max(v, pct)),
+            );
+            // Track peak allprocs memory pressure (avg60 from PSI)
+            let pct = allprocs_cgroup.memory_pressure_60s_avg;
+            self.memory_max_pressure_60s_avg_allprocs = Some(
+                self.memory_max_pressure_60s_avg_allprocs
+                    .map_or(pct, |v| f64::max(v, pct)),
+            );
         }
 
         // Track maximum buck2 forkserver memory usage from cgroup
@@ -2021,7 +2084,7 @@ impl InvocationRecorder {
         // See: https://fb.workplace.com/groups/buck2dev/permalink/3396726613948720/
         self.file_watcher_stats =
             merge_file_watcher_stats(self.file_watcher_stats.take(), file_watcher.stats.clone());
-        if let Some(duration) = duration.cloned().and_then(|x| Duration::try_from(x).ok()) {
+        if let Some(duration) = duration.copied().and_then(|x| Duration::try_from(x).ok()) {
             *self.file_watcher_duration.get_or_insert_default() += duration;
         }
         if let Some(stats) = &file_watcher.stats {
@@ -2186,7 +2249,7 @@ impl InvocationRecorder {
                     buck2_data::span_start_event::Data::TestDiscovery(test_discovery) => {
                         self.handle_test_discovery_start(test_discovery, event)
                     }
-                    buck2_data::span_start_event::Data::TestStart(test_start) => {
+                    buck2_data::span_start_event::Data::TestRun(test_start) => {
                         self.handle_test_run_start(test_start, event)
                     }
                     buck2_data::span_start_event::Data::FileWatcher(file_watcher) => {
@@ -2298,6 +2361,11 @@ impl InvocationRecorder {
                         self.target_cfg = Some(target_cfg.clone());
                         Ok(())
                     }
+                    buck2_data::instant_event::Data::TargetRuleTypeName(rule_type) => {
+                        self.target_rule_type_names
+                            .push(rule_type.rule_type.clone());
+                        Ok(())
+                    }
                     buck2_data::instant_event::Data::VersionControlRevision(revision) => {
                         self.handle_version_control(revision)
                     }
@@ -2357,7 +2425,6 @@ fn process_error_report(error: buck2_data::ErrorReport) -> buck2_data::Processed
     let tags = tags.chain(string_tags).collect();
 
     buck2_data::ProcessedErrorReport {
-        tier: None,
         message: strip_ansi_codes(&error.message).to_string(),
         telemetry_message: error
             .telemetry_message
@@ -2397,11 +2464,9 @@ impl EventSubscriber for InvocationRecorder {
         &mut self,
         c: &Option<SuperConsoleToggle>,
     ) -> buck2_error::Result<()> {
-        match c {
-            Some(c) => self
-                .tags
-                .push(format!("superconsole-toggle:{}", c.key()).to_owned()),
-            None => {}
+        if let Some(c) = c {
+            self.tags
+                .push(format!("superconsole-toggle:{}", c.key()).to_owned())
         }
         Ok(())
     }
@@ -2413,18 +2478,19 @@ impl EventSubscriber for InvocationRecorder {
         self.has_command_result = true;
         match &result.result {
             Some(command_result::Result::BuildResponse(res)) => {
-                let built_rule_type_names: Vec<String> =
-                    unique_and_sorted(res.build_targets.iter().map(|t| {
+                // Append per-BuildTarget rule type names from the build
+                // response. Extending (not assigning) preserves rule types
+                // already accumulated from `TargetRuleTypeName` instant events.
+                self.target_rule_type_names
+                    .extend(res.build_targets.iter().map(|t| {
                         t.target_rule_type_name
                             .clone()
                             .unwrap_or_else(|| "NULL".to_owned())
                     }));
-                self.target_rule_type_names = built_rule_type_names;
             }
-            Some(command_result::Result::TestResponse(res)) => {
-                let built_rule_type_names: Vec<String> =
-                    unique_and_sorted(res.target_rule_type_names.clone().into_iter());
-                self.target_rule_type_names = built_rule_type_names;
+            Some(command_result::Result::InstallResponse(res)) => {
+                self.target_rule_type_names
+                    .extend(res.target_rule_type_names.iter().cloned());
             }
             _ => {}
         }
@@ -2459,7 +2525,7 @@ impl EventSubscriber for InvocationRecorder {
         self.has_end_of_stream = true;
     }
 
-    async fn finalize(&mut self) -> buck2_error::Result<()> {
+    async fn finalize(mut self: Box<Self>) -> buck2_error::Result<()> {
         // Can't set this before the daemon forks.
         // Typically initialized already unless the command failed early.
         let fb = buck2_common::fbinit::get_or_init_fbcode_globals();

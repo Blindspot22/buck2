@@ -20,6 +20,7 @@ use starlark::environment::GlobalsBuilder;
 use starlark::values::Coerce;
 use starlark::values::Freeze;
 use starlark::values::FreezeError;
+use starlark::values::StarlarkPagable;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::ValueLifetimeless;
@@ -49,7 +50,16 @@ enum InstallInfoProviderErrors {
 }
 
 #[internal_provider(install_info_creator)]
-#[derive(Clone, Coerce, Debug, Freeze, Trace, ProvidesStaticType, Allocative)]
+#[derive(
+    Clone,
+    Coerce,
+    Debug,
+    Freeze,
+    Trace,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
+)]
 #[repr(C)]
 #[freeze(validator = validate_install_info, bounds = "V: ValueLike<'freeze>")]
 pub struct InstallInfoGen<V: ValueLifetimeless> {

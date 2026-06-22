@@ -76,6 +76,8 @@ struct ValidatedCommand {
     std_redirects: Option<StdRedirectPaths>,
     graceful_shutdown_timeout_s: Option<u32>,
     command_cgroup: Option<CgroupPathBuf>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    network_access: Option<buck2_data::NetworkAccess>,
 }
 
 impl ValidatedCommand {
@@ -90,6 +92,7 @@ impl ValidatedCommand {
             std_redirects,
             graceful_shutdown_timeout_s,
             command_cgroup,
+            network_access,
         } = cmd_request;
 
         let exe = OsStr::from_bytes(&exe);
@@ -128,6 +131,10 @@ impl ValidatedCommand {
             std_redirects,
             graceful_shutdown_timeout_s,
             command_cgroup,
+            network_access: network_access
+                .map(buck2_data::NetworkAccess::try_from)
+                .transpose()
+                .map_err(|v| internal_error!("Invalid network_access value: {}", v))?,
         })
     }
 }
@@ -211,6 +218,31 @@ impl UnixForkserverService {
 
         Self::configure_environment(&mut cmd, &validated_cmd.env)?;
 
+        #[cfg(target_os = "linux")]
+        if validated_cmd
+            .network_access
+            .is_some_and(is_restricted_network_access)
+        {
+            #[cfg(fbcode_build)]
+            {
+                cmd.env("INSIDE_NETWORK_ISOLATION", "1");
+                cmd.env("DOTSLASH_OFFLINE", "1");
+            }
+
+            use std::os::unix::process::CommandExt;
+            // Safety: unshare() is async-signal-safe.
+            // It only makes a single syscall with no memory allocation.
+            unsafe {
+                cmd.pre_exec(|| {
+                    nix::sched::unshare(
+                        nix::sched::CloneFlags::CLONE_NEWUSER
+                            | nix::sched::CloneFlags::CLONE_NEWNET,
+                    )
+                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+                });
+            }
+        }
+
         // cmd: ready-to-spawn process command
         // miniperf_output: path to miniperf output file (if monitoring)
         Ok((cmd, miniperf_output))
@@ -265,6 +297,17 @@ impl UnixForkserverService {
 
         let stream = encode_event_stream(stream);
         Ok(Box::pin(stream) as _)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_restricted_network_access(network_access: buck2_data::NetworkAccess) -> bool {
+    match network_access {
+        buck2_data::NetworkAccess::All => false,
+        buck2_data::NetworkAccess::None
+        | buck2_data::NetworkAccess::Loopback
+        | buck2_data::NetworkAccess::Strict
+        | buck2_data::NetworkAccess::Private => true,
     }
 }
 

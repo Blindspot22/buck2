@@ -10,6 +10,8 @@
 
 use std::borrow::Cow;
 use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::Duration;
 
 use allocative::Allocative;
 use async_trait::async_trait;
@@ -40,12 +42,12 @@ use buck2_build_api::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineBuilder;
-use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineContext;
-use buck2_build_api::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
+use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineSink;
 use buck2_build_api::interpreter::rule_defs::cmd_args::FrozenStarlarkCmdArgs;
 use buck2_build_api::interpreter::rule_defs::cmd_args::SimpleCommandLineArtifactVisitor;
+use buck2_build_api::interpreter::rule_defs::cmd_args::SingletonCommandLineSink;
 use buck2_build_api::interpreter::rule_defs::cmd_args::StarlarkCmdArgs;
-use buck2_build_api::interpreter::rule_defs::cmd_args::space_separated::SpaceSeparatedCommandLineBuilder;
+use buck2_build_api::interpreter::rule_defs::cmd_args::path_format;
 use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::worker_info::FrozenWorkerInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::worker_info::WorkerInfo;
@@ -63,6 +65,7 @@ use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::buck_out_path::BuckOutPathKind;
 use buck2_core::fs::buck_out_path::BuildArtifactPath;
+use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_error::internal_error;
@@ -88,15 +91,18 @@ use buck2_execute::execute::result::CommandExecutionResult;
 use buck2_execute::materialize::materializer::WriteRequest;
 use buck2_fs::fs_util;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::BuckIndexMap;
+use buck2_hash::BuckIndexSet;
+use buck2_hash::buck_indexmap;
+use buck2_util::thin_box::ThinBoxSlice;
 use derive_more::Display;
 use dupe::Dupe;
 use gazebo::prelude::*;
 use host_sharing::HostSharingRequirements;
 use host_sharing::WeightClass;
-use indexmap::IndexMap;
-use indexmap::IndexSet;
-use indexmap::indexmap;
 use itertools::Itertools;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use serde_json::json;
 use sorted_vector_map::SortedVectorMap;
 use starlark::collections::SmallSet;
@@ -111,6 +117,7 @@ use starlark::values::NoSerialize;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::OwnedFrozenValueTyped;
 use starlark::values::ProvidesStaticType;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
@@ -137,7 +144,7 @@ pub(crate) mod audit_dep_files;
 pub(crate) mod dep_files;
 mod metadata;
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub(crate) struct MetadataParameter {
     /// Name of the environment variable which is set to contain
     /// resolved path of the metadata file when requested by user.
@@ -230,14 +237,16 @@ pub(crate) fn new_executor_preference(
     }
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub(crate) struct UnregisteredRunAction {
     pub(crate) executor_preference: ExecutorPreference,
     pub(crate) always_print_stderr: bool,
+    pub(crate) eager_materialization_enabled: bool,
     pub(crate) weight: WeightClass,
     pub(crate) low_pass_filter: bool,
     pub(crate) dep_files: RunActionDepFiles,
-    pub(crate) metadata_param: Option<MetadataParameter>,
+    // Since this is usually None, use a Box to reduce memory.
+    pub(crate) metadata_param: Option<Box<MetadataParameter>>,
     pub(crate) no_outputs_cleanup: bool,
     pub(crate) incremental_remote_outputs: bool,
     pub(crate) allow_cache_upload: Option<bool>,
@@ -245,19 +254,20 @@ pub(crate) struct UnregisteredRunAction {
     pub(crate) allow_offline_output_cache: bool,
     pub(crate) force_full_hybrid_if_capable: bool,
     pub(crate) unique_input_inodes: bool,
-    pub(crate) remote_execution_dependencies: Vec<RemoteExecutorDependency>,
-    pub(crate) re_gang_workers: Vec<ReGangWorker>,
+    pub(crate) remote_execution_dependencies: ThinBoxSlice<RemoteExecutorDependency>,
+    pub(crate) re_gang_workers: ThinBoxSlice<ReGangWorker>,
     // Since this is usually None, use a Box to avoid using memory that is the size
     // of RemoteExecutorCustomImage.
     pub(crate) remote_execution_custom_image: Option<Box<RemoteExecutorCustomImage>>,
-    pub(crate) meta_internal_extra_params: MetaInternalExtraParams,
+    pub(crate) meta_internal_extra_params: Arc<MetaInternalExtraParams>,
     pub(crate) expected_eligible_for_dedupe: Option<bool>,
+    pub(crate) timeout: Option<Duration>,
 }
 
 impl UnregisteredAction for UnregisteredRunAction {
     fn register(
         self: Box<Self>,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         starlark_data: Option<OwnedFrozenValue>,
         error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
@@ -281,7 +291,15 @@ pub(crate) struct StarlarkRunActionValues<'v> {
     pub(crate) outputs_for_error_handler: Vec<ValueTyped<'v, StarlarkOutputArtifact<'v>>>,
 }
 
-#[derive(Debug, Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
+#[derive(
+    Debug,
+    Display,
+    Trace,
+    ProvidesStaticType,
+    NoSerialize,
+    Allocative,
+    StarlarkPagable
+)]
 #[display("RunActionValues")]
 pub(crate) struct FrozenStarlarkRunActionValues {
     pub(crate) exe: FrozenValueTyped<'static, FrozenStarlarkCmdArgs>,
@@ -325,11 +343,15 @@ impl<'v> Freeze for StarlarkRunActionValues<'v> {
             remote_worker: remote_worker.freeze(freezer)?,
             category: category.freeze(freezer)?,
             identifier: identifier.freeze(freezer)?,
-            outputs_for_error_handler: outputs_for_error_handler
-                .iter()
-                .copied()
-                .map(|x| x.freeze(freezer))
-                .collect::<FreezeResult<_>>()?,
+            // N.B. collect::<Result<_>> sets the lower bound to zero,
+            // which can cause over-allocations in frozen containers.
+            outputs_for_error_handler: {
+                let mut frozen_outputs = Vec::with_capacity(outputs_for_error_handler.len());
+                for output in outputs_for_error_handler {
+                    frozen_outputs.push(output.freeze(freezer)?);
+                }
+                frozen_outputs
+            },
         })
     }
 }
@@ -375,7 +397,7 @@ struct UnpackedRunActionValues<'v> {
     remote_worker: Option<UnpackedWorkerValues<'v>>,
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 pub(crate) struct RunAction {
     inner: UnregisteredRunAction,
     starlark_values: OwnedFrozenValueTyped<FrozenStarlarkRunActionValues>,
@@ -407,13 +429,13 @@ type ExpandedCommandLineDigestForDepFiles = ExpandedCommandLineDigest;
 
 /// A CommandLineArtifactVisitor that gathers non-hidden inputs.
 pub struct SkipHiddenCommandLineArtifactVisitor {
-    pub inputs: IndexSet<ArtifactGroup>,
+    pub inputs: BuckIndexSet<ArtifactGroup>,
 }
 
 impl SkipHiddenCommandLineArtifactVisitor {
     pub fn new() -> Self {
         Self {
-            inputs: IndexSet::new(),
+            inputs: BuckIndexSet::default(),
         }
     }
 }
@@ -520,12 +542,7 @@ impl RunAction {
         Option<RemoteWorkerSpec>,
     )> {
         let fs = &action_execution_ctx.executor_fs();
-        let mut cli_ctx = DefaultCommandLineContext::new(fs);
         let values = Self::unpack(&self.starlark_values)?;
-
-        let mut command_line_digest_for_dep_files = ExpandedCommandLineFingerprinter::new();
-
-        let mut exe_rendered = Vec::<String>::new();
 
         // Creating the artifact_path_mapping isn't free, because we have to iterate TSets.
         // Therefore, only create a mapping if we're going to use it - i.e. if the input
@@ -534,53 +551,66 @@ impl RunAction {
         self.visit_artifacts(&mut skip_hidden_visitor)?;
         let artifact_path_mapping =
             action_execution_ctx.artifact_path_mapping(Some(skip_hidden_visitor.inputs));
+
+        let mut exe_rendered = Vec::<String>::new();
+        values
+            .exe
+            .add_to_command_line(&mut CommandLineBuilder::new(
+                &mut exe_rendered,
+                &artifact_path_mapping,
+                fs,
+            ))?;
+
+        let mut command_line_digest_for_dep_files = ExpandedCommandLineFingerprinter::new();
         let artifact_path_mapping_for_dep_files = DepFilesPlaceholderArtifactPathMapper {};
         values
             .exe
-            .add_to_command_line(&mut exe_rendered, &mut cli_ctx, &artifact_path_mapping)?;
-        values.exe.add_to_command_line(
-            &mut command_line_digest_for_dep_files,
-            &mut cli_ctx,
-            &artifact_path_mapping_for_dep_files,
-        )?;
+            .add_to_command_line(&mut CommandLineBuilder::new(
+                &mut command_line_digest_for_dep_files,
+                &artifact_path_mapping_for_dep_files,
+                fs,
+            ))?;
         values.exe.visit_artifacts(artifact_visitor)?;
         command_line_digest_for_dep_files.push_count();
 
         let worker = if let Some(worker) = values.worker {
             let mut worker_rendered = Vec::<String>::new();
+            worker
+                .exe
+                .add_to_command_line(&mut CommandLineBuilder::new(
+                    &mut worker_rendered,
+                    &artifact_path_mapping,
+                    fs,
+                ))?;
+            worker
+                .exe
+                .add_to_command_line(&mut CommandLineBuilder::new(
+                    &mut command_line_digest_for_dep_files,
+                    &artifact_path_mapping_for_dep_files,
+                    fs,
+                ))?;
             let mut local_worker_visitor = SimpleCommandLineArtifactVisitor::new();
-            worker.exe.add_to_command_line(
-                &mut worker_rendered,
-                &mut cli_ctx,
-                &artifact_path_mapping,
-            )?;
-            worker.exe.add_to_command_line(
-                &mut command_line_digest_for_dep_files,
-                &mut cli_ctx,
-                &artifact_path_mapping_for_dep_files,
-            )?;
             worker.exe.visit_artifacts(&mut local_worker_visitor)?;
             let worker_env: buck2_error::Result<SortedVectorMap<_, _>> = worker
                 .env
                 .into_iter()
                 .map(|(k, v)| {
-                    let mut env = String::new();
-                    let mut ctx = DefaultCommandLineContext::new(fs);
-                    v.add_to_command_line(
-                        &mut SpaceSeparatedCommandLineBuilder::wrap_string(&mut env),
-                        &mut ctx,
-                        &artifact_path_mapping,
-                    )?;
                     v.visit_artifacts(&mut local_worker_visitor)?;
 
-                    command_line_digest_for_dep_files.push_arg(k.to_owned());
-                    v.add_to_command_line(
+                    let mut env = SingletonCommandLineSink::new();
+                    let mut env_fmt = CommandLineBuilder::new(&mut env, &artifact_path_mapping, fs);
+                    env_fmt.push_scope_delimiter(" ");
+                    v.add_to_command_line(&mut env_fmt)?;
+                    env_fmt.pop_scope();
+
+                    command_line_digest_for_dep_files.push_arg(Cow::Borrowed(k));
+                    v.add_to_command_line(&mut CommandLineBuilder::new(
                         &mut command_line_digest_for_dep_files,
-                        &mut ctx,
                         &artifact_path_mapping_for_dep_files,
-                    )?;
+                        fs,
+                    ))?;
                     command_line_digest_for_dep_files.push_count();
-                    Ok((k.to_owned(), env))
+                    Ok((k.to_owned(), env.finalize()?))
                 })
                 .collect();
 
@@ -594,7 +624,7 @@ impl RunAction {
 
             let input_paths = CommandExecutionPaths::new(
                 inputs,
-                IndexSet::new(),
+                BuckIndexSet::default(),
                 action_execution_ctx.fs(),
                 action_execution_ctx.digest_config(),
                 action_execution_ctx
@@ -645,16 +675,20 @@ impl RunAction {
         let remote_worker = if let Some(remote_worker) = values.remote_worker {
             let mut remote_worker_init_visitor = SimpleCommandLineArtifactVisitor::new();
             let mut remote_worker_init_rendered = Vec::<String>::new();
-            remote_worker.exe.add_to_command_line(
-                &mut remote_worker_init_rendered,
-                &mut cli_ctx,
-                &artifact_path_mapping,
-            )?;
-            remote_worker.exe.add_to_command_line(
-                &mut command_line_digest_for_dep_files,
-                &mut cli_ctx,
-                &artifact_path_mapping_for_dep_files,
-            )?;
+            remote_worker
+                .exe
+                .add_to_command_line(&mut CommandLineBuilder::new(
+                    &mut remote_worker_init_rendered,
+                    &artifact_path_mapping,
+                    fs,
+                ))?;
+            remote_worker
+                .exe
+                .add_to_command_line(&mut CommandLineBuilder::new(
+                    &mut command_line_digest_for_dep_files,
+                    &artifact_path_mapping_for_dep_files,
+                    fs,
+                ))?;
             remote_worker
                 .exe
                 .visit_artifacts(&mut remote_worker_init_visitor)?;
@@ -663,23 +697,22 @@ impl RunAction {
                 .env
                 .into_iter()
                 .map(|(k, v)| {
-                    let mut env = String::new();
-                    let mut ctx = DefaultCommandLineContext::new(fs);
-                    v.add_to_command_line(
-                        &mut SpaceSeparatedCommandLineBuilder::wrap_string(&mut env),
-                        &mut ctx,
-                        &artifact_path_mapping,
-                    )?;
                     v.visit_artifacts(&mut remote_worker_init_visitor)?;
 
-                    command_line_digest_for_dep_files.push_arg(k.to_owned());
-                    v.add_to_command_line(
+                    let mut env = SingletonCommandLineSink::new();
+                    let mut env_fmt = CommandLineBuilder::new(&mut env, &artifact_path_mapping, fs);
+                    env_fmt.push_scope_delimiter(" ");
+                    v.add_to_command_line(&mut env_fmt)?;
+                    env_fmt.pop_scope();
+
+                    command_line_digest_for_dep_files.push_arg(Cow::Borrowed(k));
+                    v.add_to_command_line(&mut CommandLineBuilder::new(
                         &mut command_line_digest_for_dep_files,
-                        &mut ctx,
                         &artifact_path_mapping_for_dep_files,
-                    )?;
+                        fs,
+                    ))?;
                     command_line_digest_for_dep_files.push_count();
-                    Ok((k.to_owned(), env))
+                    Ok((k.to_owned(), env.finalize()?))
                 })
                 .collect();
 
@@ -693,7 +726,7 @@ impl RunAction {
 
             let input_paths = CommandExecutionPaths::new(
                 inputs,
-                IndexSet::new(),
+                BuckIndexSet::default(),
                 action_execution_ctx.fs(),
                 action_execution_ctx.digest_config(),
                 action_execution_ctx
@@ -713,16 +746,20 @@ impl RunAction {
         };
 
         let mut args_rendered = Vec::<String>::new();
-        values.args.add_to_command_line(
-            &mut args_rendered,
-            &mut cli_ctx,
-            &artifact_path_mapping,
-        )?;
-        values.args.add_to_command_line(
-            &mut command_line_digest_for_dep_files,
-            &mut cli_ctx,
-            &artifact_path_mapping_for_dep_files,
-        )?;
+        values
+            .args
+            .add_to_command_line(&mut CommandLineBuilder::new(
+                &mut args_rendered,
+                &artifact_path_mapping,
+                fs,
+            ))?;
+        values
+            .args
+            .add_to_command_line(&mut CommandLineBuilder::new(
+                &mut command_line_digest_for_dep_files,
+                &artifact_path_mapping_for_dep_files,
+                fs,
+            ))?;
         values.args.visit_artifacts(artifact_visitor)?;
         command_line_digest_for_dep_files.push_count();
 
@@ -731,27 +768,26 @@ impl RunAction {
             .env
             .into_iter()
             .map(|(k, v)| {
-                let mut env = String::new();
-                let mut ctx = DefaultCommandLineContext::new(fs);
-                v.add_to_command_line(
-                    &mut SpaceSeparatedCommandLineBuilder::wrap_string(&mut env),
-                    &mut ctx,
-                    &artifact_path_mapping,
-                )?;
                 v.visit_artifacts(artifact_visitor)?;
 
-                command_line_digest_for_dep_files.push_arg(k.to_owned());
-                v.add_to_command_line(
+                let mut env = SingletonCommandLineSink::new();
+                let mut env_fmt = CommandLineBuilder::new(&mut env, &artifact_path_mapping, fs);
+                env_fmt.push_scope_delimiter(" ");
+                v.add_to_command_line(&mut env_fmt)?;
+                env_fmt.pop_scope();
+
+                command_line_digest_for_dep_files.push_arg(Cow::Borrowed(k));
+                v.add_to_command_line(&mut CommandLineBuilder::new(
                     &mut command_line_digest_for_dep_files,
-                    &mut ctx,
                     &artifact_path_mapping_for_dep_files,
-                )?;
+                    fs,
+                ))?;
                 command_line_digest_for_dep_files.push_count();
-                Ok((k.to_owned(), env))
+                Ok((k.to_owned(), env.finalize()?))
             })
             .collect();
 
-        command_line_digest_for_dep_files.push_arg(env_len.to_string());
+        command_line_digest_for_dep_files.push_arg(Cow::Owned(env_len.to_string()));
         command_line_digest_for_dep_files.push_count();
 
         Ok((
@@ -769,7 +805,7 @@ impl RunAction {
     pub(crate) fn new(
         inner: UnregisteredRunAction,
         starlark_values: OwnedFrozenValue,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Self> {
         let starlark_values = starlark_values
@@ -817,15 +853,13 @@ impl RunAction {
             artifact_inputs[..].map(|&i| CommandExecutionInput::Artifact(Box::new(i.dupe())));
 
         let mut extra_env = Vec::new();
-        let cli_ctx = DefaultCommandLineContext::new(&executor_fs);
-        self.prepare_action_metadata(ctx, &cli_ctx, fs, visitor, &mut inputs, &mut extra_env)
+        self.prepare_action_metadata(ctx, &executor_fs, visitor, &mut inputs, &mut extra_env)
             .await?;
 
         let mut shared_content_based_paths = Vec::new();
         self.prepare_scratch_path(
             ctx,
-            &cli_ctx,
-            fs,
+            &executor_fs,
             &mut inputs,
             &mut shared_content_based_paths,
             &mut extra_env,
@@ -833,12 +867,10 @@ impl RunAction {
 
         for output in self.outputs.iter() {
             if output.get_path().is_content_based_path() {
-                let full_path = cli_ctx
-                    .resolve_project_path(fs.buck_out_path_resolver().resolve_gen(
-                        output.get_path(),
-                        Some(&ContentBasedPathHash::for_output_artifact()),
-                    )?)?
-                    .into_string();
+                let full_path = fs.buck_out_path_resolver().resolve_gen(
+                    output.get_path(),
+                    Some(&ContentBasedPathHash::for_output_artifact()),
+                )?;
                 shared_content_based_paths.push(full_path);
             }
         }
@@ -846,7 +878,10 @@ impl RunAction {
         // TODO(ianc) Only do this if we're actually going to run the action?
         let host_sharing_requirements = if !shared_content_based_paths.is_empty() {
             HostSharingRequirements::OnePerTokens(
-                shared_content_based_paths.into(),
+                shared_content_based_paths
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect(),
                 self.inner.weight,
             )
         } else {
@@ -860,7 +895,6 @@ impl RunAction {
                 .map(|b| CommandExecutionOutput::BuildArtifact {
                     path: b.get_path().dupe(),
                     output_type: b.output_type(),
-                    supports_incremental_remote: self.inner.incremental_remote_outputs,
                 })
                 .collect(),
             ctx.fs(),
@@ -888,8 +922,7 @@ impl RunAction {
     async fn prepare_action_metadata(
         &self,
         ctx: &dyn ActionExecutionCtx,
-        cli_ctx: &DefaultCommandLineContext<'_>,
-        fs: &ArtifactFs,
+        fs: &ExecutorFs<'_>,
         visitor: &mut RunActionVisitor<'_>,
         inputs: &mut Vec<CommandExecutionInput>,
         extra_env: &mut Vec<(String, String)>,
@@ -910,11 +943,16 @@ impl RunAction {
                 .iter()
                 .map(|group| ctx.artifact_values(group))
                 .collect();
-            let (data, digest) = metadata_content(fs, &artifact_inputs, ctx.digest_config())?;
+            let (data, digest) = metadata_content(fs.fs(), &artifact_inputs, ctx.digest_config())?;
             let content_hash = ContentBasedPathHash::new(digest.raw_digest().as_bytes())?;
             let project_rel_path = fs
+                .fs()
                 .buck_out_path_resolver()
                 .resolve_gen(&path, Some(&content_hash))?;
+
+            let configuration_path = ctx
+                .materializer()
+                .maybe_eager_configuration_path(fs.fs(), &path)?;
 
             ctx.materializer()
                 .declare_write(Box::new(|| {
@@ -922,6 +960,7 @@ impl RunAction {
                         path: project_rel_path.clone(),
                         content: data.0.0,
                         is_executable: false,
+                        configuration_path,
                     }])
                 }))
                 .await
@@ -933,10 +972,10 @@ impl RunAction {
                 content_hash,
             }));
 
-            let env = cli_ctx
-                .resolve_project_path(project_rel_path)?
-                .into_string();
-            extra_env.push((metadata_param.env_var.to_owned(), env));
+            extra_env.push((
+                metadata_param.env_var.to_owned(),
+                path_format(project_rel_path.as_ref(), fs.path_separator()).into_owned(),
+            ));
         }
         Ok(())
     }
@@ -944,22 +983,22 @@ impl RunAction {
     fn prepare_scratch_path(
         &self,
         ctx: &dyn ActionExecutionCtx,
-        cli_ctx: &DefaultCommandLineContext,
-        fs: &ArtifactFs,
+        fs: &ExecutorFs,
         inputs: &mut Vec<CommandExecutionInput>,
-        shared_content_based_paths: &mut Vec<String>,
+        shared_content_based_paths: &mut Vec<ProjectRelativePathBuf>,
         extra_env: &mut Vec<(String, String)>,
     ) -> buck2_error::Result<()> {
         let scratch = ctx.target().scratch_path();
-        let scratch_path = cli_ctx
-            .resolve_project_path(fs.buck_out_path_resolver().resolve_scratch(&scratch)?)?
-            .into_string();
+        let scratch_path = fs.fs().buck_out_path_resolver().resolve_scratch(&scratch)?;
 
         if scratch.uses_content_hash() {
-            shared_content_based_paths.push(scratch_path.to_owned());
+            shared_content_based_paths.push(scratch_path.clone());
         }
 
-        extra_env.push(("BUCK_SCRATCH_PATH".to_owned(), scratch_path));
+        extra_env.push((
+            "BUCK_SCRATCH_PATH".to_owned(),
+            path_format(scratch_path.as_ref(), fs.path_separator()).into_owned(),
+        ));
         inputs.push(CommandExecutionInput::ScratchPath(scratch));
 
         Ok(())
@@ -1048,8 +1087,7 @@ impl RunAction {
             self.command_execution_request(ctx, prepared_run_action, host_sharing_requirements)?;
 
         // Prepare the action, check the action cache, fully check the local dep file cache if needed, then execute the command
-        let re_outputs_required = ctx.run_action_knobs().re_outputs_required;
-        let prepared_action = ctx.prepare_action(&req, re_outputs_required)?;
+        let prepared_action = ctx.prepare_action(&req, true)?;
         waiting_data.start_waiting_category_now(WaitingCategory::CheckingCaches);
         let manager = ctx.command_execution_manager(waiting_data);
 
@@ -1135,8 +1173,7 @@ impl RunAction {
                             digest_config,
                             ctx.run_action_knobs().action_paths_interner.as_ref(),
                         )?;
-                        let override_prepared_action =
-                            ctx.prepare_action(&override_req, re_outputs_required)?;
+                        let override_prepared_action = ctx.prepare_action(&override_req, true)?;
                         (override_req, override_prepared_action)
                     } else {
                         (req, prepared_action)
@@ -1175,7 +1212,7 @@ impl RunAction {
         };
         let entries = ctx
             .materializer()
-            .get_artifact_entries_for_materialized_paths(output_paths)
+            .get_artifact_entries_for_materialized_paths(output_paths, false)
             .await?;
         // Only proceed with incremental outputs if every output is present
         Ok(entries
@@ -1202,13 +1239,17 @@ impl RunAction {
             .with_local_environment_inheritance(EnvironmentInheritance::local_command_exclusions())
             .with_force_full_hybrid_if_capable(self.inner.force_full_hybrid_if_capable)
             .with_unique_input_inodes(self.inner.unique_input_inodes)
-            .with_remote_execution_dependencies(self.inner.remote_execution_dependencies.clone())
-            .with_re_gang_workers(self.inner.re_gang_workers.clone())
+            .with_remote_execution_dependencies(self.inner.remote_execution_dependencies.to_vec())
+            .with_re_gang_workers(self.inner.re_gang_workers.to_vec())
             .with_remote_execution_custom_image(
                 self.inner.remote_execution_custom_image.clone().map(|s| *s),
             )
             .with_meta_internal_extra_params(self.inner.meta_internal_extra_params.clone())
             .with_outputs_for_error_handler(outputs_for_error_handler);
+
+        if let Some(timeout) = self.inner.timeout {
+            req = req.with_timeout(timeout);
+        }
 
         if self.inner.no_outputs_cleanup {
             if self
@@ -1301,15 +1342,12 @@ impl<'a> RunActionVisitor<'a> {
 
 impl<'v> CommandLineArtifactVisitor<'v> for RunActionVisitor<'v> {
     fn visit_input(&mut self, input: ArtifactGroup, tags: Vec<&ArtifactTag>) {
-        match self.incremental_metadata_ignore_tags {
-            Some(ignore_tags) => {
-                if !tags.iter().any(|t| ignore_tags.contains(*t)) {
-                    self.incremental_metadata_inputs.push(input.dupe());
-                }
+        // If incremental_metadata_ignore_tags is None, then we're not going to produce
+        // incremental metadata at all, so there's nothing to do here.
+        if let Some(ignore_tags) = self.incremental_metadata_ignore_tags {
+            if !tags.iter().any(|t| ignore_tags.contains(*t)) {
+                self.incremental_metadata_inputs.push(input.dupe());
             }
-            // If incremental_metadata_ignore_tags is None, then we're not going to produce
-            // incremental metadata at all, so there's nothing to do here.
-            None => {}
         }
 
         self.dep_files_visitor.visit_input(input, tags);
@@ -1354,6 +1392,7 @@ impl RunAction {
     }
 }
 
+#[pagable_typetag]
 #[async_trait]
 impl Action for RunAction {
     fn kind(&self) -> buck2_data::ActionKind {
@@ -1391,24 +1430,26 @@ impl Action for RunAction {
         self.inner.expected_eligible_for_dedupe
     }
 
+    fn executor_preference(&self) -> Option<ExecutorPreference> {
+        Some(self.inner.executor_preference)
+    }
+
+    fn eager_materialization_enabled(&self) -> bool {
+        self.inner.eager_materialization_enabled
+    }
+
     fn aquery_attributes(
         &self,
         fs: &ExecutorFs,
         artifact_path_mapping: &dyn ArtifactPathMapper,
-    ) -> IndexMap<String, String> {
+    ) -> BuckIndexMap<String, String> {
         let mut cli_rendered = Vec::<String>::new();
-        let mut ctx = DefaultCommandLineContext::new(fs);
         let values = Self::unpack(&self.starlark_values).unwrap();
-        values
-            .exe
-            .add_to_command_line(&mut cli_rendered, &mut ctx, artifact_path_mapping)
-            .unwrap();
-        values
-            .args
-            .add_to_command_line(&mut cli_rendered, &mut ctx, artifact_path_mapping)
-            .unwrap();
+        let mut fmt = CommandLineBuilder::new(&mut cli_rendered, artifact_path_mapping, fs);
+        values.exe.add_to_command_line(&mut fmt).unwrap();
+        values.args.add_to_command_line(&mut fmt).unwrap();
         let cmd = format!("[{}]", cli_rendered.iter().join(", "));
-        indexmap! {
+        buck_indexmap! {
             "cmd".to_owned() => cmd,
             "executor_preference".to_owned() => self.inner.executor_preference.to_string(),
             "always_print_stderr".to_owned() => self.inner.always_print_stderr.to_string(),
@@ -1570,9 +1611,16 @@ impl Action for RunAction {
                 )
                 .await?;
 
-            result.did_cache_upload = upload_result.did_cache_upload;
-            result.did_dep_file_cache_upload = upload_result.did_dep_file_cache_upload;
+            result.cache_upload_result = upload_result.cache_upload_outcome.to_proto();
+            result.dep_file_cache_upload_result =
+                upload_result.dep_file_cache_upload_outcome.to_proto();
             result.dep_file_key = upload_result.dep_file_cache_upload_key;
+        } else if !result.was_success() {
+            result.cache_upload_result = buck2_data::UploadResult::ActionNotSuccessful;
+        } else if result.was_served_by_remote_dep_file_cache() {
+            result.cache_upload_result = buck2_data::UploadResult::RemoteDepFileCacheHit;
+        } else if !allow_cache_upload {
+            result.cache_upload_result = buck2_data::UploadResult::ActionUploadNotAllowed;
         }
 
         let was_locally_executed = result.was_locally_executed();

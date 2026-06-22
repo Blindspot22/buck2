@@ -21,7 +21,7 @@ This is one of the most important concepts to understand when using Buck2. It is
 a precise way to identify any buildable unit in your codebase.
 
 In the tutorials, you encountered the following target label like
-[<FbInternalOnly> `fbcode//scripts/<unixname>/buck2_lab/greeter_bin:main` </FbInternalOnly> <OssOnly> `root//buck2_lab/greeter_bin:main` </OssOnly>](../tutorial_adding_dependencies/#step-5-run-the-binary).
+[<FbInternalOnly> `fbcode//scripts/$USER/buck2_lab/greeter_bin:main` </FbInternalOnly> <OssOnly> `root//buck2_lab/greeter_bin:main` </OssOnly>](../tutorial_adding_dependencies/#step-5-run-the-binary).
 
 Here is the anatomy of a target label:
 
@@ -29,7 +29,7 @@ Here is the anatomy of a target label:
 
 <TargetDiagram
     cell_name="fbcode"
-    pkg_name="scripts/<unixname>/buck2_lab/greeter_bin"
+    pkg_name="scripts/$USER/buck2_lab/greeter_bin"
     target_name="main"
     cell_href="#cell"
     pkg_href="#package"
@@ -78,10 +78,10 @@ You can run `buck2 audit cell` to inspect the abs path of each cell root.
 ## Package
 
 The existence of a [BUCK file](#buck-file) ({ isInternal() ?
-<code>scripts/&lt;unixname&gt;/buck2_lab/greeter_bin/BUCK</code> :
+<code>scripts/$USER/buck2_lab/greeter_bin/BUCK</code> :
 <code>buck2_lab/greeter_bin/BUCK</code> }) defines a buck
 [package](../../concepts/key_concepts/#packages) { isInternal() ?
-<code>scripts/&lt;unixname&gt;/buck2_lab/greeter_bin</code> :
+<code>scripts/$USER/buck2_lab/greeter_bin</code> :
 <code>buck2_lab/greeter_bin</code> } isn't just a directory. If a buck target
 uses the source file as input, that target is regarded as the **owner** of the
 source.
@@ -558,7 +558,7 @@ buck-out,it has the following characteristics:
 - Buck-out can grow very big and consumes your disk space, you can run buck
   clean or [buck clean --stale](../../users/commands/clean/) as the remedy
 
-## Buck UI
+<h2>Buck UI</h2>
 
 Buck is mostly a command line tool but buck team does offer a
 [web-based UI](../../users/build_observability/observability/#buck2s-web-ui) for

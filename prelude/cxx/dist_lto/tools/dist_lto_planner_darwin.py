@@ -19,8 +19,6 @@ This script:
 Starlark code holds a representation of each input object file or archive in memory in an array. When code here needs to communicate characteristics about a particular element of this array, it encodes this using the index into this array. These indices are referred to as "starlark array index"
 """
 
-# pyre-unsafe
-
 import argparse
 import dataclasses
 import json
@@ -29,6 +27,7 @@ import os.path
 import subprocess
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -324,4 +323,9 @@ def main(argv):
         )
 
 
-sys.exit(main(sys.argv))
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except subprocess.CalledProcessError as e:
+        traceback.print_exc()
+        sys.exit(e.returncode)

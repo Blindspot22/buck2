@@ -24,16 +24,19 @@ use std::array;
 use allocative::Allocative;
 use once_cell::sync::Lazy;
 use starlark_derive::NoSerialize;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_value;
 
 use crate as starlark;
 use crate::eval::runtime::slots::LocalSlotId;
+use crate::singleton_heap_name;
 use crate::starlark_simple_value;
 use crate::values::FrozenHeap;
 use crate::values::FrozenHeapRef;
 use crate::values::FrozenValueTyped;
 use crate::values::ProvidesStaticType;
 use crate::values::StarlarkValue;
+use crate::values::layout::heap::heap_type::FrozenHeapName;
 
 /// Local slot id as `FrozenValue`. This object only using during compilation
 /// and never appears in the executed program.
@@ -42,7 +45,8 @@ use crate::values::StarlarkValue;
     Debug,
     ProvidesStaticType,
     NoSerialize,
-    Allocative
+    Allocative,
+    StarlarkPagable
 )]
 #[display("{:?}", self)]
 pub(crate) struct LocalAsValue {
@@ -70,7 +74,10 @@ pub(crate) fn local_as_value(
                 local: LocalSlotId(i as u32),
             })
         });
-        (heap.into_ref(), locals)
+        (
+            heap.into_ref_named(FrozenHeapName::Singleton(singleton_heap_name!())),
+            locals,
+        )
     });
     LOCALS.1.get(local.0 as usize).copied()
 }

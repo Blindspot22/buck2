@@ -15,10 +15,11 @@ use async_trait::async_trait;
 use buck2_core::deferred::dynamic::DynamicLambdaResultsKey;
 use buck2_util::late_binding::LateBinding;
 use dice::DiceComputations;
+use pagable::Pagable;
 
 use crate::analysis::registry::RecordedAnalysisValues;
 
-#[derive(Allocative)]
+#[derive(Allocative, Pagable)]
 pub struct DynamicLambdaResult {
     pub analysis_values: RecordedAnalysisValues,
 }

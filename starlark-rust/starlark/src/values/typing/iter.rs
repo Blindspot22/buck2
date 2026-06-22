@@ -20,12 +20,16 @@ use std::marker::PhantomData;
 use allocative::Allocative;
 use starlark_derive::NoSerialize;
 use starlark_derive::ProvidesStaticType;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_value;
 
 use crate as starlark;
+use crate::docs::DocItem;
+use crate::docs::DocString;
+use crate::docs::DocType;
+use crate::static_starlark_value;
 use crate::typing::Ty;
 use crate::values::AllocFrozenValue;
-use crate::values::AllocStaticSimple;
 use crate::values::FrozenHeap;
 use crate::values::FrozenValue;
 use crate::values::StarlarkValue;
@@ -49,13 +53,33 @@ impl<T: StarlarkTypeRepr> StarlarkTypeRepr for StarlarkIter<T> {
     derive_more::Display,
     Allocative,
     ProvidesStaticType,
-    NoSerialize
+    NoSerialize,
+    StarlarkPagable
 )]
 #[display("{}", Self::TYPE)]
 pub(crate) struct TypingIterable;
 
 #[starlark_value(type = "typing.Iterable")]
 impl<'v> StarlarkValue<'v> for TypingIterable {
+    fn documentation(&self) -> DocItem {
+        DocItem::Type(DocType {
+            docs: DocString::from_docstring(
+                crate::docs::DocStringKind::Rust,
+                "\
+Represents a type that can be [iterated][1].
+
+`Iterable` takes one type argument, which may indicate the type of values yielded by the `Iterable`
+instance. Specifying the type to be iterated over is not currently supported.
+
+See also [`typing.Iterable` in the Python documentation][2].
+
+[1]: https://github.com/bazelbuild/starlark/blob/master/spec.md#iteration
+[2]: https://docs.python.org/3/library/typing.html#typing.Iterable",
+            ),
+            ..DocType::from_starlark_value::<Self>()
+        })
+    }
+
     fn eval_type(&self) -> Option<Ty> {
         Some(Ty::iter(Ty::any()))
     }
@@ -63,11 +87,11 @@ impl<'v> StarlarkValue<'v> for TypingIterable {
     // TODO(nga): support `[]`.
 }
 
+static_starlark_value!(ITERABLE: TypingIterable = TypingIterable);
+
 impl AllocFrozenValue for TypingIterable {
     fn alloc_frozen_value(self, _heap: &FrozenHeap) -> FrozenValue {
-        static ANY: AllocStaticSimple<TypingIterable> = AllocStaticSimple::alloc(TypingIterable);
-
-        ANY.to_frozen_value()
+        ITERABLE.to_frozen_value()
     }
 }
 

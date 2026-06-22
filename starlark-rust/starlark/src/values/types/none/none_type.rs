@@ -23,6 +23,7 @@ use derive_more::Display;
 use dupe::Dupe;
 use serde::Serialize;
 use serde::Serializer;
+use starlark_derive::StarlarkPagable;
 use starlark_derive::starlark_value;
 
 use crate as starlark;
@@ -30,9 +31,9 @@ use crate::any::ProvidesStaticType;
 use crate::collections::StarlarkHashValue;
 use crate::collections::StarlarkHasher;
 use crate::private::Private;
+use crate::static_starlark_value;
 use crate::typing::Ty;
 use crate::values::AllocFrozenValue;
-use crate::values::AllocStaticSimple;
 use crate::values::AllocValue;
 use crate::values::FrozenHeap;
 use crate::values::FrozenValue;
@@ -42,7 +43,15 @@ use crate::values::UnpackValue;
 use crate::values::Value;
 
 /// Define the None type, use [`NoneType`] in Rust.
-#[derive(Debug, Clone, Dupe, ProvidesStaticType, Display, Allocative)]
+#[derive(
+    Debug,
+    Clone,
+    Dupe,
+    ProvidesStaticType,
+    Display,
+    Allocative,
+    StarlarkPagable
+)]
 #[display("None")]
 pub struct NoneType;
 
@@ -103,7 +112,7 @@ impl Serialize for NoneType {
     }
 }
 
-pub(crate) static VALUE_NONE: AllocStaticSimple<NoneType> = AllocStaticSimple::alloc(NoneType);
+static_starlark_value!(pub(crate) VALUE_NONE: NoneType = NoneType);
 
 impl AllocFrozenValue for NoneType {
     fn alloc_frozen_value(self, _heap: &FrozenHeap) -> FrozenValue {

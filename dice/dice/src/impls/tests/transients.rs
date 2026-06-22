@@ -18,17 +18,23 @@ use derivative::Derivative;
 use derive_more::Display;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use pagable::PagablePanic;
+use pagable::pagable_typetag;
 
+use crate::DiceKeyDyn;
 use crate::api::computations::DiceComputations;
 use crate::api::cycles::DetectCycles;
 use crate::api::key::Key;
+use crate::api::key::NoValueSerialize;
+use crate::api::key::ValueSerialize;
 use crate::impls::dice::Dice;
 
 #[tokio::test]
 async fn invalid_results_are_not_cached() -> anyhow::Result<()> {
-    #[derive(Clone, Dupe, Debug, Display, Derivative, Allocative)]
+    #[derive(Clone, Dupe, Debug, Display, Derivative, Allocative, PagablePanic)]
     #[derivative(Hash, PartialEq, Eq)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct AlwaysTransient(#[derivative(PartialEq = "ignore", Hash = "ignore")] Arc<AtomicBool>);
 
     #[async_trait]
@@ -50,6 +56,10 @@ async fn invalid_results_are_not_cached() -> anyhow::Result<()> {
 
         fn validity(_x: &Self::Value) -> bool {
             false
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -90,9 +100,10 @@ async fn invalid_results_are_not_cached() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn demo_with_transient() -> anyhow::Result<()> {
-    #[derive(Clone, Dupe, Debug, Display, Derivative, Allocative)]
+    #[derive(Clone, Dupe, Debug, Display, Derivative, Allocative, PagablePanic)]
     #[derivative(Hash, PartialEq, Eq)]
     #[display("{:?}", self)]
+    #[pagable_typetag(DiceKeyDyn)]
     struct MaybeTransient(
         usize,
         #[derivative(PartialEq = "ignore", Hash = "ignore")] Arc<AtomicBool>,
@@ -138,6 +149,10 @@ async fn demo_with_transient() -> anyhow::Result<()> {
             // intermediate nodes won't be directly invalid, but rely on the children to
             // propagate transient-ness
             if let Err(x) = x { !*x } else { true }
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
         }
     }
 

@@ -10,13 +10,13 @@
 
 package com.facebook.buck.testrunner;
 
+import com.facebook.buck.testrunner.reportlayer.PerfettoReportLayer;
 import com.facebook.buck.testrunner.reportlayer.TombstonesReportLayer;
 import com.facebook.buck.testrunner.reportlayer.VideoRecordingReportLayer;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-import javax.annotation.Nullable;
 
 public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner {
 
@@ -33,6 +33,7 @@ public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner
       String apkUnderTestPath,
       String exopackageLocalPath,
       String apkUnderTestExopackageLocalPath,
+      String exopackageSecondaryDexLocalPath,
       boolean attemptUninstallApkUnderTest,
       boolean attemptUninstallInstrumentationApk,
       boolean debug,
@@ -58,6 +59,7 @@ public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner
         apkUnderTestPath,
         exopackageLocalPath,
         apkUnderTestExopackageLocalPath,
+        exopackageSecondaryDexLocalPath,
         attemptUninstallApkUnderTest,
         attemptUninstallInstrumentationApk,
         debug,
@@ -91,6 +93,7 @@ public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner
             argsParser.apkUnderTestPath,
             argsParser.exopackageLocalPath,
             argsParser.apkUnderTestExopackageLocalPath,
+            argsParser.exopackageSecondaryDexLocalPath,
             argsParser.attemptUninstallApkUnderTest,
             argsParser.attemptUninstallInstrumentationApk,
             argsParser.debug,
@@ -110,6 +113,9 @@ public class InstrumentationTestRunnerForClout extends InstrumentationTestRunner
       runner.addReportLayer(new VideoRecordingReportLayer(runner));
     }
     runner.addReportLayer(new TombstonesReportLayer(runner, argsParser.collectTombstones));
+    if (argsParser.collectPerfetto) {
+      runner.addReportLayer(new PerfettoReportLayer(runner));
+    }
     return runner;
   }
 

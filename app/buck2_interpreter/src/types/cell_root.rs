@@ -18,16 +18,23 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
-use starlark::environment::MethodsStatic;
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
 use starlark::values::NoSerialize;
+use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::starlark_value;
-use starlark::values::starlark_value_as_type::StarlarkValueAsType;
 
-#[derive(Debug, PartialEq, Display, ProvidesStaticType, NoSerialize, Allocative)]
-pub struct CellRoot(CellPath);
+#[derive(
+    Debug,
+    PartialEq,
+    Display,
+    ProvidesStaticType,
+    NoSerialize,
+    Allocative,
+    StarlarkPagable
+)]
+pub struct CellRoot(#[starlark_pagable(pagable)] CellPath);
 
 impl CellRoot {
     pub fn new(name: CellName) -> Self {
@@ -44,11 +51,12 @@ impl CellRoot {
 
 starlark_simple_value!(CellRoot);
 
+starlark::methods_static!(CELL_ROOT_METHODS = cell_root_methods);
+
 #[starlark_value(type = "CellRoot")]
 impl<'v> StarlarkValue<'v> for CellRoot {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(cell_root_methods)
+        Some(CELL_ROOT_METHODS.methods())
     }
 }
 
@@ -62,6 +70,5 @@ impl<'v> StarlarkValue<'v> for CellRoot {
 fn cell_root_methods(_builder: &mut MethodsBuilder) {}
 
 #[starlark_module]
-pub fn register_cell_root(globals: &mut GlobalsBuilder) {
-    const CellRoot: StarlarkValueAsType<CellRoot> = StarlarkValueAsType::new();
-}
+#[starlark_types(CellRoot as CellRoot)]
+pub fn register_cell_root(globals: &mut GlobalsBuilder) {}

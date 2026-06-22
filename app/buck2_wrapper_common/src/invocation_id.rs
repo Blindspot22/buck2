@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -18,6 +17,7 @@ use std::str::FromStr;
 
 use allocative::Allocative;
 use buck2_error::BuckErrorContext;
+use buck2_hash::BuckDefaultHasher;
 use dupe::Dupe;
 use uuid::Uuid;
 
@@ -89,6 +89,13 @@ impl TraceId {
         TraceId(Uuid::nil())
     }
 
+    /// Returns the raw 16-byte UUID. Provided for callers that need byte-level
+    /// access (e.g. sampling on a UUID nibble) without going through the
+    /// textual form, which allocates.
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
+
     /// Fetch `TraceId` from environment variable or generate a new one.
     pub fn from_env_or_new() -> buck2_error::Result<TraceId> {
         match env::var(BUCK_WRAPPER_UUID_ENV_VAR) {
@@ -102,7 +109,7 @@ impl TraceId {
 
     /// Generate short hash to be used as a message key for a Scribe client.
     pub fn hash(&self) -> i64 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = BuckDefaultHasher::new();
         Hash::hash(self, &mut hasher);
         hasher.finish() as i64
     }

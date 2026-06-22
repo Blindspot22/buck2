@@ -8,7 +8,6 @@
  * above-listed licenses.
  */
 
-use std::collections::HashMap;
 use std::pin::Pin;
 
 use buck2_artifact::artifact::artifact_type::Artifact;
@@ -19,11 +18,12 @@ use buck2_core::deferred::base_deferred_key::BaseDeferredKeyBxl;
 use buck2_core::deferred::dynamic::DynamicLambdaResultsKey;
 use buck2_execute::artifact_value::ArtifactValue;
 use buck2_execute::digest_config::DigestConfig;
+use buck2_hash::BuckIndexMap;
+use buck2_hash::StdBuckHashMap;
 use buck2_util::late_binding::LateBinding;
 use dice::DiceComputations;
 use dice_futures::cancellation::CancellationObserver;
 use futures::Future;
-use indexmap::IndexMap;
 use starlark::values::OwnedRefFrozenRef;
 
 use crate::dynamic::deferred::InputArtifactsMaterialized;
@@ -36,8 +36,8 @@ pub static EVAL_BXL_FOR_DYNAMIC_OUTPUT: LateBinding<
         OwnedRefFrozenRef<'v, FrozenDynamicLambdaParams>,
         &'v mut DiceComputations,
         InputArtifactsMaterialized,
-        &'v IndexMap<&Artifact, &ArtifactValue>,
-        HashMap<DynamicValue, FrozenProviderCollectionValue>,
+        &'v BuckIndexMap<&Artifact, &ArtifactValue>,
+        StdBuckHashMap<DynamicValue, FrozenProviderCollectionValue>,
         DigestConfig,
         CancellationObserver,
     ) -> Pin<
@@ -51,8 +51,8 @@ pub(crate) async fn eval_bxl_for_dynamic_output<'v>(
     dynamic_lambda: OwnedRefFrozenRef<'_, FrozenDynamicLambdaParams>,
     dice_ctx: &'v mut DiceComputations<'_>,
     input_artifacts_materialized: InputArtifactsMaterialized,
-    ensured_artifacts: &'v IndexMap<&Artifact, &ArtifactValue>,
-    resolved_dynamic_values: HashMap<DynamicValue, FrozenProviderCollectionValue>,
+    ensured_artifacts: &'v BuckIndexMap<&Artifact, &ArtifactValue>,
+    resolved_dynamic_values: StdBuckHashMap<DynamicValue, FrozenProviderCollectionValue>,
     digest_config: DigestConfig,
     liveness: CancellationObserver,
 ) -> buck2_error::Result<RecordedAnalysisValues> {

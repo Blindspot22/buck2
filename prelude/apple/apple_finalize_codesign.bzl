@@ -20,7 +20,7 @@ load(
 def _apple_finalize_bundle_impl(ctx):
     original_bundle = ctx.attrs.bundle
     bundle_artifact = original_bundle[DefaultInfo].default_outputs[0]
-    finalized_bundle = ctx.actions.declare_output(bundle_artifact.basename)
+    finalized_bundle = ctx.actions.declare_output(bundle_artifact.basename, has_content_based_path = False)
 
     cmd = cmd_args([
         ctx.attrs.finalizer[RunInfo],
@@ -44,6 +44,7 @@ def _apple_finalize_bundle_impl(ctx):
         binary_name = original_bundle_info.binary_name,
         contains_watchapp = original_bundle_info.contains_watchapp,
         skip_copying_swift_stdlib = original_bundle_info.skip_copying_swift_stdlib,
+        signing_info = original_bundle_info.signing_info,
     )
 
     forwarded_providers = [original_bundle[AppleDebuggableInfo], original_bundle[AppleInfoPlistInfo], original_bundle[AppleBundleLinkerMapInfo]]

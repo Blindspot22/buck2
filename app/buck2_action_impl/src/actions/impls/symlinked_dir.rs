@@ -35,10 +35,12 @@ use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::CopiedArtifact;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_hash::BuckIndexSet;
 use dupe::Dupe;
 use gazebo::prelude::*;
-use indexmap::IndexSet;
 use itertools::Itertools;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::ValueError;
 use starlark::values::dict::UnpackDictEntries;
@@ -165,7 +167,7 @@ impl UnregisteredSymlinkedDirAction {
 impl UnregisteredAction for UnregisteredSymlinkedDirAction {
     fn register(
         self: Box<Self>,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         _starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
@@ -177,7 +179,7 @@ impl UnregisteredAction for UnregisteredSymlinkedDirAction {
     }
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 struct SymlinkedDirAction {
     copy: CopyMode,
     args: Vec<(ArtifactGroup, Box<ForwardRelativePath>)>,
@@ -193,6 +195,7 @@ impl SymlinkedDirAction {
     }
 }
 
+#[pagable_typetag]
 #[async_trait]
 impl Action for SymlinkedDirAction {
     fn kind(&self) -> buck2_data::ActionKind {
@@ -297,8 +300,12 @@ impl Action for SymlinkedDirAction {
             })
             .collect_vec();
 
+        let configuration_path = ctx
+            .materializer()
+            .maybe_eager_configuration_path(ctx.fs(), self.output().get_path())?;
+
         ctx.materializer()
-            .declare_copy(actual_output, value.dupe(), srcs)
+            .declare_copy(actual_output, value.dupe(), srcs, configuration_path)
             .await?;
         Ok((
             ActionOutputs::from_single(self.output().get_path().dupe(), value),

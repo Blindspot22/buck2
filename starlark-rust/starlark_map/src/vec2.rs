@@ -35,9 +35,9 @@ use std::slice;
 
 use allocative::Allocative;
 use allocative::Visitor;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use pagable::PagableDeserialize;
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 use pagable::PagableSerialize;
 use serde::Deserialize;
 use serde::Serialize;
@@ -112,7 +112,7 @@ pub struct Vec2<A, B> {
 unsafe impl<A: Send, B: Send> Send for Vec2<A, B> {}
 unsafe impl<A: Sync, B: Sync> Sync for Vec2<A, B> {}
 
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 impl<A: PagableSerialize, B: PagableSerialize> PagableSerialize for Vec2<A, B> {
     fn pagable_serialize(
         &self,
@@ -126,7 +126,7 @@ impl<A: PagableSerialize, B: PagableSerialize> PagableSerialize for Vec2<A, B> {
     }
 }
 
-#[cfg(feature = "pagable")]
+#[cfg(feature = "pagable_dep")]
 impl<'de, A: PagableDeserialize<'de>, B: PagableDeserialize<'de>> PagableDeserialize<'de>
     for Vec2<A, B>
 {
@@ -204,6 +204,26 @@ impl<A, B> Default for Vec2<A, B> {
     #[inline]
     fn default() -> Vec2<A, B> {
         Vec2::new()
+    }
+}
+impl<A, B> Extend<(A, B)> for Vec2<A, B> {
+    fn extend<T: IntoIterator<Item = (A, B)>>(&mut self, iter: T) {
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        self.reserve(lower);
+        for (a, b) in iter {
+            self.push(a, b);
+        }
+    }
+}
+
+impl<A, B> FromIterator<(A, B)> for Vec2<A, B> {
+    fn from_iter<T: IntoIterator<Item = (A, B)>>(iter: T) -> Self {
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        let mut values = Vec2::with_capacity(lower);
+        values.extend(iter);
+        values
     }
 }
 
@@ -849,6 +869,20 @@ mod tests {
         assert_eq!(2, v.len());
         assert_eq!(Some((&1, &2)), v.get(0));
         assert_eq!(Some((&3, &4)), v.get(1));
+    }
+
+    #[test]
+    fn test_from_iter_uses_size_hint_lower_bound() {
+        for len in [2, 3, 5, 7, 11] {
+            let values: Vec2<u32, u32> = (0..len).map(|i| (i, i * 10)).collect();
+            assert_eq!(len as usize, values.len());
+            assert_eq!(len as usize, values.capacity());
+            assert_eq!(Some((&0, &0)), values.get(0));
+            assert_eq!(
+                Some((&(len - 1), &((len - 1) * 10))),
+                values.get((len - 1) as usize)
+            );
+        }
     }
 
     #[test]

@@ -149,6 +149,7 @@ def cxx_python_extension_impl(ctx: AnalysisContext) -> list[Provider]:
         prefix_header = ctx.attrs.prefix_header,
         _cxx_toolchain = ctx.attrs._cxx_toolchain,
         coverage_instrumentation_compiler_flags = ctx.attrs.coverage_instrumentation_compiler_flags,
+        coverage_profile_list = ctx.attrs.coverage_profile_list[DefaultInfo].default_outputs[0] if ctx.attrs.coverage_profile_list else None,
         separate_debug_info = ctx.attrs.separate_debug_info,
         cuda_compile_style = CudaCompileStyle(ctx.attrs.cuda_compile_style),
         supports_stripping = ctx.attrs.supports_stripping,
@@ -214,7 +215,9 @@ def cxx_python_extension_impl(ctx: AnalysisContext) -> list[Provider]:
         if base_module != "":
             lines = ["# auto generated stub for {}\n".format(ctx.label.raw_target())]
             stub_name = module_name + ".empty_stub"
-            extension_artifacts.update(qualify_srcs(ctx.label, ctx.attrs.base_module, {stub_name: ctx.actions.write(stub_name, lines)}))
+            extension_artifacts.update(
+                qualify_srcs(ctx.label, ctx.attrs.base_module, {stub_name: ctx.actions.write(stub_name, lines, has_content_based_path = False)})
+            )
 
         python_module_names[base_module.replace("/", ".") + module_name] = pyinit_symbol
 
@@ -267,14 +270,16 @@ def cxx_python_extension_impl(ctx: AnalysisContext) -> list[Provider]:
         unembeddable_extensions[base_module + name] = linkable_providers
         linkable_providers = None
 
-    providers.append(merge_cxx_extension_info(
-        actions = ctx.actions,
-        deps = cxx_deps,
-        linkable_providers = linkable_providers,
-        artifacts = extension_artifacts,
-        python_module_names = python_module_names,
-        unembeddable_extensions = unembeddable_extensions,
-    ))
+    providers.append(
+        merge_cxx_extension_info(
+            actions = ctx.actions,
+            deps = cxx_deps,
+            linkable_providers = linkable_providers,
+            artifacts = extension_artifacts,
+            python_module_names = python_module_names,
+            unembeddable_extensions = unembeddable_extensions,
+        )
+    )
     providers.extend(cxx_library_info.providers)
 
     # If a type stub was specified, create a manifest for export.
@@ -320,11 +325,13 @@ def cxx_python_extension_impl(ctx: AnalysisContext) -> list[Provider]:
     if src_types != None:
         sub_targets["source-db-no-deps"] = [create_source_db_no_deps(ctx, src_types), create_python_source_db_info(library_info.manifests)]
 
-    providers.append(DefaultInfo(
-        default_output = shared_output.default,
-        other_outputs = shared_output.other,
-        sub_targets = sub_targets,
-    ))
+    providers.append(
+        DefaultInfo(
+            default_output = shared_output.default,
+            other_outputs = shared_output.other,
+            sub_targets = sub_targets,
+        )
+    )
 
     # Omnibus providers
 
@@ -371,6 +378,7 @@ def cxx_python_extension_impl(ctx: AnalysisContext) -> list[Provider]:
                         py_lib_paths = ["lib/python"],
                         runtime_lib_paths = [],
                     ),
+                    has_content_based_path = False,
                 ),
             ),
             deps = raw_deps,

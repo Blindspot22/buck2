@@ -40,10 +40,12 @@ def command_alias_impl(ctx: AnalysisContext):
     #
     # FIXME(JakobDegen): It's easy to end up depending on either one of these behaviors. Life would
     # probably be easier if we just always went the `output.cmd` route
-    if output.maybe_directly_runnable == None or \
-       ctx.attrs.run_using_single_arg or \
-       ctx.attrs.executable_name != None or \
-       (len(ctx.attrs.platform_exe) > 0 and target_os.script == ScriptLanguage("sh")):
+    if (
+        output.maybe_directly_runnable == None
+        or ctx.attrs.run_using_single_arg
+        or ctx.attrs.executable_name != None
+        or (len(ctx.attrs.platform_exe) > 0 and target_os.script == ScriptLanguage("sh"))
+    ):
         run_info = RunInfo(args = output.cmd)
     else:
         run_info = RunInfo(args = output.maybe_directly_runnable)
@@ -88,18 +90,20 @@ CommandAliasOutput = record(
 )
 
 def command_alias(
-        *,
-        actions: AnalysisActions,
-        # The path at which to write the output to, without an extension - that will be added
-        path: str | None,
-        # The target where this script should be able to run (this may actually be your exec platform)
-        target_os: OsLookup,
-        # Either the `RunInfo` to use, or in the case of a fat platform, the choice of `RunInfo`
-        # depending on `uname`
-        base: RunInfo | dict[str, RunInfo],
-        args: cmd_args,
-        env: dict[str, ArgLike],
-        labels: list[str]) -> CommandAliasOutput:
+    *,
+    actions: AnalysisActions,
+    # The path at which to write the output to, without an extension - that will be added
+    path: str | None,
+    # The target where this script should be able to run (this may actually be your exec platform)
+    target_os: OsLookup,
+    # Either the `RunInfo` to use, or in the case of a fat platform, the choice of `RunInfo`
+    # depending on `uname`
+    base: RunInfo | dict[str, RunInfo],
+    args: cmd_args,
+    env: dict[str, ArgLike],
+    labels: list[str],
+    has_content_based_path: bool = False,
+) -> CommandAliasOutput:
     if path == "":
         fail("Path cannot be empty string")
 
@@ -116,9 +120,9 @@ def command_alias(
         windows_trampoline_path = "__command_alias_trampoline.bat"
 
     if target_os.script == ScriptLanguage("sh"):
-        trampoline, hidden = _command_alias_write_trampoline_unix(actions, unix_trampoline_path, base, args, env)
+        trampoline, hidden = _command_alias_write_trampoline_unix(actions, unix_trampoline_path, base, args, env, has_content_based_path)
     elif target_os.script == ScriptLanguage("bat"):
-        trampoline, hidden = _command_alias_write_trampoline_windows(actions, windows_trampoline_path, base, args, env, labels)
+        trampoline, hidden = _command_alias_write_trampoline_windows(actions, windows_trampoline_path, base, args, env, labels, has_content_based_path)
     else:
         fail("Unsupported script language: {}".format(target_os.script))
 
@@ -137,11 +141,8 @@ def command_alias(
     )
 
 def _command_alias_write_trampoline_unix(
-        actions: AnalysisActions,
-        path: str,
-        base: RunInfo | dict[str, RunInfo],
-        args: cmd_args,
-        env: dict[str, ArgLike]) -> (Artifact, cmd_args):
+    actions: AnalysisActions, path: str, base: RunInfo | dict[str, RunInfo], args: cmd_args, env: dict[str, ArgLike], has_content_based_path: bool
+) -> (Artifact, cmd_args):
     trampoline_args = cmd_args()
     trampoline_args.add("#!/usr/bin/env bash")
     trampoline_args.add("set -euo pipefail")
@@ -175,25 +176,29 @@ fi
 """,
     )
 
-    # Calculate the base path and process arguments with the resolved path
+    # Calculate the base path and process arguments with the resolved path.
     trampoline_args.add(
         """
 BASE=$(cd -- "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 ; pwd -P)
 R_ARGS=()
 for arg in "${ARGS[@]}"; do
+    # Normalize Windows-style backslash path separators to forward slashes for
+    # artifact paths (identified by the prefix placeholder). This handles the case
+    # where Buck2 runs on Windows but this trampoline executes on Linux via RE.
+    if [[ "$arg" == *BUCK_COMMAND_ALIAS_ABSOLUTE_PREFIX* ]]; then arg="${arg//\\\\//}"; fi
     R_ARGS+=("${arg//BUCK_COMMAND_ALIAS_ABSOLUTE_PREFIX/$BASE}")
 done
 """,
     )
 
-    for (k, v) in env.items():
+    for k, v in env.items():
         # TODO(akozhevnikov): maybe check environment variable is not conflicting with pre-existing one
         trampoline_args.add(cmd_args("export ", k, "=", cmd_args(v, quote = "shell"), delimiter = ""))
         trampoline_args.add(cmd_args("export ", k, '="${', k, '//BUCK_COMMAND_ALIAS_ABSOLUTE_PREFIX/$BASE}"', delimiter = ""))
 
     trampoline_args.add('exec "${R_ARGS[@]}" "$@"')
 
-    trampoline = actions.declare_output(path)
+    trampoline = actions.declare_output(path, has_content_based_path = has_content_based_path)
     trampoline_args = cmd_args(
         trampoline_args,
         relative_to = (trampoline, 1),
@@ -204,17 +209,14 @@ done
         trampoline_args,
         allow_args = True,
         is_executable = True,
+        has_content_based_path = has_content_based_path,
     )
 
     return trampoline, trampoline_args
 
 def _command_alias_write_trampoline_windows(
-        actions: AnalysisActions,
-        path: str,
-        base: RunInfo,
-        args: cmd_args,
-        env: dict[str, ArgLike],
-        labels: list[str]) -> (Artifact, cmd_args):
+    actions: AnalysisActions, path: str, base: RunInfo, args: cmd_args, env: dict[str, ArgLike], labels: list[str], has_content_based_path: bool
+) -> (Artifact, cmd_args):
     trampoline_args = cmd_args()
     trampoline_args.add("@echo off")
 
@@ -229,7 +231,7 @@ def _command_alias_write_trampoline_windows(
     trampoline_args.add("set BUCK_COMMAND_ALIAS_ABSOLUTE=%~dp0")
 
     # Handle envs
-    for (k, v) in env.items():
+    for k, v in env.items():
         # TODO(akozhevnikov): maybe check environment variable is not conflicting with pre-existing one
         trampoline_args.add(cmd_args(["set ", k, "=", v], delimiter = ""))
 
@@ -238,7 +240,7 @@ def _command_alias_write_trampoline_windows(
 
     trampoline_args.add(cmd)
 
-    trampoline = actions.declare_output(path)
+    trampoline = actions.declare_output(path, has_content_based_path = has_content_based_path)
     trampoline_args = cmd_args(
         trampoline_args,
         relative_to = (trampoline, 1),
@@ -249,6 +251,7 @@ def _command_alias_write_trampoline_windows(
         trampoline_args,
         allow_args = True,
         is_executable = True,
+        has_content_based_path = has_content_based_path,
     )
 
     return trampoline, trampoline_args

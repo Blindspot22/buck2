@@ -42,14 +42,19 @@ use buck2_execute::directory::INTERNER;
 use buck2_execute::directory::extract_artifact_value;
 use buck2_execute::directory::insert_artifact;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_util::time_span::TimeSpan;
 use derive_more::Display;
 use dice::DiceComputations;
 use dice::Key;
+use dice::OkPagableValueSerialize;
+use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::Future;
 use futures::FutureExt;
 use itertools::Itertools;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use ref_cast::RefCast;
 use smallvec::SmallVec;
 use sorted_vector_map::SortedVectorMap;
@@ -83,7 +88,7 @@ impl ArtifactGroupCalculation for DiceComputations<'_> {
         let resolved_artifacts = input.resolved_artifact(self).await?;
         ensure_artifact_group_staged(self, resolved_artifacts.clone())
             .await?
-            .to_group_values(&resolved_artifacts)
+            .into_group_values(&resolved_artifacts)
     }
 }
 
@@ -102,7 +107,7 @@ impl ArtifactGroupCalculation for DiceComputations<'_> {
 ///  - The staged future is kept to a minimum size (which we track in an assertion below).
 ///  - The result of the staged future is kept to a minimum size (also tracked below).
 ///  - For the single Artifact case from ensure_artifact_group_staged, we defer allocation
-///    of the ArtifactGroupValues until `to_group_values()` is called. For callers waiting
+///    of the ArtifactGroupValues until `into_group_values()` is called. For callers waiting
 ///    on many inputs, this allows them to only allocate those large values only after all
 ///    inputs are ready.
 pub(crate) fn ensure_artifact_group_staged<'a>(
@@ -217,7 +222,7 @@ pub(crate) enum EnsureArtifactGroupReady {
 impl EnsureArtifactGroupReady {
     /// Converts the ensured artifact to an ArtifactGroupValues. The caller must ensure that the passed in artifact
     /// is the same one that was used to ensure this.
-    pub(crate) fn to_group_values<'v>(
+    pub(crate) fn into_group_values<'v>(
         self,
         resolved_artifact_group: &ResolvedArtifactGroup<'v>,
     ) -> buck2_error::Result<ArtifactGroupValues> {
@@ -294,8 +299,9 @@ async fn dir_artifact_value(
     // `DirArtifactValueKey` is an intermediate DICE key to prevent that -  every `BuildKey` using
     // that directory now only depends on one `DirArtifactValueKey`, and that `DirArtifactValueKey`
     // depends on the `PathMetadataKey` of every member of the directory.
-    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative)]
+    #[derive(Clone, Dupe, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
     #[display("dir_artifact_value({})", _0)]
+    #[pagable_typetag(dice::DiceKeyDyn)]
     struct DirArtifactValueKey(Arc<CellPath>);
 
     #[async_trait]
@@ -379,6 +385,10 @@ async fn dir_artifact_value(
                 (Ok(x), Ok(y)) => x == y,
                 _ => false,
             }
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            OkPagableValueSerialize::<Self::Value>::new()
         }
     }
 
@@ -480,8 +490,11 @@ enum ProjectedArtifactError {
     MissingInProjectedArtifact(ForwardRelativePathBuf, BaseArtifactKind),
 }
 
-#[derive(Clone, Dupe, Eq, PartialEq, Hash, Display, Debug, Allocative, RefCast)]
+#[derive(
+    Clone, Dupe, Eq, PartialEq, Hash, Display, Debug, Allocative, RefCast, Pagable
+)]
 #[repr(transparent)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 pub struct EnsureProjectedArtifactKey(pub(crate) ArtifactKind);
 
 #[async_trait]
@@ -542,10 +555,23 @@ impl Key for EnsureProjectedArtifactKey {
             _ => false,
         }
     }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
+    }
 }
 
-#[derive(Clone, Dupe, Eq, PartialEq, Hash, Display, Debug, Allocative, RefCast)]
+/// Activation data for [`EnsureTransitiveSetProjectionKey`] DICE evaluations,
+/// used to record duration in the critical path graph.
+pub struct EnsureTransitiveSetProjectionKeyActivationData {
+    pub time_span: TimeSpan,
+}
+
+#[derive(
+    Clone, Dupe, Eq, PartialEq, Hash, Display, Debug, Allocative, RefCast, Pagable
+)]
 #[repr(transparent)]
+#[pagable_typetag(dice::DiceKeyDyn)]
 pub struct EnsureTransitiveSetProjectionKey(pub TransitiveSetProjectionKey);
 
 #[async_trait]
@@ -597,7 +623,7 @@ impl Key for EnsureTransitiveSetProjectionKey {
                         values.push((artifact.dupe(), ready.unpack_single()?))
                     }
                     ResolvedArtifactGroup::TransitiveSetProjection(..) => {
-                        children.push(ready.to_group_values(group)?)
+                        children.push(ready.into_group_values(group)?)
                     }
                 }
             }
@@ -607,11 +633,15 @@ impl Key for EnsureTransitiveSetProjectionKey {
         // At this point we're holding a lot of data and want to ensure that we don't hold that across any
         // .await, so move into a little sync closure and call that
         (move || {
+            let time_span = TimeSpan::start_now();
             let digest_config = ctx.global_data().get_digest_config();
 
             let values = ArtifactGroupValues::new(values, children, &artifact_fs, digest_config)
                 .buck_error_context("Failed to construct ArtifactGroupValues")?;
 
+            ctx.store_evaluation_data(EnsureTransitiveSetProjectionKeyActivationData {
+                time_span: time_span.end_now(),
+            })?;
             Ok(values)
         })()
     }
@@ -621,5 +651,9 @@ impl Key for EnsureTransitiveSetProjectionKey {
             (Ok(x), Ok(y)) => x.shallow_equals(y),
             _ => false,
         }
+    }
+
+    fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+        OkPagableValueSerialize::<Self::Value>::new()
     }
 }

@@ -20,6 +20,7 @@ from buck2.tests.e2e_util.asserts import expect_failure
 from buck2.tests.e2e_util.buck_workspace import buck_test, env
 from buck2.tests.e2e_util.helper.golden import (
     golden,
+    sanitize_daemon_stderr,
     sanitize_stacktrace,
     sanitize_stderr,
 )
@@ -40,8 +41,8 @@ async def test_action_error(buck: Buck) -> None:
     assert error["category"] == "USER"
     # This test is unfortunately liable to break as a result of refactorings, since this is not
     # stable. Feel free to delete it if it becomes a problem.
-    assert (
-        error["source_location"] == "buck2_build_api/src/actions/error.rs::ActionError"
+    assert error["source_location"].startswith(
+        "buck2_build_api/src/actions/error.rs::ActionError::"
     )
 
 
@@ -77,7 +78,7 @@ async def test_attr_coercion(buck: Buck) -> None:
     )
     error = res.invocation_record().single_error()
     # Just make sure there's some kind of error metadata
-    assert "StarlarkError::Value" in error["source_location"]
+    assert "StarlarkError::Value::" in error["source_location"]
 
 
 @buck_test(write_invocation_record=True)
@@ -89,9 +90,8 @@ async def test_buck2_fail(buck: Buck) -> None:
     error = res.invocation_record().single_error()
     # Just make sure that despite there being no context on the error, we still report the right
     # metadata
-    assert (
-        error["source_location"]
-        == "buck2_interpreter_for_build/src/interpreter/functions/internals.rs::BuckFail"
+    assert error["source_location"].startswith(
+        "buck2_interpreter_for_build/src/interpreter/functions/internals.rs::BuckFail::"
     )
 
 
@@ -102,7 +102,7 @@ async def test_starlark_fail_error_categorization(buck: Buck) -> None:
         stderr_regex="evaluating build file: `root//starlark_fail:TARGETS.fixture`",
     )
     error = res.invocation_record().single_error()
-    assert error["source_location"].endswith("StarlarkError::Fail")
+    assert "StarlarkError::Fail::" in error["source_location"]
     assert error["source_area"] == "BUCK2"
     assert error["category"] == "USER"
 
@@ -114,7 +114,7 @@ async def test_starlark_parse_error_categorization(buck: Buck) -> None:
         stderr_regex=".*Parse error:.*",
     )
     error = res.invocation_record().single_error()
-    assert error["source_location"].endswith("StarlarkError::Parser")
+    assert "StarlarkError::Parser::" in error["source_location"]
     assert error["tags"] == ["STARLARK_PARSER"]
     assert error["source_area"] == "BUCK2"
     assert error["category"] == "USER"
@@ -127,7 +127,7 @@ async def test_starlark_scope_error_categorization(buck: Buck) -> None:
         stderr_regex="evaluating build file: .* not found",
     )
     error = res.invocation_record().single_error()
-    assert error["source_location"].endswith("StarlarkError::Scope")
+    assert "StarlarkError::Scope::" in error["source_location"]
     assert error["tags"] == ["STARLARK_SCOPE"]
     assert error["source_area"] == "BUCK2"
     assert error["category"] == "USER"
@@ -359,6 +359,19 @@ async def test_daemon_startup_error(buck: Buck) -> None:
     )
 
 
+@buck_test(skip_for_os=["windows"], write_invocation_record=True)
+@env("BUCK2_TEST_DAEMON_STARTUP_SIGNAL", "true")
+async def test_daemon_startup_signal(buck: Buck) -> None:
+    res = await expect_failure(buck.targets(":"))
+    error = res.invocation_record().single_error()
+    assert error["category_key"] == "DAEMON_STARTUP_FAILED:SIGTERM"
+
+    golden(
+        output=sanitize_daemon_stderr(res.stderr),
+        rel_path="fixtures/test_daemon_startup_signal.golden.txt",
+    )
+
+
 @buck_test(
     setup_eden=True,
     extra_buck_config={
@@ -407,6 +420,21 @@ async def test_action_error_has_categorization(buck: Buck) -> None:
     error = res.invocation_record().single_error()
     assert "ACTION_COMMAND_FAILURE" in error["tags"]
     assert error["category_key"] == "ACTION_COMMAND_FAILURE:FirstError"
+
+
+@buck_test(write_invocation_record=True, skip_for_os=["windows"])
+@env("BUCK2_TEST_INIT_DATA_SLEEP_SECS", "120")
+@env("BUCKD_STARTUP_INIT_TIMEOUT", "5")
+async def test_init_data_timeout(buck: Buck) -> None:
+    res = await expect_failure(buck.targets(":"))
+    record = res.invocation_record()
+    error = record.single_error()
+
+    assert error["category_key"] == "CLIENT_STARTUP_TIMEOUT"
+    golden(
+        output=sanitize_daemon_stderr(res.stderr),
+        rel_path="fixtures/test_init_timeout.golden.txt",
+    )
 
 
 @buck_test(

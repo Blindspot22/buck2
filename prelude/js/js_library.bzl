@@ -39,60 +39,111 @@ def _get_grouped_srcs(ctx: AnalysisContext) -> list[GroupedSource]:
 
     return grouped_srcs.values()
 
-def _get_virtual_path(ctx: AnalysisContext, src: Artifact, base_path: [str, None]) -> str:
+def _get_base_package(ctx: AnalysisContext) -> str:
+    # The base package is identical for every source in the target, so callers resolve it once and
+    # pass it into _get_virtual_path rather than re-deriving it on every call.
     package = ctx.label.package
+    base_path = ctx.attrs.base_path
     if base_path and base_path not in ["", "."]:
         package = paths.join(package, base_path)
 
+    return package
+
+def _get_virtual_path(package: str, src: Artifact) -> str:
     return paths.join(package, src.short_path)
 
-def _build_js_files(
-        ctx: AnalysisContext,
-        transform_profile: str,
-        flavors: list[str],
-        grouped_srcs: list[GroupedSource]) -> list[Artifact]:
-    if not grouped_srcs:
+# A source's transform job args, minus the fields that depend on the transform profile
+# (`outputFilePath` and `transformProfile`). These are built once per source and reused across
+# all of TRANSFORM_PROFILES.
+_PrecomputedJsFile = record(
+    canonical_name = str,
+    job_args = dict,
+)
+
+def _precompute_transform_job_args(ctx: AnalysisContext, flavors: list[str], grouped_srcs: list[GroupedSource]) -> list[_PrecomputedJsFile]:
+    # `js_library_impl` runs the transform pipeline once per entry in TRANSFORM_PROFILES. Every
+    # field of a source's transform job args is identical across profiles except `outputFilePath`
+    # and `transformProfile`, so build the profile-independent portion exactly once here instead
+    # of rebuilding it for every (source, profile) pair inside `_build_js_files`.
+    extra_job_args = {}
+    if ctx.attrs.extra_json:
+        extra_job_args["extraData"] = cmd_args(ctx.attrs.extra_json, delimiter = "")
+
+    if ctx.attrs.extra_babel_plugins:
+        babel_plugin_configs = []
+        for plugin_value in ctx.attrs.extra_babel_plugins:
+            if type(plugin_value) == "tuple":
+                plugin_dep, plugin_args_json = plugin_value
+            else:
+                plugin_dep = plugin_value
+                plugin_args_json = None
+            plugin_artifact = plugin_dep[DefaultInfo].default_outputs[0]
+            config = {"modulePath": plugin_artifact}
+            if plugin_args_json != None:
+                config["pluginArgs"] = cmd_args(plugin_args_json, delimiter = "")
+            babel_plugin_configs.append(config)
+        extra_job_args["extraBabelPlugins"] = babel_plugin_configs
+
+    base_package = _get_base_package(ctx)
+
+    precomputed_js_files = []
+    for grouped_src in grouped_srcs:
+        job_args = {
+            "additionalSources": [
+                {
+                    "sourcePath": additional_source,
+                    "virtualPath": _get_virtual_path(base_package, additional_source),
+                }
+                for additional_source in grouped_src.additional_sources
+            ],
+            "command": "transform",
+            "flavors": flavors,
+            "release": ctx.attrs._is_release,
+            "sourceJsFileName": _get_virtual_path(base_package, grouped_src.main_source),
+            "sourceJsFilePath": grouped_src.main_source,
+        }
+        job_args.update(extra_job_args)
+        precomputed_js_files.append(
+            _PrecomputedJsFile(
+                canonical_name = grouped_src.canonical_name,
+                job_args = job_args,
+            )
+        )
+
+    return precomputed_js_files
+
+def _build_js_files(ctx: AnalysisContext, transform_profile: str, precomputed_js_files: list[_PrecomputedJsFile]) -> list[Artifact]:
+    if not precomputed_js_files:
         return []
 
     all_output_paths = []
     all_command_args_files = []
-    all_hidden_artifacts = []
-    for grouped_src in grouped_srcs:
-        identifier = "{}/{}".format(transform_profile, grouped_src.canonical_name)
+    for precomputed_js_file in precomputed_js_files:
+        identifier = "{}/{}".format(transform_profile, precomputed_js_file.canonical_name)
 
         output_path = ctx.actions.declare_output(
             "transform-out/{}.jsfile".format(identifier),
             has_content_based_path = True,
         )
-        job_args = {
-            "additionalSources": [{
-                "sourcePath": additional_source,
-                "virtualPath": _get_virtual_path(ctx, additional_source, ctx.attrs.base_path),
-            } for additional_source in grouped_src.additional_sources],
-            "command": "transform",
-            "flavors": flavors,
-            "outputFilePath": output_path.as_output(),
-            "release": ctx.attrs._is_release,
-            "sourceJsFileName": _get_virtual_path(ctx, grouped_src.main_source, ctx.attrs.base_path),
-            "sourceJsFilePath": grouped_src.main_source,
-            "transformProfile": "default" if transform_profile == "hermes-legacy" else transform_profile,
-        }
-        if ctx.attrs.extra_json:
-            job_args["extraData"] = cmd_args(ctx.attrs.extra_json, delimiter = "")
+
+        # Copy the profile-independent base and fill in the two profile-specific fields.
+        job_args = dict(precomputed_js_file.job_args)
+        job_args["outputFilePath"] = output_path.as_output()
+        job_args["transformProfile"] = "default" if transform_profile == "hermes-legacy" else transform_profile
 
         command_args_file = ctx.actions.write_json(
             "{}_command_args".format(identifier),
             job_args,
+            with_inputs = True,
             has_content_based_path = True,
         )
 
         all_output_paths.append(output_path)
         all_command_args_files.append(command_args_file)
-        all_hidden_artifacts.append(cmd_args([output_path.as_output(), grouped_src.main_source] + grouped_src.additional_sources))
 
     batch_size = 25
     command_count = len(all_output_paths)
-    for (batch_number, start_index) in enumerate(range(0, command_count, batch_size)):
+    for batch_number, start_index in enumerate(range(0, command_count, batch_size)):
         end_index = min(start_index + batch_size, command_count)
         run_worker_commands(
             ctx = ctx,
@@ -100,17 +151,12 @@ def _build_js_files(
             command_args_files = all_command_args_files[start_index:end_index],
             identifier = "{}_{}_batch{}".format(ctx.label.name, transform_profile, batch_number),
             category = "transform",
-            hidden_artifacts = all_hidden_artifacts[start_index:end_index],
             has_content_based_path = True,
         )
 
     return all_output_paths
 
-def _build_library_files(
-        ctx: AnalysisContext,
-        transform_profile: str,
-        flavors: list[str],
-        js_files: list[Artifact]) -> Artifact:
+def _build_library_files(ctx: AnalysisContext, transform_profile: str, flavors: list[str], js_files: list[Artifact]) -> Artifact:
     output_path = ctx.actions.declare_output(
         "library-files-out/{}/library_files".format(transform_profile),
         has_content_based_path = True,
@@ -134,6 +180,7 @@ def _build_library_files(
     command_args_file = ctx.actions.write_json(
         "library_files_{}_command_args".format(transform_profile),
         job_args,
+        with_inputs = True,
         has_content_based_path = True,
     )
 
@@ -143,17 +190,11 @@ def _build_library_files(
         command_args_files = [command_args_file],
         identifier = transform_profile,
         category = "library_files",
-        hidden_artifacts = [cmd_args([output_path.as_output()] + js_files)],
         has_content_based_path = True,
     )
     return output_path
 
-def _build_js_library(
-        ctx: AnalysisContext,
-        transform_profile: str,
-        library_files: Artifact,
-        flavors: list[str],
-        js_library_deps: list[Artifact]) -> Artifact:
+def _build_js_library(ctx: AnalysisContext, transform_profile: str, library_files: Artifact, flavors: list[str], js_library_deps: list[Artifact]) -> Artifact:
     output_path = ctx.actions.declare_output(
         "library-dependencies-out/{}.jslib".format(transform_profile),
         has_content_based_path = True,
@@ -174,6 +215,7 @@ def _build_js_library(
     command_args_file = ctx.actions.write_json(
         "library_deps_{}_args".format(transform_profile),
         job_args,
+        with_inputs = True,
         has_content_based_path = True,
     )
 
@@ -183,10 +225,6 @@ def _build_js_library(
         command_args_files = [command_args_file],
         identifier = transform_profile,
         category = "library_dependencies",
-        hidden_artifacts = [cmd_args([
-            output_path.as_output(),
-            library_files,
-        ] + js_library_deps)],
         has_content_based_path = True,
     )
 
@@ -195,16 +233,19 @@ def _build_js_library(
 def js_library_impl(ctx: AnalysisContext) -> list[Provider]:
     grouped_srcs = _get_grouped_srcs(ctx)
     flavors = get_flavors(ctx)
+    precomputed_js_files = _precompute_transform_job_args(ctx, flavors, grouped_srcs)
     sub_targets = {}
 
     for transform_profile in TRANSFORM_PROFILES:
-        built_js_files = _build_js_files(ctx, transform_profile, flavors, grouped_srcs)
+        built_js_files = _build_js_files(ctx, transform_profile, precomputed_js_files)
         library_files = _build_library_files(ctx, transform_profile, flavors, built_js_files)
 
-        js_library_deps = dedupe(map_idx(
-            JsLibraryInfo,
-            [dep[DefaultInfo].sub_targets[transform_profile] for dep in ctx.attrs.deps],
-        ))
+        js_library_deps = dedupe(
+            map_idx(
+                JsLibraryInfo,
+                [dep[DefaultInfo].sub_targets[transform_profile] for dep in ctx.attrs.deps],
+            )
+        )
         js_library = _build_js_library(
             ctx,
             transform_profile,

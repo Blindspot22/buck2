@@ -26,23 +26,25 @@ use buck2_build_api::actions::execute::action_executor::ActionOutputs;
 use buck2_build_api::actions::execute::error::ExecuteError;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::interpreter::rule_defs::artifact_tagging::ArtifactTag;
-use buck2_build_api::interpreter::rule_defs::cmd_args::AbsCommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
-use buck2_build_api::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
+use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_build_signals::env::WaitingData;
 use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_core::category::CategoryRef;
 use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_error::internal_error;
+use buck2_execute::artifact::artifact_dyn::ArtifactDyn;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::execute::command_executor::ActionExecutionTimingData;
 use buck2_execute::materialize::materializer::WriteRequest;
+use buck2_hash::BuckIndexMap;
+use buck2_hash::BuckIndexSet;
+use buck2_hash::buck_indexmap;
 use dupe::Dupe;
-use indexmap::IndexMap;
-use indexmap::IndexSet;
-use indexmap::indexmap;
+use pagable::Pagable;
+use pagable::pagable_typetag;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::UnpackValue;
 
@@ -60,7 +62,7 @@ enum WriteActionValidationError {
 }
 
 pub(crate) struct CommandLineContentBasedInputVisitor {
-    pub(crate) content_based_inputs: IndexSet<ArtifactGroup>,
+    pub(crate) content_based_inputs: BuckIndexSet<ArtifactGroup>,
 }
 
 impl CommandLineContentBasedInputVisitor {
@@ -100,18 +102,18 @@ impl<'v> CommandLineArtifactVisitor<'v> for CommandLineContentBasedInputVisitor 
     }
 }
 
-#[derive(Allocative, Debug)]
+#[derive(Allocative, Debug, Pagable)]
 pub(crate) struct UnregisteredWriteAction {
     pub(crate) is_executable: bool,
     pub(crate) absolute: bool,
-    pub(crate) macro_files: Option<IndexSet<Artifact>>,
+    pub(crate) macro_files: Option<BuckIndexSet<Artifact>>,
     pub(crate) use_dep_files_placeholder_for_content_based_paths: bool,
 }
 
 impl UnregisteredAction for UnregisteredWriteAction {
     fn register(
         self: Box<Self>,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         starlark_data: Option<OwnedFrozenValue>,
         _error_handler: Option<OwnedFrozenValue>,
     ) -> buck2_error::Result<Box<dyn Action>> {
@@ -122,7 +124,7 @@ impl UnregisteredAction for UnregisteredWriteAction {
     }
 }
 
-#[derive(Debug, Allocative)]
+#[derive(Debug, Allocative, Pagable)]
 struct WriteAction {
     contents: OwnedFrozenValue, // StarlarkCmdArgs
     output: BuildArtifact,
@@ -132,7 +134,7 @@ struct WriteAction {
 impl WriteAction {
     fn new(
         contents: OwnedFrozenValue,
-        outputs: IndexSet<BuildArtifact>,
+        outputs: BuckIndexSet<BuildArtifact>,
         inner: UnregisteredWriteAction,
     ) -> buck2_error::Result<Self> {
         let mut outputs = outputs.into_iter();
@@ -164,37 +166,35 @@ impl WriteAction {
     ) -> buck2_error::Result<String> {
         let mut cli = Vec::<String>::new();
 
-        let macro_files = self.inner.macro_files.as_ref().map(|macro_files| {
-            macro_files
-                .iter()
-                .map(|a| (a, artifact_path_mapping.get(a)))
-                .collect()
-        });
+        let macro_files = self
+            .inner
+            .macro_files
+            .as_ref()
+            .map(|macro_files| {
+                macro_files
+                    .iter()
+                    .map(|a| a.resolve_path(fs.fs(), artifact_path_mapping.get(a)))
+                    .collect::<buck2_error::Result<Vec<_>>>()
+            })
+            .transpose()?;
 
-        let mut ctx = if let Some(ref macro_files) = macro_files {
-            DefaultCommandLineContext::new_with_write_to_file_macros_support(fs, macro_files)
-        } else {
-            DefaultCommandLineContext::new(fs)
-        };
-
-        let mut abs;
-
-        let ctx = if self.inner.absolute {
-            abs = AbsCommandLineContext::wrap(ctx);
-            &mut abs as _
-        } else {
-            &mut ctx as _
-        };
-
+        let mut fmt = CommandLineBuilder::new_with_options(
+            &mut cli,
+            artifact_path_mapping,
+            fs,
+            self.inner.absolute,
+            macro_files,
+        );
         ValueAsCommandLineLike::unpack_value_err(self.contents.value())
             .unwrap()
             .0
-            .add_to_command_line(&mut cli, ctx, artifact_path_mapping)?;
+            .add_to_command_line(&mut fmt)?;
 
         Ok(cli.join("\n"))
     }
 }
 
+#[pagable_typetag]
 #[async_trait]
 impl Action for WriteAction {
     fn kind(&self) -> buck2_data::ActionKind {
@@ -241,9 +241,9 @@ impl Action for WriteAction {
         &self,
         fs: &ExecutorFs,
         artifact_path_mapping: &dyn ArtifactPathMapper,
-    ) -> IndexMap<String, String> {
+    ) -> BuckIndexMap<String, String> {
         // TODO(cjhopman): We should change this api to support returning a Result.
-        indexmap! {
+        buck_indexmap! {
             "contents".to_owned() => match self.get_contents(fs, artifact_path_mapping) {
                 Ok(v) => v,
                 Err(e) => format!("ERROR: constructing contents ({e})")
@@ -287,10 +287,14 @@ impl Action for WriteAction {
                     }
                     .as_ref(),
                 )?;
+                let configuration_path = ctx
+                    .materializer()
+                    .maybe_eager_configuration_path(fs, self.output.get_path())?;
                 Ok(vec![WriteRequest {
                     path,
                     content,
                     is_executable: self.inner.is_executable,
+                    configuration_path,
                 }])
             }))
             .await?
@@ -303,7 +307,7 @@ impl Action for WriteAction {
                 .ok_or_else(|| internal_error!("Action did not set execution_start"))?;
 
         Ok((
-            ActionOutputs::new(indexmap![self.output.get_path().dupe() => value]),
+            ActionOutputs::new(buck_indexmap![self.output.get_path().dupe() => value]),
             ActionExecutionMetadata {
                 execution_kind: ActionExecutionKind::Simple,
                 timing: ActionExecutionTimingData { wall_time },

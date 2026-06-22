@@ -19,7 +19,7 @@
 
 use thiserror::Error;
 
-use crate::pagable::vtable_registry::DeserTypeId;
+use crate::pagable::DeserTypeId;
 
 /// Errors that can occur during pagable serialization/deserialization.
 #[derive(Debug, Error)]
@@ -29,6 +29,43 @@ pub enum PagableError {
     TypeNotRegistered {
         /// The type identifier that was not found.
         type_id: DeserTypeId,
+    },
+
+    /// The total bytes declared for an arena bump do not match what was actually deserialized.
+    #[error(
+        "Corrupted data: {count} values consumed {actual_bytes} bytes but expected {expected_bytes}"
+    )]
+    InconsistentArenaSize {
+        /// Number of values deserialized.
+        count: usize,
+        /// Bytes declared in the serialized header.
+        expected_bytes: u32,
+        /// Bytes actually consumed by deserialized values.
+        actual_bytes: u32,
+    },
+
+    /// A value declared a zero `alloc_size`. Every arena value occupies at least
+    /// its header, so this is never valid and indicates a corrupt page-out stream.
+    #[error("Corrupted data: value {index} declared a zero alloc_size")]
+    ZeroAllocSize {
+        /// Index of the value in the heap.
+        index: usize,
+    },
+
+    /// Heap bases not registered for the heap a `FrozenValue` resolves to.
+    #[error("Heap bases not registered for heap {heap_id:?}")]
+    HeapBasesNotRegistered {
+        /// The HeapRefId whose bases were not found.
+        heap_id: crate::pagable::heap_ref_id::HeapRefId,
+    },
+
+    /// A `StarlarkPagable`-derived enum was deserialized with an unknown variant tag.
+    #[error("Invalid `{enum_name}` variant tag: {tag}")]
+    InvalidVariantTag {
+        /// Name of the enum being deserialized.
+        enum_name: &'static str,
+        /// The tag byte read from the input.
+        tag: u8,
     },
 }
 

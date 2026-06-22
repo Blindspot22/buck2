@@ -29,32 +29,42 @@ use crate as starlark;
 use crate::environment::GlobalsBuilder;
 use crate::environment::Methods;
 use crate::environment::MethodsBuilder;
-use crate::environment::MethodsStatic;
 use crate::eval::Evaluator;
 use crate::values::AllocValue;
 use crate::values::Heap;
 use crate::values::NoSerialize;
 use crate::values::ProvidesStaticType;
+use crate::values::StarlarkPagable;
 use crate::values::StarlarkValue;
 use crate::values::Trace;
 use crate::values::Value;
 use crate::values::none::NoneOr;
 use crate::values::starlark_value;
 
-#[derive(ProvidesStaticType, Trace, Allocative, Debug, NoSerialize, Clone)]
+#[derive(
+    ProvidesStaticType,
+    Trace,
+    Allocative,
+    Debug,
+    NoSerialize,
+    Clone,
+    StarlarkPagable
+)]
 /// A frame of the call-stack.
 struct StackFrame {
     /// The name of the entry on the call-stack.
     name: String,
     /// The location of the definition, or [`None`] for native Rust functions.
+    #[starlark_pagable(pagable)]
     location: Option<FileSpan>,
 }
+
+starlark::methods_static!(STACK_FRAME_METHODS = stack_frame_methods);
 
 #[starlark_value(type = "StackFrame", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StackFrame {
     fn get_methods() -> Option<&'static Methods> {
-        static RES: MethodsStatic = MethodsStatic::new();
-        RES.methods(stack_frame_methods)
+        Some(STACK_FRAME_METHODS.methods())
     }
 }
 
