@@ -157,6 +157,22 @@ simple_dep_file = rule(
     },
 )
 
+def _cross_config_run_impl(ctx):
+    # A minimal `run` action that copies a marker file to a content-based output.
+    marker = ctx.actions.write("marker", ctx.attrs.marker_content, has_content_based_path = True)
+    out = ctx.actions.declare_output("out", has_content_based_path = True)
+    ctx.actions.run(cmd_args(["cp", marker, out.as_output()]), category = "test_run")
+    return [DefaultInfo(default_output = out)]
+
+cross_config_run = rule(
+    impl = _cross_config_run_impl,
+    attrs = {
+        "marker_content": attrs.string(),
+        # Unused by the action; only used to force a DICE recompute across builds via a buckconfig change
+        "_ignored": attrs.string(default = ""),
+    },
+)
+
 def _shared_dir_dep_file_impl(ctx):
     has_content_based_path = ctx.attrs.use_content_based_paths
     used_input = ctx.actions.write("used_input1", ctx.attrs.used_input_contents, has_content_based_path = has_content_based_path)
@@ -274,4 +290,58 @@ def _dep_file_with_preceding_actions_impl(ctx):
 dep_file_with_preceding_actions = rule(
     impl = _dep_file_with_preceding_actions_impl,
     attrs = {},
+)
+
+def _dir_output_dep_file_impl(ctx):
+    # A dep-file-producing action whose outputs are a DIRECTORY plus a leaf dep file. Exercises
+    # persisting/reloading a directory output (its tree is rehydrated from the materializer).
+    has_content_based_path = ctx.attrs.use_content_based_paths
+    used_input = ctx.actions.write("used_input", ctx.attrs.used_input_contents, has_content_based_path = has_content_based_path)
+    unused_input = ctx.actions.write("unused_input", ctx.attrs.unused_input_contents, has_content_based_path = has_content_based_path)
+
+    dep_file = ctx.actions.declare_output("depfile", has_content_based_path = has_content_based_path)
+    out_dir = ctx.actions.declare_output("out_dir", has_content_based_path = has_content_based_path, dir = True)
+
+    script = ctx.actions.write(
+        "script.py",
+        [
+            "import os, sys",
+            "out_dir = sys.argv[1]",
+            "os.makedirs(out_dir, exist_ok=True)",
+            # Echo the used input into the output so a test can tell a freshly produced tree from a
+            # stale one reloaded out of the cache.
+            "with open(sys.argv[3]) as used_input:",
+            "  used_contents = used_input.read()",
+            "with open(os.path.join(out_dir, 'f'), 'w') as f:",
+            "  f.write(used_contents)",
+            "with open(sys.argv[2], 'w') as dep_file:",
+            "  for arg in sys.argv[3:]:",
+            "    dep_file.write('{}\\n'.format(arg))",
+        ],
+        has_content_based_path = has_content_based_path,
+    )
+
+    tag = ctx.actions.artifact_tag()
+    args = cmd_args(
+        [
+            "fbpython",
+            script,
+            out_dir.as_output(),
+            tag.tag_artifacts(dep_file.as_output()),
+            tag.tag_artifacts(used_input),
+        ],
+        hidden = tag.tag_artifacts(cmd_args([unused_input])),
+    )
+
+    ctx.actions.run(args, category = "test_run", dep_files = {"used": tag})
+
+    return [DefaultInfo(default_output = out_dir)]
+
+dir_output_dep_file = rule(
+    impl = _dir_output_dep_file_impl,
+    attrs = {
+        "unused_input_contents": attrs.string(),
+        "use_content_based_paths": attrs.bool(default = read_config("test", "use_content_based_paths", "true") == "true"),
+        "used_input_contents": attrs.string(),
+    },
 )

@@ -32,6 +32,7 @@ use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use buck2_build_api::interpreter::rule_defs::cmd_args::SimpleCommandLineArtifactVisitor;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::install_info::FrozenInstallInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::run_info::FrozenRunInfo;
+use buck2_build_api::interpreter::rule_defs::provider::builtin::run_info::OwnedRunInfo;
 use buck2_build_api::materialize::HasMaterializationQueueTracker;
 use buck2_build_api::materialize::MaterializationAndUploadContext;
 use buck2_build_api::materialize::materialize_and_upload_artifact_group;
@@ -95,12 +96,9 @@ use buck2_server_ctx::template::ServerCommandTemplate;
 use buck2_server_ctx::template::run_server_command;
 use buck2_util::future::try_join_all;
 use buck2_util::process::async_background_command;
-use chrono::DateTime;
-use chrono::Utc;
 use dice::DiceComputations;
 use dice::DiceTransaction;
 use dupe::Dupe;
-use futures::future::FutureExt;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use starlark_map::small_map::SmallMap;
@@ -231,7 +229,7 @@ async fn install(
             .into_iter()
             .collect();
 
-    let install_log_dir = &get_installer_log_directory(server_ctx, &mut ctx).await?;
+    let install_log_dir = &get_installer_log_directory(server_ctx, &mut ctx.ctx()).await?;
 
     // Snapshot the installed target labels for telemetry before the vec is
     // consumed by the install pipeline below. Deduped to keep
@@ -251,22 +249,20 @@ async fn install(
 
     let install_requests = install_request_data_vec.into_iter().map(|data| {
         let installer_run_args = &request.installer_run_args;
-        DiceComputations::declare_closure(move |ctx| {
-            async move {
-                handle_install_request(
-                    ctx,
-                    install_log_dir,
-                    &data,
-                    installer_run_args,
-                    request.installer_debug,
-                )
-                .await
-            }
-            .boxed()
+        DiceComputations::declare_closure(async move |ctx| {
+            handle_install_request(
+                ctx,
+                install_log_dir,
+                &data,
+                installer_run_args,
+                request.installer_debug,
+            )
+            .await
         })
     });
 
-    let install_requests = ctx.compute_many(install_requests);
+    let mut dice = ctx.ctx();
+    let install_requests = dice.compute_many(install_requests);
     try_join_all(install_requests)
         .await
         .buck_error_context("Interaction with installer failed.")?;
@@ -275,7 +271,7 @@ async fn install(
     // because rule-type lookup hit an error (DICE failure, unbound late binding, etc).
     let mut target_rule_type_names: Vec<String> = Vec::with_capacity(installed_target_labels.len());
     for label in &installed_target_labels {
-        match get_target_rule_type_name(&mut ctx, label).await {
+        match get_target_rule_type_name(&mut ctx.ctx(), label).await {
             Ok(name) => target_rule_type_names.push(name),
             Err(e) => {
                 let _unused = soft_error!(
@@ -306,18 +302,21 @@ async fn collect_install_request_data<'a>(
             .as_ref()
             .ok_or_else(|| internal_error!("target_cfg must be set"))?,
         server_ctx,
-        ctx,
+        &mut ctx.ctx(),
     )
     .await?;
 
     // Note <TargetName> does not return the providers
     let parsed_patterns_with_modifiers = parse_patterns_with_modifiers_from_cli_args::<
         ConfiguredProvidersPatternExtra,
-    >(ctx, &request.target_patterns, cwd)
+    >(&mut ctx.ctx(), &request.target_patterns, cwd)
     .await?;
     server_ctx.log_target_pattern_with_modifiers(&parsed_patterns_with_modifiers);
-    let resolved_pattern =
-        ResolveTargetPatterns::resolve_with_modifiers(ctx, &parsed_patterns_with_modifiers).await?;
+    let resolved_pattern = ResolveTargetPatterns::resolve_with_modifiers(
+        &mut ctx.ctx(),
+        &parsed_patterns_with_modifiers,
+    )
+    .await?;
 
     let resolved_pattern = resolved_pattern
         .convert_pattern()
@@ -330,7 +329,7 @@ async fn collect_install_request_data<'a>(
         let targets: Vec<(TargetName, ProvidersPatternExtra)> = match spec {
             PackageSpec::Targets(targets) => targets.into_iter().collect(),
             PackageSpec::All() => {
-                let interpreter_results = ctx.get_interpreter_results(package.dupe()).await?;
+                let interpreter_results = ctx.ctx().get_interpreter_results(package.dupe()).await?;
                 interpreter_results
                     .targets()
                     .keys()
@@ -363,21 +362,23 @@ async fn collect_install_request_data<'a>(
         for (target_name, providers) in targets {
             let label = providers.into_providers_label(package.dupe(), target_name.as_ref());
             let providers_label = ctx
+                .ctx()
                 .get_configured_provider_label(&label, &local_cfg_options)
                 .await?;
             let install_info = ctx
+                .ctx()
                 .get_providers(&providers_label)
                 .await?
                 .require_compatible()?
-                .value
-                .maybe_map(|c| c.as_ref().builtin_provider_value::<FrozenInstallInfo>());
+                .builtin_provider_value::<FrozenInstallInfo>();
             match install_info {
                 Some(install_info) => {
                     let installer_label = install_info.get_installer()?;
+                    let install_files = install_info.get_files()?;
                     installer_to_files_map
                         .entry(installer_label)
                         .or_insert_with(Vec::new)
-                        .push((providers_label.target().dupe(), install_info));
+                        .push((providers_label.target().dupe(), install_files));
                 }
                 None => {
                     return Err(InstallError::NoInstallProvider(
@@ -391,12 +392,7 @@ async fn collect_install_request_data<'a>(
     }
 
     let mut request_data_vec = Vec::with_capacity(installer_to_files_map.len());
-    for (installer_label, install_info_vector) in installer_to_files_map {
-        let mut installed_targets = Vec::with_capacity(install_info_vector.len());
-        for (installed_target, install_info) in install_info_vector {
-            let install_files = install_info.get_files()?;
-            installed_targets.push((installed_target, install_files));
-        }
+    for (installer_label, installed_targets) in installer_to_files_map {
         request_data_vec.push(InstallRequestData {
             installer_label,
             installed_targets,
@@ -429,8 +425,7 @@ fn get_random_tcp_port() -> buck2_error::Result<u16> {
 }
 
 fn get_timestamp_as_string() -> buck2_error::Result<String> {
-    let dt = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
-    Ok(dt.format("%Y%m%d-%H%M%S").to_string())
+    Ok(jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S").to_string())
 }
 
 fn calculate_hash<T: Hash>(t: &T) -> u64 {
@@ -448,7 +443,7 @@ struct InstallResult {
 
 struct ConnectedInstaller<'a> {
     client: InstallerClient<Channel>,
-    artifact_fs: ArtifactFs,
+    artifact_fs: &'a ArtifactFs,
     install_request_data: &'a InstallRequestData<'a>,
     device_metadata: Arc<Mutex<Vec<DeviceMetadata>>>,
     installer_ready: Instant,
@@ -459,7 +454,7 @@ struct ConnectedInstaller<'a> {
 impl<'a> ConnectedInstaller<'a> {
     async fn connect(
         tcp_port: u16,
-        artifact_fs: ArtifactFs,
+        artifact_fs: &'a ArtifactFs,
         install_request_data: &'a InstallRequestData<'a>,
         installer_run_args: &[String],
         installer_child: &mut tokio::process::Child,
@@ -711,7 +706,7 @@ impl<'a> ConnectedInstaller<'a> {
                     path: path.to_owned(),
                     err: format!(
                         "Received install id: {} doesn't match with the sent one: {}",
-                        response.install_id, &install_id
+                        response.install_id, install_id
                     ),
                 }
                 .into());
@@ -780,55 +775,49 @@ async fn handle_install_request(
 
     let compute_result = ctx
         .try_compute2(
-            |ctx| {
-                async move {
-                    build_files(ctx, &install_request_data.installed_targets, files_tx).await?;
-                    buck2_error::Ok(Instant::now())
-                }
-                .boxed()
+            async |ctx| {
+                build_files(ctx, &install_request_data.installed_targets, files_tx).await?;
+                buck2_error::Ok(Instant::now())
             },
-            |ctx| {
-                async move {
-                    // FIXME: The random unused tcp port might be available when get_random_tcp_port() is called,
-                    // but when the installer tries to bind on it, someone else might bind on it.
-                    // TODO: choose unused tcp port on installer side.
-                    // The way communication may happen:
-                    // 1. buck2 passes a temp file for a tcp port output.
-                    // 2. installer app choose unused tcp port and writes it into the passed file.
-                    // 3. buck2 reads tcp port from file and use it to connect to the installer app. (`connect_to_installer` function)
-                    let tcp_port = get_random_tcp_port()?;
+            async |ctx| {
+                // FIXME: The random unused tcp port might be available when get_random_tcp_port() is called,
+                // but when the installer tries to bind on it, someone else might bind on it.
+                // TODO: choose unused tcp port on installer side.
+                // The way communication may happen:
+                // 1. buck2 passes a temp file for a tcp port output.
+                // 2. installer app choose unused tcp port and writes it into the passed file.
+                // 3. buck2 reads tcp port from file and use it to connect to the installer app. (`connect_to_installer` function)
+                let tcp_port = get_random_tcp_port()?;
 
-                    let mut installer_run_args: Vec<String> = vec![
-                        "--tcp-port".to_owned(),
-                        tcp_port.to_string(),
-                        "--log-path".to_owned(),
-                        log_path_string.to_owned(),
-                    ];
+                let mut installer_run_args: Vec<String> = vec![
+                    "--tcp-port".to_owned(),
+                    tcp_port.to_string(),
+                    "--log-path".to_owned(),
+                    log_path_string.to_owned(),
+                ];
 
-                    installer_run_args.extend(initial_installer_run_args.to_vec());
+                installer_run_args.extend(initial_installer_run_args.to_vec());
 
-                    let mut installer_child = build_launch_installer(
-                        ctx,
-                        &install_request_data.installer_label,
-                        &installer_run_args,
-                        installer_debug,
-                        &stderr_log_path_string,
-                    )
-                    .await?;
-                    let artifact_fs = ctx.get_artifact_fs().await?;
+                let mut installer_child = build_launch_installer(
+                    ctx,
+                    &install_request_data.installer_label,
+                    &installer_run_args,
+                    installer_debug,
+                    &stderr_log_path_string,
+                )
+                .await?;
+                let artifact_fs = ctx.get_artifact_fs().await?;
 
-                    let installer = ConnectedInstaller::connect(
-                        tcp_port,
-                        artifact_fs,
-                        install_request_data,
-                        initial_installer_run_args,
-                        &mut installer_child,
-                    )
-                    .await?;
+                let installer = ConnectedInstaller::connect(
+                    tcp_port,
+                    artifact_fs,
+                    install_request_data,
+                    initial_installer_run_args,
+                    &mut installer_child,
+                )
+                .await?;
 
-                    buck2_error::Ok(installer.install(files_rx).await)
-                }
-                .boxed()
+                buck2_error::Ok(installer.install(files_rx).await)
             },
         )
         .await;
@@ -913,31 +902,33 @@ async fn build_launch_installer(
         .await?
         .require_compatible()?;
 
-    if let Some(installer_run_info) = frozen_providers
-        .provider_collection()
-        .builtin_provider::<FrozenRunInfo>()
-    {
+    // Held across awaits, so this needs the owned form; the branded view is derived at each use.
+    let installer_run_info: Option<OwnedRunInfo> = frozen_providers
+        .builtin_provider_value::<FrozenRunInfo>()
+        .map(Into::into);
+    if let Some(installer_run_info) = installer_run_info {
         let artifact_fs = ctx.get_artifact_fs().await?;
         let inputs = {
             // Restrict lifetime of mutable artifact_visitor.
             let mut artifact_visitor = SimpleCommandLineArtifactVisitor::new();
-            installer_run_info.visit_artifacts(&mut artifact_visitor)?;
+            installer_run_info
+                .as_ref()
+                .value()
+                .as_ref()
+                .visit_artifacts(&mut artifact_visitor)?;
             artifact_visitor.inputs
         };
         let ensured_inputs = ctx
-            .try_compute_join(inputs, |ctx, input| {
-                async move {
-                    materialize_and_upload_artifact_group(
-                        ctx,
-                        &input,
-                        MaterializationAndUploadContext::materialize(),
-                        &ctx.per_transaction_data()
-                            .get_materialization_queue_tracker(),
-                    )
-                    .await
-                    .map(|value| (input, value))
-                }
-                .boxed()
+            .try_compute_join(inputs, async |ctx, input| {
+                materialize_and_upload_artifact_group(
+                    ctx,
+                    &input,
+                    MaterializationAndUploadContext::materialize(),
+                    &ctx.per_transaction_data()
+                        .get_materialization_queue_tracker(),
+                )
+                .await
+                .map(|value| (input, value))
             })
             .await
             .buck_error_context("Failed to build installer")?;
@@ -948,7 +939,7 @@ async fn build_launch_installer(
         } else {
             PathSeparatorKind::Unix
         };
-        let executor_fs = ExecutorFs::new(&artifact_fs, path_separator);
+        let executor_fs = ExecutorFs::new(artifact_fs, path_separator);
         let mut run_args = Vec::<String>::new();
         let artifact_path_mapper = ArtifactPathMapperImpl::from(&ensured_inputs);
         let mut fmt = CommandLineBuilder::new_with_options(
@@ -958,7 +949,11 @@ async fn build_launch_installer(
             true,
             None,
         );
-        installer_run_info.add_to_command_line(&mut fmt)?;
+        installer_run_info
+            .as_ref()
+            .value()
+            .as_ref()
+            .add_to_command_line(&mut fmt)?;
 
         let stderr = if installer_log_console {
             Stdio::inherit()
@@ -1048,47 +1043,38 @@ async fn build_files(
 
     ctx.try_compute_join(
         file_outputs,
-        |ctx, (installed_target, name, artifact, tx_clone)| {
-            async move {
-                let (_, artifact_values) = ctx
-                    .try_compute2(
-                        |ctx| {
-                            async move {
-                                VALIDATION_IMPL
-                                    .get()?
-                                    .validate_target_node_transitively(ctx, installed_target.dupe())
-                                    .await
-                            }
-                            .boxed()
-                        },
-                        |ctx| {
-                            async move {
-                                materialize_and_upload_artifact_group(
-                                    ctx,
-                                    &artifact,
-                                    MaterializationAndUploadContext::materialize(),
-                                    &ctx.per_transaction_data()
-                                        .get_materialization_queue_tracker(),
-                                )
-                                .await
-                            }
-                            .boxed()
-                        },
-                    )
-                    .await?;
-                for (artifact, artifact_value) in artifact_values.iter() {
-                    let install_id = install_id(installed_target);
-                    let file_result = FileResult {
-                        install_id,
-                        name: (*name).to_owned(),
-                        artifact: artifact.to_owned(),
-                        artifact_value: artifact_value.to_owned(),
-                    };
-                    tx_clone.send(file_result)?;
-                }
-                buck2_error::Ok(())
+        async |ctx, (installed_target, name, artifact, tx_clone)| {
+            let (_, artifact_values) = ctx
+                .try_compute2(
+                    async |ctx| {
+                        VALIDATION_IMPL
+                            .get()?
+                            .validate_target_node_transitively(ctx, installed_target.dupe())
+                            .await
+                    },
+                    async |ctx| {
+                        materialize_and_upload_artifact_group(
+                            ctx,
+                            &artifact,
+                            MaterializationAndUploadContext::materialize(),
+                            &ctx.per_transaction_data()
+                                .get_materialization_queue_tracker(),
+                        )
+                        .await
+                    },
+                )
+                .await?;
+            for (artifact, artifact_value) in artifact_values.iter() {
+                let install_id = install_id(installed_target);
+                let file_result = FileResult {
+                    install_id,
+                    name: (*name).to_owned(),
+                    artifact: artifact.to_owned(),
+                    artifact_value: artifact_value.to_owned(),
+                };
+                tx_clone.send(file_result)?;
             }
-            .boxed()
+            buck2_error::Ok(())
         },
     )
     .await?;

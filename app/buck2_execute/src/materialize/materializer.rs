@@ -23,14 +23,13 @@ use buck2_directory::directory::directory_iterator::DirectoryIterator;
 use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_directory::directory::walk::ordered_entry_walk;
 use buck2_events::dispatch::EventDispatcher;
-use chrono::DateTime;
-use chrono::Duration;
-use chrono::Utc;
 use derive_more::Display;
 use dice::UserComputationData;
 use dupe::Dupe;
 use futures::stream::BoxStream;
 use futures::stream::TryStreamExt;
+use jiff::SignedDuration;
+use jiff::Timestamp;
 
 use crate::artifact_value::ArtifactValue;
 use crate::directory::ActionDirectoryEntry;
@@ -142,6 +141,12 @@ pub struct DeclareArtifactPayload {
     pub artifact: ArtifactValue,
     /// For content-based artifacts, the configuration-based path used for eager materialization lookups.
     pub configuration_path: Option<ProjectRelativePathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Dupe, Eq, PartialEq)]
+pub enum MaterializationPurpose {
+    FinalOutput,
+    IntermediateOnly,
 }
 
 /// A trait providing methods to asynchronously materialize artifacts.
@@ -256,6 +261,7 @@ pub trait Materializer: Allocative + Send + Sync + 'static {
     async fn ensure_materialized(
         &self,
         artifact_paths: Vec<ProjectRelativePathBuf>,
+        _purpose: MaterializationPurpose,
     ) -> buck2_error::Result<()> {
         Ok(self
             .materialize_many(artifact_paths)
@@ -496,17 +502,17 @@ pub struct ActionExecutionOrigin {
     /// the system went to sleep (on MacOS, it will not increase during that time!).
     ///
     /// See: <https://github.com/rust-lang/rust/issues/79462>
-    action_instant: DateTime<Utc>,
+    action_instant: Timestamp,
 
     /// The TTL we retrieved from RE for this action.
-    ttl: Duration,
+    ttl: SignedDuration,
 }
 
 impl ActionExecutionOrigin {
-    fn action_age(&self) -> Duration {
+    fn action_age(&self) -> SignedDuration {
         // NOTE: This might return a negative duration if our time skewed a lot, but that's
         // actually totally fine, since we only care to know if this is < TTL.
-        Utc::now() - self.action_instant
+        Timestamp::now().duration_since(self.action_instant)
     }
 }
 
@@ -518,8 +524,8 @@ impl fmt::Display for CasDownloadInfoOrigin {
                     f,
                     "{} retrieved {:.3} seconds ago with ttl = {:.3} seconds",
                     execution.action_digest,
-                    execution.action_age().num_seconds(),
-                    execution.ttl.num_seconds()
+                    execution.action_age().as_secs(),
+                    execution.ttl.as_secs()
                 )?;
             }
             Self::Declared => {
@@ -579,8 +585,8 @@ impl CasDownloadInfo {
     pub fn new_execution(
         action_digest: TrackedActionDigest,
         re_use_case: RemoteExecutorUseCase,
-        action_instant: DateTime<Utc>,
-        ttl: Duration,
+        action_instant: Timestamp,
+        ttl: SignedDuration,
     ) -> Self {
         Self {
             origin: CasDownloadInfoOrigin::Execution(ActionExecutionOrigin {
@@ -599,7 +605,7 @@ impl CasDownloadInfo {
         }
     }
 
-    pub fn action_age(&self) -> Option<Duration> {
+    pub fn action_age(&self) -> Option<SignedDuration> {
         match &self.origin {
             CasDownloadInfoOrigin::Execution(execution) => Some(execution.action_age()),
             CasDownloadInfoOrigin::Declared => None,
@@ -673,7 +679,9 @@ pub trait SetMaterializer {
 }
 
 pub trait HasMaterializer {
-    fn get_materializer(&self) -> Arc<dyn Materializer>;
+    fn get_materializer(&self) -> &dyn Materializer;
+
+    fn get_materializer_handle(&self) -> Arc<dyn Materializer>;
 }
 
 impl SetMaterializer for UserComputationData {
@@ -683,7 +691,14 @@ impl SetMaterializer for UserComputationData {
 }
 
 impl HasMaterializer for UserComputationData {
-    fn get_materializer(&self) -> Arc<dyn Materializer> {
+    fn get_materializer(&self) -> &dyn Materializer {
+        &**self
+            .data
+            .get::<Arc<dyn Materializer>>()
+            .expect("Materializer should be set")
+    }
+
+    fn get_materializer_handle(&self) -> Arc<dyn Materializer> {
         self.data
             .get::<Arc<dyn Materializer>>()
             .expect("Materializer should be set")
@@ -782,7 +797,7 @@ pub trait DeferredMaterializerExtensions: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct CleanStaleArtifactsArgs {
-    pub keep_since_time: DateTime<Utc>,
+    pub keep_since_time: Timestamp,
     pub dry_run: bool,
     pub tracked_only: bool,
     pub adaptive_low_disk_threshold: Option<f64>,

@@ -40,17 +40,18 @@ use buck2_fs::paths::file_name::FileName;
 use buck2_fs::paths::file_name::FileNameBuf;
 use buck2_hash::StdBuckHashMap;
 use buck2_wrapper_common::invocation_id::TraceId;
-use chrono::DateTime;
-use chrono::Utc;
 use derivative::Derivative;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use jiff::Timestamp;
 use tokio::sync::oneshot::Sender;
 
 use crate::materializers::deferred::ArtifactMaterializationStage;
 use crate::materializers::deferred::DeferredMaterializerCommandProcessor;
+use crate::materializers::deferred::DeferredMaterializerStats;
+use crate::materializers::deferred::artifact_tree::ArtifactClassification;
 use crate::materializers::deferred::artifact_tree::ArtifactMaterializationData;
 use crate::materializers::deferred::artifact_tree::ArtifactTree;
 use crate::materializers::deferred::artifact_tree::artifact_metadata_size;
@@ -61,7 +62,7 @@ use crate::sqlite::materializer_db::MaterializerStateSqliteDb;
 
 #[derive(Debug, Clone)]
 pub struct CleanStaleArtifactsCommand {
-    pub keep_since_time: DateTime<Utc>,
+    pub keep_since_time: Timestamp,
     pub dry_run: bool,
     pub tracked_only: bool,
     pub dispatcher: EventDispatcher,
@@ -81,7 +82,10 @@ pub struct AdaptiveLowDiskParams {
     pub threshold_percent: f64,
     /// Retained artifacts last accessed at or after this instant are protected
     /// from adaptive promotion, regardless of free disk pressure.
-    pub min_access_time: DateTime<Utc>,
+    pub min_access_time: Timestamp,
+    /// Whether non-active intermediate-only artifacts may be promoted even
+    /// when they are within the adaptive minimum TTL.
+    pub delete_intermediate_within_min_ttl: bool,
 }
 
 #[derive(Derivative)]
@@ -221,6 +225,7 @@ impl CleanStaleArtifactsCommand {
                     &mut processor.tree,
                     sqlite_db,
                     &processor.io,
+                    &processor.stats,
                     processor.cancellations,
                     liveliness_observer.clone(),
                 )
@@ -235,13 +240,14 @@ impl CleanStaleArtifactsCommand {
         tree: &mut ArtifactTree,
         sqlite_db: &mut MaterializerStateSqliteDb,
         io: &Arc<T>,
+        materializer_stats: &DeferredMaterializerStats,
         cancellations: &'static CancellationContext,
         liveliness_observer: Arc<dyn LivelinessObserverSync>,
     ) -> buck2_error::Result<PendingCleanResult> {
         let start_time = Instant::now();
 
         let mut artifact_dirs = Vec::new();
-        for dir_name in &["gen", "art"] {
+        for dir_name in &["gen", "gen-anon", "gen-bxl", "art", "art-anon", "art-bxl"] {
             let dir_path = io
                 .buck_out_path()
                 .join(ProjectRelativePathBuf::unchecked_new(dir_name.to_string()));
@@ -297,6 +303,7 @@ impl CleanStaleArtifactsCommand {
                     disk_stats.total_space,
                     params.threshold_percent,
                     params.min_access_time,
+                    params.delete_intermediate_within_min_ttl,
                 ),
                 Err(e) => {
                     let _unused = soft_error!("disk_space_stats", e);
@@ -360,6 +367,7 @@ impl CleanStaleArtifactsCommand {
                 tree,
                 sqlite_db,
                 io,
+                materializer_stats,
                 cancellations,
                 liveliness_observer,
             )?))
@@ -410,6 +418,7 @@ fn create_clean_fut<T: IoHandler>(
     tree: &mut ArtifactTree,
     sqlite_db: &mut MaterializerStateSqliteDb,
     io: &Arc<T>,
+    materializer_stats: &DeferredMaterializerStats,
     cancellations: &'static CancellationContext,
     liveliness_observer: Arc<dyn LivelinessObserverSync>,
 ) -> buck2_error::Result<BoxFuture<'static, buck2_error::Result<CleanResult>>> {
@@ -427,8 +436,11 @@ fn create_clean_fut<T: IoHandler>(
         })
         .collect();
 
-    let existing_clean_futs =
-        tree.invalidate_paths_and_collect_futures(paths_to_invalidate, Some(sqlite_db))?;
+    let existing_clean_futs = tree.invalidate_paths_and_collect_futures(
+        paths_to_invalidate,
+        Some(sqlite_db),
+        materializer_stats,
+    )?;
     let mut existing_materialization_futs = vec![];
     for data in tree.iter_without_paths() {
         if let Some(active) = data.processing.active_ref()
@@ -465,7 +477,9 @@ fn create_clean_fut<T: IoHandler>(
                 })
                 .map(|(path, size)| {
                     clean_artifact(path, size, cancellations, &io, liveliness_observer.dupe())
-                }),
+                })
+                .collect::<Vec<_>>()
+                .into_iter(),
         )
         .await?;
 
@@ -541,7 +555,7 @@ pub fn get_size(path: &AbsNormPath) -> buck2_error::Result<u64> {
 
 struct StaleFinder<'a, T: IoHandler> {
     io: Arc<T>,
-    keep_since_time: DateTime<Utc>,
+    keep_since_time: Timestamp,
     found_paths: &'a mut Vec<FoundPath>,
     liveliness_observer: Arc<dyn LivelinessObserverSync>,
 }
@@ -564,7 +578,10 @@ enum TrackedState {
     Stale,
     /// Materialized, not-stale, and not active. Eligible to be promoted
     /// to `Stale` by `apply_adaptive_low_disk`.
-    Retained { last_access_time: DateTime<Utc> },
+    Retained {
+        last_access_time: Timestamp,
+        classification: ArtifactClassification,
+    },
     /// Materialized and is active. Must never be promoted/deleted.
     ActiveRetained,
 }
@@ -655,6 +672,7 @@ impl<T: IoHandler> StaleFinder<'_, T> {
                     });
                 }
                 ArtifactTree::Data(box ArtifactMaterializationData {
+                    classification,
                     stage:
                         ArtifactMaterializationStage::Materialized {
                             active: false,
@@ -669,6 +687,7 @@ impl<T: IoHandler> StaleFinder<'_, T> {
                         size: artifact_metadata_size(metadata),
                         state: TrackedState::Retained {
                             last_access_time: *last_access_time,
+                            classification: *classification,
                         },
                     });
                 }
@@ -697,7 +716,7 @@ impl<T: IoHandler> StaleFinder<'_, T> {
 
 fn find_stale_tracked_only(
     tree: &ArtifactTree,
-    keep_since_time: DateTime<Utc>,
+    keep_since_time: Timestamp,
     found_paths: &mut Vec<FoundPath>,
 ) -> buck2_error::Result<()> {
     for (f_path, v) in tree.iter_with_paths() {
@@ -729,6 +748,7 @@ fn find_stale_tracked_only(
                     size: 0,
                     state: TrackedState::Retained {
                         last_access_time: *last_access_time,
+                        classification: v.classification,
                     },
                 });
             }
@@ -740,14 +760,15 @@ fn find_stale_tracked_only(
 /// Promote retained, non-active artifacts to stale, oldest-access-first, until
 /// projected free disk space rises above `threshold_percent` of `total_space`,
 /// or every promotable artifact has been promoted. Artifacts last accessed at
-/// or after `min_access_time` are excluded — i.e. they are protected by the
-/// adaptive minimum TTL even when disk pressure remains.
+/// or after `min_access_time` are excluded unless they are intermediate-only
+/// and `delete_intermediate_within_min_ttl` is enabled.
 fn apply_adaptive_low_disk(
     found_paths: &mut [FoundPath],
     free_space: u64,
     total_space: u64,
     threshold_percent: f64,
-    min_access_time: DateTime<Utc>,
+    min_access_time: Timestamp,
+    delete_intermediate_within_min_ttl: bool,
 ) {
     if total_space == 0 {
         return;
@@ -763,15 +784,24 @@ fn apply_adaptive_low_disk(
         return;
     }
 
-    let mut promotable: Vec<(usize, DateTime<Utc>, u64)> = found_paths
+    let mut promotable: Vec<(usize, Timestamp, u64)> = found_paths
         .iter()
         .enumerate()
         .filter_map(|(i, p)| match p {
             FoundPath::Tracked {
-                state: TrackedState::Retained { last_access_time },
+                state:
+                    TrackedState::Retained {
+                        last_access_time,
+                        classification,
+                    },
                 size,
                 ..
-            } if *last_access_time < min_access_time => Some((i, *last_access_time, *size)),
+            } if *last_access_time < min_access_time
+                || (delete_intermediate_within_min_ttl
+                    && *classification == ArtifactClassification::IntermediateOnly) =>
+            {
+                Some((i, *last_access_time, *size))
+            }
             _ => None,
         })
         .collect();
@@ -814,9 +844,26 @@ pub enum LowDiskCleanMode {
     /// Run the normal-TTL clean, then keep marking retained, non-active
     /// artifacts (oldest access first) as stale until projected free disk %
     /// rises back above the threshold or every eligible artifact has been
-    /// marked. Retained artifacts younger than `min_ttl` are protected — they
-    /// are never promoted, even when disk pressure persists.
-    Adaptive { min_ttl: Duration },
+    /// marked. Retained artifacts below `min_ttl` are protected unless
+    /// deletion within the minimum TTL is enabled for intermediate artifacts.
+    Adaptive {
+        min_ttl: Duration,
+        delete_intermediate_within_min_ttl: bool,
+    },
+}
+
+/// Rejects values (negative, NaN, out of range) that the datetime arithmetic these durations
+/// feed into cannot represent.
+fn duration_from_config_hours(hours: f64, property: &str) -> buck2_error::Result<Duration> {
+    Duration::try_from_secs_f64(hours * 3600.0).map_err(|e| {
+        buck2_error::buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Invalid value `{}` for `buck2.{}`: {}",
+            hours,
+            property,
+            e
+        )
+    })
 }
 
 impl CleanStaleConfig {
@@ -863,18 +910,30 @@ impl CleanStaleConfig {
                 property: "clean_stale_low_disk_adaptive_min_ttl_hours",
             })?
             .unwrap_or(12.0);
-        let adaptive_min_ttl = Duration::from_hours(1).mul_f64(adaptive_min_ttl_hours);
+        let delete_intermediate_within_min_ttl = root_config
+            .parse(BuckconfigKeyRef {
+                section: "buck2",
+                property: "clean_stale_low_disk_adaptive_delete_intermediate_within_min_ttl",
+            })?
+            .unwrap_or(false);
         let low_disk_artifact_ttl_hours: Option<f64> = root_config.parse(BuckconfigKeyRef {
             section: "buck2",
             property: "clean_stale_low_disk_artifact_ttl_hours",
         })?;
         let low_disk_mode = if adaptive_enabled {
             LowDiskCleanMode::Adaptive {
-                min_ttl: adaptive_min_ttl,
+                min_ttl: duration_from_config_hours(
+                    adaptive_min_ttl_hours,
+                    "clean_stale_low_disk_adaptive_min_ttl_hours",
+                )?,
+                delete_intermediate_within_min_ttl,
             }
         } else {
             let hours = low_disk_artifact_ttl_hours.unwrap_or(48.0);
-            LowDiskCleanMode::Fixed(Duration::from_hours(1).mul_f64(hours))
+            LowDiskCleanMode::Fixed(duration_from_config_hours(
+                hours,
+                "clean_stale_low_disk_artifact_ttl_hours",
+            )?)
         };
         let low_disk_threshold_percent: Option<f64> = root_config.parse(BuckconfigKeyRef {
             section: "buck2",
@@ -886,9 +945,18 @@ impl CleanStaleConfig {
         });
         let clean_stale_config = if clean_stale_enabled {
             Some(Self {
-                clean_period: Duration::from_hours(1).mul_f64(clean_stale_period_hours),
-                artifact_ttl: Duration::from_hours(1).mul_f64(clean_stale_artifact_ttl_hours),
-                start_offset: Duration::from_hours(1).mul_f64(clean_stale_start_offset_hours),
+                clean_period: duration_from_config_hours(
+                    clean_stale_period_hours,
+                    "clean_stale_period_hours",
+                )?,
+                artifact_ttl: duration_from_config_hours(
+                    clean_stale_artifact_ttl_hours,
+                    "clean_stale_artifact_ttl_hours",
+                )?,
+                start_offset: duration_from_config_hours(
+                    clean_stale_start_offset_hours,
+                    "clean_stale_start_offset_hours",
+                )?,
                 low_disk,
                 dry_run: clean_stale_dry_run,
             })
@@ -904,7 +972,11 @@ impl CleanStaleConfig {
         match config.and_then(|c| c.low_disk.as_ref()) {
             Some(LowDiskCleanConfig {
                 threshold_percent,
-                mode: LowDiskCleanMode::Adaptive { min_ttl },
+                mode:
+                    LowDiskCleanMode::Adaptive {
+                        min_ttl,
+                        delete_intermediate_within_min_ttl,
+                    },
             }) => vec![
                 "adaptive-clean-stale:true".to_owned(),
                 format!(
@@ -915,6 +987,10 @@ impl CleanStaleConfig {
                     "adaptive-clean-stale-min-ttl-hours:{}",
                     min_ttl.as_secs_f64() / 3600.0
                 ),
+                format!(
+                    "adaptive-clean-stale-delete-intermediate-within-min-ttl:{}",
+                    delete_intermediate_within_min_ttl
+                ),
             ],
             _ => vec!["adaptive-clean-stale:false".to_owned()],
         }
@@ -924,24 +1000,50 @@ impl CleanStaleConfig {
 #[cfg(test)]
 mod tests {
     use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
-    use chrono::DateTime;
-    use chrono::TimeZone;
-    use chrono::Utc;
+    use jiff::Timestamp;
 
+    use crate::materializers::deferred::artifact_tree::ArtifactClassification;
     use crate::materializers::deferred::clean_stale::FoundPath;
     use crate::materializers::deferred::clean_stale::TrackedState;
     use crate::materializers::deferred::clean_stale::apply_adaptive_low_disk;
+    use crate::materializers::deferred::clean_stale::duration_from_config_hours;
 
-    fn t(secs: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(secs, 0).unwrap()
+    #[test]
+    fn test_duration_from_config_hours() {
+        assert_eq!(
+            duration_from_config_hours(2.0, "prop").unwrap(),
+            std::time::Duration::from_secs(7200)
+        );
+        assert!(duration_from_config_hours(-1.0, "prop").is_err());
+        assert!(duration_from_config_hours(f64::NAN, "prop").is_err());
+        assert!(duration_from_config_hours(f64::INFINITY, "prop").is_err());
+    }
+
+    fn t(secs: i64) -> Timestamp {
+        Timestamp::from_second(secs).unwrap()
     }
 
     fn retained(name: &str, last_access_secs: i64, size: u64) -> FoundPath {
+        retained_with_classification(
+            name,
+            last_access_secs,
+            size,
+            ArtifactClassification::FinalOutput,
+        )
+    }
+
+    fn retained_with_classification(
+        name: &str,
+        last_access_secs: i64,
+        size: u64,
+        classification: ArtifactClassification,
+    ) -> FoundPath {
         FoundPath::Tracked {
             path: ProjectRelativePathBuf::unchecked_new(name.to_owned()),
             size,
             state: TrackedState::Retained {
                 last_access_time: t(last_access_secs),
+                classification,
             },
         }
     }
@@ -988,15 +1090,15 @@ mod tests {
     /// Sentinel `min_access_time` that protects no artifacts — every retained
     /// artifact has `last_access_time` strictly less than this far-future
     /// instant, so the full promotion logic is exercised end-to-end.
-    fn no_min_ttl() -> DateTime<Utc> {
-        DateTime::<Utc>::MAX_UTC
+    fn no_min_ttl() -> Timestamp {
+        Timestamp::MAX
     }
 
     #[test]
     fn threshold_already_met_is_noop() {
         let mut paths = vec![retained("a", 100, 50)];
         // 60% free, threshold 50% -> already above, do nothing.
-        apply_adaptive_low_disk(&mut paths, 60, 100, 50.0, no_min_ttl());
+        apply_adaptive_low_disk(&mut paths, 60, 100, 50.0, no_min_ttl(), false);
         assert!(
             is_retained(&paths[0]),
             "free disk (60%) already exceeds threshold (50%); nothing should be promoted",
@@ -1011,7 +1113,7 @@ mod tests {
             retained("oldest", 100, 100),
             retained("old", 200, 350),
         ];
-        apply_adaptive_low_disk(&mut paths, 100, 1000, 50.0, no_min_ttl());
+        apply_adaptive_low_disk(&mut paths, 100, 1000, 50.0, no_min_ttl(), false);
         // Oldest (t=100, size=100) + next (t=200, size=350) = 450 >= 400 bytes_needed.
         // Newest (t=300) is left alone — promotion stops as soon as the running total crosses bytes_needed.
         assert!(
@@ -1036,7 +1138,7 @@ mod tests {
             retained("b", 200, 20),
             active_retained(9999),
         ];
-        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, no_min_ttl());
+        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, no_min_ttl(), false);
         assert!(
             is_stale(&paths[0], 10),
             "non-active retained `a` should be promoted"
@@ -1069,7 +1171,7 @@ mod tests {
             retained("r", 100, 100),
             active_retained(50),
         ];
-        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, no_min_ttl());
+        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, no_min_ttl(), false);
         assert!(
             matches!(&paths[0], FoundPath::Untracked(_, _, 42)),
             "untracked entries should never be touched",
@@ -1091,7 +1193,7 @@ mod tests {
     #[test]
     fn zero_total_is_noop() {
         let mut paths = vec![retained("a", 100, 50)];
-        apply_adaptive_low_disk(&mut paths, 0, 0, 100.0, no_min_ttl());
+        apply_adaptive_low_disk(&mut paths, 0, 0, 100.0, no_min_ttl(), false);
         assert!(
             is_retained(&paths[0]),
             "total_space=0 must short-circuit to a no-op (avoids divide-by-zero)",
@@ -1108,7 +1210,7 @@ mod tests {
             retained("on_boundary", 150, 50),
             retained("recent", 200, 50),
         ];
-        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, t(150));
+        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, t(150), false);
         assert!(
             is_stale(&paths[0], 50),
             "retained accessed before min_access_time is eligible for promotion",
@@ -1129,10 +1231,51 @@ mod tests {
         // retained access time means every artifact is within the min-TTL
         // window — adaptive cleaning never violates the minimum TTL floor.
         let mut paths = vec![retained("a", 100, 100), retained("b", 200, 100)];
-        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, t(50));
+        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, t(50), false);
         assert!(
             is_retained(&paths[0]) && is_retained(&paths[1]),
             "no retained artifact may be promoted when all are within the adaptive min-TTL window",
+        );
+    }
+
+    #[test]
+    fn enabled_gate_promotes_recent_intermediate_only() {
+        let mut paths = vec![
+            retained_with_classification(
+                "intermediate",
+                200,
+                50,
+                ArtifactClassification::IntermediateOnly,
+            ),
+            retained("final", 200, 50),
+        ];
+
+        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, t(150), true);
+
+        assert!(
+            is_stale(&paths[0], 50),
+            "an intermediate-only artifact within the minimum TTL should be promoted when enabled",
+        );
+        assert!(
+            is_retained(&paths[1]),
+            "a final output within the minimum TTL must remain protected",
+        );
+    }
+
+    #[test]
+    fn disabled_gate_protects_recent_intermediate_only() {
+        let mut paths = vec![retained_with_classification(
+            "intermediate",
+            200,
+            50,
+            ArtifactClassification::IntermediateOnly,
+        )];
+
+        apply_adaptive_low_disk(&mut paths, 0, 1000, 100.0, t(150), false);
+
+        assert!(
+            is_retained(&paths[0]),
+            "the default-disabled gate must preserve minimum-TTL protection",
         );
     }
 }

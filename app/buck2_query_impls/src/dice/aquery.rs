@@ -147,7 +147,7 @@ pub(crate) struct DiceAqueryDelegate<'c, 'd> {
 }
 
 pub(crate) struct AqueryData {
-    artifact_fs: Arc<ArtifactFs>,
+    artifact_fs: ArtifactFs,
     delegate_query_data: Arc<DiceQueryData>,
     nodes_cache: DiceAqueryNodesCache,
 }
@@ -158,17 +158,20 @@ pub(crate) struct AqueryData {
 // than `(TransitiveSetKey, ProjectionIndex)`. We already have that information when constructing it and the
 // artifact side of it holds a starlark ref. That would allow someone with an ArtifactGroup to synchronously
 // traverse the tset graph rather than needing to asynchronously resolve a TransitiveSetKey.
-async fn convert_inputs<'c, 'a, Iter: IntoIterator<Item = &'a ArtifactGroup>>(
+async fn convert_inputs<
+    'c,
+    'a,
+    Iter: IntoIterator<Item = &'a ArtifactGroup, IntoIter: ExactSizeIterator>,
+>(
     ctx: &'c mut DiceComputations<'_>,
     node_cache: DiceAqueryNodesCache,
     inputs: Iter,
 ) -> buck2_error::Result<Vec<ActionInput>> {
-    let resolved_artifacts: Vec<_> = tokio::task::unconstrained(KeepGoing::try_compute_join_all(
-        ctx,
-        inputs,
-        |ctx, input| async move { input.resolved_artifact(ctx).await }.boxed(),
-    ))
-    .await?;
+    let resolved_artifacts: Vec<_> =
+        KeepGoing::try_compute_join_all(ctx, inputs, async |ctx, input| {
+            input.resolved_artifact(ctx).await
+        })
+        .await?;
 
     let (artifacts, projections): (Vec<_>, Vec<_>) = Itertools::partition_map(
         resolved_artifacts
@@ -184,10 +187,8 @@ async fn convert_inputs<'c, 'a, Iter: IntoIterator<Item = &'a ArtifactGroup>>(
     let mut deps =
         artifacts.into_map(|a| ActionInput::ActionKey(ActionQueryNodeRef::Action(a.dupe())));
     let projection_deps = ctx
-        .try_compute_join(projections, |ctx, key| {
-            let key = key.dupe();
-            let node_cache = node_cache.dupe();
-            async move { get_tset_node(node_cache, ctx, key).await }.boxed()
+        .try_compute_join(projections, async |ctx, key| {
+            get_tset_node(node_cache.dupe(), ctx, key.dupe()).await
         })
         .await?;
 
@@ -205,7 +206,7 @@ fn compute_tset_node<'c>(
     async move {
         let set = key.key.lookup(ctx).await?;
 
-        let sub_inputs = set.get_projection_sub_inputs(key.projection)?;
+        let sub_inputs = set.by_ref(|s| s.get_projection_sub_inputs(key.projection))?;
 
         let inputs = convert_inputs(ctx, node_cache, sub_inputs.iter()).await?;
 
@@ -237,7 +238,7 @@ fn compute_action_node<'c>(
     node_cache: DiceAqueryNodesCache,
     ctx: &'c mut DiceComputations<'_>,
     key: ActionKey,
-    fs: Arc<ArtifactFs>,
+    fs: ArtifactFs,
 ) -> BoxFuture<'c, buck2_error::Result<ActionQueryNode>> {
     async move {
         let action = ActionCalculation::get_action(ctx, &key).await?;
@@ -251,7 +252,7 @@ async fn get_action_node(
     node_cache: DiceAqueryNodesCache,
     ctx: &mut DiceComputations<'_>,
     key: ActionKey,
-    fs: Arc<ArtifactFs>,
+    fs: ArtifactFs,
 ) -> buck2_error::Result<ActionQueryNode> {
     let copied_node_cache = node_cache.dupe();
     node_cache
@@ -266,7 +267,7 @@ impl<'c, 'd> DiceAqueryDelegate<'c, 'd> {
     pub(crate) async fn new(
         base_delegate: DiceQueryDelegate<'c, 'd>,
     ) -> buck2_error::Result<DiceAqueryDelegate<'c, 'd>> {
-        let artifact_fs = Arc::new(base_delegate.ctx().get_artifact_fs().await?);
+        let artifact_fs = base_delegate.ctx().get_artifact_fs().await?.dupe();
         let query_data = Arc::new(AqueryData {
             artifact_fs,
             delegate_query_data: base_delegate.query_data().dupe(),
@@ -352,12 +353,12 @@ async fn get_target_set_from_analysis_inner(
     let mut result = TargetSet::new();
 
     let providers = analysis.lookup_inner(configured_label)?;
-
-    for output in providers
+    let outputs = providers
         .provider_collection()
         .default_info()?
-        .default_outputs()
-    {
+        .default_outputs()?;
+
+    for output in outputs {
         if let Some(action_key) = output.artifact().action_key() {
             result.insert(
                 get_action_node(
@@ -406,7 +407,11 @@ impl QueryLiterals<ActionQueryNode> for AqueryData {
                         )
                         .await?;
 
-                    match dice.get_analysis_result(configured_label.target()).await? {
+                    match dice
+                        .get_analysis_result(configured_label.target())
+                        .await
+                        .ok()?
+                    {
                         MaybeCompatible::Incompatible(_) => {
                             // ignored
                         }
@@ -414,7 +419,7 @@ impl QueryLiterals<ActionQueryNode> for AqueryData {
                             let target_set = get_target_set_from_analysis_inner(
                                 self,
                                 &configured_label,
-                                analysis,
+                                analysis.dupe(),
                                 dice,
                             )
                             .await?;

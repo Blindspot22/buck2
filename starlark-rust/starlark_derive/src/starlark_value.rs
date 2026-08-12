@@ -105,7 +105,7 @@ fn is_impl_starlark_value(
     attrs: StarlarkValueAttrs,
 ) -> syn::Result<ImplStarlarkValue> {
     let err = "expected `impl StarlarkValue for ...`";
-    let Some((_, path, _)) = &input.trait_ else {
+    let Some((path, _)) = &input.trait_ else {
         return Err(syn::Error::new_spanned(input, err));
     };
     let Some(last) = path.segments.last() else {
@@ -243,6 +243,19 @@ impl ImplStarlarkValue {
         self.find_fn(name).is_some()
     }
 
+    /// The impl block contains a macro invocation in item position.
+    ///
+    /// Attribute macros run before item macros are expanded, so we cannot see which
+    /// `StarlarkValue` methods such a macro is going to define. Whenever the answer to
+    /// "does this impl define `foo`?" would change the code we generate, we have to
+    /// assume the macro might define it.
+    fn has_macro_item(&self) -> bool {
+        self.input
+            .items
+            .iter()
+            .any(|item| matches!(item, syn::ImplItem::Macro(_)))
+    }
+
     fn bin_op_arm(&self, bin_op: &str, impl_name: &str) -> Option<syn::Arm> {
         let bin_op = syn::Ident::new(bin_op, proc_macro2::Span::call_site());
         if self.has_fn(impl_name) || (impl_name == "bit_or" && self.has_fn("eval_type")) {
@@ -335,8 +348,11 @@ impl ImplStarlarkValue {
 
     /// `fn attr_ty()`.
     fn attr_ty(&self) -> syn::Result<Option<syn::ImplItem>> {
-        if self.has_fn("attr_ty") {
-            // User has custom `attr_ty` implementation.
+        if self.has_fn("attr_ty") || self.has_macro_item() {
+            // User has custom `attr_ty` implementation, or an item macro which may
+            // expand to `get_attr`/`attr_ty`.
+            // Fall back to the default implementation, which returns `Any` for every
+            // attribute: we cannot prove the attribute does not exist.
             Ok(None)
         } else if !self.has_fn("get_attr") {
             Ok(Some(syn::parse2(quote! {
@@ -413,7 +429,11 @@ impl ImplStarlarkValue {
                 "self type is not path",
             ));
         };
-        let syn::TypePath { qself, path } = type_path;
+        let syn::TypePath {
+            attrs: _,
+            qself,
+            path,
+        } = type_path;
         if qself.is_some() {
             return Err(syn::Error::new_spanned(
                 type_path,

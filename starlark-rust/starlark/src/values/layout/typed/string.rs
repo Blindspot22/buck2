@@ -127,6 +127,11 @@ impl<'v> StringValue<'v> {
         Ok(unsafe { FrozenStringValue::new_unchecked(freezer.freeze(self.to_value())?) })
     }
 
+    /// Convert a value to a frozen string value using a supplied [`Freezer`].
+    pub fn freeze_branded<'fv>(self, freezer: &Freezer<'fv>) -> FreezeResult<StringValue<'fv>> {
+        Ok(unsafe { StringValue::new_unchecked(freezer.freeze_branded(self.to_value())?) })
+    }
+
     /// Get self along with the hash.
     pub fn get_hashed(self) -> Hashed<Self> {
         Hashed::new_unchecked(self.get_hash(), self)
@@ -140,13 +145,6 @@ impl<'v> StringValue<'v> {
     /// Get the [`Value`] along with the hash.
     pub fn get_hashed_value(self) -> Hashed<Value<'v>> {
         Hashed::new_unchecked(self.get_hash(), self.to_value())
-    }
-
-    /// If this string value is frozen, return it.
-    pub fn unpack_frozen(self) -> Option<FrozenStringValue> {
-        self.to_value()
-            .unpack_frozen()
-            .map(|s| unsafe { FrozenStringValue::new_unchecked(s) })
     }
 }
 

@@ -19,6 +19,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use buck2_action_parallelism::ActionInterval;
 use buck2_cli_proto::command_result;
 use buck2_common::build_count::BuildCount;
 use buck2_common::build_count::BuildCountManager;
@@ -58,6 +59,7 @@ use buck2_events::sink::remote::new_remote_event_sink_if_enabled;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::paths::abs_path::AbsPathBuf;
+use buck2_hash::IntentionallyStdHashMap;
 use buck2_hash::StdBuckHashMap;
 use buck2_hash::StdBuckHashSet;
 use buck2_util::network_speed_average::NetworkSpeedAverage;
@@ -78,7 +80,7 @@ use crate::client_metadata::ClientMetadata;
 use crate::common::CommonBuildConfigurationOptions;
 use crate::common::CommonEventLogOptions;
 use crate::common::PreemptibleWhen;
-use crate::console_interaction_stream::SuperConsoleToggle;
+use crate::console_interaction_stream::ConsoleInteraction;
 use crate::exit_result::ExitResult;
 use crate::subscribers::classify_server_stderr::classify_server_stderr;
 use crate::subscribers::observer::ErrorObserver;
@@ -100,6 +102,9 @@ pub fn process_memory(snapshot: &buck2_data::Snapshot) -> Option<u64> {
 
 const MEMORY_PRESSURE_TAG: &str = "memory_pressure_warning";
 
+const SYSTEM_LOAD1_WINDOW: Duration = Duration::from_secs(60);
+const SYSTEM_LOAD5_WINDOW: Duration = Duration::from_secs(5 * 60);
+
 pub struct InvocationRecorder {
     write_to_path: Option<AbsPathBuf>,
     command_name: Option<&'static str>,
@@ -115,6 +120,7 @@ pub struct InvocationRecorder {
     re_experiment_name: Option<String>,
     persistent_cache_mode: Option<String>,
     critical_path_duration: Option<Duration>,
+    critical_path_page_in: Option<Duration>,
     tags: Vec<String>,
     run_local_count: u64,
     run_remote_count: u64,
@@ -165,6 +171,7 @@ pub struct InvocationRecorder {
     time_to_first_infra_failure_test_result: Option<Duration>,
 
     system_info: SystemInfo,
+    paging_summary: Option<buck2_data::PagingSummary>,
     file_watcher_stats: Option<buck2_data::FileWatcherStats>,
     file_watcher_duration: Option<Duration>,
     time_to_last_action_execution_end: Option<Duration>,
@@ -175,7 +182,7 @@ pub struct InvocationRecorder {
     sink_max_buffer_depth: u64,
     soft_error_categories: StdBuckHashSet<SoftError>,
     concurrent_command_blocking_duration: Option<Duration>,
-    metadata: StdBuckHashMap<String, String>,
+    metadata: IntentionallyStdHashMap<String, String>,
     analysis_count: u64,
     load_count: u64,
     daemon_in_memory_state_is_corrupted: bool,
@@ -235,6 +242,7 @@ pub struct InvocationRecorder {
     active_networks_kinds: StdBuckHashSet<i32>,
     target_cfg: Option<TargetCfg>,
     hg_revision: Option<String>,
+    git_revision: Option<String>,
     has_local_changes: Option<bool>,
     version_control_errors: Vec<String>,
     concurrent_commands: bool,
@@ -262,6 +270,9 @@ pub struct InvocationRecorder {
     max_in_progress_remote_actions: u64,
     current_in_progress_remote_uploads: u64,
     max_in_progress_remote_uploads: u64,
+    // Execution-only intervals of each executed action, used to compute the
+    // action-concurrency distribution emitted on the InvocationRecord.
+    action_intervals: Vec<ActionInterval>,
     // Track executor stage types by span ID to know which counter to decrement on end
     executor_stages_by_span: StdBuckHashMap<u64, ExecutorStageType>,
     // Track maximum buck2 daemon anon memory usage
@@ -331,6 +342,7 @@ impl InvocationRecorder {
             re_experiment_name: None,
             persistent_cache_mode: None,
             critical_path_duration: None,
+            critical_path_page_in: None,
             tags: vec![],
             run_local_count: 0,
             run_remote_count: 0,
@@ -378,6 +390,7 @@ impl InvocationRecorder {
             time_to_first_infra_failure_test_result: None,
             time_to_first_unknown_test_result: None,
             system_info: SystemInfo::default(),
+            paging_summary: None,
             file_watcher_stats: None,
             file_watcher_duration: None,
             time_to_last_action_execution_end: None,
@@ -456,6 +469,7 @@ impl InvocationRecorder {
             active_networks_kinds: StdBuckHashSet::default(),
             target_cfg: None,
             hg_revision: None,
+            git_revision: None,
             has_local_changes: None,
             version_control_errors: Vec::new(),
             concurrent_commands: false,
@@ -477,6 +491,7 @@ impl InvocationRecorder {
             max_dice_compute_keys: 0,
             current_in_progress_actions: 0,
             max_in_progress_actions: 0,
+            action_intervals: Vec::new(),
             current_in_progress_local_actions: 0,
             max_in_progress_local_actions: 0,
             current_in_progress_remote_actions: 0,
@@ -762,6 +777,24 @@ impl InvocationRecorder {
         let mut io_canonicalize_count = None;
         let mut io_eden_settle_count = None;
 
+        let mut page_in_count = None;
+        let mut page_in_fetch_us = None;
+        let mut page_in_deser_us = None;
+        let mut page_in_bytes = None;
+        let mut page_in_by_key_type = IntentionallyStdHashMap::new();
+
+        // Already a per-command delta from the daemon; sum across key types for
+        // the aggregate scalars.
+        if let Some(paging_summary) = &self.paging_summary
+            && !paging_summary.dice_page_in_by_key_type.is_empty()
+        {
+            page_in_by_key_type = paging_summary.dice_page_in_by_key_type.clone();
+            page_in_count = Some(page_in_by_key_type.values().map(|s| s.count).sum());
+            page_in_fetch_us = Some(page_in_by_key_type.values().map(|s| s.fetch_us).sum());
+            page_in_deser_us = Some(page_in_by_key_type.values().map(|s| s.deser_us).sum());
+            page_in_bytes = Some(page_in_by_key_type.values().map(|s| s.bytes).sum());
+        }
+
         if let Some(snapshot) = &self.last_snapshot {
             sink_success_count =
                 calculate_diff_if_some(&snapshot.sink_successes, &self.initial_sink_success_count);
@@ -974,6 +1007,11 @@ impl InvocationRecorder {
 
         let errors = self.finalize_errors();
 
+        let action_parallelism = buck2_action_parallelism::compute(
+            &std::mem::take(&mut self.action_intervals),
+            &buck2_action_parallelism::PERCENTILES,
+        );
+
         let record = buck2_data::InvocationRecord {
             command_name: Some(self.command_name.unwrap_or("unknown").to_owned()),
             command_end: self.command_end.take(),
@@ -996,6 +1034,7 @@ impl InvocationRecorder {
             cli_args: self.cli_args.clone(),
             representative_config_flags: self.representative_config_flags.clone(),
             critical_path_duration: self.critical_path_duration.and_then(|x| x.try_into().ok()),
+            critical_path_page_in: self.critical_path_page_in.and_then(|x| x.try_into().ok()),
             metadata: Some(metadata),
             tags: self.tags.drain(..).collect(),
             run_local_count: self.run_local_count,
@@ -1111,6 +1150,10 @@ impl InvocationRecorder {
             concurrent_command_ids: std::mem::take(&mut self.concurrent_command_ids)
                 .into_iter()
                 .collect(),
+            page_out_started: self
+                .paging_summary
+                .as_ref()
+                .and_then(|s| s.page_out_started),
             daemon_connection_failure: Some(self.daemon_connection_failure),
             daemon_was_started: self.daemon_was_started.map(|t| t as i32),
             should_restart: Some(self.should_restart),
@@ -1163,6 +1206,7 @@ impl InvocationRecorder {
                 .collect(),
             target_cfg: self.target_cfg.take(),
             hg_revision: self.hg_revision.take(),
+            git_revision: self.git_revision.take(),
             has_local_changes: self.has_local_changes.take(),
             version_control_errors: self.version_control_errors.drain(..).collect(),
             version_control_revision: None,
@@ -1190,6 +1234,20 @@ impl InvocationRecorder {
             max_in_progress_local_actions: Some(self.max_in_progress_local_actions),
             max_in_progress_remote_actions: Some(self.max_in_progress_remote_actions),
             max_in_progress_remote_uploads: Some(self.max_in_progress_remote_uploads),
+            action_concurrency_percentiles: action_parallelism
+                .percentiles
+                .iter()
+                .map(
+                    |&(percentile, concurrency)| buck2_data::ActionConcurrencyPercentile {
+                        percentile,
+                        concurrency,
+                    },
+                )
+                .collect(),
+            action_avg_concurrency: Some(action_parallelism.avg_concurrency),
+            action_active_duration_ms: Some(
+                (action_parallelism.total_active_duration_us.max(0) / 1000) as u64,
+            ),
             memory_max_anon_allprocs: self.memory_max_anon_allprocs,
             memory_max_anon_forkserver_actions: self.memory_max_anon_forkserver_actions,
             memory_max_total_allprocs: self.memory_max_total_allprocs,
@@ -1220,6 +1278,27 @@ impl InvocationRecorder {
             io_write_count,
             io_canonicalize_count,
             io_eden_settle_count,
+            page_in_count,
+            page_in_fetch_us,
+            page_in_deser_us,
+            page_in_bytes,
+            page_in_by_key_type,
+            paging_db_size_bytes: self
+                .paging_summary
+                .as_ref()
+                .and_then(|s| s.paging_db_size_bytes),
+            paging_resident_node_count: self
+                .paging_summary
+                .as_ref()
+                .and_then(|s| s.resident_node_count),
+            paging_paged_out_node_count: self
+                .paging_summary
+                .as_ref()
+                .and_then(|s| s.paged_out_node_count),
+            paging_candidate_node_count: self
+                .paging_summary
+                .as_ref()
+                .and_then(|s| s.candidate_node_count),
             repo_path: self.repo_path.take(),
         };
 
@@ -1275,12 +1354,17 @@ impl InvocationRecorder {
     // Collects client-side state and data, suitable for telemetry.
     // NOTE: If data is visible from the daemon, put it in cli::metadata::collect()
     fn default_metadata() -> buck2_data::TypedMetadata {
-        let mut ints = StdBuckHashMap::default();
+        let mut ints = IntentionallyStdHashMap::new();
         ints.insert("is_tty".to_owned(), std::io::stderr().is_tty() as i64);
-        buck2_data::TypedMetadata {
-            ints,
-            strings: StdBuckHashMap::default(),
+        // `strings` is only mutated under the cfg-gated block below, so in any other build
+        // configuration (notably OSS) the `mut` is unused and trips `-D unused_mut`.
+        #[cfg_attr(not(all(fbcode_build, target_os = "linux")), allow(unused_mut))]
+        let mut strings = IntentionallyStdHashMap::new();
+        #[cfg(all(fbcode_build, target_os = "linux"))]
+        if let Some(agent_identity) = identity_env::agent_identity_from_env() {
+            strings.insert("client_agent_identity_from_env".to_owned(), agent_identity);
         }
+        buck2_data::TypedMetadata { ints, strings }
     }
 
     fn handle_command_start(
@@ -1454,6 +1538,13 @@ impl InvocationRecorder {
             Some(duration_since(event.timestamp(), self.start_time));
 
         self.exec_time_ms += get_last_command_execution_time(action).exec_time_ms;
+
+        // Accumulate the execution-only interval for the action-concurrency
+        // distribution (cache hits / no-command actions are excluded by
+        // extract_interval).
+        if let Some(interval) = buck2_action_parallelism::extract_interval(action) {
+            self.action_intervals.push(interval);
+        }
 
         Ok(())
     }
@@ -1764,14 +1855,23 @@ impl InvocationRecorder {
         _event: &BuckEvent,
     ) -> buck2_error::Result<()> {
         let mut duration = Duration::default();
+        let mut page_in = Duration::default();
 
         for node in &info.critical_path2 {
             if let Some(d) = &node.duration {
-                duration += d.try_into_duration()?;
+                let d = d.try_into_duration()?;
+                duration += d;
+                if matches!(
+                    node.entry,
+                    Some(buck2_data::critical_path_entry2::Entry::PageIn(_))
+                ) {
+                    page_in += d;
+                }
             }
         }
 
         self.critical_path_duration = Some(duration);
+        self.critical_path_page_in = Some(page_in);
         self.critical_path_backend = info.backend_name.clone();
         Ok(())
     }
@@ -1801,6 +1901,28 @@ impl InvocationRecorder {
         self.concurrent_commands =
             self.concurrent_commands || concurrent_commands.trace_ids.len() > 1;
         Ok(())
+    }
+
+    fn update_peak_system_load(&mut self, elapsed: Duration, load1: f64, load5: f64) {
+        let num_cores = self.system_info.num_cores.unwrap_or(1) as f64;
+        // `load1`/`load5` are kernel exponential moving averages over the trailing 1 and 5 minutes, so a
+        // sample taken sooner than that after the invocation starts still reflects load from before it
+        // began. Only fold a sample into the peak once its averaging window lies entirely within the
+        // invocation.
+        if elapsed >= SYSTEM_LOAD1_WINDOW {
+            let normalized = load1 / num_cores;
+            self.peak_normalized_system_load1 = Some(
+                self.peak_normalized_system_load1
+                    .map_or(normalized, |v| f64::max(v, normalized)),
+            );
+        }
+        if elapsed >= SYSTEM_LOAD5_WINDOW {
+            let normalized = load5 / num_cores;
+            self.peak_normalized_system_load5 = Some(
+                self.peak_normalized_system_load5
+                    .map_or(normalized, |v| f64::max(v, normalized)),
+            );
+        }
     }
 
     fn handle_snapshot(
@@ -2009,17 +2131,8 @@ impl InvocationRecorder {
         );
 
         if let Some(ref unix_stats) = update.unix_system_stats {
-            let num_cores = self.system_info.num_cores.unwrap_or(1) as f64;
-            let normalized_load1 = unix_stats.load1 / num_cores;
-            let normalized_load5 = unix_stats.load5 / num_cores;
-            self.peak_normalized_system_load1 = Some(
-                self.peak_normalized_system_load1
-                    .map_or(normalized_load1, |v| f64::max(v, normalized_load1)),
-            );
-            self.peak_normalized_system_load5 = Some(
-                self.peak_normalized_system_load5
-                    .map_or(normalized_load5, |v| f64::max(v, normalized_load5)),
-            );
+            let elapsed = duration_since(event.timestamp(), self.start_time);
+            self.update_peak_system_load(elapsed, unix_stats.load1, unix_stats.load5);
         }
 
         // Track maximum buck2 daemon memory usage from cgroup
@@ -2197,6 +2310,7 @@ impl InvocationRecorder {
         revision: &buck2_data::VersionControlRevision,
     ) -> buck2_error::Result<()> {
         self.hg_revision = revision.hg_revision.clone().or(self.hg_revision.clone());
+        self.git_revision = revision.git_revision.clone().or(self.git_revision.clone());
         self.has_local_changes = revision.has_local_changes.or(self.has_local_changes);
         self.version_control_errors
             .extend(revision.command_error.clone());
@@ -2357,6 +2471,10 @@ impl InvocationRecorder {
                     buck2_data::instant_event::Data::SystemInfo(system_info) => {
                         self.handle_system_info(system_info)
                     }
+                    buck2_data::instant_event::Data::PagingSummary(paging_summary) => {
+                        self.paging_summary = Some(paging_summary.clone());
+                        Ok(())
+                    }
                     buck2_data::instant_event::Data::TargetCfg(target_cfg) => {
                         self.target_cfg = Some(target_cfg.clone());
                         Ok(())
@@ -2462,12 +2580,13 @@ impl EventSubscriber for InvocationRecorder {
 
     async fn handle_console_interaction(
         &mut self,
-        c: &Option<SuperConsoleToggle>,
+        c: &ConsoleInteraction,
     ) -> buck2_error::Result<()> {
-        if let Some(c) = c {
-            self.tags
-                .push(format!("superconsole-toggle:{}", c.key()).to_owned())
-        }
+        let ConsoleInteraction::Toggle(c) = c else {
+            return Ok(());
+        };
+        self.tags
+            .push(format!("superconsole-toggle:{}", c.key()).to_owned());
         Ok(())
     }
 
@@ -2636,6 +2755,7 @@ fn duration_as_millis(duration: Duration) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::time::Duration;
     use std::time::SystemTime;
 
     use buck2_data::InvocationOutcome;
@@ -2686,5 +2806,39 @@ mod tests {
         let err = buck2_error!(ErrorTag::IoClientBrokenPipe, "test");
         let exit_result = ExitResult::err(err);
         assert_eq!(recorder.outcome(&exit_result), InvocationOutcome::Cancelled);
+    }
+
+    #[test]
+    fn test_peak_system_load_excludes_pre_invocation_window() {
+        let mut recorder =
+            InvocationRecorder::new(TraceId::new(), None, SystemTime::UNIX_EPOCH, vec![]);
+        // num_cores = 1 makes normalization the identity, so peaks equal the raw loads.
+        recorder.system_info.num_cores = Some(1);
+
+        // A sample inside both windows must be ignored: its averaging window reaches before the
+        // invocation started.
+        recorder.update_peak_system_load(Duration::from_secs(30), 10.0, 10.0);
+        assert_eq!(
+            recorder.peak_normalized_system_load1, None,
+            "load1 sampled within the 1-minute window must be ignored"
+        );
+        assert_eq!(
+            recorder.peak_normalized_system_load5, None,
+            "load5 sampled within the 5-minute window must be ignored"
+        );
+
+        // At exactly the 1-minute boundary, load1 counts but load5 is still inside its window.
+        recorder.update_peak_system_load(Duration::from_secs(60), 4.0, 99.0);
+        assert_eq!(recorder.peak_normalized_system_load1, Some(4.0));
+        assert_eq!(
+            recorder.peak_normalized_system_load5, None,
+            "load5 sampled within the 5-minute window must be ignored"
+        );
+
+        // At the 5-minute boundary both count; peak stays the running max, so the earlier larger
+        // load1 (4.0) is kept over the later 2.0.
+        recorder.update_peak_system_load(Duration::from_secs(5 * 60), 2.0, 7.0);
+        assert_eq!(recorder.peak_normalized_system_load1, Some(4.0));
+        assert_eq!(recorder.peak_normalized_system_load5, Some(7.0));
     }
 }

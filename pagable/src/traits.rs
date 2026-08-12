@@ -24,58 +24,55 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use crate::PagableDeserializerRecipe;
+use crate::PageInScope;
 use crate::arc_erase::ArcEraseDyn;
 use crate::storage::handle::PagableStorageHandle;
 
 // ============================================================================
-// SessionContext — typed map for passing session-scoped state through serializers
+// StorageContext — typed state shared by one storage backend
 // ============================================================================
 
-/// A typed map that allows different layers to store and retrieve their own
-/// context data without coupling. Uses `TypeId` as key, so each type can
-/// store exactly one value.
+/// State that may be owned by a [`StorageContext`].
+pub trait StorageState: Send + Sync + 'static {}
+
+/// Storage-lifetime state shared by serializers and deserializers using the
+/// same storage backend.
 ///
 /// Thread-safe: backed by `DashMap` so multiple serializations can run
 /// concurrently without external locking.
-pub struct SessionContext {
-    map: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
+#[derive(Default)]
+pub struct StorageContext {
+    states: DashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
-impl Default for SessionContext {
-    fn default() -> Self {
-        Self {
-            map: DashMap::new(),
-        }
-    }
-}
-
-impl SessionContext {
+impl StorageContext {
     /// Create a new empty context.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Get a clone of the stored value of type `T`.
-    pub fn get<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
-        self.map
+    /// Get the state of type `T`, if initialized.
+    pub fn get<T: StorageState>(&self) -> Option<Arc<T>> {
+        self.states
             .get(&TypeId::of::<T>())
-            .and_then(|r| r.downcast_ref::<T>().cloned())
+            .map(|value| Arc::clone(value.value()))
+            .map(|value| {
+                value
+                    .downcast::<T>()
+                    .expect("storage state must match its type")
+            })
     }
 
-    /// Get a clone of the stored value of type `T`, inserting the result of `f`
-    /// if no value is present. Uses `DashMap::entry` for atomicity.
-    pub fn get_or_insert_with<T: Any + Send + Sync + Clone>(&self, f: impl FnOnce() -> T) -> T {
-        self.map
+    /// Get the state of type `T`, initializing it atomically if absent.
+    pub fn get_or_init<T: StorageState>(&self, init: impl FnOnce() -> T) -> Arc<T> {
+        let value = self
+            .states
             .entry(TypeId::of::<T>())
-            .or_insert_with(|| Box::new(f()))
-            .downcast_ref::<T>()
-            .cloned()
-            .expect("downcast can't fail, type must be T")
-    }
-
-    /// Store a value of type `T`, replacing any previous value of the same type.
-    pub fn set<T: Any + Send + Sync>(&self, value: T) {
-        self.map.insert(TypeId::of::<T>(), Box::new(value));
+            .or_insert_with(|| Arc::new(init()))
+            .clone();
+        value
+            .downcast::<T>()
+            .expect("storage state must match its type")
     }
 }
 
@@ -127,6 +124,22 @@ impl<T: Send + Sync + PagableSerialize + for<'a> PagableDeserialize<'a> + 'stati
 pub trait PagableSerialize {
     /// Serialize this value using the provided serializer.
     fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> crate::Result<()>;
+
+    /// Serialize this value as the payload of an Arc node.
+    ///
+    /// Page-out calls this hook after [`PagableSerializer::serialize_arc`] records
+    /// an Arc edge. The default uses the same representation as the value itself.
+    /// For example, when one allocation is held as both `Arc<Concrete>` and
+    /// `Arc<dyn Trait>`, the generated typetag override stores the dyn view as a
+    /// type tag plus a reference to the canonical `Arc<Concrete>`. This stores the
+    /// concrete body once and records the relationship needed for page-in to
+    /// reconstruct both views using the same Arc allocation.
+    fn pagable_serialize_arc_payload(
+        self: Arc<Self>,
+        serializer: &mut dyn PagableSerializer,
+    ) -> crate::Result<()> {
+        self.pagable_serialize(serializer)
+    }
 }
 
 /// Trait for types that should be serialized eagerly.
@@ -175,6 +188,19 @@ pub trait PagableBoxDeserialize<'de> {
     fn deserialize_box<D: PagableDeserializer<'de> + ?Sized>(
         deserializer: &mut D,
     ) -> crate::Result<Box<Self>>;
+
+    /// Deserialize an Arc from its stored payload.
+    ///
+    /// The default deserializes the value into a box and moves it into a new Arc.
+    /// Implementations can override this when an Arc view has a different payload.
+    /// For example, the generated `Arc<dyn Trait>` typetag override reads the type
+    /// tag, deserializes the referenced canonical `Arc<Concrete>`, and coerces that
+    /// Arc into the dyn view. This lets both views use the same page-in allocation.
+    fn deserialize_arc_payload<D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+    ) -> crate::Result<Arc<Self>> {
+        Ok(Arc::from(Self::deserialize_box(deserializer)?))
+    }
 }
 
 /// Trait for types that should be deserialized eagerly.
@@ -219,8 +245,8 @@ pub trait PagableSerializer {
         self.serde().output.write_at(pos, bytes);
     }
 
-    /// Access the session context for storing/retrieving layer-specific state.
-    fn session_context(&mut self) -> &SessionContext;
+    /// Access state owned by the storage backend.
+    fn storage_context(&self) -> &StorageContext;
 }
 
 static_assertions::assert_obj_safe!(PagableSerializer);
@@ -253,9 +279,10 @@ pub trait PagableDeserializer<'de> {
     /// should return clones that point to the same allocation (preserving identity).
     ///
     /// Takes a function pointer that performs the actual deserialization. The
-    /// function receives both a type-erased deserializer  and an
-    /// `Arc<dyn PagableDeserializerRecipe>`. Callbacks that want to defer further reads
-    /// (e.g. partial-deser) can retain or stash the recipe `Arc` for later reopening.
+    /// function receives both a type-erased deserializer and an
+    /// `Arc<dyn PagableDeserializerRecipe>`. Callbacks that want to defer further
+    /// reads (e.g. partial-deser) can retain or stash the recipe `Arc` for later
+    /// reopening.
     ///
     /// The `type_id` parameter provides the TypeId of the Arc being deserialized,
     /// which is needed for storage cache lookups.
@@ -274,14 +301,17 @@ pub trait PagableDeserializer<'de> {
     /// that are connected to the appropriate storage backend for future paging.
     fn storage(&self) -> PagableStorageHandle;
 
+    /// Scope shared by the root value and all nested page-in work.
+    fn page_in_scope(&self) -> &PageInScope;
+
     /// Returns this deserializer as a trait object.
     ///
     /// This is useful when you need to pass the deserializer to code that
     /// works with `dyn PagableDeserializer` rather than generic types.
     fn as_dyn(&mut self) -> &mut dyn PagableDeserializer<'de>;
 
-    /// Access the session context for storing/retrieving layer-specific state.
-    fn session_context(&self) -> &SessionContext;
+    /// Access state owned by the storage backend.
+    fn storage_context(&self) -> &StorageContext;
 }
 
 static_assertions::assert_obj_safe!(PagableDeserializer<'_>);
@@ -314,13 +344,37 @@ impl<'de, D: PagableDeserializer<'de> + ?Sized> PagableDeserializer<'de> for &mu
         <D as PagableDeserializer<'de>>::storage(self)
     }
 
+    fn page_in_scope(&self) -> &PageInScope {
+        <D as PagableDeserializer<'de>>::page_in_scope(self)
+    }
+
     fn as_dyn(&mut self) -> &mut dyn PagableDeserializer<'de> {
         self
     }
 
-    fn session_context(&self) -> &SessionContext {
-        <D as PagableDeserializer<'de>>::session_context(self)
+    fn storage_context(&self) -> &StorageContext {
+        <D as PagableDeserializer<'de>>::storage_context(self)
     }
 }
 
 static_assertions::assert_impl_all!(dyn PagableDeserializer<'static>: PagableDeserializer<'static>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestState(usize);
+
+    impl StorageState for TestState {}
+
+    #[test]
+    fn storage_context_initializes_state_once() {
+        let context = StorageContext::new();
+
+        assert!(context.get::<TestState>().is_none());
+        let state = context.get_or_init(|| TestState(1));
+
+        assert_eq!(state.0, 1);
+        assert!(Arc::ptr_eq(&state, &context.get_or_init(|| TestState(2)),));
+    }
+}

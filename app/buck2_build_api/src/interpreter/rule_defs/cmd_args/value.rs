@@ -15,13 +15,13 @@ use allocative::Allocative;
 use dupe::Dupe;
 use serde::Serializer;
 use starlark::__derive_refs::serde::Serialize;
-use starlark::coerce::Coerce;
+use starlark::any::ProvidesStaticType;
 use starlark::typing::Ty;
-use starlark::values::Freeze;
+use starlark::values::FreezeBranded;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
-use starlark::values::FrozenValue;
 use starlark::values::StarlarkPagable;
+use starlark::values::ThinBoxSliceFrozenValue;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
@@ -52,17 +52,28 @@ where
     Trace,
     derive_more::Display,
     Serialize,
-    Allocative
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
 )]
 #[serde(transparent)]
 #[repr(transparent)]
 pub struct CommandLineArg<'v>(#[serde(serialize_with = "serialize_as_display")] Value<'v>);
 
-impl<'v> Freeze for CommandLineArg<'v> {
-    type Frozen = FrozenCommandLineArg;
+impl<'v> PartialEq for CommandLineArg<'v> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(other.0)
+    }
+}
 
-    fn freeze(self, freezer: &Freezer) -> FreezeResult<FrozenCommandLineArg> {
-        Ok(FrozenCommandLineArg(self.0.freeze(freezer)?))
+impl<'v> Eq for CommandLineArg<'v> {}
+
+impl<'v> FreezeBranded for CommandLineArg<'v> {
+    type Frozen<'fv> = CommandLineArg<'fv>;
+
+    fn freeze<'fv>(self, freezer: &Freezer<'fv>) -> FreezeResult<CommandLineArg<'fv>> {
+        // Freezing does not change a value's type, so the constructor check carries over.
+        Ok(CommandLineArg(self.0.freeze_branded(freezer)?))
     }
 }
 
@@ -87,6 +98,11 @@ impl<'v> UnpackValue<'v> for CommandLineArg<'v> {
 }
 
 impl<'v> CommandLineArg<'v> {
+    pub fn new(value: Value<'v>) -> buck2_error::Result<CommandLineArg<'v>> {
+        ValueAsCommandLineLike::unpack_value_err(value)?;
+        Ok(CommandLineArg(value))
+    }
+
     pub fn from_cmd_args(cmd_args: ValueTyped<'v, StarlarkCmdArgs<'v>>) -> Self {
         let _no_check_needed: &dyn CommandLineArgLike<'v> = cmd_args.as_ref();
         CommandLineArg(cmd_args.to_value())
@@ -101,40 +117,14 @@ impl<'v> CommandLineArg<'v> {
     pub fn to_value(self) -> Value<'v> {
         self.0
     }
-}
 
-#[derive(
-    Debug,
-    Allocative,
-    Eq,
-    PartialEq,
-    derive_more::Display,
-    Clone,
-    Copy,
-    Dupe,
-    StarlarkPagable
-)]
-#[repr(transparent)]
-pub struct FrozenCommandLineArg(FrozenValue);
-
-unsafe impl<'v> Coerce<CommandLineArg<'v>> for FrozenCommandLineArg {}
-
-impl FrozenCommandLineArg {
-    pub fn new(value: FrozenValue) -> buck2_error::Result<FrozenCommandLineArg> {
-        ValueAsCommandLineLike::unpack_value_err(value.to_value())?;
-        Ok(FrozenCommandLineArg(value))
-    }
-
-    pub fn as_command_line_arg<'v>(self) -> &'v dyn CommandLineArgLike<'v> {
-        CommandLineArg(self.0.to_value()).as_command_line_arg()
-    }
-
-    pub fn to_frozen_value(&self) -> FrozenValue {
-        self.0
-    }
-
-    pub fn slice_from_frozen_value_unchecked(v: &[FrozenValue]) -> &[FrozenCommandLineArg] {
-        // SAFETY: `#[repr(transparent)]`
+    /// View a `FrozenStarlarkCmdArgs`' element storage, whose elements were checked when
+    /// the unfrozen form was built. Taking the branded slice type ties the resulting
+    /// views to the heap backing the storage.
+    pub fn slice_from_frozen_value_unchecked<'a>(
+        v: &'a ThinBoxSliceFrozenValue<'v>,
+    ) -> &'a [CommandLineArg<'v>] {
+        // SAFETY: `#[repr(transparent)]` over `Value`, to which `FrozenValue` is coercible
         unsafe { std::slice::from_raw_parts(v.as_ptr() as *const _, v.len()) }
     }
 }

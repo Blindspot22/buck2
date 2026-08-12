@@ -43,6 +43,7 @@ BUCK2_TEST_ERROR_ON_CACHE_UPLOAD               bool                       false
 BUCK2_TEST_EXTRA_EXTERNAL_CONFIG               String
 BUCK2_TEST_FAIL_BUCKD_AUTH                     bool                       false
 BUCK2_TEST_FAIL_CONNECT                        bool                       false
+BUCK2_TEST_FAIL_PAGE_OUT                       bool                       false
 BUCK2_TEST_FAIL_RE_DOWNLOADS                   bool                       false
 BUCK2_TEST_FAIL_RE_EXECUTE                     bool                       false
 BUCK2_TEST_FAIL_RE_RESOURCE_EXHAUSTED          bool                       false
@@ -58,6 +59,7 @@ BUCK2_TEST_MANIFOLD_TTL_S                      u64
 BUCK2_TEST_ONLY_REMOTE_DEP_FILE_CACHE          bool                       false
 BUCK2_TEST_RESOURCE_CONTROL_CONFIG             String
 BUCK2_TEST_RE_QUEUE_ESTIMATE_S                 u64
+BUCK2_TEST_SETTINGS_HOME_DIR                   String
 BUCK2_TEST_SKIP_ACTION_CACHE_WRITE             bool                       false
 BUCK2_TEST_SKIP_DEFAULT_EXTERNAL_CONFIG        bool                       false
 BUCK2_TEST_SKIP_DICE_CLEAR_ON_MERGEBASE_CHANGE bool                       false

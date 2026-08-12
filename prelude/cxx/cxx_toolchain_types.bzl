@@ -8,6 +8,7 @@
 
 load("@prelude//cxx:cxx_apple_linker_flags.bzl", "apple_extra_darwin_linker_flags", "apple_format_target_triple", "is_valid_apple_platform_name")
 load("@prelude//cxx:debug.bzl", "SplitDebugMode")
+load("@prelude//target_stats:target_stats_tools.bzl", "TargetStatsToolsInfo")
 
 LinkerType = enum("gnu", "darwin", "windows", "wasm")
 
@@ -62,6 +63,8 @@ LinkerInfo = provider(
         # "o" on Unix, "obj" on Windows
         "object_file_extension": provider_field(typing.Any, default = None),  # str
         "post_linker_flags": provider_field(typing.Any, default = None),
+        # `LinkInfo`s (list[LinkInfo]) of the runtime libraries the toolchain provides.
+        "runtime_library_files": provider_field(list[typing.Any], default = []),
         "sanitizer_runtime_enabled": provider_field(bool, default = False),
         "sanitizer_runtime_files": provider_field(list[Artifact], default = []),
         "shlib_interfaces": provider_field(ShlibInterfacesMode),
@@ -282,6 +285,11 @@ CxxToolchainInfo = provider(
         "lipo": provider_field([RunInfo, None], default = None),
         "llvm_cgdata": provider_field([RunInfo, None], default = None),
         "llvm_link": provider_field(typing.Any, default = None),
+        # Whether a top-level binary's unpacked external debug info (e.g.
+        # split-dwarf .dwo files) is materialized as part of building it, via
+        # DefaultInfo.other_outputs. When False, it can still be materialized
+        # explicitly via the `[debuginfo]` sub-target.
+        "materialize_external_debug_info": provider_field(bool, default = True),
         "minimum_os_version": provider_field([str, None], default = None),
         "objc_compiler_info": provider_field([ObjcCompilerInfo, None], default = None),
         "objcxx_compiler_info": provider_field([ObjcxxCompilerInfo, None], default = None),
@@ -295,6 +303,7 @@ CxxToolchainInfo = provider(
         "split_debug_mode": provider_field(typing.Any, default = None),
         "strip_flags_info": provider_field(typing.Any, default = None),
         "supported_compile_flavors": provider_field(typing.Any, default = []),
+        "target_stats_tools": provider_field([TargetStatsToolsInfo, None], default = None),
         "use_dep_files": provider_field(typing.Any, default = None),
         "use_distributed_thinlto": provider_field(typing.Any, default = None),
     },
@@ -347,6 +356,7 @@ def cxx_toolchain_infos(
     cuda_dep_tracking_mode = DepTrackingMode("none"),
     strip_flags_info = None,
     split_debug_mode = SplitDebugMode("none"),
+    materialize_external_debug_info = True,
     bolt_enabled = False,
     cell_to_path_prefix_map = {},
     llvm_cgdata = None,
@@ -366,6 +376,7 @@ def cxx_toolchain_infos(
     pass_plugin = None,
     default_deps = [],
     runtime_dependency_handling = RuntimeDependencyHandling("no_symlink"),
+    target_stats_tools = None,
 ):
     """
     Creates the collection of cxx-toolchain Infos for a cxx toolchain.
@@ -413,6 +424,7 @@ def cxx_toolchain_infos(
         lipo = lipo,
         llvm_cgdata = llvm_cgdata,
         llvm_link = llvm_link,
+        materialize_external_debug_info = materialize_external_debug_info,
         objc_compiler_info = objc_compiler_info,
         objcxx_compiler_info = objcxx_compiler_info,
         object_format = object_format,
@@ -431,6 +443,7 @@ def cxx_toolchain_infos(
         cxx_error_handler = cxx_error_handler,
         supported_compile_flavors = supported_compile_flavors,
         default_deps = default_deps,
+        target_stats_tools = target_stats_tools,
     )
 
     ldflags_shared_extra = None

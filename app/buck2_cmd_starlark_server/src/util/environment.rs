@@ -11,12 +11,13 @@
 use buck2_core::bzl::ImportPath;
 use buck2_core::cells::build_file_cell::BuildFileCell;
 use buck2_core::cells::name::CellName;
-use buck2_hash::StdBuckHashSet;
+use buck2_hash::IntentionallyStdHashSet;
 use buck2_interpreter::file_type::StarlarkFileType;
 use buck2_interpreter::import_paths::HasImportPaths;
 use buck2_interpreter::load_module::INTERPRETER_CALCULATION_IMPL;
 use buck2_interpreter::load_module::InterpreterCalculation;
 use buck2_interpreter::prelude_path::PreludePath;
+use dice::DiceComputations;
 use dice::DiceTransaction;
 use starlark::environment::Globals;
 
@@ -35,7 +36,7 @@ impl Environment {
     pub(crate) async fn new(
         cell: CellName,
         path_type: StarlarkFileType,
-        dice: &mut DiceTransaction,
+        dice: &mut DiceComputations<'_>,
     ) -> buck2_error::Result<Environment> {
         // Find the information from the globals
         let globals = INTERPRETER_CALCULATION_IMPL.get()?.global_env(dice).await?;
@@ -72,9 +73,9 @@ impl Environment {
         &self,
         path_type: StarlarkFileType,
         dice: &DiceTransaction,
-    ) -> buck2_error::Result<StdBuckHashSet<String>> {
-        let mut dice = dice.clone();
-        let mut names = StdBuckHashSet::default();
+    ) -> buck2_error::Result<IntentionallyStdHashSet<String>> {
+        let mut dice = dice.ctx();
+        let mut names = IntentionallyStdHashSet::new();
 
         for x in self.globals.names() {
             names.insert(x.as_str().to_owned());

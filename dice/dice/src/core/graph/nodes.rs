@@ -1,0 +1,1044 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
+ * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
+ */
+
+//!
+//! A cache that deals with versions
+//!
+//! This is responsible for performing incremental caching and invalidations
+//! with multiple versions in-flight at the same time.
+//!
+//! The 'VersionedCache' will track dependency edges and use computed version
+//! number for each cache entry and a global version counter to determine
+//! up-to-date-ness of cache entries.
+
+use std::ops::Bound;
+use std::ops::RangeBounds;
+
+use allocative::Allocative;
+use dupe::Dupe;
+use gazebo::variants::UnpackVariants;
+use itertools::Itertools;
+use pagable::DataKey;
+use sorted_vector_map::SortedVectorMap;
+
+use super::types::PagedOutMatch;
+use super::types::PagedOutMismatch;
+use super::types::VersionedGraphResult;
+use crate::HashSet;
+use crate::api::key::InvalidationSourcePriority;
+use crate::arc::Arc;
+use crate::core::graph::lazy_deps::LazyDepsSet;
+use crate::core::graph::types::VersionedGraphResultMismatch;
+use crate::deps::graph::SeriesParallelDeps;
+use crate::introspection::graph::GraphNodeKind;
+use crate::introspection::graph::KeyID;
+use crate::introspection::graph::SerializedGraphNode;
+use crate::key::DiceKey;
+use crate::value::DiceComputedValue;
+use crate::value::DiceValidValue;
+use crate::value::MaybeValidDiceValue;
+use crate::value::TrackedInvalidationPaths;
+use crate::versions::VersionNumber;
+use crate::versions::VersionRange;
+use crate::versions::VersionRanges;
+
+/// Actual entries as seen when querying the VersionedGraph.
+///
+/// This is responsible for tracking the information related to a single
+/// node (i.e. a DiceKey) required for incremental computations.
+#[derive(UnpackVariants, Allocative, Debug)]
+pub(crate) enum VersionedGraphNode {
+    Occupied(OccupiedGraphNode),
+    Injected(InjectedGraphNode),
+    Vacant(VacantGraphNode),
+}
+
+mini_vec::size_assert::words_of_type!(VersionedGraphNode, 11);
+
+/// A node's classification for the pagable index (see [`crate::core::graph::storage`]):
+/// whether it's a tracked occupied node and, if so, its resident / paged-out state.
+/// Captured before a mutation and recomputed after so the index can be reconciled by
+/// delta. Only `Occupied` nodes are tracked.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum PagableState {
+    /// The value is resident in memory. `candidate` is true iff it has never been
+    /// paged out, so it is eligible for the next page-out.
+    Resident { candidate: bool },
+    /// The value has been paged out to disk.
+    PagedOut,
+    /// Not an occupied pagable value, so it contributes to none of the index's
+    /// tallies: a vacant slot (never computed / invalidated away) or an injected
+    /// node. Injected values are resident in memory but live in a separate
+    /// `VersionedGraphNode` variant and are never paged, so they're excluded here (and
+    /// from the existing `pagable_status` scan) by design.
+    Untracked,
+}
+
+impl PagableState {
+    /// Whether the value is resident in memory (whether or not it's a candidate).
+    pub(crate) fn is_resident(self) -> bool {
+        matches!(self, PagableState::Resident { .. })
+    }
+
+    /// Whether the value is paged out to disk.
+    pub(crate) fn is_paged_out(self) -> bool {
+        matches!(self, PagableState::PagedOut)
+    }
+
+    /// Whether the node is a page-out candidate (resident and never paged out).
+    pub(crate) fn is_candidate(self) -> bool {
+        matches!(self, PagableState::Resident { candidate: true })
+    }
+}
+
+impl VersionedGraphNode {
+    pub(crate) fn force_dirty(
+        &mut self,
+        v: VersionNumber,
+        invalidation_priority: InvalidationSourcePriority,
+    ) -> InvalidateResult<'_> {
+        match self {
+            VersionedGraphNode::Occupied(e) => e.force_dirty(v, invalidation_priority),
+            VersionedGraphNode::Vacant(e) => {
+                if e.force_dirty(v, invalidation_priority) {
+                    InvalidateResult::Changed(None)
+                } else {
+                    InvalidateResult::NoChange
+                }
+            }
+            VersionedGraphNode::Injected(e) => {
+                panic!("injected keys don't get invalidated (`{e:?}`)")
+            }
+        }
+    }
+
+    pub(crate) fn mark_invalidated(
+        &mut self,
+        v: VersionNumber,
+        invalidation_priority: Option<InvalidationSourcePriority>,
+    ) -> InvalidateResult<'_> {
+        match self {
+            VersionedGraphNode::Occupied(e) => {
+                if e.mark_invalidated(v, invalidation_priority) {
+                    InvalidateResult::Changed(Some(e.metadata.rdeps.drain()))
+                } else {
+                    InvalidateResult::NoChange
+                }
+            }
+            VersionedGraphNode::Vacant(e) => {
+                panic!("vacant nodes shouldn't get invalidated (`{e:?}`)")
+            }
+            VersionedGraphNode::Injected(e) => {
+                panic!("injected keys don't get invalidated (`{e:?}`)")
+            }
+        }
+    }
+
+    /// Classify this node for the pagable index (see [`PagableState`]).
+    pub(crate) fn pagable_state(&self) -> PagableState {
+        let VersionedGraphNode::Occupied(occ) = self else {
+            return PagableState::Untracked;
+        };
+        let val = occ.val();
+        if val.as_hydrated().is_some() {
+            PagableState::Resident {
+                candidate: val.is_page_out_candidate(),
+            }
+        } else {
+            // A `PagableNodeValue` always holds a value or a data key, so a
+            // non-hydrated occupied node is paged out.
+            PagableState::PagedOut
+        }
+    }
+
+    /// Returns the VersionedGraphResult for the entry at the provided version.
+    pub(crate) fn at_version(&self, v: VersionNumber) -> VersionedGraphResult {
+        match self {
+            VersionedGraphNode::Occupied(entry) => entry.at_version(v),
+            VersionedGraphNode::Vacant(_) => VersionedGraphResult::Compute,
+            VersionedGraphNode::Injected(entry) => entry.at_version(v),
+        }
+    }
+
+    pub(crate) fn add_rdep_at(&mut self, v: VersionNumber, k: DiceKey) {
+        match self {
+            VersionedGraphNode::Occupied(occ) => occ.add_rdep_at(v, k),
+            VersionedGraphNode::Injected(inj) => inj.add_rdep_at(v, k),
+            VersionedGraphNode::Vacant(_) => {
+                unreachable!("we can't have an rdep on something that has never seen a value")
+            }
+        }
+    }
+
+    pub(crate) fn on_injected(
+        &mut self,
+        version: VersionNumber,
+        value: DiceValidValue,
+        invalidation_priority: InvalidationSourcePriority,
+    ) -> InvalidateResult<'_> {
+        match self {
+            VersionedGraphNode::Occupied(occ) => {
+                occ.on_injected(version, value, invalidation_priority)
+            }
+            VersionedGraphNode::Injected(inj) => {
+                inj.on_injected(version, value, invalidation_priority)
+            }
+            VersionedGraphNode::Vacant(vac) => {
+                let entry = OccupiedGraphNode::new(
+                    vac.key,
+                    value,
+                    Arc::new(SeriesParallelDeps::None),
+                    VersionRange::begins_with(version).into_ranges(),
+                    vac.dirtied_history.clone(),
+                    TrackedInvalidationPaths::new(invalidation_priority, vac.key, version),
+                );
+                *self = Self::Occupied(entry);
+                InvalidateResult::Changed(None)
+            }
+        }
+    }
+
+    /// Returns the newly updated value for the key, and whether or not any state changed.
+    pub(crate) fn on_computed(
+        &mut self,
+        key: super::types::VersionedGraphKey,
+        value: DiceValidValue,
+        mut valid_deps_versions: VersionRanges,
+        reusable: super::storage::ValueReusable,
+        deps: Arc<SeriesParallelDeps>,
+        mut invalidation_paths: TrackedInvalidationPaths,
+    ) -> (DiceComputedValue, bool) {
+        let (dirtied_history, overwrite_entry, make_res): (
+            _,
+            _,
+            fn(DiceValidValue) -> PagableNodeValue,
+        ) = match self {
+            VersionedGraphNode::Occupied(entry) if reusable.is_reusable(&value, &deps, entry) => {
+                entry.mark_unchanged(key.v, valid_deps_versions, invalidation_paths);
+                let ret = entry.computed_val(
+                    key.v,
+                    "is_reusable returned true, which only happens for hydrated entries",
+                );
+                return (ret, false);
+            }
+            VersionedGraphNode::Occupied(entry) => {
+                // TODO(cjhopman): Should this consider the max version in valid_deps_version rather than just key.v?
+                (
+                    &entry.metadata.dirtied_history,
+                    !entry.metadata.ever_valid_after(key.v),
+                    entry.val().after_recompute(),
+                )
+            }
+            VersionedGraphNode::Vacant(entry) => (
+                &entry.dirtied_history,
+                true,
+                PagableNodeValue::NeverPagedOut,
+            ),
+            _ => unreachable!("injected nodes are never computed"),
+        };
+
+        let (force_dirty_restricted_range, invalidation_priority) = dirtied_history.get_x(key.v);
+        if force_dirty_restricted_range.begin() > VersionNumber::FIRST {
+            invalidation_paths.update(&TrackedInvalidationPaths::new(
+                invalidation_priority,
+                key.k,
+                force_dirty_restricted_range.begin(),
+            ))
+        }
+
+        valid_deps_versions.intersect_range(force_dirty_restricted_range);
+        let computed_version = VersionRange::bounded(key.v, key.v.next());
+        valid_deps_versions.insert(computed_version);
+
+        if !overwrite_entry {
+            // TODO(cjhopman): Returning `true` here matches previous behavior, but it seems odd
+            // that we claim something changed when we don't change anything. It's likely that the
+            // the return value actually is used to mean something different than that we changed
+            // something.
+            return (
+                DiceComputedValue::new(
+                    MaybeValidDiceValue::valid(value),
+                    Arc::new(valid_deps_versions),
+                    invalidation_paths,
+                ),
+                true,
+            );
+        }
+
+        let mut new = OccupiedGraphNode::new(
+            key.k,
+            value,
+            deps,
+            valid_deps_versions,
+            dirtied_history.clone(),
+            invalidation_paths,
+        );
+        // Carry the previous value's page-out lifecycle onto the recomputed value: a
+        // key that was paged out stays resident once recomputed rather than becoming a
+        // candidate again. `new` is always freshly `NeverPagedOut` here.
+        let PagableNodeValue::NeverPagedOut(v) = new.res else {
+            unreachable!("`OccupiedGraphNode::new` always constructs a `NeverPagedOut` value");
+        };
+        new.res = make_res(v);
+        let ret = new.computed_val(
+            key.v,
+            "newly-constructed OccupiedGraphNode is always hydrated",
+        );
+        *self = VersionedGraphNode::Occupied(new);
+
+        (ret, true)
+    }
+
+    pub(crate) fn to_introspectable(&self) -> Option<SerializedGraphNode> {
+        fn visit_deps<'a>(deps: impl Iterator<Item = DiceKey> + 'a) -> HashSet<KeyID> {
+            deps.map(|d| d.introspect()).collect()
+        }
+
+        fn visit_rdeps(rdeps: impl Iterator<Item = DiceKey>) -> Vec<KeyID> {
+            rdeps.unique().map(|d| KeyID(d.index as usize)).collect()
+        }
+
+        match self {
+            VersionedGraphNode::Occupied(o) => Some(SerializedGraphNode {
+                node_id: KeyID(o.key.index as usize),
+                kind: GraphNodeKind::Occupied,
+                history: crate::introspection::graph::CellHistory {
+                    valid_ranges: o.metadata.verified_ranges.to_introspectable(),
+                    force_dirtied_at: o.metadata.dirtied_history.to_introspectable(),
+                },
+                deps: visit_deps(o.deps().iter_keys()),
+                rdeps: visit_rdeps(o.rdeps()),
+            }),
+            VersionedGraphNode::Vacant(_) => {
+                // TODO(bobyf) should probably write the metadata of vacant
+                None
+            }
+            VersionedGraphNode::Injected(inj) => {
+                let latest = inj.latest();
+                Some(SerializedGraphNode {
+                    node_id: KeyID(inj.key.index as usize),
+                    kind: GraphNodeKind::Occupied,
+                    history: crate::introspection::graph::CellHistory {
+                        valid_ranges: latest.valid_versions.to_introspectable(),
+                        force_dirtied_at: Vec::new(),
+                    },
+                    deps: HashSet::default(),
+                    rdeps: visit_rdeps(inj.rdeps.iter()),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn intersect_valid_versions_at(
+        &self,
+        v: VersionNumber,
+        deps_verified_ranges: &mut VersionRanges,
+    ) {
+        match self.valid_versions_at(v) {
+            None => {
+                deps_verified_ranges.clear();
+            }
+            Some(valid_ranges) => {
+                deps_verified_ranges.intersect_in_place(valid_ranges);
+            }
+        }
+    }
+
+    fn valid_versions_at(&self, v: VersionNumber) -> Option<&VersionRanges> {
+        match self {
+            VersionedGraphNode::Occupied(occ) => {
+                if occ.metadata.verified_ranges.contains(v) {
+                    Some(&occ.metadata.verified_ranges)
+                } else {
+                    None
+                }
+            }
+            VersionedGraphNode::Injected(inj) => Some(&inj.data_at(v).unwrap().1.valid_versions),
+            VersionedGraphNode::Vacant(_) => {
+                unreachable!()
+            }
+        }
+    }
+}
+
+pub(crate) enum InvalidateResult<'a> {
+    NoChange,
+    /// Returns the rdeps of the node (that must also be invalidated). There can be duplicates in this list.
+    Changed(Option<mini_vec::Drain<'a, DiceKey>>),
+}
+
+/// The stored value of an `OccupiedGraphNode` together with where it sits in the
+/// page-out lifecycle. Every state except `PagedOut` keeps the hydrated value
+/// resident; `PagedOut` keeps only the content-addressable on-disk `DataKey`.
+#[derive(Allocative, Debug)]
+pub(crate) enum PagableNodeValue {
+    /// Resident, no on-disk copy — a candidate for the next page-out.
+    NeverPagedOut(DiceValidValue),
+    /// Serialized to disk and evicted from memory, so the key is load-bearing and no
+    /// hydrated value is resident.
+    PagedOut(DataKey),
+    /// Resident but its value can't be serialized (e.g. `NoValueSerialize`, or an
+    /// `Err`); not a page-out candidate.
+    NonPageable(DiceValidValue),
+    /// Was paged out and is resident again — recomputed to a fresh value or reloaded
+    /// via `page-in`. Not a page-out candidate (a value is paged out at most once);
+    /// the previous on-disk key is no longer tracked.
+    Recomputed(DiceValidValue),
+}
+
+mini_vec::size_assert::words_of_type!(PagableNodeValue, 3);
+
+impl PagableNodeValue {
+    /// A resident value that has never been paged out.
+    fn hydrated(value: DiceValidValue) -> Self {
+        PagableNodeValue::NeverPagedOut(value)
+    }
+
+    /// The hydrated value, if one is resident (every state but `PagedOut`).
+    pub(crate) fn as_hydrated(&self) -> Option<&DiceValidValue> {
+        match self {
+            PagableNodeValue::NeverPagedOut(value)
+            | PagableNodeValue::NonPageable(value)
+            | PagableNodeValue::Recomputed(value) => Some(value),
+            PagableNodeValue::PagedOut(_) => None,
+        }
+    }
+
+    /// The hydrated value, panicking with `msg` if it is paged out. `msg` should
+    /// explain why the caller knows the value is resident (analogous to
+    /// `Option::expect`).
+    pub(crate) fn expect_hydrated(&self, msg: &str) -> &DiceValidValue {
+        self.as_hydrated().unwrap_or_else(|| {
+            panic!(
+                "PagableNodeValue::expect_hydrated called on a paged-out value: {}",
+                msg
+            )
+        })
+    }
+
+    /// The on-disk key of a `PagedOut` value (in-memory copy evicted), used to load
+    /// it back in. `None` for resident values.
+    pub(crate) fn data_key(&self) -> Option<DataKey> {
+        match self {
+            PagableNodeValue::PagedOut(k) => Some(*k),
+            PagableNodeValue::NeverPagedOut(_)
+            | PagableNodeValue::NonPageable(_)
+            | PagableNodeValue::Recomputed(_) => None,
+        }
+    }
+
+    /// Whether this value has never been paged out — a candidate for the next
+    /// page-out.
+    fn is_page_out_candidate(&self) -> bool {
+        matches!(self, PagableNodeValue::NeverPagedOut(_))
+    }
+
+    /// The variant a freshly-recomputed (or paged-in) value takes given this
+    /// (previous) state, returned as a constructor for the caller to wrap the new
+    /// value. A value is paged out at most once: once it has been paged out (or
+    /// found non-pageable) it stays resident rather than becoming a candidate again.
+    fn after_recompute(&self) -> fn(DiceValidValue) -> PagableNodeValue {
+        match self {
+            PagableNodeValue::NeverPagedOut(_) => PagableNodeValue::NeverPagedOut,
+            PagableNodeValue::NonPageable(_) => PagableNodeValue::NonPageable,
+            PagableNodeValue::Recomputed(_) | PagableNodeValue::PagedOut(_) => {
+                PagableNodeValue::Recomputed
+            }
+        }
+    }
+}
+
+/// The stored entry of the cache
+#[derive(Allocative, Debug)]
+pub(crate) struct OccupiedGraphNode {
+    key: DiceKey,
+    res: PagableNodeValue,
+    metadata: NodeMetadata,
+    invalidation_paths: TrackedInvalidationPaths,
+}
+
+/// Meta data about a DICE node, which are its edges and history information
+#[derive(Allocative, Debug)]
+pub(crate) struct NodeMetadata {
+    deps: Arc<SeriesParallelDeps>,
+    rdeps: LazyDepsSet,
+    verified_ranges: Arc<VersionRanges>,
+    dirtied_history: ForceDirtyHistory,
+}
+
+impl NodeMetadata {
+    fn should_add_rdep_at(&self, v: VersionNumber) -> bool {
+        match self.verified_ranges.last() {
+            Some(last) => match (last.begin(), last.end()) {
+                (begin, _) if begin > v => false,
+                (_, Some(_end)) => false,
+                _ => true,
+            },
+            None => true,
+        }
+    }
+
+    fn ever_valid_after(&self, v: VersionNumber) -> bool {
+        match self.verified_ranges.last() {
+            Some(last) => match last.end() {
+                Some(end) => end > v,
+                _ => true,
+            },
+            _ => false,
+        }
+    }
+}
+
+/// For a node, keeps a history of every version that that node has been force-dirtied at.
+///
+/// Across a force-dirtied version, we cannot ever reuse a node's value based on its deps' values not changing.
+#[derive(Allocative, Clone, Debug)]
+pub(crate) struct ForceDirtyHistory {
+    #[allow(clippy::box_collection)]
+    versions: Option<Box<(Vec<VersionNumber>, InvalidationSourcePriority)>>,
+}
+
+// the vast majority of nodes are never force-dirtied, so we want to make sure that we optimize for that.
+mini_vec::size_assert::words_of_type!(ForceDirtyHistory, 1);
+
+impl ForceDirtyHistory {
+    pub(crate) fn new() -> Self {
+        Self { versions: None }
+    }
+
+    /// Marks a version as force-dirtied. Returns true if the version was not already marked.
+    ///
+    /// Should only ever be called at increasing version numbers.
+    pub(crate) fn force_dirty(
+        &mut self,
+        v: VersionNumber,
+        invalidation_priority: InvalidationSourcePriority,
+    ) -> bool {
+        match &mut self.versions {
+            Some(data) => {
+                if *data.0.last().unwrap() == v {
+                    false
+                } else {
+                    data.0.push(v);
+                    true
+                }
+            }
+            None => {
+                self.versions = Some(Box::new((vec![v], invalidation_priority)));
+                true
+            }
+        }
+    }
+
+    /// Returns the force-dirtied bounds around the provided version.
+    fn restricted_range(&self, version: VersionNumber) -> VersionRange {
+        self.get_x(version).0
+    }
+
+    fn get_x(&self, version: VersionNumber) -> (VersionRange, InvalidationSourcePriority) {
+        match &self.versions {
+            None => (
+                VersionRange::begins_with(VersionNumber::FIRST),
+                InvalidationSourcePriority::Normal,
+            ),
+            Some(data) => {
+                let (dirties, invalidation_priority) = &**data;
+                let mut end = None;
+                let mut begin = None;
+                for dirty_v in dirties.iter().rev() {
+                    if *dirty_v <= version {
+                        begin = Some(*dirty_v);
+                        break;
+                    } else {
+                        end = Some(*dirty_v);
+                    }
+                }
+
+                (
+                    match (begin, end) {
+                        (Some(begin), Some(end)) => VersionRange::bounded(begin, end),
+                        (Some(begin), None) => VersionRange::begins_with(begin),
+                        (None, Some(end)) => VersionRange::bounded(VersionNumber::FIRST, end),
+                        (None, None) => VersionRange::begins_with(VersionNumber::FIRST),
+                    },
+                    *invalidation_priority,
+                )
+            }
+        }
+    }
+
+    pub(crate) fn to_introspectable(&self) -> Vec<crate::introspection::graph::VersionNumber> {
+        match &self.versions {
+            Some(data) => data.0.iter().map(|v| v.to_introspectable()).collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+impl OccupiedGraphNode {
+    pub(crate) fn new(
+        key: DiceKey,
+        res: DiceValidValue,
+        deps: Arc<SeriesParallelDeps>,
+        verified_ranges: VersionRanges,
+        dirtied_history: ForceDirtyHistory,
+        invalidation_paths: TrackedInvalidationPaths,
+    ) -> Self {
+        Self {
+            key,
+            res: PagableNodeValue::hydrated(res),
+            metadata: NodeMetadata {
+                deps,
+                rdeps: LazyDepsSet::new(),
+                verified_ranges: verified_ranges.into_arc(),
+                dirtied_history,
+            },
+            invalidation_paths,
+        }
+    }
+
+    pub(crate) fn mark_unchanged(
+        &mut self,
+        version: VersionNumber,
+        mut valid_deps_versions: VersionRanges,
+        new_invalidation_paths: TrackedInvalidationPaths,
+    ) {
+        valid_deps_versions
+            .intersect_range(self.metadata.dirtied_history.restricted_range(version));
+        valid_deps_versions.insert(VersionRange::bounded(version, version.next()));
+        Arc::make_mut(&mut self.metadata.verified_ranges).union_in_place(&valid_deps_versions);
+
+        self.invalidation_paths.update(&new_invalidation_paths)
+    }
+
+    /// Returns this node's stored value (which may be hydrated or paged out).
+    /// Callers that need a hydrated `DiceValidValue` should call `.expect_hydrated(msg)`
+    /// with a message explaining why the caller knows the value is hydrated.
+    pub(crate) fn val(&self) -> &PagableNodeValue {
+        &self.res
+    }
+
+    /// Restores the in-memory hydrated value (typically after deserializing from
+    /// disk), marking a `PagedOut` node `Recomputed`: resident again and no longer a
+    /// page-out candidate (it has already been paged out once).
+    pub(crate) fn rehydrate(&mut self, value: DiceValidValue) {
+        if matches!(self.res, PagableNodeValue::PagedOut(_)) {
+            self.res = PagableNodeValue::Recomputed(value);
+        }
+    }
+
+    /// Records that the value has been written to storage at `data_key` and drops
+    /// the in-memory value (the on-disk reference is now load-bearing).
+    pub(crate) fn set_paged_out(&mut self, data_key: DataKey) {
+        self.res = PagableNodeValue::PagedOut(data_key);
+    }
+
+    /// Records that page-out considered this node but its value can't be
+    /// serialized, so it stays resident and is not a page-out candidate (nor
+    /// after a recompute — see `PagableNodeValue::after_recompute`).
+    pub(crate) fn mark_non_pageable(&mut self) {
+        let value = self
+            .res
+            .expect_hydrated("mark_non_pageable is only called on resident page-out candidates")
+            .dupe();
+        self.res = PagableNodeValue::NonPageable(value);
+    }
+
+    /// `expect_hydrated_msg` is forwarded to `expect_hydrated` and should explain why the
+    /// caller knows the entry is hydrated.
+    pub(crate) fn computed_val(
+        &self,
+        for_version: VersionNumber,
+        expect_hydrated_msg: &str,
+    ) -> DiceComputedValue {
+        DiceComputedValue::new(
+            MaybeValidDiceValue::valid(self.val().expect_hydrated(expect_hydrated_msg).dupe()),
+            self.metadata.verified_ranges.dupe(),
+            self.invalidation_paths.at_version(for_version),
+        )
+    }
+
+    pub(crate) fn on_injected(
+        &mut self,
+        version: VersionNumber,
+        value: DiceValidValue,
+        invalidation_priority: InvalidationSourcePriority,
+    ) -> InvalidateResult<'_> {
+        // TODO(cjhopman): accepting injections only for InjectedKey would make the VersionedGraph simpler. Currently, this is used
+        // for "mocking" dice keys in tests via DiceBuilder::mock_and_return().
+        //
+        // Equality short-circuit only applies when the existing value is hydrated. If
+        // it's paged out, we can't compare without hydrating, so we skip the check
+        // and just replace the node below.
+        if let Some(existing) = self.res.as_hydrated() {
+            if existing.equality(&value) {
+                // TODO(cjhopman): This is wrong. The node could currently be in a dirtied state and we
+                // aren't recording that the value is verified at this version.
+                return InvalidateResult::NoChange;
+            }
+        }
+
+        self.res = PagableNodeValue::hydrated(value);
+        self.metadata.deps = Arc::new(SeriesParallelDeps::None);
+        self.metadata.verified_ranges = Arc::new(VersionRange::begins_with(version).into_ranges());
+        self.invalidation_paths
+            .update(&TrackedInvalidationPaths::new(
+                invalidation_priority,
+                self.key,
+                version,
+            ));
+
+        InvalidateResult::Changed(Some(self.metadata.rdeps.drain()))
+    }
+
+    fn at_version(&self, v: VersionNumber) -> VersionedGraphResult {
+        match self.metadata.verified_ranges.find_value_upper_bound(v) {
+            Some(found) if found == v => {
+                if self.res.as_hydrated().is_some() {
+                    VersionedGraphResult::Match(
+                        self.computed_val(v, "the Match branch checked as_hydrated().is_some()"),
+                    )
+                } else {
+                    VersionedGraphResult::MatchPagedOut(PagedOutMatch {
+                        data_key: self.res.data_key().expect(
+                            "a non-resident `PagableNodeValue` is always `PagedOut`, which has a `DataKey`",
+                        ),
+                        valid: self.metadata.verified_ranges.dupe(),
+                        invalidation_paths: self.invalidation_paths.at_version(v),
+                    })
+                }
+            }
+            Some(prev_verified_version) => {
+                if self
+                    .metadata
+                    .dirtied_history
+                    .restricted_range(v)
+                    .contains(&prev_verified_version)
+                {
+                    if let Some(value) = self.res.as_hydrated() {
+                        VersionedGraphResult::CheckDeps(VersionedGraphResultMismatch {
+                            entry: value.dupe(),
+                            prev_verified_version,
+                            deps_to_validate: self.metadata.deps.dupe(),
+                        })
+                    } else {
+                        VersionedGraphResult::CheckDepsPagedOut(PagedOutMismatch {
+                            data_key: self.res.data_key().expect(
+                                "a non-resident `PagableNodeValue` is always `PagedOut`, which has a `DataKey`",
+                            ),
+                            prev_verified_version,
+                            deps_to_validate: self.metadata.deps.dupe(),
+                        })
+                    }
+                } else {
+                    VersionedGraphResult::Compute
+                }
+            }
+            None => VersionedGraphResult::Compute,
+        }
+    }
+
+    fn add_rdep_at(&mut self, v: VersionNumber, k: DiceKey) {
+        if self.metadata.should_add_rdep_at(v) {
+            self.metadata.rdeps.insert(v, k);
+        }
+    }
+
+    fn force_dirty(
+        &mut self,
+        v: VersionNumber,
+        invalidation_priority: InvalidationSourcePriority,
+    ) -> InvalidateResult<'_> {
+        self.mark_invalidated(v, Some(invalidation_priority));
+        if self
+            .metadata
+            .dirtied_history
+            .force_dirty(v, invalidation_priority)
+        {
+            InvalidateResult::Changed(Some(self.metadata.rdeps.drain()))
+        } else {
+            InvalidateResult::NoChange
+        }
+    }
+
+    fn mark_invalidated(
+        &mut self,
+        v: VersionNumber,
+        invalidation_priority: Option<InvalidationSourcePriority>,
+    ) -> bool {
+        if let Some(invalidation_priority) = invalidation_priority {
+            self.invalidation_paths
+                .update(&TrackedInvalidationPaths::new(
+                    invalidation_priority,
+                    self.key,
+                    v,
+                ));
+        }
+        Arc::make_mut(&mut self.metadata.verified_ranges)
+            .intersect_range(VersionRange::bounded(VersionNumber::FIRST, v))
+    }
+
+    fn rdeps(&self) -> impl Iterator<Item = DiceKey> {
+        self.metadata.rdeps.iter()
+    }
+
+    pub(crate) fn deps(&self) -> &Arc<SeriesParallelDeps> {
+        &self.metadata.deps
+    }
+
+    pub(crate) fn is_verified_at(&self, version: VersionNumber) -> bool {
+        self.metadata.verified_ranges.contains(version)
+    }
+}
+
+/// An entry in the graph that has no computation value associated. This is used to store the
+/// history information that is known.
+/// This will be replaced by `OccupiedGraphNode` when a computed value is associated with
+/// this node. There is no guarantees of when, or even if that will occur since users may never
+/// need the associated value at this node.
+#[derive(Allocative, Debug)]
+pub(crate) struct VacantGraphNode {
+    key: DiceKey,
+    dirtied_history: ForceDirtyHistory,
+    invalidation_priority: InvalidationSourcePriority,
+}
+impl VacantGraphNode {
+    pub(crate) fn new(key: DiceKey, invalidation_priority: InvalidationSourcePriority) -> Self {
+        Self {
+            key,
+            dirtied_history: ForceDirtyHistory::new(),
+            invalidation_priority,
+        }
+    }
+
+    pub(crate) fn force_dirty(
+        &mut self,
+        v: VersionNumber,
+        invalidation_priority: InvalidationSourcePriority,
+    ) -> bool {
+        assert!(self.invalidation_priority == invalidation_priority);
+        self.dirtied_history.force_dirty(v, invalidation_priority)
+    }
+}
+
+/// An entry in the graph for an InjectedKey. This will store all injected values it ever sees because
+/// we cannot recompute them if they are dropped.
+#[derive(Allocative, Debug)]
+pub(crate) struct InjectedGraphNode {
+    key: DiceKey,
+    values: SortedVectorMap<VersionNumber, InjectedNodeData>,
+    rdeps: LazyDepsSet,
+    invalidation_paths: TrackedInvalidationPaths,
+}
+
+#[derive(Allocative, Debug)]
+pub(crate) struct InjectedNodeData {
+    value: DiceValidValue,
+    first_valid_version: VersionNumber,
+    // Used to cache the version ranges for `at_version`. This is a single VersionRange.
+    valid_versions: Arc<VersionRanges>,
+}
+
+impl InjectedGraphNode {
+    /// Returns a list of rdeps to invalidate and a bool indicating if the value changed. Should only ever be called at increasing version numbers.
+    pub(crate) fn on_injected(
+        &mut self,
+        version: VersionNumber,
+        value: DiceValidValue,
+        invalidation_priority: InvalidationSourcePriority,
+    ) -> InvalidateResult<'_> {
+        match self.values.values_mut().next_back() {
+            Some(v) if v.value.equality(&value) => {
+                return InvalidateResult::NoChange;
+            }
+            Some(v) => {
+                v.valid_versions =
+                    Arc::new(VersionRange::bounded(v.first_valid_version, version).into_ranges());
+            }
+            None => {}
+        };
+
+        self.values
+            .insert(version, Self::new_node_data(value, version));
+        self.invalidation_paths
+            .update(&TrackedInvalidationPaths::new(
+                invalidation_priority,
+                self.key,
+                version,
+            ));
+
+        InvalidateResult::Changed(Some(self.rdeps.drain()))
+    }
+
+    pub(crate) fn at_version(&self, v: VersionNumber) -> VersionedGraphResult {
+        match self.data_at(v) {
+            Some((_, data)) => VersionedGraphResult::Match(DiceComputedValue::new(
+                MaybeValidDiceValue::valid(data.value.dupe()),
+                data.valid_versions.dupe(),
+                self.invalidation_paths.at_version(v),
+            )),
+            None => VersionedGraphResult::Compute,
+        }
+    }
+
+    pub(crate) fn add_rdep_at(&mut self, v: VersionNumber, k: DiceKey) {
+        for version in self.values.keys().rev() {
+            if *version <= v {
+                self.rdeps.insert(v, k);
+                return;
+            }
+        }
+        unreachable!()
+    }
+
+    pub(crate) fn new(
+        k: DiceKey,
+        v: VersionNumber,
+        value: DiceValidValue,
+        invalidation_priority: InvalidationSourcePriority,
+    ) -> InjectedGraphNode {
+        InjectedGraphNode {
+            key: k,
+            values: [(v, Self::new_node_data(value, v))].into_iter().collect(),
+            rdeps: LazyDepsSet::new(),
+            invalidation_paths: TrackedInvalidationPaths::new(invalidation_priority, k, v),
+        }
+    }
+
+    pub(crate) fn latest(&self) -> &InjectedNodeData {
+        // We don't ever create an empty values map
+        self.values.values().next_back().unwrap()
+    }
+
+    fn new_node_data(value: DiceValidValue, version: VersionNumber) -> InjectedNodeData {
+        InjectedNodeData {
+            value,
+            first_valid_version: version,
+            valid_versions: Arc::new(VersionRange::begins_with(version).into_ranges()),
+        }
+    }
+
+    fn data_at(&self, v: VersionNumber) -> Option<(&VersionNumber, &InjectedNodeData)> {
+        self.values
+            .range((Bound::Unbounded, Bound::Included(v)))
+            .next_back()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use allocative::Allocative;
+    use async_trait::async_trait;
+    use derive_more::Display;
+    use dice_futures::cancellation::CancellationContext;
+    use dupe::Dupe;
+    use pagable::Pagable;
+    use pagable::pagable_typetag;
+
+    use crate::DiceKeyDyn;
+    use crate::api::computations::DiceComputations;
+    use crate::api::key::Key;
+    use crate::api::key::NoValueSerialize;
+    use crate::api::key::ValueSerialize;
+    use crate::arc::Arc;
+    use crate::core::graph::nodes::ForceDirtyHistory;
+    use crate::core::graph::nodes::OccupiedGraphNode;
+    use crate::deps::graph::SeriesParallelDeps;
+    use crate::key::DiceKey;
+    use crate::value::DiceKeyValue;
+    use crate::value::DiceValidValue;
+    use crate::value::TrackedInvalidationPaths;
+    use crate::versions::VersionNumber;
+    use crate::versions::VersionRange;
+    use crate::versions::VersionRanges;
+
+    #[derive(Allocative, Clone, Dupe, Debug, Display, PartialEq, Eq, Hash, Pagable)]
+    #[pagable_typetag(DiceKeyDyn)]
+    struct K;
+
+    #[async_trait]
+    impl Key for K {
+        type Value = usize;
+
+        async fn compute(
+            &self,
+            _ctx: &mut DiceComputations,
+            _cancellations: &CancellationContext,
+        ) -> Self::Value {
+            unimplemented!("test")
+        }
+
+        fn equality(x: &Self::Value, y: &Self::Value) -> bool {
+            x == y
+        }
+
+        fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
+            NoValueSerialize::<Self::Value>::new()
+        }
+    }
+
+    #[test]
+    fn update_versioned_graph_entry_tracks_versions() {
+        let deps0: Arc<SeriesParallelDeps> =
+            Arc::new(SeriesParallelDeps::serial_from_vec(vec![DiceKey {
+                index: 5,
+            }]));
+        let mut entry = OccupiedGraphNode::new(
+            DiceKey { index: 1335 },
+            DiceValidValue::testing_new(DiceKeyValue::<K>::new(1)),
+            deps0.dupe(),
+            VersionRanges::testing_new(
+                vec![VersionRange::bounded(
+                    VersionNumber::new(1),
+                    VersionNumber::new(2),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ForceDirtyHistory::new(),
+            TrackedInvalidationPaths::clean(),
+        );
+
+        assert!(entry.is_verified_at(VersionNumber::new(1)));
+        assert_eq!(*entry.deps(), deps0);
+
+        entry.mark_unchanged(
+            VersionNumber::new(2),
+            VersionRanges::new(),
+            TrackedInvalidationPaths::clean(),
+        );
+
+        assert!(entry.is_verified_at(VersionNumber::new(1)));
+        assert!(entry.is_verified_at(VersionNumber::new(2)));
+    }
+
+    #[test]
+    fn rehydrate_does_not_overwrite_resident_value() {
+        let resident = DiceValidValue::testing_new(DiceKeyValue::<K>::new(2));
+        let stale = DiceValidValue::testing_new(DiceKeyValue::<K>::new(1));
+        let mut entry = OccupiedGraphNode::new(
+            DiceKey { index: 1335 },
+            resident.dupe(),
+            Arc::new(SeriesParallelDeps::None),
+            VersionRange::begins_with(VersionNumber::new(1)).into_ranges(),
+            ForceDirtyHistory::new(),
+            TrackedInvalidationPaths::clean(),
+        );
+
+        entry.rehydrate(stale);
+
+        assert!(
+            entry
+                .val()
+                .expect_hydrated("the resident value must survive stale hydration")
+                .equality(&resident)
+        );
+    }
+}

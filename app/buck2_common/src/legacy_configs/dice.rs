@@ -33,6 +33,7 @@ use dice::ProjectionKey;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use dupe::ResultDupedErrExt;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 
@@ -45,11 +46,11 @@ use crate::legacy_configs::view::LegacyBuckConfigView;
 
 /// Buckconfig view which queries buckconfig entry from DICE.
 #[derive(Clone, Dupe)]
-pub struct OpaqueLegacyBuckConfigOnDice {
-    config: Arc<OpaqueValue<LegacyBuckConfigForCellKey>>,
+pub struct OpaqueLegacyBuckConfigOnDice<'d> {
+    config: Arc<OpaqueValue<'d, LegacyBuckConfigForCellKey>>,
 }
 
-impl std::fmt::Debug for OpaqueLegacyBuckConfigOnDice {
+impl<'d> std::fmt::Debug for OpaqueLegacyBuckConfigOnDice<'d> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LegacyBuckConfigOnDice")
             .field("config", &self.config)
@@ -57,10 +58,10 @@ impl std::fmt::Debug for OpaqueLegacyBuckConfigOnDice {
     }
 }
 
-impl OpaqueLegacyBuckConfigOnDice {
+impl<'d> OpaqueLegacyBuckConfigOnDice<'d> {
     pub fn lookup(
         &self,
-        ctx: &mut DiceComputations,
+        ctx: &mut DiceComputations<'d>,
         key: BuckconfigKeyRef,
     ) -> buck2_error::Result<Option<Arc<str>>> {
         let BuckconfigKeyRef { section, property } = key;
@@ -73,17 +74,14 @@ impl OpaqueLegacyBuckConfigOnDice {
         )?)
     }
 
-    pub fn view<'a, 'd>(
-        &'a self,
-        ctx: &'a mut DiceComputations<'d>,
-    ) -> LegacyBuckConfigOnDice<'a, 'd> {
+    pub fn view<'a>(&'a self, ctx: &'a mut DiceComputations<'d>) -> LegacyBuckConfigOnDice<'a, 'd> {
         LegacyBuckConfigOnDice { ctx, config: self }
     }
 }
 
 pub struct LegacyBuckConfigOnDice<'a, 'd> {
     ctx: &'a mut DiceComputations<'d>,
-    config: &'a OpaqueLegacyBuckConfigOnDice,
+    config: &'a OpaqueLegacyBuckConfigOnDice<'d>,
 }
 
 impl LegacyBuckConfigOnDice<'_, '_> {
@@ -109,10 +107,10 @@ impl LegacyBuckConfigView for LegacyBuckConfigOnDice<'_, '_> {
     }
 }
 
-pub trait HasInjectedLegacyConfigs {
+pub trait HasInjectedLegacyConfigs<'d> {
     fn get_injected_external_buckconfig_data(
         &mut self,
-    ) -> impl Future<Output = buck2_error::Result<Arc<ExternalBuckconfigData>>>;
+    ) -> impl Future<Output = buck2_error::Result<&'d ExternalBuckconfigData>>;
 
     fn is_injected_external_buckconfig_data_key_set(
         &mut self,
@@ -120,7 +118,7 @@ pub trait HasInjectedLegacyConfigs {
 }
 
 #[async_trait]
-pub trait HasLegacyConfigs {
+pub trait HasLegacyConfigs<'d> {
     /// Get buckconfigs.
     ///
     /// This operation does not record buckconfig as a dependency of current computation.
@@ -128,11 +126,11 @@ pub trait HasLegacyConfigs {
     async fn get_legacy_config_on_dice(
         &mut self,
         cell_name: CellName,
-    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice>;
+    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice<'d>>;
 
     async fn get_legacy_root_config_on_dice(
         &mut self,
-    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice>;
+    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice<'d>>;
 
     /// Use this function carefully: a computation which fetches this key will be recomputed
     /// if any buckconfig property changes.
@@ -141,7 +139,7 @@ pub trait HasLegacyConfigs {
     async fn get_legacy_config_for_cell(
         &mut self,
         cell_name: CellName,
-    ) -> buck2_error::Result<LegacyBuckConfig>;
+    ) -> buck2_error::Result<&'d LegacyBuckConfig>;
 
     async fn get_legacy_config_property(
         &mut self,
@@ -183,7 +181,7 @@ pub trait SetLegacyConfigs {
 struct LegacyExternalBuckConfigDataKey;
 
 impl InjectedKey for LegacyExternalBuckConfigDataKey {
-    type Value = Option<Arc<ExternalBuckconfigData>>;
+    type Value = Option<ExternalBuckconfigData>;
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
         x == y
@@ -329,11 +327,11 @@ impl ProjectionKey for LegacyBuckConfigPropertyProjectionKey {
     }
 }
 
-impl HasInjectedLegacyConfigs for DiceComputations<'_> {
+impl<'d> HasInjectedLegacyConfigs<'d> for DiceComputations<'d> {
     async fn get_injected_external_buckconfig_data(
         &mut self,
-    ) -> buck2_error::Result<Arc<ExternalBuckconfigData>> {
-        self.compute(&LegacyExternalBuckConfigDataKey).await?.ok_or_else(|| internal_error!(
+    ) -> buck2_error::Result<&'d ExternalBuckconfigData> {
+        self.compute(&LegacyExternalBuckConfigDataKey).await?.as_ref().ok_or_else(|| internal_error!(
             "Tried to retrieve LegacyExternalBuckConfigDataKey from the graph, but key has None value"
         ))
     }
@@ -357,11 +355,11 @@ pub fn inject_legacy_config_for_test(
 }
 
 #[async_trait]
-impl HasLegacyConfigs for DiceComputations<'_> {
+impl<'d> HasLegacyConfigs<'d> for DiceComputations<'d> {
     async fn get_legacy_config_on_dice(
         &mut self,
         cell_name: CellName,
-    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice> {
+    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice<'d>> {
         let config = self
             .compute_opaque(&LegacyBuckConfigForCellKey { cell_name })
             .await?;
@@ -375,7 +373,7 @@ impl HasLegacyConfigs for DiceComputations<'_> {
 
     async fn get_legacy_root_config_on_dice(
         &mut self,
-    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice> {
+    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice<'d>> {
         let cell_resolver = self.get_cell_resolver().await?;
         self.get_legacy_config_on_dice(cell_resolver.root_cell())
             .await
@@ -384,9 +382,11 @@ impl HasLegacyConfigs for DiceComputations<'_> {
     async fn get_legacy_config_for_cell(
         &mut self,
         cell_name: CellName,
-    ) -> buck2_error::Result<LegacyBuckConfig> {
+    ) -> buck2_error::Result<&'d LegacyBuckConfig> {
         self.compute(&LegacyBuckConfigForCellKey { cell_name })
             .await?
+            .as_ref()
+            .duped_err()
     }
 
     async fn get_legacy_config_property(
@@ -440,10 +440,7 @@ impl SetLegacyConfigs for DiceTransactionUpdater {
         data: ExternalBuckconfigData,
     ) -> buck2_error::Result<()> {
         let data = data.filter_values(is_config_invisible_to_dice);
-        Ok(self.changed_to(vec![(
-            LegacyExternalBuckConfigDataKey,
-            Some(Arc::new(data)),
-        )])?)
+        Ok(self.changed_to(vec![(LegacyExternalBuckConfigDataKey, Some(data))])?)
     }
 
     fn set_none_legacy_config_external_data(&mut self) -> buck2_error::Result<()> {

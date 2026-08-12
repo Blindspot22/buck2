@@ -21,6 +21,7 @@ use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use dupe::ResultDupedErrExt;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use starlark::environment::GlobalFrozenHeapName;
@@ -29,6 +30,8 @@ use starlark::environment::Globals;
 use crate::interpreter::configuror::BuildInterpreterConfiguror;
 use crate::interpreter::context::HasInterpreterContext;
 use crate::interpreter::globals::base_globals;
+
+pagable::static_str!(GLOBAL_ENV_HEAP_NAME = concat!(module_path!(), "::global_env"));
 
 /// Information shared across interpreters. Contains no cell-specific
 /// information.
@@ -64,7 +67,7 @@ impl GlobalInterpreterState {
                 }
             })
             .build_named(GlobalFrozenHeapName {
-                name: concat!(module_path!(), "::global_env"),
+                name: GLOBAL_ENV_HEAP_NAME,
             });
 
         Ok(Self {
@@ -86,20 +89,17 @@ impl GlobalInterpreterState {
 }
 
 #[async_trait]
-pub trait HasGlobalInterpreterState {
+pub trait HasGlobalInterpreterState<'d> {
     async fn get_global_interpreter_state(
         &mut self,
-    ) -> buck2_error::Result<Arc<GlobalInterpreterState>>;
+    ) -> buck2_error::Result<&'d Arc<GlobalInterpreterState>>;
 }
 
 #[async_trait]
-impl HasGlobalInterpreterState for DiceComputations<'_> {
+impl<'d> HasGlobalInterpreterState<'d> for DiceComputations<'d> {
     async fn get_global_interpreter_state(
         &mut self,
-    ) -> buck2_error::Result<Arc<GlobalInterpreterState>> {
-        #[derive(Clone, Dupe, Allocative, Pagable)]
-        struct GisValue(Arc<GlobalInterpreterState>);
-
+    ) -> buck2_error::Result<&'d Arc<GlobalInterpreterState>> {
         #[derive(
             Clone,
             derive_more::Display,
@@ -117,23 +117,23 @@ impl HasGlobalInterpreterState for DiceComputations<'_> {
 
         #[async_trait]
         impl Key for GisKey {
-            type Value = buck2_error::Result<GisValue>;
+            type Value = buck2_error::Result<Arc<GlobalInterpreterState>>;
             async fn compute(
                 &self,
                 ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
-                let interpreter_configuror = ctx.get_interpreter_configuror().await?;
-                let cell_resolver = ctx.get_cell_resolver().await?;
+                let interpreter_configuror = ctx.get_interpreter_configuror().await?.dupe();
+                let cell_resolver = ctx.get_cell_resolver().await?.dupe();
                 let disable_starlark_types = ctx.get_disable_starlark_types().await?;
                 let unstable_typecheck = ctx.get_unstable_typecheck().await?;
 
-                Ok(GisValue(Arc::new(GlobalInterpreterState::new(
+                Ok(Arc::new(GlobalInterpreterState::new(
                     cell_resolver,
                     interpreter_configuror,
                     disable_starlark_types,
                     unstable_typecheck,
-                )?)))
+                )?))
             }
 
             fn equality(_: &Self::Value, _: &Self::Value) -> bool {
@@ -145,6 +145,6 @@ impl HasGlobalInterpreterState for DiceComputations<'_> {
             }
         }
 
-        Ok(self.compute(&GisKey()).await??.0)
+        self.compute(&GisKey()).await?.as_ref().duped_err()
     }
 }

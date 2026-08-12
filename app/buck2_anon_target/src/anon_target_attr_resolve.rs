@@ -33,9 +33,7 @@ use buck2_node::attrs::attr_type::query::ResolvedQueryLiterals;
 use buck2_node::attrs::configured_traversal::ConfiguredAttrTraversal;
 use dice::DiceComputations;
 use dupe::Dupe;
-use futures::FutureExt;
 use starlark::values::Value;
-use starlark::values::dict::Dict;
 use starlark::values::tuple::AllocTuple;
 use starlark_map::small_map::SmallMap;
 
@@ -116,7 +114,7 @@ impl AnonTargetAttrResolution for AnonTargetAttr {
                         v.resolve_single(pkg, anon_resolution_ctx)?,
                     );
                 }
-                Ok(ctx.heap().alloc(Dict::new(res)))
+                Ok(ctx.heap().alloc_dict(res))
             }
             AnonTargetAttr::None => Ok(Value::new_none()),
             AnonTargetAttr::OneOf(box l, _) => l.resolve_single(pkg, anon_resolution_ctx),
@@ -246,27 +244,21 @@ impl AnonTargetDependents {
         dice: &mut DiceComputations<'_>,
     ) -> buck2_error::Result<AnonTargetDependentAnalysisResults<'v>> {
         let dep_analysis_results =
-            KeepGoing::try_compute_join_all(dice, self.deps.iter(), |ctx, dep| {
-                async move {
-                    ctx.get_analysis_result(dep)
-                        .await
-                        .and_then(|v| v.require_compatible())
-                        .map(|r| (dep, r))
-                }
-                .boxed()
+            KeepGoing::try_compute_join_all(dice, self.deps.iter(), async |ctx, dep| {
+                ctx.get_analysis_result(dep)
+                    .await
+                    .require_compatible()
+                    .map(|r| (dep, r.dupe()))
             })
             .await?;
         let promised_artifacts: StdBuckHashMap<_, _> = {
             KeepGoing::try_compute_join_all(
                 dice,
                 self.promise_artifacts.iter(),
-                |ctx, promise_artifact_attr| {
-                    async move {
-                        get_artifact_from_anon_target_analysis(&promise_artifact_attr.id, ctx)
-                            .await
-                            .map(|artifact| (promise_artifact_attr, artifact))
-                    }
-                    .boxed()
+                async |ctx, promise_artifact_attr| {
+                    get_artifact_from_anon_target_analysis(&promise_artifact_attr.id, ctx)
+                        .await
+                        .map(|artifact| (promise_artifact_attr, artifact.dupe()))
                 },
             )
         }

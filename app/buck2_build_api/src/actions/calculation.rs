@@ -52,16 +52,16 @@ use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use dupe::ResultDupedErrExt;
+use dupe::ResultDupedExt;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use futures::future::{self};
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use ref_cast::RefCast;
 use smallvec::SmallVec;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
-use tracing::debug;
 
 use crate::actions::RegisteredAction;
 use crate::actions::artifact::get_artifact_fs::GetArtifactFs;
@@ -91,9 +91,6 @@ async fn build_action_impl(
     cancellation: &CancellationContext,
     key: &ActionKey,
 ) -> buck2_error::Result<ActionOutputs> {
-    // Compute is only called if we have cache miss
-    debug!("compute {}", key);
-
     let action = ActionCalculation::get_action(ctx, key).await?;
 
     if action.key() != key {
@@ -103,12 +100,15 @@ async fn build_action_impl(
         // pointing at the same underlying action. We need to make sure that
         // underlying action only gets called once, so call build_action once
         // again with the new key to get DICE deduplication.
-        let res = ActionCalculation::build_action(ctx, action.key()).await;
-        return res;
+        return ActionCalculation::build_action(ctx, action.key())
+            .await
+            .duped();
     }
 
     build_action_no_redirect(ctx, cancellation, action).await
 }
+
+mini_vec::size_assert::words_of_async_fn_future!(build_action_impl, (_, _, _), ~53);
 
 async fn build_action_no_redirect(
     ctx: &mut DiceComputations<'_>,
@@ -130,7 +130,9 @@ async fn build_action_no_redirect(
                 && (pref.prefers_local() || executor.is_full_hybrid_enabled())
         }) {
         let artifact_fs = ctx.get_artifact_fs().await?;
-        let eager_paths = collect_eager_paths(ctx, &inputs, &artifact_fs).await?;
+        let eager_paths = collect_eager_paths(ctx, &inputs, artifact_fs)
+            .boxed()
+            .await?;
 
         if eager_paths.is_empty() {
             None
@@ -149,22 +151,16 @@ async fn build_action_no_redirect(
     let ensured_inputs = if inputs.is_empty() {
         BuckIndexMap::default()
     } else {
-        let ready_inputs: Vec<_> = tokio::task::unconstrained(KeepGoing::try_compute_join_all(
-            ctx,
-            inputs.iter(),
-            |ctx, v| {
-                async move {
-                    let resolved = v.resolved_artifact(ctx).await?;
-                    buck2_error::Ok(
-                        ensure_artifact_group_staged(ctx, resolved.clone())
-                            .await?
-                            .into_group_values(&resolved)?,
-                    )
-                }
-                .boxed()
-            },
-        ))
-        .await?;
+        let ready_inputs: Vec<_> =
+            KeepGoing::try_compute_join_all(ctx, inputs.iter(), async |ctx, v| {
+                let resolved = v.resolved_artifact(ctx).await?;
+                buck2_error::Ok(
+                    ensure_artifact_group_staged(ctx, resolved)
+                        .await?
+                        .into_group_values(resolved)?,
+                )
+            })
+            .await?;
 
         let mut results = BuckIndexMap::with_capacity(inputs.len());
         for (artifact, ready) in zip(inputs.iter(), ready_inputs) {
@@ -173,6 +169,26 @@ async fn build_action_no_redirect(
         results
     };
 
+    let now = TimeSpan::start_now();
+
+    let target_rule_type_name = match action.key().owner() {
+        BaseDeferredKey::TargetLabel(target_label) => {
+            Some(get_target_rule_type_name(ctx, target_label).await?)
+        }
+        _ => None,
+    };
+
+    let fut = build_action_inner(
+        ctx,
+        cancellation,
+        &executor,
+        waiting_data,
+        ensured_inputs,
+        &action,
+        target_rule_type_name,
+    );
+
+    // Don't hold this across an await point
     let start_event = buck2_data::ActionExecutionStart {
         key: Some(action.key().as_proto()),
         kind: action.kind().into(),
@@ -182,32 +198,10 @@ async fn build_action_no_redirect(
         }),
     };
 
-    let now = TimeSpan::start_now();
-    let action = &action;
-
-    let target = match action.key().owner() {
-        BaseDeferredKey::TargetLabel(target_label) => Some(target_label.dupe()),
-        _ => None,
-    };
-
-    let target_rule_type_name = match target {
-        Some(label) => Some(get_target_rule_type_name(ctx, &label).await?),
-        None => None,
-    };
-
-    let fut = build_action_inner(
-        ctx,
-        cancellation,
-        &executor,
-        waiting_data,
-        ensured_inputs,
-        action,
-        target_rule_type_name,
-    );
-
-    // boxed() the future so that we don't need to allocate space for it while waiting on input dependencies.
-    let (action_execution_data, spans) =
-        async_record_root_spans(span_async(start_event, fut.boxed())).await;
+    let (action_execution_data, spans) = async_record_root_spans(span_async(start_event, fut))
+        // boxed() the future so that we don't need to allocate space for it while waiting on input dependencies.
+        .boxed()
+        .await;
 
     let execution_metrics = ActionExecutionMetrics {
         key: action.key().dupe(),
@@ -279,7 +273,9 @@ async fn collect_eager_paths(
             }
             ArtifactGroup::TransitiveSetProjection(tset) => {
                 let set = tset.key.key.lookup(ctx).await?;
-                queue.extend(set.get_projection_sub_inputs(tset.key.projection)?);
+                let sub_inputs =
+                    set.by_ref(|set| set.get_projection_sub_inputs(tset.key.projection))?;
+                queue.extend(sub_inputs);
             }
             ArtifactGroup::Promise(_) => {
                 // Skip promise artifacts - they should not be eagerly materialized
@@ -293,7 +289,7 @@ async fn collect_eager_paths(
 async fn build_action_inner(
     ctx: &mut DiceComputations<'_>,
     cancellation: &CancellationContext,
-    executor: &BuckActionExecutor,
+    executor: &BuckActionExecutor<'_>,
     waiting_data: WaitingData,
     ensured_inputs: BuckIndexMap<ArtifactGroup, ArtifactGroupValues>,
     action: &Arc<RegisteredAction>,
@@ -316,7 +312,7 @@ async fn build_action_inner(
 
     let allow_omit_details = execute_result.is_ok();
 
-    let commands = future::join_all(
+    let commands = buck2_util::future::join_all(
         command_reports
             .iter()
             .map(|r| command_execution_report_to_proto(r, allow_omit_details)),
@@ -364,6 +360,15 @@ async fn build_action_inner(
             output_size = outputs.calc_output_count_and_bytes(false).bytes;
             action_result = Ok(outputs);
             execution_kind = Some(meta.execution_kind.as_enum());
+            if matches!(
+                meta.execution_kind.as_enum(),
+                buck2_data::ActionExecutionKind::Local
+                    | buck2_data::ActionExecutionKind::LocalWorker
+                    | buck2_data::ActionExecutionKind::LocalDepFile
+                    | buck2_data::ActionExecutionKind::LocalActionCache
+            ) {
+                hostname = buck2_events::metadata::hostname();
+            }
             wall_time = Some(meta.timing.wall_time);
             error = None;
             input_files_bytes = meta.input_files_bytes;
@@ -599,7 +604,7 @@ fn check_infra_error_patterns(
 fn try_run_error_handler(
     action: Arc<RegisteredAction>,
     last_command: Option<&buck2_data::CommandExecution>,
-    artifact_fs: buck2_error::Result<ArtifactFs>,
+    artifact_fs: buck2_error::Result<&ArtifactFs>,
     outputs: Option<&ActionOutputs>,
 ) -> Option<ActionErrorDiagnostics> {
     use buck2_data::action_error_diagnostics::Data;
@@ -639,7 +644,7 @@ fn try_run_error_handler(
                         };
 
                         let outputs_artifacts = match action.action.failed_action_output_artifacts(
-                            &artifact_fs,
+                            artifact_fs,
                             heap,
                             outputs,
                         ) {
@@ -654,7 +659,7 @@ fn try_run_error_handler(
                             );
 
                         let error_handler_result = eval.eval_function(
-                            heap.access_owned_frozen_value(error_handler),
+                            error_handler.as_ref().add_to_heap(heap),
                             &[heap.alloc(error_handler_ctx)],
                             &[],
                         );
@@ -758,20 +763,18 @@ impl ActionCalculation {
         }
     }
 
-    pub fn build_action<'a>(
-        ctx: &'a mut DiceComputations<'_>,
+    pub fn build_action<'a, 'd>(
+        ctx: &'a mut DiceComputations<'d>,
         action_key: &ActionKey,
-    ) -> impl Future<Output = buck2_error::Result<ActionOutputs>> + use<'a> {
-        // build_action is called for every action key. We don't use `async fn` to ensure that it has minimal cost.
-        // We don't currently consume this in buck_e2e but it's good to log for debugging purposes.
-        debug!("build_action {}", action_key);
-        ctx.compute(BuildKey::ref_cast(action_key)).map(|v| v?)
+    ) -> impl Future<Output = buck2_error::Result<&'d ActionOutputs>> + use<'a, 'd> {
+        ctx.compute(BuildKey::ref_cast(action_key))
+            .map(|v| v?.as_ref().duped_err())
     }
 
-    pub fn build_artifact<'a>(
-        ctx: &'a mut DiceComputations<'_>,
+    pub fn build_artifact<'a, 'd>(
+        ctx: &'a mut DiceComputations<'d>,
         artifact: &BuildArtifact,
-    ) -> impl Future<Output = buck2_error::Result<ActionOutputs>> + use<'a> {
+    ) -> impl Future<Output = buck2_error::Result<&'d ActionOutputs>> + use<'a, 'd> {
         Self::build_action(ctx, artifact.key())
     }
 }

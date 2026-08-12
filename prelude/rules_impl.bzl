@@ -329,7 +329,6 @@ cxx_extra_attributes = {
             "exported_header_style": attrs.enum(IncludeType, default = "system"),
             "header_dirs": attrs.option(attrs.list(attrs.source(allow_directory = True)), default = None),
             "linker_flags": attrs.list(attrs.arg(anon_target_compatible = True), default = []),
-            "platform_header_dirs": attrs.option(attrs.list(attrs.tuple(attrs.regex(), attrs.list(attrs.source(allow_directory = True)))), default = None),
             "post_linker_flags": attrs.list(attrs.arg(anon_target_compatible = True), default = []),
             "preferred_linkage": attrs.enum(
                 Linkage.values(),
@@ -423,6 +422,7 @@ _go_extra_attributes = {
         "_exec_os_type": buck.exec_os_type_arg(),
         "_go_stdlib": attrs.default_only(attrs.dep(default = "prelude//go/tools:stdlib")),
         "_go_toolchain": toolchains_common.go(),
+        "_list_tests": attrs.default_only(attrs.dep(providers = [RunInfo], default = "prelude//go/tools:list_tests")),
         "_testmaingen": attrs.default_only(attrs.exec_dep(providers = [RunInfo], default = "prelude//go/tools:testmaingen")),
     },
 }

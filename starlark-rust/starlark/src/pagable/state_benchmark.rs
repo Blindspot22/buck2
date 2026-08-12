@@ -28,11 +28,13 @@
 //! return only the struct shell (~48 B for a 20K-entry HashMap).
 
 use std::mem;
+use std::sync::Arc;
 use std::time::Instant;
 
 use allocative::Allocative;
 use dashmap::DashMap;
 use derive_more::Display;
+use pagable::Pagable;
 use starlark_derive::NoSerialize;
 use starlark_derive::ProvidesStaticType;
 use starlark_derive::StarlarkPagable;
@@ -71,7 +73,8 @@ impl<'v> StarlarkValue<'v> for BenchValue {
     type Canonical = Self;
 }
 
-#[derive(Debug, Clone, Display, Hash, StrongHash)]
+#[derive(Debug, Clone, Display, Hash, StrongHash, Pagable)]
+#[pagable::pagable_typetag(crate::values::UserHeapName)]
 #[display("BenchHeapName({})", _0)]
 struct BenchHeapName(String);
 
@@ -181,10 +184,12 @@ fn test_chunk_index_beats_per_value_hashmap_memory_and_speed() {
 
     // NEW: chunk-index StarlarkSerState.
     let rss_before_new = read_rss_bytes();
-    let state = StarlarkSerState::new();
+    let state = Arc::new(StarlarkSerState::new());
     let new_build_start = Instant::now();
     for (heap_ref, _, _) in &heaps {
-        state.ensure_chunk_index_registered(heap_ref);
+        state
+            .ensure_chunk_index_registered(heap_ref)
+            .expect("register chunk index");
     }
     let new_build_elapsed = new_build_start.elapsed();
     let rss_after_new = read_rss_bytes();
@@ -218,7 +223,7 @@ fn test_chunk_index_beats_per_value_hashmap_memory_and_speed() {
 
     // Stride across heaps/bumps to avoid "all hits in one chunk".
     let mut sample_ptrs: Vec<usize> = Vec::with_capacity(NUM_LOOKUPS);
-    'fill: loop {
+    'fill: {
         for (_, _, ptrs) in &heaps {
             for (i, &p) in ptrs.iter().enumerate() {
                 if i % 4 == 0 {
@@ -229,7 +234,6 @@ fn test_chunk_index_beats_per_value_hashmap_memory_and_speed() {
                 }
             }
         }
-        break;
     }
 
     // Accumulate into `black_box` so the loop body can't be elided.
@@ -327,9 +331,11 @@ fn test_chunk_index_lookup_is_correct_and_fast() {
 
     let heaps = build_synthetic_heaps(NUM_HEAPS, VALUES_PER_HEAP);
 
-    let state = StarlarkSerState::new();
+    let state = Arc::new(StarlarkSerState::new());
     for (heap_ref, _, _) in &heaps {
-        state.ensure_chunk_index_registered(heap_ref);
+        state
+            .ensure_chunk_index_registered(heap_ref)
+            .expect("register chunk index");
     }
 
     let lookup_start = Instant::now();
@@ -363,9 +369,11 @@ fn test_chunk_index_lookup_is_correct_and_fast() {
 fn test_lookup_misses_when_ptr_not_in_any_chunk() {
     let heaps = build_synthetic_heaps(4, 32);
 
-    let state = StarlarkSerState::new();
+    let state = Arc::new(StarlarkSerState::new());
     for (heap_ref, _, _) in &heaps {
-        state.ensure_chunk_index_registered(heap_ref);
+        state
+            .ensure_chunk_index_registered(heap_ref)
+            .expect("register chunk index");
     }
 
     // Tiny sentinel address — well outside any plausible heap chunk.

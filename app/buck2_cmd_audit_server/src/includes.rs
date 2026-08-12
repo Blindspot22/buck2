@@ -43,6 +43,7 @@ use derive_more::Display;
 use dice::DiceComputations;
 use dice::LinearRecomputeDiceComputations;
 use dupe::Dupe;
+use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream::FuturesOrdered;
 use gazebo::prelude::*;
@@ -95,7 +96,7 @@ async fn get_transitive_includes(
     }
 
     struct Lookup<'a, 'd> {
-        ctx: &'a LinearRecomputeDiceComputations<'d>,
+        ctx: LinearRecomputeDiceComputations<'a, 'd>,
     }
 
     #[async_trait]
@@ -105,7 +106,8 @@ async fn get_transitive_includes(
                 self.ctx
                     .get()
                     .get_loaded_module(StarlarkModulePath::LoadFile(&label.0))
-                    .await?,
+                    .await?
+                    .dupe(),
             ))
         }
     }
@@ -131,16 +133,20 @@ async fn get_transitive_includes(
         }
     }
 
-    ctx.with_linear_recompute(|ctx| async move {
-        let lookup = Lookup { ctx: &ctx };
+    ctx.with_linear_recompute(|ctx| {
+        async move {
+            let lookup = Lookup { ctx };
 
-        async_depth_first_postorder_traversal(
-            &lookup,
-            load_result.imports().map(NodeRef::ref_cast),
-            Delegate,
-            visit,
-        )
-        .await
+            async_depth_first_postorder_traversal(
+                &lookup,
+                load_result.imports().map(NodeRef::ref_cast),
+                Delegate,
+                visit,
+                false, // allow_partial_graph
+            )
+            .await
+        }
+        .boxed()
     })
     .await?;
     Ok(imports)
@@ -170,7 +176,7 @@ async fn load_and_collect_includes(
         .into());
     }
 
-    get_transitive_includes(ctx, &load_result).await
+    get_transitive_includes(ctx, load_result).await
 }
 
 fn resolve_path(
@@ -202,8 +208,8 @@ impl ServerAuditSubcommand for AuditIncludesCommand {
         _client_ctx: ClientContext,
     ) -> buck2_error::Result<()> {
         Ok(server_ctx
-            .with_dice_ctx(|server_ctx, mut ctx| async move {
-                let cells = ctx.get_cell_resolver().await?;
+            .with_dice_ctx(|server_ctx, ctx| async move {
+                let cells = ctx.ctx().get_cell_resolver().await?;
                 let cwd = server_ctx.working_dir();
                 let current_cell = cells.get(cells.find(cwd))?;
                 let fs = server_ctx.project_root();
@@ -216,12 +222,12 @@ impl ServerAuditSubcommand for AuditIncludesCommand {
                     .unique()
                     .map(|path| {
                         let path = path.to_owned();
-                        let mut ctx = ctx.dupe();
+                        let ctx = ctx.dupe();
                         let cell_path = resolve_path(&cells, fs, &current_cell_abs_path, &path);
                         async move {
                             let load_result = try {
                                 let cell_path = cell_path?;
-                                load_and_collect_includes(&mut ctx, &cell_path).await?
+                                load_and_collect_includes(&mut ctx.ctx(), &cell_path).await?
                             };
                             (path, load_result)
                         }

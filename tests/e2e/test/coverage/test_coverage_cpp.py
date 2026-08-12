@@ -334,10 +334,7 @@ async def test_cpp_test_coverage_when_filter_by_test_binary_header_file(
         file_filter=[header_name],
     )
 
-    assert len(paths) == 2, str(paths)
-    assert header_name in paths
-    source_name = "fbcode/testing_frameworks/code_coverage/playground/Test.cpp"
-    assert source_name in paths
+    assert paths == [header_name]
 
 
 @buck_test(inplace=True)
@@ -353,46 +350,7 @@ async def test_cpp_test_coverage_when_filter_by_library_header_file(
         file_filter=[header_name],
     )
 
-    assert len(paths) == 9, str(paths)
-    # because it belongs to a target that has a header file selected for coverage
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/ThirdLevelDep.cpp" in paths
-    )
-    # because it's header file selected for coverage and it has executable code
-    assert "fbcode/testing_frameworks/code_coverage/playground/ThirdLevelDep.h" in paths
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/ThirdLevelDepPrivate.h"
-        in paths
-    )
-    # because it belongs to a target that has a dependency that contains a header
-    # file selected for coverage
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/SecondLevelDepIncludesThirdLevelDep.cpp"
-        in paths
-    )
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/SecondLevelDepDoesNotIncludeThirdLevelDep.cpp"
-        in paths
-    )
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/FirstLevelDep.cpp" in paths
-    )
-    assert "fbcode/testing_frameworks/code_coverage/playground/Test.cpp" in paths
-    # because a cpp file (FirstLvelDep.cpp) that included it called a template function
-    # defined inside it
-    assert "fbcode/testing_frameworks/code_coverage/playground/FirstLevelDep.h" in paths
-    assert "fbcode/testing_frameworks/code_coverage/playground/Test.h" in paths
-
-    # because they are not in the transitive rdeps of the cxx_library that has the header
-    # that was selected for coverage
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/SecondLevelDepWithoutDeps.cpp"
-        not in paths
-    )
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/SecondLevelDepWithoutDeps.h"
-        not in paths
-    )
+    assert paths == [header_name]
 
 
 @buck_test(inplace=True)
@@ -436,16 +394,7 @@ async def test_cpp_test_coverage_when_filter_by_header_file_in_headers_only_libr
         file_filter=[header_name],
     )
 
-    assert len(paths) == 3, str(paths)
-    assert header_name in paths
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/TestWithDepWithOnlyHeaders.cpp"
-        in paths
-    )
-    assert (
-        "fbcode/testing_frameworks/code_coverage/playground/TestWithDepWithOnlyHeaders.h"
-        in paths
-    )
+    assert paths == [header_name]
 
 
 @buck_test(inplace=True)

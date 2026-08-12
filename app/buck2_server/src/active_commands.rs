@@ -9,6 +9,7 @@
  */
 
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use buck2_event_observer::dice_state::DiceState;
 use buck2_event_observer::pending_estimate::pending_estimate;
@@ -22,13 +23,12 @@ use buck2_hash::StdBuckHashMap;
 use buck2_hash::StdBuckHashSet;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use parking_lot::MutexGuard;
 use tokio::sync::oneshot;
 
-static ACTIVE_COMMANDS: Lazy<Mutex<StdBuckHashMap<TraceId, ActiveCommandHandle>>> =
-    Lazy::new(|| Mutex::new(StdBuckHashMap::default()));
+static ACTIVE_COMMANDS: LazyLock<Mutex<StdBuckHashMap<TraceId, ActiveCommandHandle>>> =
+    LazyLock::new(|| Mutex::new(StdBuckHashMap::default()));
 
 /// Return the active commands, if you can access them.
 pub fn try_active_commands() -> Option<StdBuckHashMap<TraceId, ActiveCommandHandle>> {
@@ -38,6 +38,14 @@ pub fn try_active_commands() -> Option<StdBuckHashMap<TraceId, ActiveCommandHand
 
 pub fn active_commands() -> MutexGuard<'static, StdBuckHashMap<TraceId, ActiveCommandHandle>> {
     ACTIVE_COMMANDS.lock()
+}
+
+/// Whether `trace_id` is the one and only active command. False if it isn't
+/// registered (e.g. an empty map), so callers must hold their own active-command
+/// guard when relying on this.
+pub fn is_only_active_command(trace_id: &TraceId) -> bool {
+    let active = ACTIVE_COMMANDS.lock();
+    active.len() == 1 && active.contains_key(trace_id)
 }
 
 /// Broadcasts an instant event, returns whether any subscribers were connected.
@@ -278,6 +286,7 @@ mod tests {
     use buck2_events::Event;
     use buck2_events::daemon_id::DaemonId;
     use buck2_events::source::ChannelEventSource;
+    use buck2_hash::IntentionallyStdHashMap;
 
     use super::*;
 
@@ -381,7 +390,7 @@ mod tests {
                 data: Some(
                     buck2_data::DiceStateSnapshot {
                         key_states: {
-                            let mut map = StdBuckHashMap::default();
+                            let mut map = IntentionallyStdHashMap::new();
                             map.insert(
                                 "BuildKey".to_owned(),
                                 buck2_data::DiceKeyState {

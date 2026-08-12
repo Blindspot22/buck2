@@ -28,7 +28,6 @@ use dice::InjectedKey;
 use dice::Key;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
-use futures::FutureExt;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 
@@ -88,14 +87,14 @@ impl Key for BenchKey {
         ctx: &mut DiceComputations,
         _cancellations: &CancellationContext,
     ) -> Self::Value {
-        let size = ctx.compute(&ValueSizeKey).await.unwrap();
-        let num_deps = ctx.compute(&NumDepsKey).await.unwrap();
+        let size = *ctx.compute(&ValueSizeKey).await.unwrap();
+        let num_deps = *ctx.compute(&NumDepsKey).await.unwrap();
 
         // Depend on `num_deps` predecessor keys (j < self.0) to form a DAG.
         let start = self.0.saturating_sub(num_deps);
         if start < self.0 {
-            ctx.compute_join(start..self.0, |ctx, j| {
-                async move { ctx.compute(&BenchKey(j)).await.unwrap() }.boxed()
+            ctx.compute_join(start..self.0, async |ctx, j| {
+                ctx.compute(&BenchKey(j)).await.unwrap()
             })
             .await;
         }
@@ -134,15 +133,16 @@ pub struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let backend = dice::PagableStorageBackend::default().with_env_override()?;
+
     // Emit parameters as the first JSON line.
     {
-        let storage = std::env::var("PAGABLE_STORAGE_BACKEND").unwrap_or("sqlite".to_owned());
         let params = json_value::json!({
             "type": "params",
             "num_keys": cli.num_keys,
             "value_size": cli.value_size,
             "num_deps": cli.num_deps,
-            "storage": storage,
+            "storage": backend.to_string(),
         });
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut builder = Dice::builder();
     if let Ok(path) = std::env::var("BUCK2_DICE_DB_PATH") {
-        let storage = dice::DiceStorage::open(std::path::Path::new(&path))?;
+        let storage = dice::DiceStorage::open(std::path::Path::new(&path), backend)?;
         builder.set_pagable_storage(storage);
     }
     let dice = builder.build(DetectCycles::Disabled);
@@ -164,18 +164,18 @@ async fn main() -> anyhow::Result<()> {
         updater.changed_to(vec![(NumDepsKey, cli.num_deps)])?;
         updater.commit().await;
     }
-    let mut ctx = dice.updater().commit().await;
+    let ctx = dice.updater().commit().await;
 
     let compute_start = Instant::now();
-    ctx.compute_join(0..cli.num_keys, |ctx, i| {
-        async move { ctx.compute(&BenchKey(i)).await.unwrap() }.boxed()
-    })
-    .await;
+    ctx.ctx()
+        .compute_join(0..cli.num_keys, async |ctx, i| {
+            ctx.compute(&BenchKey(i)).await.unwrap()
+        })
+        .await;
     let compute_elapsed = compute_start.elapsed();
     // Flush the state processor queue so the SharedCache (which holds Arc clones
     // of all computed values) is dropped before we measure memory.
     drop(ctx);
-    let _ = dice.metrics();
     benchmark_utils::jemalloc_purge();
     benchmark_utils::emit_stage("compute", compute_elapsed.as_secs_f64(), heap_dump)?;
 

@@ -27,6 +27,7 @@
 use std::borrow::Cow;
 use std::fmt::Debug;
 use std::ops::ControlFlow;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use allocative::Allocative;
@@ -72,10 +73,10 @@ use pagable::PagableTagged;
 use pagable::pagable_typetag;
 use remote_execution::TActionResult2;
 use starlark::values::Heap;
-use starlark::values::OwnedFrozenValue;
+use starlark::values::OwnedFrozen;
+use starlark::values::Value;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::dict::DictType;
-use static_assertions::_core::ops::Deref;
 
 use crate::actions::execute::action_execution_target::ActionExecutionTarget;
 use crate::actions::execute::action_executor::ActionExecutionMetadata;
@@ -107,8 +108,8 @@ pub trait UnregisteredAction: Allocative + Send {
     fn register(
         self: Box<Self>,
         outputs: BuckIndexSet<BuildArtifact>,
-        starlark_data: Option<OwnedFrozenValue>,
-        error_handler: Option<OwnedFrozenValue>,
+        starlark_data: Option<OwnedFrozen<Value<'static>>>,
+        error_handler: Option<OwnedFrozen<Value<'static>>>,
     ) -> buck2_error::Result<Box<dyn Action>>;
 }
 
@@ -180,7 +181,7 @@ pub trait Action: PagableTagged + Allocative + Debug + Send + Sync + 'static {
         buck_indexmap! {}
     }
 
-    fn error_handler(&self) -> Option<&OwnedFrozenValue> {
+    fn error_handler(&self) -> Option<&OwnedFrozen<Value<'static>>> {
         None
     }
 
@@ -316,7 +317,7 @@ pub trait ActionExecutionCtx: Send + Sync {
     /// Clean up all the output directories for this action. This requires a mutable reference
     /// because you shouldn't be doing anything else with the ActionExecutionCtx while cleaning the
     /// outputs.
-    async fn cleanup_outputs(&mut self) -> buck2_error::Result<()>;
+    async fn cleanup_outputs(&self) -> buck2_error::Result<()>;
 
     /// Get the value of an Artifact. This Artifact _must_ have been declared
     /// as an input to the associated action or a panic will be raised.
@@ -341,11 +342,11 @@ pub trait ActionExecutionCtx: Send + Sync {
     fn cancellation_context(&self) -> &CancellationContext;
 
     /// I/O layer access to add non-source files (e.g. downloaded files) to
-    /// offline archive trace. If None, tracing is not enabled.
-    fn io_provider(&self) -> Arc<dyn IoProvider>;
+    /// offline archive trace.
+    fn io_provider(&self) -> &dyn IoProvider;
 
     /// Http client used for fetching and downloading remote artifacts.
-    fn http_client(&self) -> HttpClient;
+    fn http_client(&self) -> &HttpClient;
 
     fn output_trees_download_config(&self) -> &OutputTreesDownloadConfig;
 }
@@ -480,8 +481,8 @@ impl ActionToBeRegistered {
 
     fn register(
         self,
-        starlark_data: Option<OwnedFrozenValue>,
-        error_handler: Option<OwnedFrozenValue>,
+        starlark_data: Option<OwnedFrozen<Value<'static>>>,
+        error_handler: Option<OwnedFrozen<Value<'static>>>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         self.action
             .register(self.outputs, starlark_data, error_handler)

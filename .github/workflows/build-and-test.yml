@@ -1,6 +1,8 @@
 name: Build and test
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch: # allows manual triggering
 
@@ -8,25 +10,32 @@ permissions:
   contents: read
 
 jobs:
+  # Runner labels are repository (owner) specific, so the Meta larger runners
+  # (4-core-ubuntu, windows-8-core) don't exist on forks and jobs requesting
+  # them would sit queued forever waiting for a runner that isn't available.
+  # Fall back to the standard GitHub-hosted runners there.
   linux-build-and-test:
-    runs-on: 4-core-ubuntu
+    runs-on: ${{ github.repository_owner == 'facebook' && '4-core-ubuntu' || 'ubuntu-latest' }}
     steps:
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup_linux_env
     - uses: ./.github/actions/build_debug
     - uses: ./.github/actions/run_test_py
   macos-build-and-test:
-    runs-on: macos-latest
+    # Pinned to macos-14: on the macos-15 runner image `latest-stable` selects an
+    # Xcode/SDK that mis-targets the deployment SDK and breaks the `cargo build`
+    # step (actions/runner-images#12758). macos-14 resolves to a known-good Xcode 16.x.
+    runs-on: macos-14
     steps:
     - uses: maxim-lobanov/setup-xcode@v1.6.0
       with:
-        xcode-version: 16.4.0
+        xcode-version: latest-stable
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup_macos_env
     - uses: ./.github/actions/build_debug
     - uses: ./.github/actions/run_test_py
   windows-build-and-test:
-    runs-on: windows-8-core
+    runs-on: ${{ github.repository_owner == 'facebook' && 'windows-8-core' || 'windows-latest' }}
     steps:
     - uses: actions/checkout@v6
     - uses: ./.github/actions/setup_windows_env

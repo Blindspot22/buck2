@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -54,21 +55,24 @@ use buck2_events::dispatch::EventDispatcher;
 use buck2_events::dispatch::instant_event;
 use buck2_events::dispatch::with_dispatcher_async;
 use buck2_events::span::SpanId;
+use buck2_hash::BuckDashMap;
+use buck2_hash::BuckDashSet;
 use buck2_hash::StdBuckHashMap;
 use buck2_interpreter_for_build::interpreter::calculation::InterpreterResultsKey;
 use buck2_interpreter_for_build::interpreter::calculation::InterpreterResultsKeyActivationData;
 use buck2_node::nodes::eval_result::EvaluationResult;
+use buck2_util::size_assert;
 use buck2_util::time_span::TimeSpan;
 use dice::ActivationData;
 use dice::ActivationTracker;
 use dice::DynKey;
+use dice::PageInPhase;
 use dupe::Dupe;
 use gazebo::prelude::SliceExt;
 use gazebo::variants::VariantName;
 use itertools::Itertools;
 use ref_cast::RefCast;
 use smallvec::SmallVec;
-use static_assertions::assert_eq_size;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
@@ -109,19 +113,29 @@ enum NodeKey {
 
     // Dynamically-typed.
     Dyn(&'static str, BuildSignalsNodeKey),
+
+    // A DICE key that is normally omitted from the graph, retained as a zero-duration connector
+    // because it paged in or depends on a key that did.
+    PageInConnector(DynKey),
+
+    // Evaluation work separated from the key's completion because hydration happened after it.
+    EvaluationWork(Arc<NodeKey>),
+
+    // The page-in of the wrapped key, represented as a separate graph phase.
+    PageIn(Arc<NodeKey>),
 }
 
 // Explain the sizeof this struct (and avoid regressing it since we store it in the longest path
 // graph implementation).
 
-assert_eq_size!(BuildKey, [usize; 4]);
-assert_eq_size!(AnalysisKey, [usize; 2]);
-assert_eq_size!(EnsureTransitiveSetProjectionKey, [usize; 5]);
-assert_eq_size!(EnsureProjectedArtifactKey, [usize; 7]);
-assert_eq_size!(InterpreterResultsKey, [usize; 1]);
-assert_eq_size!(PackageListingKey, [usize; 1]);
-assert_eq_size!(BuildArtifact, [usize; 6]);
-assert_eq_size!(NodeKey, [usize; 7]);
+size_assert::words_of_type!(BuildKey, 4);
+size_assert::words_of_type!(AnalysisKey, 2);
+size_assert::words_of_type!(EnsureTransitiveSetProjectionKey, 5);
+size_assert::words_of_type!(EnsureProjectedArtifactKey, 7);
+size_assert::words_of_type!(InterpreterResultsKey, 1);
+size_assert::words_of_type!(PackageListingKey, 1);
+size_assert::words_of_type!(BuildArtifact, 6);
+size_assert::words_of_type!(NodeKey, 7);
 
 impl NodeKey {
     fn from_dyn_key(key: &DynKey) -> Option<Self> {
@@ -245,6 +259,23 @@ impl NodeKey {
                 suite: t.suite.to_string(),
             }
             .into(),
+
+            key @ NodeKey::PageInConnector(..) => key.into_generic_entry(),
+
+            NodeKey::EvaluationWork(inner) => inner
+                .as_ref()
+                .dupe()
+                .into_critical_path_entry_data(extra_data),
+
+            NodeKey::PageIn(inner) => buck2_data::critical_path_entry2::PageIn {
+                key_type: match &*inner {
+                    NodeKey::PageInConnector(key) => key.key_type_name().to_owned(),
+                    _ => inner.variant_name_lowercase().to_owned(),
+                },
+                count: 1,
+                key_type_counts: Default::default(),
+            }
+            .into(),
         }
     }
 
@@ -275,6 +306,9 @@ impl fmt::Display for NodeKey {
             Self::TestExecution(k) => write!(f, "TestExecution({k:?})"),
             Self::TestListing(k) => write!(f, "TestListing({k:?})"),
             Self::Dyn(name, k) => write!(f, "{name}({k})"),
+            Self::PageInConnector(key) => write!(f, "{}({key})", key.key_type_name()),
+            Self::EvaluationWork(k) => write!(f, "EvaluationWork({k})"),
+            Self::PageIn(k) => write!(f, "PageIn({k})"),
         }
     }
 }
@@ -292,6 +326,19 @@ struct FinalMaterializationSignal {
     pub(crate) waiting_data: WaitingData,
 }
 
+/// A paged-out DICE key that was paged back in. `duration` is a synthetic span covering the
+/// page-in (backend fetch + deserialize) so its cost lands on the critical path as its own node.
+struct PageInSignal {
+    key: NodeKey,
+    duration: NodeDuration,
+    phase: PageInPhase,
+}
+
+struct PageInAssociation {
+    key: Arc<NodeKey>,
+    phase: PageInPhase,
+}
+
 /* These signals are distinct from the main Buck event bus because some
  * analysis needs access to the entire build graph, and serializing the
  * entire build graph isn't feasible - therefore, we have these signals
@@ -303,6 +350,7 @@ enum BuildSignal {
     FinalMaterialization(FinalMaterializationSignal),
     TestExecution(TestExecutionSignal),
     TestListing(TestListingSignal),
+    PageIn(PageInSignal),
     BuildFinished,
 }
 
@@ -326,11 +374,75 @@ pub(crate) struct Evaluation {
     /// If this is Part 2 of a split analysis, contains info about the discovering
     /// analysis Part 1 and the anon targets that were discovered.
     split_discovery: Option<SplitDiscoveryData>,
+
+    /// A page-in that completed after this evaluation phase.
+    page_in: Option<PageInAssociation>,
 }
 
-#[derive(Clone)]
 pub(crate) struct BuildSignalSender {
     sender: UnboundedSender<BuildSignal>,
+    pending_page_in_phases: BuckDashMap<NodeKey, PageInPhase>,
+    // `None` until the first page-in is recorded (via `key_paged_in`), so builds that never
+    // page in allocate nothing here and keep the fast early-return for unmapped keys. Never
+    // cleared once set, matching the monotonic nature of page-in tracking within a build.
+    page_in_reachability: OnceLock<PageInReachability>,
+}
+
+/// Tracks which keys reach a page-in (themselves, or transitively through a dependency), so
+/// otherwise-filtered DICE keys on the chain between a page-in and the graph can be retained
+/// as `PageInConnector` connectors. Only exists once a page-in has occurred (see
+/// [`BuildSignalSender::page_in_reachability`]).
+#[derive(Default)]
+struct PageInReachability {
+    keys: BuckDashSet<DynKey>,
+}
+
+impl PageInReachability {
+    fn reaches_page_in(&self, key: &DynKey) -> bool {
+        self.keys.contains(key)
+    }
+
+    fn record_page_in(&self, key: &DynKey) {
+        self.keys.insert(key.dupe());
+    }
+
+    /// Resolve an activation into its graph representation while tracking page-in reachability:
+    /// walk `deps`, substituting `PageInConnector` connectors for unmapped deps that reach a page-in;
+    /// mark `key` if it (or a dep) reaches one; and return the graph key plus dep keys, or `None`
+    /// when `key` is unmapped and doesn't reach a page-in (so it is dropped).
+    fn resolve_graph_keys(
+        &self,
+        key: &DynKey,
+        mapped_key: Option<NodeKey>,
+        deps: &mut dyn Iterator<Item = &DynKey>,
+    ) -> Option<(NodeKey, Vec<NodeKey>)> {
+        let mut has_dep_reaching_page_in = false;
+        let dep_keys = deps
+            .filter_map(|dep| {
+                let mapped_dep = NodeKey::from_dyn_key(dep);
+                if self.reaches_page_in(dep) {
+                    has_dep_reaching_page_in = true;
+                    Some(mapped_dep.unwrap_or_else(|| NodeKey::PageInConnector(dep.dupe())))
+                } else {
+                    mapped_dep
+                }
+            })
+            .collect();
+
+        // Mark `key` (even when mapped) so its reachability propagates to its parents. Dependency
+        // callbacks finish before the parent's, so the mark is visible as activations complete.
+        let reaches_page_in = has_dep_reaching_page_in || self.reaches_page_in(key);
+        if reaches_page_in {
+            self.keys.insert(key.dupe());
+        }
+
+        let key = match mapped_key {
+            Some(key) => key,
+            None if reaches_page_in => NodeKey::PageInConnector(key.dupe()),
+            None => return None,
+        };
+        Some((key, dep_keys))
+    }
 }
 
 impl BuildSignalSender {
@@ -451,19 +563,37 @@ impl ActivationTracker for BuildSignalSender {
         deps: &mut dyn Iterator<Item = &DynKey>,
         activation_data: ActivationData,
     ) {
-        let key = match NodeKey::from_dyn_key(key) {
-            Some(key) => key,
-            None => return,
+        let mapped_key = NodeKey::from_dyn_key(key);
+        let (key, dep_keys) = match self.page_in_reachability.get() {
+            Some(reachability) => match reachability.resolve_graph_keys(key, mapped_key, deps) {
+                Some(resolved) => resolved,
+                None => return,
+            },
+            None => {
+                // No page-in has happened yet: keep only mapped keys, exactly as before paging.
+                let Some(key) = mapped_key else {
+                    return;
+                };
+                (key, deps.filter_map(NodeKey::from_dyn_key).collect())
+            }
         };
+        let page_in =
+            self.pending_page_in_phases
+                .remove(&key)
+                .map(|(_, phase)| PageInAssociation {
+                    key: Arc::new(key.dupe()),
+                    phase,
+                });
 
         let mut signal = Evaluation {
             key,
             extra_data: NodeExtraData::None,
             duration: NodeDuration::zero(),
-            dep_keys: deps.into_iter().filter_map(NodeKey::from_dyn_key).collect(),
+            dep_keys,
             spans: Default::default(),
             waiting_data: WaitingData::new(),
             split_discovery: None,
+            page_in,
         };
 
         /// Given an Option containing an Any, take it if and only if it contains a T.
@@ -523,6 +653,7 @@ impl ActivationTracker for BuildSignalSender {
                     signal.waiting_data = waiting_data;
 
                     let part1_key = signal.key.dupe();
+                    let page_in = signal.page_in.take();
 
                     // Part 2: finish key with post-anon-target duration
                     let finish_key = Self::make_finish_key(&part1_key, &analysis_node_data);
@@ -546,6 +677,7 @@ impl ActivationTracker for BuildSignalSender {
                             discovering_analysis_end: time_span.end(),
                             anon_targets: anon_deps,
                         }),
+                        page_in,
                     };
 
                     // Send Part 1 and Part 2 as separate signals
@@ -597,6 +729,29 @@ impl ActivationTracker for BuildSignalSender {
         }
 
         let _ignored = self.sender.send(BuildSignal::Evaluation(signal));
+    }
+
+    fn key_paged_in(&self, key: &DynKey, start: Instant, duration: Duration, phase: PageInPhase) {
+        self.page_in_reachability
+            .get_or_init(PageInReachability::default)
+            .record_page_in(key);
+        let key =
+            NodeKey::from_dyn_key(key).unwrap_or_else(|| NodeKey::PageInConnector(key.dupe()));
+        if phase != PageInPhase::Match {
+            self.pending_page_in_phases.insert(key.dupe(), phase);
+        }
+
+        let duration = NodeDuration {
+            user: duration,
+            total: TimeSpan::from_start_and_duration(start, duration),
+            queue: None,
+        };
+
+        let _ignored = self.sender.send(BuildSignal::PageIn(PageInSignal {
+            key,
+            duration,
+            phase,
+        }));
     }
 }
 
@@ -670,6 +825,10 @@ struct BuildSignalReceiver<T> {
     // When a node depends on a split analysis, the dep should point to the finish key
     // (representing full completion) rather than the Part 1 key.
     split_analysis_finish_keys: HashMap<NodeKey, NodeKey>,
+    // Non-match page-ins are reported before `key_activated` supplies their dependencies and
+    // evaluation data. Hold each timed signal until that associated evaluation arrives so the
+    // page-in can be placed on the correct side of the evaluation work.
+    pending_page_ins: HashMap<NodeKey, PageInSignal>,
     backend: T,
 
     // TODO(rajneeshl): When Test listing and execution are on DICE, we can remove this and use
@@ -688,6 +847,7 @@ where
             first_edge_to_load: StdBuckHashMap::default(),
             first_analysis_for_anon_target: HashMap::new(),
             split_analysis_finish_keys: HashMap::new(),
+            pending_page_ins: HashMap::new(),
             test_listing_keys: StdBuckHashMap::default(),
         }
     }
@@ -707,7 +867,11 @@ where
                     self.process_test_execution(test_execution)
                 }
                 BuildSignal::TestListing(test_listing) => self.process_test_listing(test_listing),
-                BuildSignal::BuildFinished => break,
+                BuildSignal::PageIn(page_in) => self.process_page_in(page_in),
+                BuildSignal::BuildFinished => {
+                    self.flush_unmatched_page_ins();
+                    break;
+                }
             }
         }
 
@@ -791,6 +955,21 @@ where
             }
         }
 
+        let page_in = evaluation.page_in.take().and_then(|association| {
+            self.pending_page_ins
+                .remove(association.key.as_ref())
+                .inspect(|page_in| {
+                    debug_assert_eq!(page_in.phase, association.phase);
+                })
+        });
+
+        match page_in {
+            Some(page_in) => self.process_evaluation_with_page_in(evaluation, page_in),
+            None => self.process_evaluation_node(evaluation),
+        }
+    }
+
+    fn process_evaluation_node(&mut self, evaluation: Evaluation) {
         self.backend.process_node(
             evaluation.key,
             evaluation.extra_data,
@@ -799,6 +978,71 @@ where
             evaluation.spans,
             evaluation.waiting_data,
         );
+    }
+
+    fn process_evaluation_with_page_in(&mut self, evaluation: Evaluation, page_in: PageInSignal) {
+        let page_in_key = NodeKey::PageIn(Arc::new(page_in.key));
+
+        match page_in.phase {
+            PageInPhase::Match => unreachable!("exact matches do not emit an activation"),
+            PageInPhase::AfterDependencyValidation => {
+                // Dependency validation completed before hydration:
+                // `key -> PageIn(key) -> dependencies`.
+                self.backend.process_node(
+                    page_in_key.dupe(),
+                    NodeExtraData::None,
+                    page_in.duration,
+                    evaluation.dep_keys,
+                    Default::default(),
+                    WaitingData::new(),
+                );
+                self.backend.process_node(
+                    evaluation.key,
+                    evaluation.extra_data,
+                    evaluation.duration,
+                    [page_in_key],
+                    evaluation.spans,
+                    evaluation.waiting_data,
+                );
+            }
+            PageInPhase::AfterRecompute => {
+                // Recalculation completed before hydration. Keep the original key as a
+                // zero-duration completion node so callers see:
+                // `key -> PageIn(key) -> EvaluationWork(key) -> dependencies`.
+                let completion_key = evaluation.key.dupe();
+                let work_key = NodeKey::EvaluationWork(Arc::new(evaluation.key));
+                self.backend.process_node(
+                    work_key.dupe(),
+                    evaluation.extra_data,
+                    evaluation.duration,
+                    evaluation.dep_keys,
+                    evaluation.spans,
+                    evaluation.waiting_data,
+                );
+                self.backend.process_node(
+                    page_in_key.dupe(),
+                    NodeExtraData::None,
+                    page_in.duration,
+                    [work_key],
+                    Default::default(),
+                    WaitingData::new(),
+                );
+
+                let completion = page_in.duration.total.end();
+                self.backend.process_node(
+                    completion_key,
+                    NodeExtraData::None,
+                    NodeDuration {
+                        user: Duration::ZERO,
+                        total: TimeSpan::new_saturating(completion, completion),
+                        queue: None,
+                    },
+                    [page_in_key],
+                    Default::default(),
+                    WaitingData::new(),
+                );
+            }
+        }
     }
 
     /// If the evaluation is a load (InterpreterResultsKey) and carries a load_result, then inject
@@ -926,6 +1170,54 @@ where
             Default::default(),
             WaitingData::new(),
         );
+    }
+
+    /// Exact matches have no activation, so emit their complete topology immediately. Other
+    /// page-ins are paired with their subsequent activation, which provides the dependency and
+    /// evaluation phases on either side of hydration.
+    fn process_page_in(&mut self, page_in: PageInSignal) {
+        match page_in.phase {
+            PageInPhase::Match => {
+                let key_end = page_in.duration.total.end();
+                let page_in_key = NodeKey::PageIn(Arc::new(page_in.key.dupe()));
+                self.backend.process_node(
+                    page_in_key.dupe(),
+                    NodeExtraData::None,
+                    page_in.duration,
+                    std::iter::empty::<NodeKey>(),
+                    Default::default(),
+                    WaitingData::new(),
+                );
+                self.backend.process_node(
+                    page_in.key,
+                    NodeExtraData::None,
+                    NodeDuration {
+                        user: Duration::ZERO,
+                        total: TimeSpan::new_saturating(key_end, key_end),
+                        queue: None,
+                    },
+                    [page_in_key],
+                    Default::default(),
+                    WaitingData::new(),
+                );
+            }
+            PageInPhase::AfterDependencyValidation | PageInPhase::AfterRecompute => {
+                self.pending_page_ins.insert(page_in.key.dupe(), page_in);
+            }
+        }
+    }
+
+    fn flush_unmatched_page_ins(&mut self) {
+        for (_, page_in) in self.pending_page_ins.drain() {
+            self.backend.process_node(
+                NodeKey::PageIn(Arc::new(page_in.key)),
+                NodeExtraData::None,
+                page_in.duration,
+                std::iter::empty::<NodeKey>(),
+                Default::default(),
+                WaitingData::new(),
+            );
+        }
     }
 }
 
@@ -1104,7 +1396,7 @@ impl AnalysisNodeData {
     }
 }
 
-assert_eq_size!(NodeData, [usize; 20]);
+size_assert::words_of_type!(NodeData, 20);
 
 /// Finish key for the second part of a split analysis (regular target).
 /// Used when analysis is split due to anon target dependencies.
@@ -1217,7 +1509,11 @@ struct SplitDiscoveryData {
 fn create_build_signals() -> (BuildSignalsInstaller, Box<dyn DeferredBuildSignals>) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
-    let sender = Arc::new(BuildSignalSender { sender });
+    let sender = Arc::new(BuildSignalSender {
+        sender,
+        pending_page_in_phases: BuckDashMap::new(),
+        page_in_reachability: OnceLock::new(),
+    });
     let installer = BuildSignalsInstaller {
         build_signals: sender.dupe() as _,
         activation_tracker: sender.dupe() as _,
@@ -1237,4 +1533,138 @@ pub(crate) fn duration_to_proto_saturating(duration: Duration) -> prost_types::D
         seconds: i64::MAX,
         nanos: i32::MAX,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        deps: HashMap<NodeKey, Vec<NodeKey>>,
+    }
+
+    impl BuildListenerBackend for RecordingBackend {
+        fn process_node(
+            &mut self,
+            key: NodeKey,
+            _extra_data: NodeExtraData,
+            _duration: NodeDuration,
+            dep_keys: impl IntoIterator<Item = NodeKey>,
+            _span_ids: SmallVec<[SpanId; 1]>,
+            _waiting_data: WaitingData,
+        ) {
+            self.deps.insert(key, dep_keys.into_iter().collect());
+        }
+
+        fn process_top_level_target(
+            &mut self,
+            _analysis: ConfiguredTargetLabel,
+            _artifacts: impl IntoIterator<Item = NodeKey>,
+        ) {
+        }
+
+        fn finish(
+            self,
+            _anon_target_discovery_edges: HashMap<NodeKey, NodeKey>,
+        ) -> Result<BuildInfo, CriticalPathError> {
+            unreachable!("topology tests do not finish the backend")
+        }
+
+        fn name() -> CriticalPathBackendName {
+            CriticalPathBackendName::LongestPathGraph
+        }
+    }
+
+    fn node_key(package: &str) -> NodeKey {
+        NodeKey::PackageListingKey(PackageListingKey(PackageLabel::testing_parse(package)))
+    }
+
+    fn page_in(key: NodeKey, phase: PageInPhase) -> PageInSignal {
+        PageInSignal {
+            key,
+            duration: NodeDuration {
+                user: Duration::from_millis(1),
+                total: TimeSpan::from_start_and_duration(Instant::now(), Duration::from_millis(1)),
+                queue: None,
+            },
+            phase,
+        }
+    }
+
+    fn evaluation(
+        key: NodeKey,
+        dep: NodeKey,
+        page_in_key: NodeKey,
+        phase: PageInPhase,
+    ) -> Evaluation {
+        Evaluation {
+            key,
+            duration: NodeDuration::zero(),
+            dep_keys: vec![dep],
+            spans: Default::default(),
+            waiting_data: WaitingData::new(),
+            extra_data: NodeExtraData::None,
+            split_discovery: None,
+            page_in: Some(PageInAssociation {
+                key: Arc::new(page_in_key),
+                phase,
+            }),
+        }
+    }
+
+    fn receiver() -> BuildSignalReceiver<RecordingBackend> {
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        BuildSignalReceiver::new(receiver, RecordingBackend::default())
+    }
+
+    #[test]
+    fn exact_match_depends_on_page_in() {
+        let mut receiver = receiver();
+        let key = node_key("cell//match");
+        let page_in_key = NodeKey::PageIn(Arc::new(key.dupe()));
+
+        receiver.process_page_in(page_in(key.dupe(), PageInPhase::Match));
+
+        assert_eq!(receiver.backend.deps[&key], [page_in_key.dupe()]);
+        assert!(receiver.backend.deps[&page_in_key].is_empty());
+    }
+
+    #[test]
+    fn reuse_page_in_depends_on_validated_dependencies() {
+        let mut receiver = receiver();
+        let key = node_key("cell//reuse");
+        let dep = node_key("cell//dep");
+        let page_in_key = NodeKey::PageIn(Arc::new(key.dupe()));
+        let phase = PageInPhase::AfterDependencyValidation;
+
+        receiver.process_page_in(page_in(key.dupe(), phase));
+        receiver.process_evaluation(evaluation(key.dupe(), dep.dupe(), key.dupe(), phase));
+
+        assert_eq!(receiver.backend.deps[&key], [page_in_key.dupe()]);
+        assert_eq!(receiver.backend.deps[&page_in_key], [dep]);
+    }
+
+    #[test]
+    fn comparison_page_in_follows_recomputation() {
+        let mut receiver = receiver();
+        let paged_key = node_key("cell//recompute");
+        let completion_key = node_key("cell//recompute_finish");
+        let dep = node_key("cell//dep");
+        let page_in_key = NodeKey::PageIn(Arc::new(paged_key.dupe()));
+        let work_key = NodeKey::EvaluationWork(Arc::new(completion_key.dupe()));
+        let phase = PageInPhase::AfterRecompute;
+
+        receiver.process_page_in(page_in(paged_key.dupe(), phase));
+        receiver.process_evaluation(evaluation(
+            completion_key.dupe(),
+            dep.dupe(),
+            paged_key,
+            phase,
+        ));
+
+        assert_eq!(receiver.backend.deps[&completion_key], [page_in_key.dupe()]);
+        assert_eq!(receiver.backend.deps[&page_in_key], [work_key.dupe()]);
+        assert_eq!(receiver.backend.deps[&work_key], [dep]);
+    }
 }

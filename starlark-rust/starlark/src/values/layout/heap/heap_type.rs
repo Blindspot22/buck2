@@ -20,6 +20,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::cell::RefMut;
 use std::cmp;
+use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Formatter;
@@ -31,30 +32,37 @@ use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::ptr;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::Weak;
 
 use allocative::Allocative;
 use bumpalo::Bump;
 use dupe::Dupe;
 use dupe::IterDupedExt;
-use pagable::PagableBoxDeserialize;
 use pagable::PagableCursor;
 use pagable::PagableDeserialize;
 use pagable::PagableDeserializer;
 use pagable::PagableSerialize;
 use pagable::PagableSerializer;
+use pagable::PartialPagableArc;
+use pagable::PartialPagableWeak;
 use starlark_map::small_set::SmallSet;
 use strong_hash::StrongHash;
 
+use crate::any::IsStaticType;
 use crate::cast;
 use crate::cast::transmute;
 use crate::collections::StarlarkHashValue;
 use crate::environment::GlobalFrozenHeapName;
 use crate::environment::MethodFrozenHeapName;
 use crate::eval::runtime::profile::instant::ProfilerInstant;
+use crate::pagable::error::PagableError;
 use crate::pagable::heap_ref_id::HeapRefId;
 use crate::pagable::starlark_deserialize_context::HeapDeserializationState;
+use crate::pagable::starlark_deserialize_context::StarlarkDeserScope;
 use crate::pagable::starlark_deserialize_context::StarlarkDeserializerImpl;
 use crate::pagable::starlark_serialize::StarlarkSerializeContext;
+use crate::pagable::starlark_serialize_context::StarlarkSerState;
 use crate::pagable::starlark_serialize_context::StarlarkSerializerImpl;
 use crate::values::AllocFrozenValue;
 use crate::values::AllocValue;
@@ -82,7 +90,10 @@ use crate::values::layout::heap::call_enter_exit::CallEnter;
 use crate::values::layout::heap::call_enter_exit::CallExit;
 use crate::values::layout::heap::call_enter_exit::NeedsDrop;
 use crate::values::layout::heap::call_enter_exit::NoDrop;
+use crate::values::layout::heap::edge::HeapEdge;
 use crate::values::layout::heap::fast_cell::FastCell;
+use crate::values::layout::heap::owned_frozen::FnOncish;
+use crate::values::layout::heap::owned_frozen::FnOncish2;
 use crate::values::layout::heap::profile::by_type::HeapSummary;
 use crate::values::layout::heap::repr::AValueHeader;
 use crate::values::layout::heap::repr::AValueOrForwardUnpack;
@@ -237,17 +248,29 @@ pub struct FrozenHeap {
 /// Automatically implemented for any type that is `StrongHash + Any + Send + Sync + Debug`.
 /// `StrongHash` is required (rather than `Hash`) because heap identities are
 /// derived from this and must be deterministic across processes.
-pub trait UserHeapName: std::fmt::Display + Any + Send + Sync + Debug + 'static {
+#[pagable::pagable_typetag]
+pub trait UserHeapName:
+    std::fmt::Display + pagable::typetag::PagableTagged + Any + Send + Sync + Debug + 'static
+{
     /// Strong-hash this value through a trait object.
     fn dyn_strong_hash(&self, state: &mut dyn Hasher);
     /// Downcast support.
     fn as_any(&self) -> &dyn Any;
-
+    /// Clone this name through a trait object.
     fn clone_name(&self) -> Box<dyn UserHeapName>;
 }
 
-impl<T: std::fmt::Display + Clone + StrongHash + Any + Send + Sync + Debug + 'static> UserHeapName
-    for T
+impl<
+    T: std::fmt::Display
+        + pagable::typetag::PagableTagged
+        + Clone
+        + StrongHash
+        + Any
+        + Send
+        + Sync
+        + Debug
+        + 'static,
+> UserHeapName for T
 {
     fn dyn_strong_hash(&self, mut state: &mut dyn Hasher) {
         self.strong_hash(&mut state);
@@ -267,7 +290,7 @@ impl Clone for Box<dyn UserHeapName> {
 }
 
 /// Name/identifier for a frozen heap, used for heap graph tracking and metrics.
-#[derive(Clone, derive_more::Display, Debug)]
+#[derive(Clone, derive_more::Display, Debug, pagable::Pagable)]
 pub enum FrozenHeapName {
     /// For starlark Methods heaps.
     Method(MethodFrozenHeapName),
@@ -277,6 +300,13 @@ pub enum FrozenHeapName {
     Singleton(SingletonFrozenHeapName),
     /// For user/downstream code.
     User(Box<dyn UserHeapName>),
+}
+
+impl FrozenHeapName {
+    /// Create a user heap name backed by an owned string.
+    pub fn user(name: impl Into<String>) -> Self {
+        Self::User(Box::new(StringUserHeapName(name.into())))
+    }
 }
 
 impl StrongHash for FrozenHeapName {
@@ -296,7 +326,8 @@ impl StrongHash for FrozenHeapName {
 
 /// Testing sentinel for starlark crate's own tests.
 /// Used as `FrozenHeapName::User(Box::new(StarlarkTestHeapName))`.
-#[derive(Debug, StrongHash, Hash, Clone, derive_more::Display)]
+#[derive(Debug, StrongHash, Hash, Clone, derive_more::Display, pagable::Pagable)]
+#[pagable::pagable_typetag(UserHeapName)]
 #[display("StarlarkTestHeapName")]
 pub(crate) struct StarlarkTestHeapName;
 
@@ -306,14 +337,20 @@ impl StarlarkTestHeapName {
     }
 }
 
+/// Owned-string user heap name for callers without a dedicated name type.
+#[derive(Debug, StrongHash, Hash, Clone, derive_more::Display, pagable::Pagable)]
+#[pagable::pagable_typetag(UserHeapName)]
+#[display("{}", _0)]
+pub struct StringUserHeapName(String);
+
 /// A frozen heap name derived from source location, for singleton heaps.
 ///
 /// This type can only be created via the [`singleton_heap_name!`](crate::singleton_heap_name)
 /// macro, which captures `file!()`, `line!()`, and `column!()` at the call site.
 /// This ensures each name is unique and stable across process runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, pagable::Pagable)]
 pub struct SingletonFrozenHeapName {
-    file: &'static str,
+    file: pagable::StaticStr,
     line: u32,
     col: u32,
 }
@@ -321,7 +358,7 @@ pub struct SingletonFrozenHeapName {
 impl SingletonFrozenHeapName {
     /// Internal constructor. Do not call directly; use [`singleton_heap_name!`](crate::singleton_heap_name).
     #[doc(hidden)]
-    pub const fn _new(file: &'static str, line: u32, col: u32) -> Self {
+    pub const fn _new(file: pagable::StaticStr, line: u32, col: u32) -> Self {
         Self { file, line, col }
     }
 }
@@ -342,9 +379,10 @@ impl std::fmt::Display for SingletonFrozenHeapName {
 /// ```
 #[macro_export]
 macro_rules! singleton_heap_name {
-    () => {
-        $crate::values::SingletonFrozenHeapName::_new(file!(), line!(), column!())
-    };
+    () => {{
+        $crate::__derive_refs::static_str!(__SINGLETON_HEAP_FILE = file!());
+        $crate::values::SingletonFrozenHeapName::_new(__SINGLETON_HEAP_FILE, line!(), column!())
+    }};
 }
 
 /// `FrozenHeap` when it is no longer modified and can be shared between threads.
@@ -357,6 +395,33 @@ struct FrozenFrozenHeap {
     #[allocative(skip)] // We don't really expect it to be big
     name: Option<FrozenHeapName>,
     peak_allocated_bytes: Option<usize>,
+    #[allocative(skip)]
+    ser_state: OnceLock<Weak<StarlarkSerState>>,
+    #[allocative(skip)]
+    deser_state: OnceLock<Arc<HeapDeserializationState>>,
+}
+
+/// Process-local identity of an exact `FrozenFrozenHeap` allocation.
+#[derive(Debug, Clone, Copy, Dupe, PartialEq, Eq, Hash, Allocative)]
+pub(crate) struct FrozenHeapPtr(usize);
+
+impl FrozenHeapPtr {
+    pub(crate) fn addr(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Dupe, Allocative)]
+pub(crate) struct WeakFrozenHeapRef(PartialPagableWeak<FrozenFrozenHeap>);
+
+impl WeakFrozenHeapRef {
+    pub(crate) fn upgrade(&self) -> Option<FrozenHeapRef> {
+        self.0.upgrade().map(|heap| FrozenHeapRef(Some(heap)))
+    }
+
+    pub(crate) fn heap_ptr(&self) -> FrozenHeapPtr {
+        FrozenHeapPtr(self.0.as_ptr() as usize)
+    }
 }
 
 // SAFETY: read-only access to already-allocated arena memory is safe across
@@ -366,6 +431,16 @@ unsafe impl Sync for FrozenFrozenHeap {}
 unsafe impl Send for FrozenFrozenHeap {}
 
 impl FrozenFrozenHeap {
+    fn register_ser_state(&self, state: &Arc<StarlarkSerState>) -> pagable::Result<()> {
+        let state = Arc::downgrade(state);
+        let registered = self.ser_state.get_or_init(|| state.dupe());
+        if Weak::ptr_eq(registered, &state) {
+            Ok(())
+        } else {
+            Err(PagableError::HeapRegisteredWithDifferentSerState.into())
+        }
+    }
+
     /// Serialization format:
     /// ```text
     /// [refs_count: usize]
@@ -400,9 +475,7 @@ impl FrozenFrozenHeap {
             .name
             .as_ref()
             .expect("The name of the FrozenFrozenHeap should exist in starlark pagable serialize");
-        let heap_id = HeapRefId::from_heap_name(heap_name);
-        // TODO(nero): right now FrozenHeapName hasn't been implemented for Pagable. so just serialize HeapRefId;
-        heap_id.pagable_serialize(serializer)?;
+        heap_name.pagable_serialize(serializer)?;
 
         self.refs.len().pagable_serialize(serializer)?;
         for heap_ref in self.refs.iter() {
@@ -457,23 +530,29 @@ impl FrozenFrozenHeap {
 
         // Record base_pos — all offsets are relative to here.
         let base_pos = serializer.position();
-        // Register chunk indices for this heap + transitive deps before
-        // serializing values (which may reference values cross-heap).
+        // FrozenHeapRef registered this heap and its transitive dependencies
+        // before deferring this Arc for serialization.
         let state = StarlarkSerializerImpl::get_or_create_state(serializer);
-        state.ensure_chunk_index_registered_inner(heap_id, &self.refs, || {
-            self.arena.build_chunk_index()
-        });
         let mut ctx = StarlarkSerializerImpl::new(serializer, state);
 
         // Serialize value data, recording start cursor per value.
         let mut entry_cursors: Vec<(u32, u32)> = Vec::with_capacity(table_entry_count);
-        for header in &all_headers_in_order {
+        for (value_index, header) in all_headers_in_order.iter().enumerate() {
             let start = ctx.pagable().position();
             entry_cursors.push((
                 (start.byte_pos - base_pos.byte_pos) as u32,
                 (start.arc_index - base_pos.arc_index) as u32,
             ));
-            header.unpack().starlark_serialize(&mut ctx)?;
+            let value = header.unpack();
+            value.starlark_serialize(&mut ctx).map_err(|error| {
+                self.enrich_value_serialization_error(
+                    error,
+                    heap_name,
+                    value_index,
+                    value.vtable().type_name,
+                    &all_headers_in_order,
+                )
+            })?;
         }
         // End sentinel: position after all value data.
         let end = ctx.pagable().position();
@@ -508,36 +587,25 @@ impl FrozenFrozenHeap {
         Ok(())
     }
 
-    /// Read just the `HeapRefId` prefix; pair with [`deserialize_skeleton`](Self::deserialize_skeleton).
-    pub fn deserialize_heap_id<'de, D: PagableDeserializer<'de> + ?Sized>(
+    /// Read the heap identity prefix; pair with [`deserialize_skeleton`](Self::deserialize_skeleton).
+    pub fn deserialize_heap_identity<'de, D: PagableDeserializer<'de> + ?Sized>(
         deserializer: &mut D,
-    ) -> crate::Result<HeapRefId> {
-        Ok(HeapRefId::pagable_deserialize(deserializer)?)
+    ) -> crate::Result<(HeapRefId, FrozenHeapName)> {
+        let name = FrozenHeapName::pagable_deserialize(deserializer)?;
+        let heap_id = HeapRefId::from_heap_name(&name);
+        Ok((heap_id, name))
     }
 
-    /// Read refs + body header given an already-read `heap_id`, then seek
-    /// past the heap body. Returns an `Arc<Self>` with an empty arena.
-    /// Slot metadata is parsed lazily on first `ensure_initialized` via the
-    /// recipe stashed in `HeapDeserializationState`. Values are materialized
-    /// on demand by [`StarlarkDeserializerImpl::ensure_initialized`].
-    ///
-    /// Returns `Arc<Self>` directly: `HeapDeserializationState` holds a raw
-    /// pointer into `arena`, so the address must be stable.
-    /// `Arc::from(Box<T>)` would reallocate and dangle the pointer.
-    pub fn deserialize_skeleton<'de, D: PagableDeserializer<'de> + ?Sized>(
+    /// Deserialize the heap references and advance past the lazily-read body.
+    fn deserialize_refs_and_skip_body<'de, D: PagableDeserializer<'de> + ?Sized>(
         deserializer: &mut D,
-        heap_id: HeapRefId,
-        recipe: Arc<dyn pagable::PagableDeserializerRecipe>,
-    ) -> crate::Result<Arc<Self>> {
-        // Refs are read eagerly — referenced heaps must be registered before
-        // any of this heap's values can be resolved later.
+    ) -> crate::Result<(Box<[FrozenHeapRef]>, PagableCursor)> {
         let refs_count = usize::pagable_deserialize(deserializer)?;
         let mut refs = Vec::with_capacity(refs_count);
         for _ in 0..refs_count {
             refs.push(FrozenHeapRef::pagable_deserialize(deserializer)?);
         }
 
-        // Read 8-byte body header: (body_byte_length, body_arc_count).
         let mut header = [0u8; 8];
         for b in &mut header {
             *b = u8::pagable_deserialize(deserializer)?;
@@ -546,28 +614,10 @@ impl FrozenFrozenHeap {
             u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let body_arc_count =
             u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
-
-        // `metadata_start` is captured right after the body header.
         let metadata_start = deserializer.position();
 
-        let heap = Arc::new(FrozenFrozenHeap {
-            arena: Arena::default(),
-            refs: refs.into_boxed_slice(),
-            name: None,
-            peak_allocated_bytes: None,
-        });
-        let arena_ptr: *const Arena<ChunkAllocator> = &heap.arena;
-
-        // SAFETY: `arena_ptr` points into `*heap`. The returned `Arc` keeps
-        // that allocation alive for at least as long as the deserialize session.
-        let deser_state =
-            Arc::new(unsafe { HeapDeserializationState::new(metadata_start, recipe, arena_ptr) });
-
-        let state = StarlarkDeserializerImpl::get_or_create_state(deserializer.as_dyn());
-        state.register_heap(heap_id, deser_state);
-
-        // SAFETY: seek past the entire body — we computed the end cursor from
-        // `metadata_start + (body_byte_length, body_arc_count)`.
+        // SAFETY: the serialized body header records the exact cursor delta to
+        // the end of this heap body.
         unsafe {
             deserializer.seek(PagableCursor {
                 byte_pos: metadata_start.byte_pos + body_byte_length,
@@ -575,7 +625,73 @@ impl FrozenFrozenHeap {
             })
         };
 
+        Ok((refs.into_boxed_slice(), metadata_start))
+    }
+
+    /// Read refs + body header given an already-read `heap_id`, then seek
+    /// past the heap body. Returns a `PartialPagableArc<Self>` with an empty arena.
+    /// Slot metadata is parsed lazily on first `ensure_initialized` via the
+    /// recipe stashed in `HeapDeserializationState`. Values are materialized
+    /// on demand by [`StarlarkDeserializerImpl::ensure_initialized`].
+    ///
+    /// Returns a stable arc allocation directly: `HeapDeserializationState` holds a raw
+    /// pointer into `arena`, so the address must be stable.
+    /// `Arc::from(Box<T>)` would reallocate and dangle the pointer.
+    pub fn deserialize_skeleton<'de, D: PagableDeserializer<'de> + ?Sized>(
+        deserializer: &mut D,
+        heap_id: HeapRefId,
+        name: FrozenHeapName,
+        recipe: Arc<dyn pagable::PagableDeserializerRecipe>,
+    ) -> crate::Result<PartialPagableArc<Self>> {
+        let scope = StarlarkDeserializerImpl::get_or_create_scope(deserializer.as_dyn());
+
+        // Refs are read eagerly — referenced heaps must be registered before
+        // any of this heap's values can be resolved later.
+        let (refs, metadata_start) = Self::deserialize_refs_and_skip_body(deserializer)?;
+
+        let heap = PartialPagableArc::new(FrozenFrozenHeap {
+            arena: Arena::default(),
+            refs,
+            name: Some(name),
+            peak_allocated_bytes: None,
+            ser_state: OnceLock::new(),
+            deser_state: OnceLock::new(),
+        });
+        let arena_ptr: *const Arena<ChunkAllocator> = &heap.arena;
+
+        // SAFETY: `arena_ptr` points into `*heap`. The returned arc keeps
+        // the state and arena in the same allocation lifetime, and state lookup
+        // retains the heap before borrowing this state.
+        let deser_state = Arc::new(unsafe {
+            HeapDeserializationState::new(scope.dupe(), heap_id, metadata_start, recipe, arena_ptr)
+        });
+        assert!(
+            heap.deser_state.set(deser_state).is_ok(),
+            "a deserialized heap state must only be initialized once",
+        );
+
+        scope.register_heap(
+            heap_id,
+            WeakFrozenHeapRef(PartialPagableArc::downgrade(&heap)),
+        )?;
+
         Ok(heap)
+    }
+}
+
+impl Drop for FrozenFrozenHeap {
+    fn drop(&mut self) {
+        if let Some(state) = self.deser_state.get() {
+            state.unregister_heap(FrozenHeapPtr(self as *const Self as usize));
+        }
+
+        let Some(state) = self.ser_state.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        state.unregister_heap(
+            FrozenHeapPtr(self as *const Self as usize),
+            self.arena.allocated_chunk_bases(),
+        );
     }
 }
 
@@ -588,24 +704,14 @@ impl PagableSerialize for FrozenFrozenHeap {
     }
 }
 
-/// Exists only to satisfy the `Arc<T>: ArcErase` trait bound. This path is
-/// never run — deserialize via `FrozenHeapRef` so the recipe can be captured.
-impl<'de> PagableBoxDeserialize<'de> for FrozenFrozenHeap {
-    fn deserialize_box<D: PagableDeserializer<'de> + ?Sized>(
-        _deserializer: &mut D,
-    ) -> pagable::Result<Box<Self>> {
-        unreachable!(
-            "FrozenFrozenHeap must be deserialized via FrozenHeapRef so the recipe is captured",
-        );
-    }
-}
-
 /// PagableSerialize for FrozenHeapRef — serializes the inner Arc via pagable arc mechanism.
 impl PagableSerialize for FrozenHeapRef {
     fn pagable_serialize(&self, serializer: &mut dyn PagableSerializer) -> pagable::Result<()> {
         let is_some = self.0.is_some();
         is_some.pagable_serialize(serializer)?;
         if let Some(ref arc) = self.0 {
+            let state = StarlarkSerializerImpl::get_or_create_state(serializer);
+            state.ensure_chunk_index_registered(self)?;
             serializer.serialize_arc(arc)?;
         }
         Ok(())
@@ -624,30 +730,33 @@ impl<'de> PagableDeserialize<'de> for FrozenHeapRef {
         }
 
         let arc_box = deserializer.deserialize_arc(
-            std::any::TypeId::of::<Arc<FrozenFrozenHeap>>(),
+            std::any::TypeId::of::<PartialPagableArc<FrozenFrozenHeap>>(),
             deserialize_heap_arc_with_recipe,
         )?;
         let arc = arc_box
             .as_arc_any()
-            .downcast_ref::<Arc<FrozenFrozenHeap>>()
+            .downcast_ref::<PartialPagableArc<FrozenFrozenHeap>>()
             .ok_or_else(|| {
                 pagable::Error::msg(
-                    "FrozenHeapRef: type mismatch downcasting Arc<FrozenFrozenHeap>",
+                    "FrozenHeapRef: type mismatch downcasting PartialPagableArc<FrozenFrozenHeap>",
                 )
             })?
             .clone();
-        Ok(FrozenHeapRef(Some(arc)))
+        let heap = FrozenHeapRef(Some(arc));
+        heap.register_in_deser_scope(deserializer.as_dyn())?;
+        Ok(heap)
     }
 }
 
-/// Reads the heap's `HeapRefId`, then stash the recipe to `HeapDeserializationState``.
+/// Creates a heap's lazy-deserialization state after the generic Arc cache misses.
 fn deserialize_heap_arc_with_recipe(
     de: &mut dyn PagableDeserializer<'_>,
     recipe: Arc<dyn pagable::PagableDeserializerRecipe>,
 ) -> pagable::Result<Box<dyn pagable::arc_erase::ArcEraseDyn>> {
-    let heap_id = FrozenFrozenHeap::deserialize_heap_id(de).map_err(|e| e.into_anyhow())?;
-    let arc =
-        FrozenFrozenHeap::deserialize_skeleton(de, heap_id, recipe).map_err(|e| e.into_anyhow())?;
+    let (heap_id, name) =
+        FrozenFrozenHeap::deserialize_heap_identity(de).map_err(|e| e.into_anyhow())?;
+    let arc = FrozenFrozenHeap::deserialize_skeleton(de, heap_id, name, recipe)
+        .map_err(|e| e.into_anyhow())?;
     Ok(Box::new(arc))
 }
 
@@ -675,7 +784,7 @@ impl Debug for FrozenFrozenHeap {
 #[derive(Default, Clone, Dupe, Debug, Allocative)]
 // The Eq/Hash are by pointer rather than value, since we produce unique values
 // given an underlying FrozenHeap.
-pub struct FrozenHeapRef(Option<Arc<FrozenFrozenHeap>>);
+pub struct FrozenHeapRef(Option<PartialPagableArc<FrozenFrozenHeap>>);
 
 fn _test_frozen_heap_ref_send_sync()
 where
@@ -695,7 +804,7 @@ impl Hash for FrozenHeapRef {
 impl PartialEq<FrozenHeapRef> for FrozenHeapRef {
     fn eq(&self, other: &FrozenHeapRef) -> bool {
         match (&self.0, &other.0) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (Some(a), Some(b)) => PartialPagableArc::ptr_eq(a, b),
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         }
@@ -705,6 +814,52 @@ impl PartialEq<FrozenHeapRef> for FrozenHeapRef {
 impl Eq for FrozenHeapRef {}
 
 impl FrozenHeapRef {
+    pub(crate) fn deser_state(&self) -> Option<&HeapDeserializationState> {
+        self.0
+            .as_ref()
+            .and_then(|heap| heap.deser_state.get())
+            .map(Arc::as_ref)
+    }
+
+    fn register_in_deser_scope(
+        &self,
+        deserializer: &mut dyn PagableDeserializer<'_>,
+    ) -> pagable::Result<()> {
+        let scope = deserializer
+            .page_in_scope()
+            .get_or_init(StarlarkDeserScope::new);
+        self.register_heap_graph_in_deser_scope(&scope)
+    }
+
+    fn register_heap_graph_in_deser_scope(
+        &self,
+        scope: &StarlarkDeserScope,
+    ) -> pagable::Result<()> {
+        let name = self
+            .name()
+            .ok_or_else(|| pagable::Error::msg("deserialized frozen heap must have a name"))?;
+        let heap_id = HeapRefId::from_heap_name(name);
+        let heap = self
+            .downgrade()
+            .expect("a deserialized heap must have an inner allocation");
+        if scope
+            .is_heap_bound(heap_id, heap.heap_ptr())
+            .map_err(pagable::Error::new)?
+        {
+            return Ok(());
+        }
+
+        // A cached owner can contain FrozenValue pointers into any transitive
+        // dependency, so publish the complete graph before the owner binding.
+        for dep in self.refs_slice() {
+            dep.register_heap_graph_in_deser_scope(scope)?;
+        }
+
+        scope
+            .register_heap(heap_id, heap)
+            .map_err(pagable::Error::new)
+    }
+
     /// Number of bytes allocated on this heap, not including any memory
     /// allocated outside of the starlark heap.
     pub fn allocated_bytes(&self) -> usize {
@@ -753,6 +908,19 @@ impl FrozenHeapRef {
             Some(inner) => &inner.refs,
             None => &[],
         }
+    }
+
+    pub(crate) fn register_ser_state(&self, state: &Arc<StarlarkSerState>) -> pagable::Result<()> {
+        if let Some(inner) = &self.0 {
+            inner.register_ser_state(state)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn downgrade(&self) -> Option<WeakFrozenHeapRef> {
+        self.0
+            .as_ref()
+            .map(|heap| WeakFrozenHeapRef(PartialPagableArc::downgrade(heap)))
     }
 
     pub(crate) fn iter_values(&self) -> impl Iterator<Item = FrozenValue> {
@@ -854,12 +1022,15 @@ impl FrozenHeap {
         if arena.is_empty() && refs.is_empty() {
             FrozenHeapRef::default()
         } else {
-            FrozenHeapRef(Some(Arc::new(FrozenFrozenHeap {
+            let heap = PartialPagableArc::new(FrozenFrozenHeap {
                 arena,
                 refs: refs.into_iter().collect(),
                 name,
                 peak_allocated_bytes,
-            })))
+                ser_state: OnceLock::new(),
+                deser_state: OnceLock::new(),
+            });
+            FrozenHeapRef(Some(heap))
         }
     }
 
@@ -929,13 +1100,13 @@ impl FrozenHeap {
     }
 
     /// Allocate a new value on a [`FrozenHeap`].
-    pub fn alloc<T: AllocFrozenValue>(&self, val: T) -> FrozenValue {
+    pub fn alloc<'fv, T: AllocFrozenValue<'fv>>(&'fv self, val: T) -> FrozenValue {
         val.alloc_frozen_value(self)
     }
 
     /// Allocate a value and return [`ValueOfUnchecked`] of it.
-    pub fn alloc_typed_unchecked<T: AllocFrozenValue>(
-        &self,
+    pub fn alloc_typed_unchecked<'fv, T: AllocFrozenValue<'fv>>(
+        &'fv self,
         val: T,
     ) -> FrozenValueOfUnchecked<'static, T> {
         FrozenValueOfUnchecked::new(val.alloc_frozen_value(self))
@@ -1212,6 +1383,524 @@ impl<'v> Tracer<'v> {
         match old_val.unpack() {
             AValueOrForwardUnpack::Forward(x) => unsafe { x.forward_ptr().unpack_unfrozen_value() },
             AValueOrForwardUnpack::Header(v) => unsafe { v.unpack().heap_copy(self) },
+        }
+    }
+}
+
+// Error-path diagnostics for unresolved frozen pointers. These types and
+// searches are not used by successful serialization.
+#[derive(Debug, derive_more::Display)]
+enum FrozenValueIndexDiagnostic {
+    #[display(
+        "target_physical_index={physical_index}, target_original_recipe_index=<native heap>, target_type={value_type}, target_owner_is_restored=false"
+    )]
+    Native {
+        physical_index: usize,
+        value_type: &'static str,
+    },
+    #[display(
+        "target_physical_index=<restored allocation order is not wire order>, target_original_recipe_index={original_recipe_index}, target_owner_is_restored=true"
+    )]
+    Restored { original_recipe_index: u32 },
+}
+
+#[derive(Debug, derive_more::Display)]
+#[display("target_owner_heap={heap_name}, target_owner_ptr={heap_ptr:#x}, {index}")]
+pub(crate) struct FrozenValueLocationDiagnostic {
+    heap_name: String,
+    heap_ptr: usize,
+    index: FrozenValueIndexDiagnostic,
+}
+
+pub(crate) enum FrozenValueOwnerSearchResult {
+    Found {
+        location: FrozenValueLocationDiagnostic,
+        heaps_scanned: usize,
+    },
+    NotFound {
+        heaps_scanned: usize,
+    },
+}
+
+impl FrozenFrozenHeap {
+    #[cold]
+    fn locate_value_for_diagnostic(&self, raw_ptr: usize) -> Option<FrozenValueLocationDiagnostic> {
+        let heap_ptr = self as *const Self as usize;
+        let heap_name = self
+            .name
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "<unnamed>".to_owned());
+
+        if let Some(state) = self.deser_state.get() {
+            let original_recipe_index = state.original_value_index(raw_ptr)?;
+            return Some(FrozenValueLocationDiagnostic {
+                heap_name,
+                heap_ptr,
+                index: FrozenValueIndexDiagnostic::Restored {
+                    original_recipe_index,
+                },
+            });
+        }
+
+        let drop_headers = self.arena.collect_drop_headers_ordered();
+        let non_drop_headers = self.arena.collect_undrop_headers_ordered();
+        let (physical_index, header) = drop_headers
+            .iter()
+            .chain(non_drop_headers.iter())
+            .enumerate()
+            .find(|(_, header)| header.payload_ptr().ptr as usize == raw_ptr)?;
+        Some(FrozenValueLocationDiagnostic {
+            heap_name,
+            heap_ptr,
+            index: FrozenValueIndexDiagnostic::Native {
+                physical_index,
+                value_type: header.unpack().vtable().type_name,
+            },
+        })
+    }
+
+    #[cold]
+    fn find_reachable_value_for_diagnostic(&self, raw_ptr: usize) -> FrozenValueOwnerSearchResult {
+        let mut pending = vec![self];
+        let mut visited = HashSet::new();
+
+        while let Some(heap) = pending.pop() {
+            let heap_ptr = heap as *const Self as usize;
+            if !visited.insert(heap_ptr) {
+                continue;
+            }
+
+            if let Some(location) = heap.locate_value_for_diagnostic(raw_ptr) {
+                return FrozenValueOwnerSearchResult::Found {
+                    location,
+                    heaps_scanned: visited.len(),
+                };
+            }
+
+            for heap_ref in heap.refs.iter() {
+                if let Some(referenced_heap) = heap_ref.0.as_ref() {
+                    pending.push(Deref::deref(referenced_heap));
+                }
+            }
+        }
+
+        FrozenValueOwnerSearchResult::NotFound {
+            heaps_scanned: visited.len(),
+        }
+    }
+
+    #[cold]
+    fn enrich_value_serialization_error(
+        &self,
+        error: crate::Error,
+        heap_name: &FrozenHeapName,
+        value_index: usize,
+        value_type: &'static str,
+        all_headers_in_order: &[&&AValueHeader],
+    ) -> crate::Error {
+        let heap_ptr = self as *const Self as usize;
+        let missing_target = match error.kind() {
+            crate::ErrorKind::Other(error) => match error.downcast_ref::<PagableError>() {
+                Some(PagableError::FrozenValueNotRegistered { raw_ptr, .. }) => Some(*raw_ptr),
+                _ => None,
+            },
+            _ => None,
+        };
+        let target_diagnostic = missing_target.map_or_else(
+            || "target location is unavailable for this error".to_owned(),
+            |raw_ptr| {
+                let source_snapshot_index = all_headers_in_order
+                    .iter()
+                    .position(|header| header.payload_ptr().ptr as usize == raw_ptr);
+                let owner_diagnostic = match self.find_reachable_value_for_diagnostic(raw_ptr) {
+                    FrozenValueOwnerSearchResult::Found { location, .. } => location.to_string(),
+                    FrozenValueOwnerSearchResult::NotFound { heaps_scanned } => format!(
+                        "target owner was not found in the source heap or its {heaps_scanned} reachable heap allocations",
+                    ),
+                };
+                format!(
+                    "{owner_diagnostic}; target_source_snapshot_index={source_snapshot_index:?}",
+                )
+            },
+        );
+
+        error.with_context(format!(
+            "serializing heap `{heap_name}` allocation {heap_ptr:#x} value_index {value_index} type `{value_type}`; source_heap_is_restored={}, direct_ref_count={}; {target_diagnostic}",
+            self.deser_state.get().is_some(),
+            self.refs.len(),
+        ))
+    }
+}
+
+impl FrozenHeapRef {
+    #[cold]
+    pub(crate) fn locate_value_for_diagnostic(
+        &self,
+        raw_ptr: usize,
+    ) -> Option<FrozenValueLocationDiagnostic> {
+        self.0
+            .as_ref()
+            .and_then(|heap| heap.locate_value_for_diagnostic(raw_ptr))
+    }
+}
+
+/// A value in a frozen heap that is automatically kept alive.
+///
+/// This type is a `T` together with a `FrozenHeapRef` which keeps that `T` alive.
+///
+/// There are a number of methods on this type providing direct access to the `T`. When using these
+/// methods, the value you actually get access to is "`T` but with all lifetimes replaced with an
+/// unknown lifetime `'fv`." In other words, if you're holding a `OwnedFrozen<Value<'static>>`,
+/// `get_by_ref` actually gives you a `Value<'fv>` for some unknown lifetime `'fv`, preventing you
+/// from putting the underlying value somewhere the heap ref won't keep it alive. For more on this,
+/// see the documentation in the `branding` module.
+///
+/// The more typical way of accessing the underlying value though is with the `add_to_heap` method.
+pub struct OwnedFrozen<T> {
+    heap_ref: FrozenHeapRef,
+    // This is morally storing a `T::Reinfect<'fv>` for `'fv` the lifetime associated with the
+    // frozen heap. It would be a little bit more natural to store a `T::Reinfect<'static>` here;
+    // `T` is guaranteed by the safety contract on `ProvidesStaticType` to be the same, but if we
+    // had a `T::Reinfect<'static>` we wouldn't need to rely on that.
+    //
+    // The problem is that that would require us to add a `T: IsStaticType` bound to this *type*.
+    // That does mostly turn out fine, except that it turns out to be the *exact* pattern that
+    // consistently hits the compiler bug in <https://github.com/rust-lang/rust/issues/102211>,
+    // making this type ~unusable in async contexts. Once that bug is fixed, it may be worth to
+    // revisit.
+    v: T,
+    _no_auto_traits: PhantomData<dyn Any>,
+}
+
+// This module only has the safety-critical impls for this type. Additional conveniences and trait
+// impls are found in `owned_frozen.rs` and based on the safe APIs provided here
+impl<T> OwnedFrozen<T>
+where
+    for<'fv> T: IsStaticType<Reinfect<'fv> = T>,
+{
+    /// Get a reference to the inner value
+    pub fn get<'a>(&'a self) -> &'a T {
+        &self.v
+    }
+}
+
+impl<T: IsStaticType> OwnedFrozen<T>
+where
+    for<'fv> T::Reinfect<'fv>: Sized,
+{
+    /// Create a new `OwnedFrozen` from the given heap and a value associated with that heap.
+    ///
+    /// # SAFETY
+    ///
+    /// The `'fv` provided must be kept alive by the passed `heap_ref`.
+    pub unsafe fn unchecked_new<'fv>(heap_ref: FrozenHeapRef, v: T::Reinfect<'fv>) -> Self
+    where
+        // See comments on `Send` and `Sync` impls below
+        for<'fv2> T::Reinfect<'fv2>: HeapSendable<'fv2> + HeapSyncable<'fv2>,
+    {
+        Self {
+            heap_ref,
+            // SAFETY: `IsStaticType` guarantees that `T::Reinfect<'fv>` and `T` differ only in
+            // lifetimes, and the caller guarantees that `heap_ref`, which is stored alongside,
+            // keeps `'fv` alive.
+            v: unsafe { transmute!(T::Reinfect<'fv>, T, v) },
+            _no_auto_traits: PhantomData,
+        }
+    }
+
+    /// Get the underlying frozen heap
+    pub fn owner(&self) -> &FrozenHeapRef {
+        &self.heap_ref
+    }
+
+    /// Get access to this value within the provided heap
+    ///
+    /// See the `branding` module for more details.
+    pub fn add_to_heap<'v>(self, heap: Heap<'v>) -> T::Reinfect<'v> {
+        heap.add_reference(&self.heap_ref);
+
+        // SAFETY: The heap we just added the reference to keeps this alive for `'v`
+        unsafe { transmute!(T, T::Reinfect<'v>, self.v) }
+    }
+
+    /// Access the underlying value and a reconstructor in a closure
+    pub fn by_ref_with_reconstructor<'s, F, R>(&'s self, f: F) -> R
+    where
+        // Note: This `'a` is intentionally not `'s`. The danger that poses is that `'fv` is
+        // supposed to be a brand and hence and arbitrary lifetime, but using `'s` would allow the
+        // user to prove `'fv: 's` which makes the lifetime no longer arbitrary. In the extreme
+        // case, if the caller supplies `'s = 'static`, they can prove `'fv = 'static`, meaning the
+        // `'fv` is no longer unique at all.
+        //
+        // It's not clear that this is actually a problem, since if `'s = 'static` this thing lives
+        // forever and the poison is mostly gone anyway, but it's still very hard to reason about.
+        for<'a, 'fv> F: FnOnce(&'a T::Reinfect<'fv>, OwnedFrozenReconstructor<'fv>) -> R,
+    {
+        // SAFETY: See the comment on the type
+        f(
+            unsafe { transmute!(&T, &T::Reinfect<'_>, &self.v) },
+            OwnedFrozenReconstructor {
+                heap_ref: &self.heap_ref,
+                _invariant: PhantomData,
+            },
+        )
+    }
+
+    /// Map the underlying value and access a reconstructor
+    pub fn try_by_value_with_reconstructor<U, E, R, F>(self, f: F) -> (Result<OwnedFrozen<U>, E>, R)
+    where
+        U: IsStaticType,
+        for<'fv> U::Reinfect<'fv>: HeapSendable<'fv> + HeapSyncable<'fv> + Sized,
+        for<'fv> F: FnOncish2<
+                T::Reinfect<'fv>,
+                OwnedFrozenReconstructor<'fv>,
+                (Result<U::Reinfect<'fv>, E>, R),
+            >,
+    {
+        // SAFETY: See the comment on the type
+        let (v, extra) = f(
+            unsafe { transmute!(T, T::Reinfect<'_>, self.v) },
+            OwnedFrozenReconstructor {
+                // We have to transmute this lifetime because we want to allow our borrow of
+                // `self.heap_ref` to expire when we move `self.heap_ref` below, but the lifetime of
+                // that borrow is also the lifetime of the `'fv` in `v` which would have to expire
+                // then too.
+                //
+                // SAFETY: `self.heap_ref` is not moved until after `f` returns, so the
+                // lifetime-extended reference stays valid for the duration of the call.
+                heap_ref: unsafe { transmute!(&FrozenHeapRef, &FrozenHeapRef, &self.heap_ref) },
+                _invariant: PhantomData,
+            },
+        );
+        match v {
+            // SAFETY: `v`'s `'fv` is the brand of the heap owned by `self.heap_ref`, which we
+            // pass in as the owner.
+            Ok(v) => unsafe { (Ok(OwnedFrozen::unchecked_new(self.heap_ref, v)), extra) },
+            Err(e) => (Err(e), extra),
+        }
+    }
+}
+
+/// SAFETY: We would like to write the following impls:
+///
+/// ```rust,ignore
+/// unsafe impl<T: IsStaticType> Send for OwnedFrozen<T>
+/// where
+///     for<'fv> T::Reinfect<'fv>: HeapSendable<'fv> + HeapSyncable<'fv> + Sized,
+/// {
+/// }
+/// unsafe impl<T: IsStaticType> Sync for OwnedFrozen<T>
+/// where
+///     for<'fv> T::Reinfect<'fv>: HeapSendable<'fv> + HeapSyncable<'fv> + Sized,
+/// {
+/// }
+/// ```
+///
+/// The justification for such impls would be effectively the ones discussed in the `send` module;
+/// `for<'fv> HeapSendable<'fv> + HeapSyncable<'fv>` bounds are functionally `Send + Sync` up to any
+/// values contained in them, and those values must be frozen values so sending/syncing them is ok.
+///
+/// However, actually writing such an impl once more runs headfirst into
+/// <https://github.com/rust-lang/rust/issues/102211> where the compiler completely fails to prove
+/// them in any async context (there's a test for this in `owned_frozen.rs`). So instead, we impl
+/// `Send + Sync` unconditionally here and impose those bounds at construction time. That's a little
+/// less flexible but otherwise ok.
+unsafe impl<T> Send for OwnedFrozen<T> {}
+unsafe impl<T> Sync for OwnedFrozen<T> {}
+
+/// Marker providing the ability to reconstruct `OwnedFrozen` values.
+///
+/// This type is provided as an argument to a number of the closures in `OwnedFrozen` APIs. It
+/// allows constructing more `OwnedFrozen`s referring to the same heap:
+///
+/// ```rust,ignore
+/// let v: OwnedFrozen<(Value<'static>, Value<'static>)> = ...;
+/// let v: (OwnedFrozen<Value<'static>>, OwnedFrozen<Value<'static>>) = v
+///     .by_ref_with_reconstructor(|vs, reconstructor| {
+///         let v0 = reconstructor.reconstruct(vs.0);
+///         let v1 = reconstructor.reconstruct(vs.1);
+///         (v0, v1)
+///     });
+/// ```
+///
+/// Usually this is not needed and combinations of `map`, `clone` suffice instead.
+#[derive(Copy, Clone, Dupe)]
+pub struct OwnedFrozenReconstructor<'fv> {
+    heap_ref: &'fv FrozenHeapRef,
+    // Ensure this is invariant in `'fv`; other than that, it's fine for it to be `Send + Sync`,
+    // though not very useful
+    _invariant: PhantomData<fn(&'fv ()) -> &'fv ()>,
+}
+
+impl<'fv> OwnedFrozenReconstructor<'fv> {
+    pub fn reconstruct<T: IsStaticType>(&self, v: T::Reinfect<'fv>) -> OwnedFrozen<T>
+    where
+        for<'fv2> T::Reinfect<'fv2>: HeapSendable<'fv2> + HeapSyncable<'fv2> + Sized,
+    {
+        // SAFETY: The heap ref keeps the value alive for `'fv`
+        unsafe { OwnedFrozen::unchecked_new(self.heap_ref.dupe(), v) }
+    }
+
+    /// Make this heap a dependency of the given heap, witnessed by the returned edge.
+    ///
+    /// This is the escape hatch out of the closure-based `OwnedFrozen` APIs: `'fv`-branded
+    /// values can be rebranded for the given heap and returned from the closure.
+    pub fn edge<'v>(&self, heap: Heap<'v>) -> HeapEdge<'v, 'fv> {
+        heap.add_reference(self.heap_ref);
+
+        // SAFETY: The reference we just added keeps our heap alive for `'v`, and `'fv` is a
+        // closure-introduced brand
+        unsafe { HeapEdge::unchecked_new() }
+    }
+
+    /// Like [`edge`](OwnedFrozenReconstructor::edge), but for a frozen heap
+    pub fn frozen_edge<'v>(&self, heap: &'v FrozenHeap) -> HeapEdge<'v, 'fv> {
+        heap.add_reference(self.heap_ref);
+
+        // SAFETY: The reference we just added keeps our heap alive for `'v`, and `'fv` is a
+        // closure-introduced brand
+        unsafe { HeapEdge::unchecked_new() }
+    }
+}
+
+/// A value in a frozen heap, kept alive by a borrowed [`FrozenHeapRef`].
+///
+/// This is the borrowed counterpart of [`OwnedFrozen`]: instead of owning the heap ref, it
+/// borrows one for `'f`, and `'f` doubles as the brand under which the value is handed out. That
+/// makes access much lighter-weight than `OwnedFrozen`'s closure-based APIs — [`value`] hands out
+/// the branded value directly — and the type is `Copy` when `T` is.
+///
+/// Because `'f` is an ordinary lifetime rather than a closure-introduced one, it is a weaker
+/// brand: two `OwnedFrozenRef`s for different heaps may share the same `'f`. The soundness of
+/// this type does not depend on brand uniqueness — only on the heap ref outliving `'f` — but
+/// APIs that accept `'f`-branded values back cannot exist on this type; use the brand-generic
+/// [`try_map`] and friends instead.
+///
+/// Create one with [`OwnedFrozen::as_ref`].
+///
+/// [`value`]: OwnedFrozenRef::value
+/// [`try_map`]: OwnedFrozenRef::try_map
+pub struct OwnedFrozenRef<'f, T> {
+    heap_ref: &'f FrozenHeapRef,
+    // Morally a `T::Reinfect<'f>`, stored brand-erased for the same reasons as `OwnedFrozen::v`
+    v: T,
+    _no_auto_traits: PhantomData<dyn Any>,
+}
+
+// This type has the same relationship to its safety-critical impls as `OwnedFrozen`: everything
+// here upholds the invariant that `v` is kept alive by the heap behind `heap_ref`; conveniences
+// live in `owned_frozen.rs`.
+impl<'f, T: IsStaticType> OwnedFrozenRef<'f, T>
+where
+    for<'fv> T::Reinfect<'fv>: Sized,
+{
+    /// Create a new `OwnedFrozenRef` from the given heap ref and a value associated with that
+    /// heap.
+    ///
+    /// # SAFETY
+    ///
+    /// The value must be kept alive by the heap behind `heap_ref`.
+    pub unsafe fn unchecked_new(heap_ref: &'f FrozenHeapRef, v: T::Reinfect<'f>) -> Self
+    where
+        // See comments on the `Send` and `Sync` impls for `OwnedFrozen`
+        for<'fv> T::Reinfect<'fv>: HeapSendable<'fv> + HeapSyncable<'fv>,
+    {
+        Self {
+            heap_ref,
+            // SAFETY: Caller promised
+            v: unsafe { transmute!(T::Reinfect<'f>, T, v) },
+            _no_auto_traits: PhantomData,
+        }
+    }
+
+    /// Get the underlying frozen heap
+    pub fn owner(&self) -> &'f FrozenHeapRef {
+        self.heap_ref
+    }
+
+    /// Get the value, branded with `'f`
+    pub fn value(&self) -> T::Reinfect<'f>
+    where
+        T: Copy,
+    {
+        // SAFETY: The heap ref keeps the value alive for `'f`
+        unsafe { transmute!(T, T::Reinfect<'f>, self.v) }
+    }
+
+    /// Get access to this value within the provided heap
+    ///
+    /// See the `branding` module for more details.
+    pub fn add_to_heap<'v>(self, heap: Heap<'v>) -> T::Reinfect<'v> {
+        heap.add_reference(self.heap_ref);
+
+        // SAFETY: The heap we just added the reference to keeps this alive for `'v`
+        unsafe { transmute!(T, T::Reinfect<'v>, self.v) }
+    }
+
+    /// Like [`add_to_heap`](OwnedFrozenRef::add_to_heap), but for a frozen heap
+    pub fn add_to_frozen_heap<'v>(self, heap: &'v FrozenHeap) -> T::Reinfect<'v> {
+        heap.add_reference(self.heap_ref);
+
+        // SAFETY: The heap we just added the reference to keeps this alive as long as it lives,
+        // which is at least `'v`
+        unsafe { transmute!(T, T::Reinfect<'v>, self.v) }
+    }
+
+    /// Convert to an [`OwnedFrozen`] of the same value
+    pub fn to_owned(&self) -> OwnedFrozen<T>
+    where
+        T: Copy,
+        for<'fv> T::Reinfect<'fv>: HeapSendable<'fv> + HeapSyncable<'fv>,
+    {
+        // SAFETY: The heap ref keeps the value alive
+        unsafe { OwnedFrozen::unchecked_new(self.heap_ref.dupe(), self.value()) }
+    }
+
+    /// Fallibly transform the contained value
+    pub fn try_map<U, E, F>(self, f: F) -> Result<OwnedFrozenRef<'f, U>, E>
+    where
+        U: IsStaticType,
+        for<'fv> U::Reinfect<'fv>: HeapSendable<'fv> + HeapSyncable<'fv> + Sized,
+        for<'fv> F: FnOncish<T::Reinfect<'fv>, Result<U::Reinfect<'fv>, E>>,
+    {
+        // SAFETY: The heap ref keeps the value alive for `'f`
+        let v = f(unsafe { transmute!(T, T::Reinfect<'f>, self.v) })?;
+        // SAFETY: `f` is generic over the brand, so up to unbranded (frozen) values it can only
+        // return values derived from its input, which our heap keeps alive
+        Ok(unsafe { OwnedFrozenRef::unchecked_new(self.heap_ref, v) })
+    }
+}
+
+impl<'f, T: Copy> Copy for OwnedFrozenRef<'f, T> {}
+
+impl<'f, T: Copy> Clone for OwnedFrozenRef<'f, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'f, T: Copy> Dupe for OwnedFrozenRef<'f, T> {}
+
+/// SAFETY: As for `OwnedFrozen`: the bounds that would justify conditional impls are instead
+/// imposed at construction time, to avoid <https://github.com/rust-lang/rust/issues/102211>.
+/// Additionally, the `heap_ref` field is fine to share because `FrozenHeapRef` is `Sync`.
+unsafe impl<'f, T> Send for OwnedFrozenRef<'f, T> {}
+unsafe impl<'f, T> Sync for OwnedFrozenRef<'f, T> {}
+
+impl<T: IsStaticType> OwnedFrozen<T>
+where
+    for<'fv> T::Reinfect<'fv>: Sized,
+{
+    /// Borrow this value as an [`OwnedFrozenRef`], using the borrow as the brand
+    pub fn as_ref(&self) -> OwnedFrozenRef<'_, T>
+    where
+        T: Copy,
+    {
+        OwnedFrozenRef {
+            heap_ref: &self.heap_ref,
+            v: self.v,
+            _no_auto_traits: PhantomData,
         }
     }
 }

@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use buck2_cli_proto::BuildRequest;
 use buck2_cli_proto::build_request::BuildProviders;
 use buck2_cli_proto::build_request::Materializations;
+use buck2_cli_proto::build_request::ResponseOptions;
 use buck2_cli_proto::build_request::Uploads;
 use buck2_cli_proto::build_request::build_providers;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
@@ -44,7 +45,7 @@ use buck2_wrapper_common::BUCK_WRAPPER_UUID_ENV_VAR;
 use buck2_wrapper_common::BUCK2_WRAPPER_ENV_VAR;
 use serde::Serialize;
 
-use crate::commands::build::print_buck_ui_and_rating;
+use crate::commands::build::print_buck_ui;
 use crate::commands::build::print_build_failed;
 use crate::commands::build::print_build_result;
 use crate::commands::build::print_build_succeeded;
@@ -136,7 +137,11 @@ impl StreamingCommand for RunCommand {
                         run_info: build_providers::Action::Build as i32,
                         test_info: build_providers::Action::Skip as i32,
                     }),
-                    response_options: None,
+                    // `buck run` execs the target, so it needs the resolved run command line.
+                    response_options: Some(ResponseOptions {
+                        return_outputs: false,
+                        return_run_args: true,
+                    }),
                     build_opts: Some(self.build_opts.to_proto()),
                     final_artifact_materializations: Materializations::Materialize as i32,
                     final_artifact_uploads: Uploads::Never as i32,
@@ -190,7 +195,7 @@ impl StreamingCommand for RunCommand {
             None
         };
 
-        print_buck_ui_and_rating(&console, ctx, events_ctx.used_superconsole)?;
+        print_buck_ui(&console, ctx, events_ctx.used_superconsole)?;
         print_build_succeeded(&console, ctx, extra)?;
 
         // Special case for recursive invocations of buck; `BUCK2_WRAPPER` is set by wrapper scripts that execute

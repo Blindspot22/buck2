@@ -39,7 +39,7 @@ use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
-use futures::FutureExt;
+use dupe::ResultDupedErrExt;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use ref_cast::RefCast;
@@ -209,14 +209,11 @@ impl Key for MatchedConfigurationSettingKeysKey {
         _cancellation: &CancellationContext,
     ) -> Self::Value {
         let config_nodes = ctx
-            .compute_join(self.configuration_deps.iter(), |ctx, d| {
-                async move {
-                    (
-                        d.dupe(),
-                        get_configuration_node(ctx, &self.target_cfg, self.target_cell, d).await,
-                    )
-                }
-                .boxed()
+            .compute_join(self.configuration_deps.iter(), async |ctx, d| {
+                (
+                    d.dupe(),
+                    get_configuration_node(ctx, &self.target_cfg, self.target_cell, d).await,
+                )
             })
             .await;
 
@@ -253,6 +250,7 @@ async fn get_configuration_node(
         cfg_target: cfg_target.dupe(),
     })
     .await?
+    .dupe()
     .with_buck_error_context(|| {
         format!(
             "Error getting configuration node of `{cfg_target}` within the `{target_cfg}` configuration",
@@ -291,7 +289,7 @@ impl Key for ConfigurationNodeKey {
         let matches =
             configuration_matches(ctx, &self.target_cfg, self.target_cell, &result).await?;
 
-        Ok(ConfigurationNode::new(Some(result).filter(|_| matches)))
+        Ok(ConfigurationNode::new(matches.then_some(result)))
     }
 
     fn equality(x: &Self::Value, y: &Self::Value) -> bool {
@@ -349,6 +347,7 @@ pub(crate) async fn get_platform_configuration(
 
     ctx.compute(&PlatformConfigurationKey(target.dupe()))
         .await?
+        .dupe()
 }
 
 pub(crate) async fn compute_platform_cfgs(
@@ -369,13 +368,14 @@ pub(crate) async fn compute_platform_cfgs(
 
 pub(crate) async fn get_matched_cfg_keys<
     'a,
+    'd,
     T: IntoIterator<Item = &'a ConfigurationSettingKey> + Send,
 >(
-    ctx: &mut DiceComputations<'_>,
+    ctx: &mut DiceComputations<'d>,
     target_cfg: &ConfigurationData,
     target_cell: CellNameForConfigurationResolution,
     configuration_deps: T,
-) -> buck2_error::Result<MatchedConfigurationSettingKeysWithCfg> {
+) -> buck2_error::Result<&'d MatchedConfigurationSettingKeysWithCfg> {
     let configuration_deps: Vec<ConfigurationSettingKey> =
         configuration_deps.into_iter().map(|t| t.dupe()).collect();
     ctx.compute(&MatchedConfigurationSettingKeysKey {
@@ -384,14 +384,16 @@ pub(crate) async fn get_matched_cfg_keys<
         configuration_deps,
     })
     .await?
+    .as_ref()
+    .duped_err()
 }
 
-pub(crate) async fn get_matched_cfg_keys_for_node(
-    ctx: &mut DiceComputations<'_>,
+pub(crate) async fn get_matched_cfg_keys_for_node<'d>(
+    ctx: &mut DiceComputations<'d>,
     target_cfg: &ConfigurationData,
     target_cell: CellNameForConfigurationResolution,
     node: TargetNodeRef<'_>,
-) -> buck2_error::Result<MatchedConfigurationSettingKeysWithCfg> {
+) -> buck2_error::Result<&'d MatchedConfigurationSettingKeysWithCfg> {
     let d = node
         .get_configuration_deps_with_kind()
         .filter_map(|(d, k)| {

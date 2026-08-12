@@ -16,6 +16,7 @@ use buck2_build_api::actions::execute::dice_data::HasFallbackExecutorConfig;
 use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::constraint_value_info::FrozenConstraintValueInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::execution_platform_registration_info::FrozenExecutionPlatformRegistrationInfo;
+use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValue;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::legacy_configs::dice::HasLegacyConfigs;
 use buck2_core::configuration::compatibility::MaybeCompatible;
@@ -52,12 +53,14 @@ use buck2_node::nodes::configured_frontend::ConfiguredTargetNodeCalculation;
 use buck2_node::nodes::frontend::TargetGraphCalculation;
 use buck2_node::nodes::unconfigured::TargetNodeRef;
 use derive_more::Display;
-use futures::future::FutureExt;
 use dice::DiceComputations;
 use dice::Key;
 use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dupe::Dupe;
+use dupe::ResultDupedErrExt;
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use itertools::Itertools;
 use pagable::Pagable;
 use pagable::pagable_typetag;
@@ -199,6 +202,7 @@ impl ExecutionPlatformConstraints {
             toolchain_deps: self.toolchain_deps,
         })
         .await?
+        .dupe()
     }
 }
 
@@ -241,7 +245,7 @@ impl ToolchainExecutionPlatformCompatibilityKey {
         let unspecified_resolution = ExecutionPlatformResolution::unspecified();
         let cfg_ctx = AttrConfigurationContextImpl::new(
             self.target.inner().dupe(),
-            &matched_cfg_keys,
+            matched_cfg_keys,
             &unspecified_resolution,
             &resolved_transitions,
             &platform_cfgs,
@@ -305,6 +309,7 @@ async fn check_toolchain_execution_platform_compatibility(
         exec_platform,
     })
     .await?
+    .dupe()
 }
 
 pub(crate) async fn get_execution_platform_toolchain_dep(
@@ -334,7 +339,7 @@ pub(crate) async fn get_execution_platform_toolchain_dep(
         let unspecified_resolution = ExecutionPlatformResolution::unspecified();
         let cfg_ctx = AttrConfigurationContextImpl::new(
             target_label.inner().dupe(),
-            &matched_cfg_keys,
+            matched_cfg_keys,
             &unspecified_resolution,
             &resolved_transitions,
             &platform_cfgs,
@@ -355,7 +360,7 @@ pub(crate) async fn get_execution_platform_toolchain_dep(
             resolve_execution_platform(
                 ctx,
                 target_node,
-                &matched_cfg_keys,
+                matched_cfg_keys,
                 &gathered_deps,
                 &cfg_ctx,
             )
@@ -411,28 +416,37 @@ async fn compute_execution_platforms(
         }
     };
 
-    let providers = &ctx
+    let providers = ctx
         // Execution platform won't be supplied as a subtarget
         .get_configuration_analysis_result(&ProvidersLabel::default_for(
             execution_platforms_target.dupe(),
         ))
         .await?;
 
-    let result = providers
-        .provider_collection()
-        .builtin_provider::<FrozenExecutionPlatformRegistrationInfo>()
-        .ok_or_else(|| {
-            buck2_error::Error::from(
-                ExecutionPlatformComputationError::MissingExecutionPlatformRegistrationInfo(
-                    execution_platforms_target.dupe(),
-                ),
-            )
-        })?;
+    // Values of branded provider types must not be held across the awaits below; rustc
+    // mishandles them in the auto trait checks on this future (a rust-lang/rust#102211-like
+    // "implementation of `Sync` is not general enough" error). So look the provider up again
+    // whenever we need it instead of keeping it around.
+    let registration_info = |providers: &FrozenProviderCollectionValue| {
+        providers
+            .builtin_provider_value::<FrozenExecutionPlatformRegistrationInfo>()
+            .ok_or_else(|| {
+                buck2_error::Error::from(
+                    ExecutionPlatformComputationError::MissingExecutionPlatformRegistrationInfo(
+                        execution_platforms_target.dupe(),
+                    ),
+                )
+            })
+    };
+
+    let marker_str = registration_info(&providers)?
+        .exec_marker_constraint()
+        .map(str::to_owned);
 
     // Resolve the exec_marker_constraint if set
-    let marker_constraint = if let Some(marker_str) = result.exec_marker_constraint() {
+    let marker_constraint = if let Some(marker_str) = marker_str {
         let marker_label =
-            ProvidersLabel::parse(marker_str, cells.root_cell(), &cells, &cell_alias_resolver)?;
+            ProvidersLabel::parse(&marker_str, cells.root_cell(), &cells, &cell_alias_resolver)?;
         let marker_providers = ctx.get_configuration_analysis_result(&marker_label).await?;
         let constraint_value_info = marker_providers
             .provider_collection()
@@ -450,6 +464,7 @@ async fn compute_execution_platforms(
         None
     };
 
+    let result = registration_info(&providers)?;
     let mut platforms = Vec::new();
     for platform in result.platforms()? {
         platforms.push(platform.to_execution_platform_with_marker(marker_constraint.as_ref())?);
@@ -465,11 +480,11 @@ async fn compute_execution_platforms(
 /// This function is used in two places:
 /// 1. During execution platform selection (check_execution_platform) - to check target_compatible_with
 /// 2. During dependency graph construction (nodes.rs) - to create the final configured nodes
-pub(crate) async fn configure_exec_dep_with_modifiers(
-    ctx: &mut DiceComputations<'_>,
+pub(crate) async fn configure_exec_dep_with_modifiers<'d>(
+    ctx: &mut DiceComputations<'d>,
     exec_dep: &TargetLabel,
     execution_platform_cfg: &ConfigurationData,
-) -> ResultMaybeCompatible<ConfiguredTargetNode> {
+) -> ResultMaybeCompatible<&'d ConfiguredTargetNode> {
     let (node, super_package) = ctx.get_target_node_with_super_package(exec_dep).await?;
 
     if !execution_platform_cfg.is_bound() {
@@ -560,18 +575,16 @@ async fn check_execution_platform(
     // Then check that all exec_deps are compatible with the platform. We collect errors separately,
     // so that we do not report an error if we would later find an incompatibility.
     let dep_results = ctx
-        .compute_join(exec_deps.iter(), |ctx, dep| {
-            Box::pin(async move {
-                let cfg = exec_platform.cfg().dupe();
-                configure_exec_dep_with_modifiers(ctx, dep, &cfg)
-                    .await
-                    .map_err(|e| {
-                        e.context(format!(
-                            "Error checking compatibility of `{}` with `{}`",
-                            dep, cfg
-                        ))
-                    })
-            })
+        .compute_join(exec_deps.iter(), async |ctx, dep| {
+            let cfg = exec_platform.cfg().dupe();
+            configure_exec_dep_with_modifiers(ctx, dep, &cfg)
+                .await
+                .map_err(|e| {
+                    e.context(format!(
+                        "Error checking compatibility of `{}` with `{}`",
+                        dep, cfg
+                    ))
+                })
         })
         .await;
 
@@ -592,13 +605,9 @@ async fn check_execution_platform(
     }
 
     for result in ctx
-        .compute_join(toolchain_deps.iter(), |ctx, dep| {
-            let dep = dep.dupe();
-            let exec_platform = exec_platform.dupe();
-            async move {
-                check_toolchain_execution_platform_compatibility(ctx, dep, exec_platform).await
-            }
-            .boxed()
+        .compute_join(toolchain_deps.iter(), async |ctx, dep| {
+            check_toolchain_execution_platform_compatibility(ctx, dep.dupe(), exec_platform.dupe())
+                .await
         })
         .await
     {
@@ -620,9 +629,10 @@ async fn check_execution_platform(
 async fn get_execution_platforms_enabled(
     ctx: &mut DiceComputations<'_>,
 ) -> buck2_error::Result<ExecutionPlatforms> {
-    ctx.get_execution_platforms()
-        .await?
-        .ok_or_else(|| internal_error!("Execution platforms are not enabled"))
+    match ctx.get_execution_platforms().await? {
+        Some(platforms) => Ok(platforms.dupe()),
+        None => Err(internal_error!("Execution platforms are not enabled")),
+    }
 }
 
 async fn resolve_execution_platform_from_constraints(
@@ -776,11 +786,20 @@ struct GetExecutionPlatformsInstance;
 
 #[async_trait]
 impl GetExecutionPlatformsImpl for GetExecutionPlatformsInstance {
-    async fn get_execution_platforms_impl(
+    fn get_execution_platforms_impl<'a, 'd>(
         &self,
-        ctx: &mut DiceComputations<'_>,
-    ) -> buck2_error::Result<Option<ExecutionPlatforms>> {
-        ctx.compute(&ExecutionPlatformsKey).await?
+        ctx: &'a mut DiceComputations<'d>,
+    ) -> BoxFuture<'a, buck2_error::Result<&'d Option<ExecutionPlatforms>>>
+    where
+        'd: 'a,
+    {
+        async move {
+            ctx.compute(&ExecutionPlatformsKey)
+                .await?
+                .as_ref()
+                .duped_err()
+        }
+        .boxed()
     }
 
     async fn execution_platform_resolution_one_for_cell(

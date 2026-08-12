@@ -20,7 +20,7 @@ use dice::Key;
 use dice_futures::cancellation::CancellationContext;
 use futures::future::FutureExt;
 use pagable::Pagable;
-use pagable::PagableTagged;
+use pagable::PagableTypeTag;
 
 #[tokio::test]
 async fn test_linear_recompute_tracks_deps() {
@@ -31,15 +31,9 @@ async fn test_linear_recompute_tracks_deps() {
         #[display("K::Mid({})", _0)]
         Mid(u32),
     }
-    impl PagableTagged for K {
-        fn pagable_type_tag(&self) -> &'static str {
+    impl PagableTypeTag for K {
+        fn pagable_type_tag_static() -> &'static str {
             "K"
-        }
-        fn pagable_serialize_body(
-            &self,
-            ser: &mut dyn pagable::PagableSerializer,
-        ) -> pagable::Result<()> {
-            <Self as pagable::PagableSerialize>::pagable_serialize(self, ser)
         }
     }
 
@@ -83,16 +77,16 @@ async fn test_linear_recompute_tracks_deps() {
         builder.build(DetectCycles::Enabled)
     };
 
-    let mut ctx = dice.updater().commit().await;
+    let ctx = dice.updater().commit().await;
 
-    assert_eq!(ctx.compute(&K::Top).await.unwrap(), 4950);
+    assert_eq!(*ctx.compute(&K::Top).await.unwrap(), 4950);
 
-    let mut ctx = {
+    let ctx = {
         let mut updater = dice.updater();
         updater.changed_to(vec![(K::Mid(50), 0)]).unwrap();
         updater.commit().await
     };
 
     // should be 50 less.
-    assert_eq!(ctx.compute(&K::Top).await.unwrap(), 4900);
+    assert_eq!(*ctx.compute(&K::Top).await.unwrap(), 4900);
 }

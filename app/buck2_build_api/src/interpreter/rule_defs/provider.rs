@@ -61,6 +61,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use buck2_core::provider::id::ProviderId;
+use starlark::any::IsStaticType;
 use starlark::any::ProvidesStaticType;
 use starlark::typing::Ty;
 use starlark::values::StarlarkValue;
@@ -94,8 +95,13 @@ pub trait ProviderLike<'v>: Debug {
     fn items(&self) -> Vec<(&str, Value<'v>)>;
 }
 
-/// Implemented by frozen builtin providers.
-pub trait FrozenBuiltinProviderLike: ProviderLike<'static> + for<'v> StarlarkValue<'v> {
+/// Implemented by the frozen form of builtin providers.
+///
+/// `Self` is the brand-erased frozen type; `Self::Reinfect` recovers the branded form. For
+/// legacy (`Gen`-based) providers the two coincide: `Reinfect<'v> = Self` at every brand.
+pub trait FrozenBuiltinProviderLike:
+    ProviderLike<'static> + StarlarkValue<'static> + IsStaticType + Send + Sync
+{
     fn builtin_provider_id() -> &'static Arc<ProviderId>;
 }
 

@@ -61,7 +61,6 @@ use buck2_query_parser::BinaryOp;
 use dice::DiceComputations;
 use dupe::Dupe;
 use dupe::IterDupedExt;
-use futures::FutureExt;
 use pagable::StaticStr;
 use starlark::values::UnpackValue;
 
@@ -252,7 +251,15 @@ impl QueryEnvironment for ConfiguredGraphQueryEnvironment<'_> {
         visit: impl FnMut(Self::Target) -> buck2_error::Result<()> + Send,
         depth: u32,
     ) -> buck2_error::Result<()> {
-        async_depth_limited_traversal(&NodeLookupId, root.iter(), delegate, visit, depth).await
+        async_depth_limited_traversal(
+            &NodeLookupId,
+            root.iter(),
+            delegate,
+            visit,
+            depth,
+            self.allow_partial_graph(),
+        )
+        .await
     }
 
     async fn owner(&self, _paths: &FileSet) -> buck2_error::Result<TargetSet<Self::Target>> {
@@ -345,7 +352,7 @@ async fn get_template_info_provider_artifacts(
 pub(crate) async fn get_from_template_placeholder_info(
     ctx: &mut DiceComputations<'_>,
     template_name: StaticStr,
-    targets: impl IntoIterator<Item = ConfiguredTargetLabel>,
+    targets: impl IntoIterator<Item = ConfiguredTargetLabel, IntoIter: ExactSizeIterator>,
 ) -> buck2_error::Result<BuckIndexMap<ConfiguredTargetLabel, Artifact>> {
     let mut label_to_artifact: BuckIndexMap<ConfiguredTargetLabel, Artifact> =
         BuckIndexMap::default();
@@ -368,18 +375,14 @@ pub(crate) async fn get_from_template_placeholder_info(
     // Artifacts are put here to keep them in the correct order in the output, tsets are top-level tset nodes that we need
     // to traverse.
     let artifacts = ctx
-        .try_compute_join(targets, |ctx, target| {
-            async move {
-                let artifacts =
-                    get_template_info_provider_artifacts(ctx, &target, template_name.as_str())
-                        .await?;
-                buck2_error::Ok(
-                    artifacts
-                        .into_iter()
-                        .map(move |artifact| (target.dupe(), artifact)),
-                )
-            }
-            .boxed()
+        .try_compute_join(targets, async |ctx, target| {
+            let artifacts =
+                get_template_info_provider_artifacts(ctx, &target, template_name.as_str()).await?;
+            buck2_error::Ok(
+                artifacts
+                    .into_iter()
+                    .map(move |artifact| (target.dupe(), artifact)),
+            )
         })
         .await?;
     let mut artifacts: VecDeque<_> = artifacts.into_iter().flatten().collect();
@@ -415,66 +418,67 @@ pub(crate) async fn get_from_template_placeholder_info(
             ResolvedArtifactGroup::TransitiveSetProjection(tset_key) => {
                 // We've encountered a "top-level" tset node that we haven't yet seen (as either a top-level or intermediate node, doesn't matter).
                 if seen.insert(tset_key.dupe()) {
-                    let tset_value = tset_key.key.lookup(ctx).await?;
+                    tset_key.key.lookup(ctx).await?.by_ref(|tset_value| {
+                        // Now we can traverse this tset from that node. This is a different traversal than our top-level one as we will
+                        // be accessing tset internals directly and so we can actually traverse the starlark objects without going back through
+                        // dice. We'll be working all with values with lifetimes from `tset_value`.
+                        //
+                        // We can't use tset's normal traverse because we need to avoid retraversing parts of the tset graph that we've already
+                        // traversed (through other top-level tset nodes).
+                        let mut queue = VecDeque::new();
+                        queue.push_back(tset_value.to_value());
+                        while let Some(v) = queue.pop_front() {
+                            let as_tset = TransitiveSet::from_value(v)
+                                .ok_or_else(|| internal_error!("invalid tset structure"))?;
 
-                    // Now we can traverse this tset from that node. This is a different traversal than our top-level one as we will
-                    // be accessing tset internals directly and so we can actually traverse the starlark objects without going back through
-                    // dice. We'll be working all with values with lifetimes from `tset_value`.
-                    //
-                    // We can't use tset's normal traverse because we need to avoid retraversing parts of the tset graph that we've already
-                    // traversed (through other top-level tset nodes).
-                    let mut queue = VecDeque::new();
-                    queue.push_back(tset_value.to_value());
-                    while let Some(v) = queue.pop_front() {
-                        let as_tset = TransitiveSet::from_value(v)
-                            .ok_or_else(|| internal_error!("invalid tset structure"))?;
+                            // Visit the projection value itself. As this is an opaque cmdargs-like thing, it may contain more top-level tset node
+                            // references that need to be pushed into the outer queue.
+                            if let Some(v) = as_tset.get_projection_value(tset_key.projection)? {
+                                struct Visitor<'a>(
+                                    &'a mut VecDeque<(ConfiguredTargetLabel, ArtifactGroup)>,
+                                    ConfiguredTargetLabel,
+                                );
+                                impl<'v> CommandLineArtifactVisitor<'v> for Visitor<'_> {
+                                    fn visit_input(
+                                        &mut self,
+                                        input: ArtifactGroup,
+                                        _tags: Vec<&ArtifactTag>,
+                                    ) {
+                                        self.0.push_back((self.1.dupe(), input));
+                                    }
 
-                        // Visit the projection value itself. As this is an opaque cmdargs-like thing, it may contain more top-level tset node
-                        // references that need to be pushed into the outer queue.
-                        if let Some(v) = as_tset.get_projection_value(tset_key.projection)? {
-                            struct Visitor<'a>(
-                                &'a mut VecDeque<(ConfiguredTargetLabel, ArtifactGroup)>,
-                                ConfiguredTargetLabel,
-                            );
-                            impl<'v> CommandLineArtifactVisitor<'v> for Visitor<'_> {
-                                fn visit_input(
-                                    &mut self,
-                                    input: ArtifactGroup,
-                                    _tags: Vec<&ArtifactTag>,
-                                ) {
-                                    self.0.push_back((self.1.dupe(), input));
+                                    fn visit_declared_output(
+                                        &mut self,
+                                        _artifact: OutputArtifact<'v>,
+                                        _tags: Vec<&ArtifactTag>,
+                                    ) {
+                                    }
+
+                                    fn visit_frozen_output(
+                                        &mut self,
+                                        _artifact: Artifact,
+                                        _tags: Vec<&ArtifactTag>,
+                                    ) {
+                                    }
                                 }
+                                ValueAsCommandLineLike::unpack_value_err(v)?
+                                    .0
+                                    .visit_artifacts(&mut Visitor(&mut artifacts, target.dupe()))?;
+                            }
 
-                                fn visit_declared_output(
-                                    &mut self,
-                                    _artifact: OutputArtifact<'v>,
-                                    _tags: Vec<&ArtifactTag>,
-                                ) {
-                                }
-
-                                fn visit_frozen_output(
-                                    &mut self,
-                                    _artifact: Artifact,
-                                    _tags: Vec<&ArtifactTag>,
-                                ) {
+                            // Enqueue any children we haven't yet seen (and mark them seen).
+                            for child in as_tset.children.iter() {
+                                let child_as_tset = TransitiveSet::from_value(*child)
+                                    .ok_or_else(|| internal_error!("Invalid deferred"))?;
+                                let projection_key =
+                                    child_as_tset.get_projection_key(tset_key.projection);
+                                if seen.insert(projection_key) {
+                                    queue.push_back(*child);
                                 }
                             }
-                            ValueAsCommandLineLike::unpack_value_err(v)?
-                                .0
-                                .visit_artifacts(&mut Visitor(&mut artifacts, target.dupe()))?;
                         }
-
-                        // Enqueue any children we haven't yet seen (and mark them seen).
-                        for child in as_tset.children.iter() {
-                            let child_as_tset = TransitiveSet::from_value(*child)
-                                .ok_or_else(|| internal_error!("Invalid deferred"))?;
-                            let projection_key =
-                                child_as_tset.get_projection_key(tset_key.projection);
-                            if seen.insert(projection_key) {
-                                queue.push_back(*child);
-                            }
-                        }
-                    }
+                        buck2_error::Ok(())
+                    })?;
                 }
             }
         }

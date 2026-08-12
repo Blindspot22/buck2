@@ -53,7 +53,7 @@ use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
-use futures::FutureExt;
+use dupe::ResultDupedErrExt;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use starlark::codemap::FileSpan;
@@ -135,15 +135,15 @@ impl<'c, 'd> HasCalculationDelegate<'c, 'd> for DiceComputations<'d> {
 
                 let cell_info = InterpreterCellInfo::new(
                     self.1,
-                    ctx.get_cell_resolver().await?,
-                    cell_alias_resolver,
+                    ctx.get_cell_resolver().await?.dupe(),
+                    cell_alias_resolver.dupe(),
                 )?;
 
                 Ok(Arc::new(InterpreterForDir::new(
                     cell_info,
                     global_state.dupe(),
-                    implicit_import_paths,
-                    dirs_allowing_relative_paths,
+                    implicit_import_paths.dupe(),
+                    dirs_allowing_relative_paths.dupe(),
                 )?))
             }
 
@@ -166,7 +166,9 @@ impl<'c, 'd> HasCalculationDelegate<'c, 'd> for DiceComputations<'d> {
                     .to_owned(),
                 build_file_cell,
             ))
-            .await??;
+            .await?
+            .as_ref()
+            .duped_err()?;
 
         Ok(DiceCalculationDelegate {
             build_file_cell,
@@ -179,13 +181,13 @@ impl<'c, 'd> HasCalculationDelegate<'c, 'd> for DiceComputations<'d> {
 pub struct DiceCalculationDelegate<'c, 'd> {
     build_file_cell: BuildFileCell,
     ctx: &'c mut DiceComputations<'d>,
-    configs: Arc<InterpreterForDir>,
+    configs: &'d Arc<InterpreterForDir>,
 }
 
 impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
     async fn get_legacy_buck_config_for_starlark(
         &mut self,
-    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice> {
+    ) -> buck2_error::Result<OpaqueLegacyBuckConfigOnDice<'d>> {
         self.ctx
             .get_legacy_config_on_dice(self.build_file_cell.name())
             .await
@@ -213,22 +215,20 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         modules: &[(Option<FileSpan>, OwnedStarlarkModulePath)],
     ) -> buck2_error::Result<ModuleDeps> {
         Ok(ModuleDeps(
-            ctx.try_compute_join(modules, |ctx, (span, import)| {
-                async move {
-                    ctx.get_loaded_module(import.borrow())
-                        .await
-                        .with_buck_error_context(|| {
-                            format!(
-                                "From load at {}",
-                                span.as_ref()
-                                    .map_or("implicit location".to_owned(), |file_span| file_span
-                                        .resolve()
-                                        .begin_file_line()
-                                        .to_string())
-                            )
-                        })
-                }
-                .boxed()
+            ctx.try_compute_join(modules, async |ctx, (span, import)| {
+                ctx.get_loaded_module(import.borrow())
+                    .await
+                    .with_buck_error_context(|| {
+                        format!(
+                            "From load at {}",
+                            span.as_ref()
+                                .map_or("implicit location".to_owned(), |file_span| file_span
+                                    .resolve()
+                                    .begin_file_line()
+                                    .to_string())
+                        )
+                    })
+                    .map(|m| m.dupe())
             })
             .await?,
         ))
@@ -345,7 +345,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         let buckconfig = self.get_legacy_buck_config_for_starlark().await?;
         let root_buckconfig = self.ctx.get_legacy_root_config_on_dice().await?;
 
-        let configs = &self.configs;
+        let configs = self.configs;
         let ctx = &mut *self.ctx;
 
         let eval_kind = StarlarkEvalKind::Load(Arc::new(starlark_file.to_owned()));
@@ -416,7 +416,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
 
         #[async_trait]
         impl Key for PackageFileLookupKey {
-            type Value = buck2_error::Result<Option<Arc<PackageFilePath>>>;
+            type Value = buck2_error::Result<Option<PackageFilePath>>;
 
             async fn compute(
                 &self,
@@ -430,7 +430,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
                     )
                     .await?
                     {
-                        return Ok(Some(Arc::new(package_file_path)));
+                        return Ok(Some(package_file_path));
                     }
                 }
                 Ok(None)
@@ -455,13 +455,15 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         match self
             .ctx
             .compute(&PackageFileLookupKey(package.dupe()))
-            .await??
+            .await?
+            .as_ref()
+            .duped_err()?
         {
             Some(package_file_path) => {
                 let (module, deps) = self
-                    .prepare_eval(StarlarkPath::PackageFile(&package_file_path))
+                    .prepare_eval(StarlarkPath::PackageFile(package_file_path))
                     .await?;
-                Ok(Some(((*package_file_path).clone(), module, deps)))
+                Ok(Some((package_file_path.clone(), module, deps)))
             }
             None => Ok(None),
         }
@@ -486,7 +488,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
         let buckconfig = self.get_legacy_buck_config_for_starlark().await?;
         let root_buckconfig = self.ctx.get_legacy_root_config_on_dice().await?;
 
-        let configs = &self.configs;
+        let configs = self.configs;
         let ctx = &mut *self.ctx;
 
         let eval_kind = StarlarkEvalKind::LoadPackageFile(path.dupe());
@@ -550,7 +552,12 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
             }
         }
 
-        self.ctx.compute(&PackageFileKey(path)).await?
+        self.ctx
+            .compute(&PackageFileKey(path))
+            .await?
+            .as_ref()
+            .duped_err()
+            .map(|sp| sp.dupe())
     }
 
     /// Most directories do not contain a `PACKAGE` file, this function
@@ -601,8 +608,8 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
             let ((), listing) = self
                 .ctx
                 .try_compute2(
-                    |ctx| check_starlark_stack_size(ctx).boxed(),
-                    |ctx| Self::resolve_package_listing(ctx, package.dupe()).boxed(),
+                    async |ctx| check_starlark_stack_size(ctx).await,
+                    async |ctx| Self::resolve_package_listing(ctx, package.dupe()).await,
                 )
                 .await?;
 
@@ -617,9 +624,8 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
 
             let package_boundary_exception = self
                 .ctx
-                .get_package_boundary_exception(package.as_cell_path())
-                .await?
-                .is_some();
+                .has_package_boundary_exception(package.as_cell_path())
+                .await?;
             let buckconfig = self.get_legacy_buck_config_for_starlark().await?;
             let root_buckconfig = self.ctx.get_legacy_root_config_on_dice().await?;
             let module_id = build_file_path.to_string();
@@ -629,7 +635,7 @@ impl<'c, 'd: 'c> DiceCalculationDelegate<'c, 'd> {
                 module_id: module_id.clone(),
             };
 
-            let configs = &self.configs;
+            let configs = self.configs;
             let ctx = &mut *self.ctx;
 
             now = Some(TimeSpan::start_now());

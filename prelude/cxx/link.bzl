@@ -63,6 +63,7 @@ load(
     ":cxx_link_utility.bzl",
     "LinkArgsOutput",
     "cxx_link_cmd_parts",
+    "cxx_runtime_library_arguments",
     "cxx_sanitizer_runtime_arguments",
     "gc_sections_args",
     "generates_split_debug",
@@ -73,7 +74,7 @@ load(
 load(":debug.bzl", "SplitDebugMode")
 load(":dwp.bzl", "dwp", "dwp_available")
 load(":hip_debug_extract.bzl", "PRE_EXTRACT_SUFFIX", "hip_debug_extract_available")
-load(":link_types.bzl", "CxxLinkResultType", "LinkOptions", "merge_link_options")
+load(":link_types.bzl", "CxxLinkResultType", "LinkOptions", "get_dwp_execution_preference", "merge_link_options")
 load(
     ":linker.bzl",
     "SharedLibraryFlagOverrides",  # @unused Used as a type
@@ -217,6 +218,8 @@ def cxx_link_into(
     if linker_info.supports_distributed_thinlto and opts.enable_distributed_thinlto:
         if not linker_info.lto_mode == LtoMode("thin"):
             fail("Cannot use distributed thinlto if the cxx toolchain doesn't use thin-lto lto_mode")
+        if linker_info.runtime_library_files:
+            fail("runtime_library_files is not supported with distributed thin-lto")
         sanitizer_runtime_args = cxx_sanitizer_runtime_arguments(ctx, cxx_toolchain_info, output)
 
         linker_type = linker_info.type
@@ -268,12 +271,13 @@ def cxx_link_into(
         split_debug_output = split_debug_lto_info.output
     expect(not generates_split_debug(cxx_toolchain_info) or split_debug_output != None)
     sanitizer_runtime_args = cxx_sanitizer_runtime_arguments(ctx, cxx_toolchain_info, output)
+    runtime_library_args = cxx_runtime_library_arguments(cxx_toolchain_info)
 
     def create_local_linker_invocation(add_linker_outputs: bool) -> LinkArgsOutput:
         if linker_map != None and add_linker_outputs:
-            links_with_linker_map = opts.links + [linker_map_args(cxx_toolchain_info, linker_map.as_output())]
+            links_with_linker_map = opts.links + opts.binary_links + [linker_map_args(cxx_toolchain_info, linker_map.as_output())]
         else:
-            links_with_linker_map = opts.links
+            links_with_linker_map = opts.links + opts.binary_links
 
         # Add gc-sections output args if enabled
         if gc_sections_output != None and add_linker_outputs:
@@ -315,6 +319,10 @@ def cxx_link_into(
         # behavior of Swift runtime loading when the app also has an embedded
         # Swift runtime.
         all_link_args.add(sanitizer_runtime_args.extra_link_args)
+
+        # Runtime libraries the toolchain provides (e.g. compiler-rt builtins) go at
+        # the end, to match the Clang driver's placement of compiler-rt.
+        all_link_args.add(runtime_library_args)
 
         if linker_info.thin_lto_double_codegen_enabled:
             # This flag should only be passed to the toolchain when using local thin-lto,
@@ -368,7 +376,7 @@ def cxx_link_into(
         )
 
     bitcode_linkables = []
-    for link_item in opts.links:
+    for link_item in opts.links + opts.binary_links:
         if link_item.infos == None:
             continue
         for link_info in link_item.infos:
@@ -466,7 +474,7 @@ def cxx_link_into(
 
     external_debug_info = link_external_debug_info(
         ctx = ctx,
-        links = opts.links,
+        links = opts.links + opts.binary_links,
         split_debug_output = split_debug_output,
         pdb = link_unit_generation_link_args.pdb_artifact,
     )
@@ -478,7 +486,16 @@ def cxx_link_into(
 
     use_bolt = is_result_executable and cxx_use_bolt(ctx)
     if use_bolt:
-        bolt_output = bolt(ctx, output, external_debug_info, opts.identifier, dwp_tool_available, allow_cache_upload = enable_late_build_info_stamping)
+        bolt_output = bolt(
+            ctx,
+            output,
+            external_debug_info,
+            opts.identifier,
+            dwp_tool_available,
+            action_execution_properties,
+            opts.link_weight,
+            allow_cache_upload = enable_late_build_info_stamping,
+        )
         output = bolt_output.output
         split_debug_output = bolt_output.dwo_output
 
@@ -488,7 +505,7 @@ def cxx_link_into(
         if use_bolt:
             dwp_inputs.add([split_debug_output])
         else:
-            for link in opts.links:
+            for link in opts.links + opts.binary_links:
                 dwp_inputs.add(unpack_link_args(link))
             dwp_inputs.add(project_artifacts(ctx.actions, external_debug_info))
 
@@ -503,7 +520,9 @@ def cxx_link_into(
             # just pass in the full link line and extract all inputs from that,
             # which is a bit of an overspecification.
             referenced_objects = [dwp_inputs],
-            action_execution_properties = action_execution_properties,
+            action_execution_properties = get_action_execution_attributes(
+                get_dwp_execution_preference(opts),
+            ),
         )
 
     # Per-TU device-debug stripping runs at compile time (compile.bzl).
@@ -521,7 +540,7 @@ def cxx_link_into(
 
     linked_object = LinkedObject(
         output = output,
-        link_args = opts.links,
+        link_args = opts.links + opts.binary_links,
         bitcode_bundle = bitcode_artifact.artifact if bitcode_artifact else None,
         prebolt_output = output,
         unstripped_output = unstripped_output,

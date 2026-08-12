@@ -201,7 +201,6 @@ def apple_test_extra_attrs():
         "extension": attrs.string(),
         "link_execution_preference": link_execution_preference_attr(),
         "link_ordering": attrs.option(attrs.enum(LinkOrdering.values()), default = None),
-        "minimum_os_version": attrs.option(attrs.string(), default = None),
         "precompiled_header": attrs.option(attrs.dep(providers = [CPrecompiledHeaderInfo]), default = None),
         # Expected by `apple_bundle`, for `apple_test` this field is always None.
         "resource_group": attrs.option(attrs.string(), default = None),
@@ -246,6 +245,7 @@ def apple_test_extra_attrs():
         ),
     } | validation_common.attrs_validators_arg()
     attribs.update(apple_common.apple_toolchain_arg())
+    attribs.update(apple_common.minimum_os_version_arg())
     attribs.update(_apple_bundle_like_common_attrs())
     attribs.update(get_swift_incremental_file_hashing_attrs())
     attribs.update(get_swift_incremental_logging_attrs())
@@ -280,7 +280,7 @@ def _embed_xctest_frameworks_default_value():
         "DEFAULT": False,
         # Xcode copies XCTest frameworks to test host apps, required when the
         # selected Xcode version != Xcode version used to build an app under test
-        "config//marker/apple/constraints:embed_xctest_frameworks_enabled": True,
+        "config//marker/apple/constraints:embed_xctest_frameworks[enabled]": True,
     })
 
 def apple_bundle_extra_attrs():
@@ -289,17 +289,18 @@ def apple_bundle_extra_attrs():
         "bundle_type": attrs.option(attrs.enum(AppleBundleTypeAttributeType.values()), default = None),
         "copy_public_framework_headers": attrs.option(attrs.bool(), default = None),
         "embed_xctest_frameworks": attrs.bool(default = _embed_xctest_frameworks_default_value()),
-        "minimum_os_version": attrs.option(attrs.string(), default = None),
         "module_map": attrs.option(attrs.one_of(attrs.enum(AppleFrameworkBundleModuleMapType), attrs.source()), default = None),
         "resource_group_map": RESOURCE_GROUP_MAP_ATTR,
         "selective_debugging": attrs.option(attrs.dep(providers = [AppleSelectiveDebuggingInfo]), default = None),
         "split_arch_dsym": attrs.bool(default = False),
         "universal": attrs.option(attrs.bool(), default = None),
+        "validate_rrapi_usage": attrs.bool(default = False),
         "_apple_toolchain": get_apple_bundle_toolchain_attr(),
         "_codesign_entitlements": attrs.option(attrs.source(), default = None),
-    } | apple_common.debug_artifacts_validators_arg()
+    }
     attribs.update(_apple_bundle_like_common_attrs())
     attribs.update(apple_common.entitlements_suffixed_key_map_arg())
     attribs.update(apple_common.entitlements_removed_keys_arg())
     attribs.update(apple_common.entitlements_removed_values_map_arg())
+    attribs.update(apple_common.minimum_os_version_arg())
     return attribs

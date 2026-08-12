@@ -29,6 +29,11 @@ DexLibraryInfo = provider(
         # (single line). These are the actual counts that the 64K DEX limits apply to,
         # unlike weight_estimate which is a byte-size proxy.
         "ref_count": provider_field(typing.Any, default = None),  # ["artifact", None]
+        # a file mapping each synthetic class D8 created to the class it was synthesized from,
+        # one "<synthetic> <context>" pair per line. A synthetic must be placed in the same dex
+        # as its context class, and D8 reports the pairing because the synthetic's name is
+        # mangled in a format it does not treat as stable.
+        "synthetic_contexts": provider_field(typing.Any, default = None),  # ["artifact", None]
     },
 )
 
@@ -39,6 +44,7 @@ def get_dex_produced_from_java_library(
     needs_desugar: bool = False,
     desugar_deps: [TransitiveSetArgsProjection, None] = None,
     weight_factor: int = 1,
+    desugar_deps_file: Artifact | None = None,
 ) -> DexLibraryInfo:
     d8_cmd = cmd_args(dex_toolchain.d8_command[RunInfo])
 
@@ -54,8 +60,18 @@ def get_dex_produced_from_java_library(
     if not needs_desugar:
         d8_cmd.add("--no-desugar")
     else:
-        desugar_deps_file = ctx.actions.write(prefix + "_desugar_deps_file.txt", desugar_deps or [], has_content_based_path = True)
-        d8_cmd.add(["--classpath-files", desugar_deps_file])
+        # Callers that dex many jars against one shared classpath pass desugar_deps_file so the
+        # list is written once instead of once per jar; writing it here would be quadratic in the
+        # number of jars.
+        #
+        # Invariant: desugar_deps_file only carries the jar *paths*. The jar artifacts are declared
+        # as action inputs via the hidden cmd_args below, sourced from desugar_deps. A caller that
+        # passes desugar_deps_file must therefore also pass desugar_deps, otherwise the jars are
+        # left untracked and may be missing when d8 runs. (Alternatively a caller could write the
+        # file with ctx.actions.write(..., with_inputs = True) so the artifacts ride along with the
+        # file, but no current caller does this.)
+        classpath_file = desugar_deps_file or ctx.actions.write(prefix + "_desugar_deps_file.txt", desugar_deps or [], has_content_based_path = True)
+        d8_cmd.add(["--classpath-files", classpath_file])
         d8_cmd.add(cmd_args(hidden = desugar_deps or []))
 
     referenced_resources_file = ctx.actions.declare_output(prefix + "_referenced_resources.txt", has_content_based_path = True)
@@ -71,6 +87,9 @@ def get_dex_produced_from_java_library(
 
     ref_count_file = ctx.actions.declare_output(prefix + "_ref_count.txt", has_content_based_path = True)
     d8_cmd.add(["--ref-count-path", ref_count_file.as_output()])
+
+    synthetic_contexts_file = ctx.actions.declare_output(prefix + "_synthetic_contexts.txt", has_content_based_path = True)
+    d8_cmd.add(["--synthetic-contexts-path", synthetic_contexts_file.as_output()])
 
     min_sdk_version = getattr(ctx.attrs, "_dex_min_sdk_version", None) or getattr(ctx.attrs, "min_sdk_version", None)
     if min_sdk_version:
@@ -91,4 +110,5 @@ def get_dex_produced_from_java_library(
         referenced_resources = referenced_resources_file,
         weight_estimate = weight_estimate_file,
         ref_count = ref_count_file,
+        synthetic_contexts = synthetic_contexts_file,
     )

@@ -14,17 +14,16 @@ use std::fmt::Debug;
 use allocative::Allocative;
 use buck2_build_api_derive::internal_provider;
 use starlark::any::ProvidesStaticType;
-use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
-use starlark::values::Freeze;
+use starlark::values::FreezeBranded;
 use starlark::values::FreezeError;
+use starlark::values::OwnedFrozen;
 use starlark::values::StarlarkPagable;
 use starlark::values::Trace;
-use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
-use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::ValueTyped;
 use starlark::values::list::ListRef;
 use starlark::values::list::ListType;
 
@@ -85,29 +84,25 @@ enum ValidationInfoError {
     Clone,
     Debug,
     Trace,
-    Coerce,
-    Freeze,
+    FreezeBranded,
     ProvidesStaticType,
     Allocative,
     StarlarkPagable
 )]
-#[freeze(validator = validate_validation_info, bounds = "V: ValueLike<'freeze>")]
+#[freeze_branded(validator = validate_validation_info)]
 #[repr(transparent)]
-pub struct ValidationInfoGen<V: ValueLifetimeless> {
+pub struct ValidationInfo<'v> {
     /// Non-empty list of `ValidationSpec` values, each representing a single
     /// validation. Spec names must be unique within this provider.
     ///
     /// See the [Validations guide](https://buck2.build/docs/rule_authors/validation/)
     /// for how to declare validations end-to-end and write the validator
     /// action that produces each spec's `validation_result`.
-    validations: ValueOfUncheckedGeneric<V, Vec<FrozenStarlarkValidationSpec>>,
+    validations: ValueOfUnchecked<'v, Vec<FrozenStarlarkValidationSpec>>,
 }
 
-fn validate_validation_info<'v, V>(info: &ValidationInfoGen<V>) -> buck2_error::Result<()>
-where
-    V: ValueLike<'v>,
-{
-    let values = ListRef::from_value(info.validations.get().to_value())
+fn validate_validation_info<'v>(info: &ValidationInfo<'v>) -> buck2_error::Result<()> {
+    let values = ListRef::from_value(info.validations.get())
         .ok_or(buck2_error::Error::from(
             ValidationInfoError::ValidationsAreNotListOfSpecs,
         ))?
@@ -115,17 +110,10 @@ where
     let mut spec_names = HashSet::new();
     for value in values {
         let wrong_type_error = || ValidationInfoError::WrongSpecType(format!("{value}"));
-        let name = if let Some(frozen_value) = value.unpack_frozen() {
-            let spec = frozen_value
-                .downcast_ref::<FrozenStarlarkValidationSpec>()
-                .ok_or_else(wrong_type_error)?;
-            spec.name()
-        } else {
-            let spec = value
-                .downcast_ref::<StarlarkValidationSpec>()
-                .ok_or_else(wrong_type_error)?;
-            spec.name()
-        };
+        let name = value
+            .downcast_ref::<StarlarkValidationSpec>()
+            .ok_or_else(wrong_type_error)?
+            .name();
         if !spec_names.insert(name) {
             return Err(ValidationInfoError::SpecsWithDuplicateName(name.to_owned()).into());
         }
@@ -153,13 +141,16 @@ fn validation_info_creator(globals: &mut GlobalsBuilder) {
     }
 }
 
-impl FrozenValidationInfo {
-    pub fn validations(&self) -> impl Iterator<Item = &FrozenStarlarkValidationSpec> {
-        let it = ListRef::from_value(self.validations.get().to_value())
+/// A `ValidationInfo` kept alive by its owning frozen heap; usable across threads and awaits.
+pub type OwnedValidationInfo = OwnedFrozen<ValueTyped<'static, ValidationInfo<'static>>>;
+
+impl<'v> ValidationInfo<'v> {
+    pub fn validations(&self) -> impl Iterator<Item = &'v StarlarkValidationSpec<'v>> {
+        let it = ListRef::from_value(self.validations.get())
             .expect("type checked during construction or freezing")
             .iter();
         it.map(|x| {
-            x.downcast_ref::<FrozenStarlarkValidationSpec>()
+            x.downcast_ref::<StarlarkValidationSpec>()
                 .expect("type checked during construction or freezing")
         })
     }

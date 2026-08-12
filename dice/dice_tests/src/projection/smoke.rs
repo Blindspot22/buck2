@@ -251,13 +251,14 @@ async fn smoke() -> anyhow::Result<()> {
         ..Default::default()
     });
 
-    let mut ctx = ctx.commit().await;
+    let ctx = ctx.commit().await;
 
     let file = ctx
         .compute(&FileKey {
             name: "file.fl".to_owned(),
         })
         .await?
+        .clone()
         .map_err(|e| anyhow::anyhow!(format!("{:#}", e)))?;
     assert_eq!("<X>", &*file);
 
@@ -271,7 +272,7 @@ async fn smoke() -> anyhow::Result<()> {
         tracker.lock().computations.as_slice()
     );
 
-    let mut ctx = ctx.into_updater();
+    let mut ctx = dice.updater();
     ctx.changed([ConfigKey])?;
     ctx.commit().await;
     tracker.lock().computations.clear();
@@ -284,13 +285,14 @@ async fn smoke() -> anyhow::Result<()> {
     data.data.set(GlobalConfig {
         config: HashMap::from_iter([("x".to_owned(), "X".to_owned())]),
     });
-    let mut ctx = dice.updater_with_data(data).commit().await;
+    let ctx = dice.updater_with_data(data).commit().await;
 
     let file = ctx
         .compute(&FileKey {
             name: "file.fl".to_owned(),
         })
         .await?
+        .clone()
         .map_err(|e| anyhow::anyhow!(format!("{:#}", e)))?;
     assert_eq!("<X>", &*file);
 
@@ -299,7 +301,7 @@ async fn smoke() -> anyhow::Result<()> {
         tracker.lock().computations.as_slice()
     );
 
-    let mut ctx = ctx.into_updater();
+    let mut ctx = dice.updater();
     ctx.changed([ConfigKey])?;
     ctx.commit().await;
     tracker.lock().computations.clear();
@@ -316,13 +318,14 @@ async fn smoke() -> anyhow::Result<()> {
             ("y".to_owned(), "Y".to_owned()),
         ]),
     });
-    let mut ctx = dice.updater_with_data(data).commit().await;
+    let ctx = dice.updater_with_data(data).commit().await;
 
     let file = ctx
         .compute(&FileKey {
             name: "file.fl".to_owned(),
         })
         .await?
+        .clone()
         .map_err(|e| anyhow::anyhow!(format!("{:#}", e)))?;
     assert_eq!("<X>", &*file);
 
@@ -441,24 +444,24 @@ async fn projection_sync_and_then_recompute_incremental_reuses_key() -> anyhow::
 
     let mut updater = dice.updater();
     updater.changed_to([(BaseKey, 1)])?;
-    let mut ctx = updater.commit().await;
+    let ctx = updater.commit().await;
 
-    assert_eq!(ctx.compute(&DependsOnProjection(is_ran.dupe())).await?, 1);
+    assert_eq!(*ctx.compute(&DependsOnProjection(is_ran.dupe())).await?, 1);
     assert!(is_ran.load(Ordering::SeqCst));
 
     is_ran.store(false, Ordering::SeqCst);
     // introduce a change
     let mut updater = dice.updater();
     updater.changed_to([(BaseKey, 9999)])?;
-    let mut ctx = updater.commit().await;
+    let ctx = updater.commit().await;
 
     // if we run the sync first
-    let derive_from = ctx.compute_opaque(&BaseKey).await?;
-    let projected = ctx.projection(&derive_from, &ProjectionEqualKey)?;
+    let derive_from = ctx.ctx().compute_opaque(&BaseKey).await?;
+    let projected = ctx.ctx().projection(&derive_from, &ProjectionEqualKey)?;
     assert_eq!(projected, 1);
 
     // should not be ran
-    assert_eq!(ctx.compute(&DependsOnProjection(is_ran.dupe())).await?, 1);
+    assert_eq!(*ctx.compute(&DependsOnProjection(is_ran.dupe())).await?, 1);
     assert!(!is_ran.load(Ordering::SeqCst));
 
     Ok(())

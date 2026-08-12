@@ -17,7 +17,7 @@ import stat
 import sys
 import threading
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from importlib.machinery import PathFinder
 from importlib.util import module_from_spec
 
@@ -181,6 +181,53 @@ def _extract_sitecustomize() -> str | None:
         return None  # Best effort
 
 
+def _runtime_lib_path_var() -> str:
+    return "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+
+
+def _par_runtime_lib_dir() -> str | None:
+    """Absolute path to the PAR's runtime/lib dir, or None if unavailable.
+
+    Under NativeLinkStrategy("native"), sys.executable is the native-main ELF,
+    whose $ORIGIN-relative RPATH only resolves to runtime/lib when the ELF is
+    materialized adjacent to the link-tree. When it is materialized elsewhere
+    (e.g. the content-addressed anon-target outputs produced under
+    python.use_anon_target_for_analysis), $ORIGIN realpath-resolves into an
+    unrelated tree and the bundled .so's cannot be found. FB_PAR_RUNTIME_FILES
+    points at the link-tree root at runtime, so runtime/lib is reconstructable
+    here regardless of where the ELF itself lives.
+    """
+    runtime_files = os.environ.get("FB_PAR_RUNTIME_FILES")
+    if not runtime_files:
+        return None
+    lib_dir = os.path.join(runtime_files, "runtime", "lib")
+    return lib_dir if os.path.isdir(lib_dir) else None
+
+
+def _inject_runtime_lib_path(env: MutableMapping[str, str], lib_path_var: str) -> None:
+    """Prepend the PAR's runtime/lib to `lib_path_var` in `env`, if resolvable.
+
+    A bare self-re-exec of sys.executable cannot rely on the parent's scrubbed
+    lib-path env, so reconstruct it from FB_PAR_RUNTIME_FILES. Any existing
+    value is preserved by appending after ours.
+    """
+    lib_dir = _par_runtime_lib_dir()
+    if lib_dir is None:
+        return
+    existing = env.get(lib_path_var)
+    if not existing:
+        env[lib_path_var] = lib_dir
+        return
+    # Dedup against canonicalized entries, so the same directory reached via a
+    # symlink, redundant separators, or a relative spelling is not prepended a
+    # second time and does not accumulate across chained re-execs.
+    lib_real = os.path.realpath(lib_dir)
+    for entry in existing.split(os.pathsep):
+        if entry == lib_dir or os.path.realpath(entry) == lib_real:
+            return
+    env[lib_path_var] = lib_dir + os.pathsep + existing
+
+
 def __patch_spawn(var_names: list[str], saved_env: dict[str, str]) -> None:
     # Compute resolved PYTHONPATH once at patch time (not per-spawn).
     # dirs_only=True filters out zip files to avoid RecursionError from
@@ -212,6 +259,12 @@ def __patch_spawn(var_names: list[str], saved_env: dict[str, str]) -> None:
             parts.append(existing)
         parts.append(resolved_pythonpath)
         os.environ["PYTHONPATH"] = os.path.pathsep.join(parts)
+
+        # Reconstruct the lib path for native-strategy self-re-exec: the
+        # saved_env restore above is empty when the C++ RestoreEnv scrubbed the
+        # bootstrap LD_LIBRARY_PATH before Python captured it. __clear_env in the
+        # finally clause pops this back out after the child is spawned.
+        _inject_runtime_lib_path(os.environ, _runtime_lib_path_var())
 
     if sys.platform == "win32":
         import multiprocessing.popen_spawn_win32 as popen_win32
@@ -347,6 +400,11 @@ def __patch_subprocess_run(saved_env: dict[str, str]) -> None:
             for var in _lib_path_vars:
                 if var not in env and var in saved_env:
                     env[var] = saved_env[var]
+            # saved_env is empty when the bootstrap lib path was scrubbed before
+            # Python captured it, so also reconstruct runtime/lib directly. This
+            # is what lets a native-strategy sys.executable child load its
+            # bundled .so's when $ORIGIN doesn't resolve to the link-tree.
+            _inject_runtime_lib_path(env, _runtime_lib_path_var())
 
         return std_run(args, env=env, **kwargs)
 

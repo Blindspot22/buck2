@@ -23,6 +23,8 @@ use buck2_build_api::deferred::calculation::DeferredHolder;
 use buck2_build_api::keep_going::KeepGoing;
 use buck2_build_signals::env::WaitingData;
 use buck2_core::configuration::compatibility::MaybeCompatible;
+use buck2_core::configuration::compatibility::ResultMaybeCompatible;
+use buck2_core::configuration::compatibility::ResultMaybeCompatibleValueSerialize;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::deferred::key::DeferredHolderKey;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
@@ -57,11 +59,11 @@ use buck2_util::time_span::TimeSpan;
 use dice::CancellationContext;
 use dice::DiceComputations;
 use dice::Key;
-use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use smallvec::SmallVec;
@@ -94,7 +96,7 @@ pub(crate) fn init_rule_analysis_calculation() {
 
 #[async_trait]
 impl Key for AnalysisKey {
-    type Value = buck2_error::Result<MaybeCompatible<AnalysisResult>>;
+    type Value = ResultMaybeCompatible<AnalysisResult>;
     async fn compute(
         &self,
         ctx: &mut DiceComputations,
@@ -104,11 +106,11 @@ impl Key for AnalysisKey {
         ctx.analysis_started(&deferred_key)?;
         let res = get_analysis_result(ctx, &self.0, cancellation)
             .await
-            .with_buck_error_context(|| format!("Error running analysis for `{}`", &self.0))?;
+            .with_buck_error_context(|| format!("Error running analysis for `{}`", self.0))?;
         if let MaybeCompatible::Compatible(v) = &res {
-            ctx.analysis_complete(&deferred_key, &DeferredHolder::Analysis(v.dupe()))?;
+            ctx.analysis_complete(&deferred_key, &DeferredHolder::Analysis(v))?;
         }
-        Ok(res)
+        res.to_result_maybe_compatible()
     }
 
     fn equality(_: &Self::Value, _: &Self::Value) -> bool {
@@ -118,18 +120,20 @@ impl Key for AnalysisKey {
     }
 
     fn value_serialize() -> impl ValueSerialize<Value = Self::Value> {
-        OkPagableValueSerialize::<Self::Value>::new()
+        ResultMaybeCompatibleValueSerialize::<AnalysisResult>::new()
     }
 }
 
-#[async_trait]
 impl RuleAnalysisCalculationImpl for RuleAnalysisCalculationInstance {
-    async fn get_analysis_result(
+    fn get_analysis_result<'a, 'd>(
         &self,
-        ctx: &mut DiceComputations<'_>,
-        target: &ConfiguredTargetLabel,
-    ) -> buck2_error::Result<MaybeCompatible<AnalysisResult>> {
-        ctx.compute(&AnalysisKey(target.dupe())).await?
+        ctx: &'a mut DiceComputations<'d>,
+        target: &'a ConfiguredTargetLabel,
+    ) -> BoxFuture<'a, ResultMaybeCompatible<&'d AnalysisResult>>
+    where
+        'd: 'a,
+    {
+        async move { ctx.compute(&AnalysisKey(target.dupe())).await?.as_ref() }.boxed()
     }
 }
 
@@ -159,52 +163,48 @@ async fn resolve_queries_impl(
     queries: impl IntoIterator<Item = (String, ResolvedQueryLiterals<ConfiguredProvidersLabel>)>,
 ) -> buck2_error::Result<StdBuckHashMap<String, Arc<AnalysisQueryResult>>> {
     let deps: TargetSet<_> = configured_node.deps().duped().collect();
+    let queries: Vec<_> = queries.into_iter().collect();
     let query_results = ctx
         .try_compute_join(
             queries,
-            |ctx,
-             (query, resolved_literals_labels): (
+            async |ctx,
+                   (query, resolved_literals_labels): (
                 String,
                 ResolvedQueryLiterals<ConfiguredProvidersLabel>,
             )| {
-                let deps = &deps;
-                async move {
-                    let mut resolved_literals =
-                        HashMap::with_capacity(resolved_literals_labels.0.len());
-                    for ((offset, len), label) in resolved_literals_labels.0 {
-                        let literal = &query[offset..offset + len];
-                        let node = deps.get(label.target()).ok_or_else(|| {
-                            internal_error!("Literal `{literal}` not found in `deps`")
-                        })?;
-                        resolved_literals.insert(literal.to_owned(), node.dupe());
-                    }
+                let mut resolved_literals =
+                    HashMap::with_capacity(resolved_literals_labels.0.len());
+                for ((offset, len), label) in resolved_literals_labels.0 {
+                    let literal = &query[offset..offset + len];
+                    let node = deps.get(label.target()).ok_or_else(|| {
+                        internal_error!("Literal `{literal}` not found in `deps`")
+                    })?;
+                    resolved_literals.insert(literal.to_owned(), node.dupe());
+                }
 
-                    let result =
-                        (EVAL_ANALYSIS_QUERY.get()?)(ctx, &query, resolved_literals).await?;
+                let result = (EVAL_ANALYSIS_QUERY.get()?)(ctx, &query, resolved_literals).await?;
 
-                    // analysis for all the deps in the query result should already have been run since they must
-                    // be in our dependency graph, and so we don't worry about parallelizing these lookups.
-                    let mut query_results = Vec::new();
-                    for node in result.iter() {
-                        let label = node.label();
-                        query_results.push((
-                            label.dupe(),
-                            ctx.get_analysis_result(label)
-                                .await?
-                                .require_compatible()?
-                                .providers()?
-                                .to_owned(),
-                        ))
-                    }
-
-                    buck2_error::Ok((
-                        query.to_owned(),
-                        Arc::new(AnalysisQueryResult {
-                            result: query_results,
-                        }),
+                // analysis for all the deps in the query result should already have been run since they must
+                // be in our dependency graph, and so we don't worry about parallelizing these lookups.
+                let mut query_results = Vec::new();
+                for node in result.iter() {
+                    let label = node.label();
+                    query_results.push((
+                        label.dupe(),
+                        ctx.get_analysis_result(label)
+                            .await
+                            .require_compatible()?
+                            .providers()?
+                            .to_owned(),
                     ))
                 }
-                .boxed()
+
+                buck2_error::Ok((
+                    query.to_owned(),
+                    Arc::new(AnalysisQueryResult {
+                        result: query_results,
+                    }),
+                ))
             },
         )
         .await?;
@@ -217,33 +217,27 @@ pub async fn get_dep_analysis<'v>(
     configured_node: ConfiguredTargetNodeRef<'v>,
     ctx: &mut DiceComputations<'_>,
 ) -> buck2_error::Result<Vec<(&'v ConfiguredTargetLabel, AnalysisResult)>> {
-    KeepGoing::try_compute_join_all(ctx, configured_node.deps(), |ctx, dep| {
-        async move {
-            let res = ctx
-                .get_analysis_result(dep.label())
-                .await
-                .and_then(|v| v.require_compatible());
-            res.map(|x| (dep.label(), x))
-        }
-        .boxed()
+    KeepGoing::try_compute_join_all(ctx, configured_node.deps(), async |ctx, dep| {
+        let res = ctx
+            .get_analysis_result(dep.label())
+            .await
+            .require_compatible();
+        res.map(|x| (dep.label(), x.dupe()))
     })
     .await
 }
 
-pub async fn get_loaded_module(
-    ctx: &mut DiceComputations<'_>,
+pub async fn get_loaded_module<'d>(
+    ctx: &mut DiceComputations<'d>,
     func: &StarlarkRuleType,
-) -> buck2_error::Result<LoadedModule> {
-    let module = match &func.path {
+) -> buck2_error::Result<&'d LoadedModule> {
+    match &func.path {
         BzlOrBxlPath::Bxl(bxl_file_path) => {
             let module_path = StarlarkModulePath::BxlFile(bxl_file_path);
-            ctx.get_loaded_module(module_path).await?
+            ctx.get_loaded_module(module_path).await
         }
-        BzlOrBxlPath::Bzl(import_path) => {
-            ctx.get_loaded_module_from_import_path(import_path).await?
-        }
-    };
-    Ok(module)
+        BzlOrBxlPath::Bzl(import_path) => ctx.get_loaded_module_from_import_path(import_path).await,
+    }
 }
 
 pub async fn get_rule_spec(
@@ -269,9 +263,9 @@ async fn get_analysis_result_inner(
     target: &ConfiguredTargetLabel,
     cancellation: &CancellationContext,
 ) -> buck2_error::Result<MaybeCompatible<AnalysisResult>> {
-    let configured_node: MaybeCompatible<ConfiguredTargetNode> =
+    let configured_node: MaybeCompatible<&ConfiguredTargetNode> =
         ctx.get_configured_target_node(target).await.ok()?;
-    let configured_node: ConfiguredTargetNode = match configured_node {
+    let configured_node: &ConfiguredTargetNode = match configured_node {
         MaybeCompatible::Incompatible(reason) => {
             return Ok(MaybeCompatible::Incompatible(reason));
         }
@@ -288,8 +282,8 @@ async fn get_analysis_result_inner(
             RuleType::Starlark(func) => {
                 let (dep_analysis, query_results) = ctx
                     .try_compute2(
-                        |ctx| get_dep_analysis(configured_node, ctx).boxed(),
-                        |ctx| resolve_queries(ctx, configured_node).boxed(),
+                        async |ctx| get_dep_analysis(configured_node, ctx).await,
+                        async |ctx| resolve_queries(ctx, configured_node).await,
                     )
                     .await?;
 
@@ -336,6 +330,8 @@ async fn get_analysis_result_inner(
                             MaybeCompatible::Compatible(result)
                         };
 
+                        let error = result.as_ref().err().map(|e| format!("{e:#}"));
+
                         (
                             (result, split_instants),
                             buck2_data::AnalysisEnd {
@@ -344,6 +340,7 @@ async fn get_analysis_result_inner(
                                 profile,
                                 declared_actions,
                                 declared_artifacts,
+                                error,
                             },
                         )
                     })
@@ -446,31 +443,25 @@ pub async fn profile_analysis(
     }
 
     let nodes: Vec<ConfiguredTargetNode> = ctx
-        .try_compute_join(targets.iter(), |ctx, target| {
-            async move {
-                let node = ctx
-                    .get_configured_target_node(target)
-                    .await
-                    .require_compatible()?;
-                buck2_error::Ok(node)
-            }
-            .boxed()
+        .try_compute_join(targets.iter(), async |ctx, target| {
+            let node = ctx
+                .get_configured_target_node(target)
+                .await
+                .require_compatible()?;
+            buck2_error::Ok(node.dupe())
         })
         .await?;
 
     let all_deps = all_deps(&nodes);
 
     let profile_datas = ctx
-        .try_compute_join(all_deps.iter(), |ctx, node| {
-            async move {
-                let result = ctx
-                    .get_analysis_result(node.label())
-                    .await?
-                    .require_compatible()?;
-                // This may be `None` if we are running profiling for a subset of the targets.
-                buck2_error::Ok(result.profile_data)
-            }
-            .boxed()
+        .try_compute_join(all_deps.iter(), async |ctx, node| {
+            let result = ctx
+                .get_analysis_result(node.label())
+                .await
+                .require_compatible()?;
+            // This may be `None` if we are running profiling for a subset of the targets.
+            buck2_error::Ok(result.profile_data.dupe())
         })
         .await?;
 

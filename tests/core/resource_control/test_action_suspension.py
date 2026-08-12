@@ -135,25 +135,6 @@ async def test_action_suspend(
 
     await _check_suspends(buck, kill_and_retry, temp, res)
 
-    pressure_starts = await filter_events(
-        buck,
-        "Event",
-        "data",
-        "SpanStart",
-        "data",
-        "MemoryPressure",
-    )
-    pressure_ends = await filter_events(
-        buck,
-        "Event",
-        "data",
-        "SpanEnd",
-        "data",
-        "MemoryPressure",
-    )
-    assert len(pressure_starts) == 1
-    assert len(pressure_ends) == 1
-
 
 @buck_test(skip_for_os=["darwin", "windows"], disable_daemon_cgroup=False)
 @env("BUCK2_HARD_ERROR", "panic")
@@ -170,11 +151,15 @@ async def test_action_suspend_stress_test(
     )
 
 
+# Only kill_and_retry is exercised. Deterministic memory pressure requires swap to be disabled
+# for actions (see `memory_swap_max_actions` in the data `.buckconfig`); otherwise the overshoot
+# is paged out cheaply and pressure never crosses the suspension threshold. cgroup_freeze is
+# incompatible with that: freezing an action does not release its memory, so with swap off the
+# still-running action stays throttled above memory.high and never makes progress, deadlocking the
+# build. There is no swap setting that both builds pressure (needs swap off) and lets a freeze
+# relieve it (needs swap on), so this scenario cannot be tested deterministically for freeze.
 @buck_test(skip_for_os=["darwin", "windows"], disable_daemon_cgroup=False)
-@pytest.mark.skip(
-    reason="Action suspension not triggering in CI, same as test_action_suspend"
-)
-@pytest.mark.parametrize("kill_and_retry", [True, False])
+@pytest.mark.parametrize("kill_and_retry", [True])
 async def test_suspend_one_of_two(
     buck: Buck,
     kill_and_retry: bool,

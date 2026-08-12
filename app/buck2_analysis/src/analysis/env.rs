@@ -14,11 +14,10 @@ use std::time::Instant;
 use buck2_build_api::analysis::AnalysisResult;
 use buck2_build_api::analysis::anon_promises_dyn::RunAnonPromisesAccessorPair;
 use buck2_build_api::analysis::registry::AnalysisRegistry;
-use buck2_build_api::interpreter::rule_defs::cmd_args::value::FrozenCommandLineArg;
+use buck2_build_api::interpreter::rule_defs::cmd_args::value::CommandLineArg;
 use buck2_build_api::interpreter::rule_defs::context::AnalysisContext;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::template_placeholder_info::FrozenTemplatePlaceholderInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::validation_info::FrozenValidationInfo;
-use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollection;
 use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValue;
 use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValueRef;
 use buck2_build_api::interpreter::rule_defs::provider::collection::ProviderCollection;
@@ -55,7 +54,6 @@ use starlark::values::FrozenValue;
 use starlark::values::FrozenValueTyped;
 use starlark::values::Value;
 use starlark::values::ValueTyped;
-use starlark::values::ValueTypedComplex;
 use starlark_map::small_map::SmallMap;
 
 use crate::analysis::calculation::AnalysisSplitInstants;
@@ -92,14 +90,14 @@ impl<'a, 'v> AttrResolutionContext<'v> for &'_ RuleAnalysisAttrResolutionContext
     fn get_dep(
         &mut self,
         target: &ConfiguredProvidersLabel,
-    ) -> buck2_error::Result<FrozenValueTyped<'v, FrozenProviderCollection>> {
+    ) -> buck2_error::Result<FrozenValueTyped<'v, ProviderCollection<'v>>> {
         get_dep(&self.dep_analysis_results, target, self.module)
     }
 
     fn resolve_unkeyed_placeholder(
         &mut self,
         name: &str,
-    ) -> buck2_error::Result<Option<FrozenCommandLineArg>> {
+    ) -> buck2_error::Result<Option<CommandLineArg<'v>>> {
         Ok(resolve_unkeyed_placeholder(
             &self.dep_analysis_results,
             name,
@@ -120,7 +118,7 @@ pub fn get_dep<'v>(
     dep_analysis_results: &StdBuckHashMap<ConfiguredTargetLabel, FrozenProviderCollectionValue>,
     target: &ConfiguredProvidersLabel,
     module: &Module<'v>,
-) -> buck2_error::Result<FrozenValueTyped<'v, FrozenProviderCollection>> {
+) -> buck2_error::Result<FrozenValueTyped<'v, ProviderCollection<'v>>> {
     match dep_analysis_results.get(target.target()) {
         None => Err(AnalysisError::MissingDep(target.dupe()).into()),
         Some(x) => {
@@ -131,24 +129,24 @@ pub fn get_dep<'v>(
     }
 }
 
-pub fn resolve_unkeyed_placeholder(
+pub fn resolve_unkeyed_placeholder<'v>(
     dep_analysis_results: &StdBuckHashMap<ConfiguredTargetLabel, FrozenProviderCollectionValue>,
     name: &str,
-    module: &Module,
-) -> Option<FrozenCommandLineArg> {
+    module: &Module<'v>,
+) -> Option<CommandLineArg<'v>> {
     // TODO(cjhopman): Make it an error if two deps provide a value for the placeholder.
     for providers in dep_analysis_results.values() {
-        if let Some(placeholder_info) = providers
-            .provider_collection()
-            .builtin_provider::<FrozenTemplatePlaceholderInfo>()
-        {
-            if let Some(value) = placeholder_info.unkeyed_variables().get(name) {
-                // IMPORTANT: Anything given back to the user must be kept alive
-                module
-                    .frozen_heap()
-                    .add_reference(providers.value().owner());
-                return Some(*value);
-            }
+        let resolved = providers.value.by_ref_with_reconstructor(|collection, r| {
+            let placeholder_info = collection
+                .as_ref()
+                .builtin_provider::<FrozenTemplatePlaceholderInfo>()?;
+            let value = placeholder_info.unkeyed_variables().get(name).copied()?;
+            // IMPORTANT: Anything given back to the user must be kept alive; the edge
+            // makes the dep's heap a dependency of the module's heap.
+            Some(r.edge(module.heap()).rebrand(value))
+        });
+        if let Some(value) = resolved {
+            return Some(value);
         }
     }
     None
@@ -164,7 +162,7 @@ pub fn resolve_query(
         Some(x) => {
             for (_, y) in x.result.iter() {
                 // IMPORTANT: Anything given back to the user must be kept alive
-                module.frozen_heap().add_reference(y.value().owner());
+                module.frozen_heap().add_reference(y.as_ref().owner());
             }
             Ok(x.dupe())
         }
@@ -323,13 +321,9 @@ async fn run_analysis_with_env_underlying(
 
         // TODO: Convert the ValueError from `try_from_value` better than just printing its Debug
         let res_typed = ProviderCollection::try_from_value(list_res)?;
-        {
-            let provider_collection = ValueTypedComplex::new_err(env.heap().alloc(res_typed))
-                .internal_error("Just allocated provider collection")?;
-            analysis_registry
-                .analysis_value_storage
-                .set_result_value(provider_collection)?;
-        }
+        analysis_registry
+            .analysis_value_storage
+            .set_result_value(env.heap().alloc_typed(res_typed))?;
 
         let finished_eval = reentrant_eval.finish_evaluation();
 
@@ -368,8 +362,8 @@ pub fn transitive_validations(
 ) -> Option<TransitiveValidations> {
     let provider_collection = provider_collection.to_owned();
     let info = provider_collection
-        .value
-        .maybe_map(|c| c.as_ref().builtin_provider_value::<FrozenValidationInfo>());
+        .builtin_provider_value::<FrozenValidationInfo>()
+        .map(Into::into);
     if info.is_some() || deps.len() > 1 {
         Some(TransitiveValidations(Arc::new(TransitiveValidationsData {
             info,

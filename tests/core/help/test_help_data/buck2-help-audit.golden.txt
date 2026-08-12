@@ -31,7 +31,7 @@ Commands:
                                  configuration, the unconfigured target label will be returned.
   parse                          Parses the buck-out path into parts that may be useful (ex: config
                                  hash, file path to artifact).
-  package-values                 Inspect package values
+  package-values                 Inspect package values, visibility, within_view and visibility_cap
   help                           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -71,6 +71,9 @@ Universal Options:
           Metadata key-value pairs to inject into Buck2's logging. Client metadata must be of the
           form `key=value`, where `key` is a snake_case identifier, and will be sent to backend
           datasets
+
+      --setting <KEY=VALUE>
+          Override a Buck setting using `key=value` or `section.key=value`
 
       --agent-context <AGENT_CONTEXT>
           Agent context key=value pairs for telemetry. Used by AI agents to pass structured

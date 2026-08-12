@@ -42,10 +42,10 @@ def buck2_modifiers():
                 "DEFAULT": None,
                 "ovr_config//os:linux": modifiers.conditional({
                     "DEFAULT": modifiers.conditional({
-                        "DEFAULT": "ovr_config//build_mode/constraints:static",
-                        "ovr_config//build_mode:dev": "ovr_config//build_mode/constraints:shared",
+                        "DEFAULT": "ovr_config//build_mode/constraints:default_link_style[static]",
+                        "ovr_config//build_mode:dev": "ovr_config//build_mode/constraints:default_link_style[shared]",
                     }),
-                    "ovr_config//build_mode:sanitizer_type[asan]": "ovr_config//build_mode/constraints:static_pic",
+                    "ovr_config//build_mode:sanitizer_type[asan]": "ovr_config//build_mode/constraints:default_link_style[static_pic]",
                 }),
             }),
         }),
@@ -66,29 +66,29 @@ def buck2_modifiers():
         modifiers.conditional({
             "DEFAULT": None,
             "ovr_config//build_mode/default_opt_cxx:enabled": modifiers.conditional({
-                "DEFAULT": "ovr_config//build_mode/constraints:fbcode-build-info-mode-stable",
-                "ovr_config//build_mode:opt": "ovr_config//build_mode/constraints:fbcode-build-info-mode-full",
+                "DEFAULT": "ovr_config//build_mode/constraints:fbcode-build-info-mode[stable]",
+                "ovr_config//build_mode:opt": "ovr_config//build_mode/constraints:fbcode-build-info-mode[full]",
             }),
         }),
         modifiers.conditional({
             "DEFAULT": None,
             "ovr_config//build_mode/default_opt_cxx:enabled": modifiers.conditional({
-                "DEFAULT": "ovr_config//build_mode/constraints:python-default-package-style-inplace",
-                "ovr_config//build_mode:opt": "ovr_config//build_mode/constraints:python-default-package-style-standalone",
-            }),
-        }),
-        modifiers.conditional({
-            "DEFAULT": None,
-            "ovr_config//build_mode/default_opt_cxx:enabled": modifiers.conditional({
-                "DEFAULT": None,
-                "ovr_config//os:macos": "ovr_config//build_mode/constraints:fbcode-build-info-ldflags-accepted",
+                "DEFAULT": "ovr_config//build_mode/constraints:python-default-package-style[inplace]",
+                "ovr_config//build_mode:opt": "ovr_config//build_mode/constraints:python-default-package-style[standalone]",
             }),
         }),
         modifiers.conditional({
             "DEFAULT": None,
             "ovr_config//build_mode/default_opt_cxx:enabled": modifiers.conditional({
                 "DEFAULT": None,
-                "ovr_config//os:macos": "ovr_config//build_mode/constraints:fbcode-custom-allocators-enabled",
+                "ovr_config//os:macos": "ovr_config//build_mode/constraints:fbcode-build-info-ldflags[accepted]",
+            }),
+        }),
+        modifiers.conditional({
+            "DEFAULT": None,
+            "ovr_config//build_mode/default_opt_cxx:enabled": modifiers.conditional({
+                "DEFAULT": None,
+                "ovr_config//os:macos": "ovr_config//build_mode/constraints:fbcode-custom-allocators[enabled]",
             }),
         }),
         modifiers.conditional({

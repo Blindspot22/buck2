@@ -34,6 +34,7 @@ use crate::directory::directory_mut::DirectoryMut;
 use crate::directory::directory_ref::DirectoryRef;
 use crate::directory::entry::DirectoryEntry;
 use crate::directory::exclusive_directory::ExclusiveDirectory;
+use crate::directory::exhaustiveness::Exhaustiveness;
 use crate::directory::find::DirectoryFindError;
 use crate::directory::find::find;
 use crate::directory::fingerprinted_directory::FingerprintedDirectory;
@@ -75,7 +76,10 @@ where
     H: DirectoryDigest,
 {
     /// This has a dedicated copy and we can mutate it.
-    Mutable(SmallMap<FileNameBuf, DirectoryEntry<DirectoryBuilder<L, H>, L>>),
+    Mutable {
+        entries: SmallMap<FileNameBuf, DirectoryEntry<DirectoryBuilder<L, H>, L>>,
+        exhaustiveness: Exhaustiveness,
+    },
     Immutable(ImmutableDirectory<L, H>),
 }
 
@@ -83,8 +87,77 @@ impl<L, H> DirectoryBuilder<L, H>
 where
     H: DirectoryDigest,
 {
-    pub fn empty() -> Self {
-        Self::Mutable(Default::default())
+    /// An empty, non-exhaustive directory. There is deliberately no unmarked `empty()`: every
+    /// construction site chooses a marking, here or via [`Self::empty_exhaustive`].
+    ///
+    /// Directories fabricated to connect inserted subtrees (by `insert`/`mkdir`) are
+    /// non-exhaustive too; sites that build complete listings of real content start from
+    /// [`Self::empty_exhaustive`] or call [`Self::mark_uniformly_exhaustive`] before
+    /// fingerprinting.
+    pub fn empty_non_exhaustive() -> Self {
+        Self::Mutable {
+            entries: Default::default(),
+            exhaustiveness: Exhaustiveness::NonExhaustive,
+        }
+    }
+
+    /// An empty directory that is an exhaustive listing: it and every entry inserted directly
+    /// into it describe complete real content (e.g. one level of a disk scan or of a downloaded
+    /// RE tree). Note that entries inserted at deeper paths still get non-exhaustive
+    /// intermediates; bottom-up construction should build each level from this.
+    pub fn empty_exhaustive() -> Self {
+        Self::Mutable {
+            entries: Default::default(),
+            exhaustiveness: Exhaustiveness::Exhaustive,
+        }
+    }
+
+    /// This node's own marking (not the whole subtree's).
+    fn root_exhaustiveness(&self) -> Exhaustiveness {
+        match self {
+            Self::Mutable { exhaustiveness, .. } => *exhaustiveness,
+            Self::Immutable(d) => d.exhaustiveness_hash().own_exhaustiveness(),
+        }
+    }
+
+    /// Sets this node's own marking, copy-on-write. Does not touch the subtree.
+    fn set_root_exhaustiveness(&mut self, exhaustiveness: Exhaustiveness)
+    where
+        L: Clone,
+    {
+        if self.root_exhaustiveness() == exhaustiveness {
+            return;
+        }
+        self.as_mut();
+        match self {
+            Self::Mutable {
+                exhaustiveness: e, ..
+            } => *e = exhaustiveness,
+            Self::Immutable(..) => unreachable!(),
+        }
+    }
+
+    /// Marks this directory and every directory below it as exhaustive: a complete listing of
+    /// real content. Copy-on-write; already uniformly exhaustive subtrees are untouched.
+    pub fn mark_uniformly_exhaustive(&mut self)
+    where
+        L: Clone,
+    {
+        if let Self::Immutable(d) = self {
+            if d.exhaustiveness_hash().is_uniformly_exhaustive() {
+                return;
+            }
+        }
+        let entries = self.as_mut();
+        for (_, v) in entries.iter_mut() {
+            if let DirectoryEntry::Dir(d) = v {
+                d.mark_uniformly_exhaustive();
+            }
+        }
+        match self {
+            Self::Mutable { exhaustiveness, .. } => *exhaustiveness = Exhaustiveness::Exhaustive,
+            Self::Immutable(..) => unreachable!(),
+        }
     }
 }
 
@@ -140,7 +213,7 @@ where
                     _ => Err(PathAccumulator::new(entry.key())),
                 },
                 Entry::Vacant(entry) => {
-                    let mut dir = DirectoryBuilder::empty();
+                    let mut dir = DirectoryBuilder::empty_non_exhaustive();
                     dir.insert_inner(next_path_needle, path_rest, val)
                         .map_err(|acc| acc.with(entry.key()))?;
                     entry.insert(DirectoryEntry::Dir(dir));
@@ -181,7 +254,7 @@ where
                 _ => return Err(PathAccumulator::new(entry.key())),
             },
             Entry::Vacant(entry) => {
-                let mut dir = DirectoryBuilder::empty();
+                let mut dir = DirectoryBuilder::empty_non_exhaustive();
                 dir.mkdir_inner(path).map_err(|acc| acc.with(entry.key()))?;
                 entry.insert(DirectoryEntry::Dir(dir));
             }
@@ -199,7 +272,7 @@ where
             return self.merge(other);
         }
 
-        let v = std::mem::replace(self, DirectoryBuilder::empty());
+        let v = std::mem::replace(self, DirectoryBuilder::empty_non_exhaustive());
         let v = v
             .merge_inner(other, true)
             .map_err(|path| DirectoryMergeError::CannotTraverseLeaf { path })?;
@@ -209,7 +282,7 @@ where
 
     pub fn merge(&mut self, other: Self) -> Result<(), DirectoryMergeError> {
         if buck2_core::faster_directories::is_enabled() {
-            let v = std::mem::replace(self, DirectoryBuilder::empty());
+            let v = std::mem::replace(self, DirectoryBuilder::empty_non_exhaustive());
             let v = v
                 .merge_inner(other, false)
                 .map_err(|path| DirectoryMergeError::CannotTraverseLeaf { path })?;
@@ -226,13 +299,27 @@ where
         mut other: Self,
         leaf_compatible: bool,
     ) -> Result<Self, PathAccumulator> {
+        // The result's exhaustiveness marking is the pointwise join of both sides' markings.
+        // The join being symmetric is also what keeps the LHS/RHS swap optimization below
+        // sound.
+        let joined_exhaustiveness = self.root_exhaustiveness().join(other.root_exhaustiveness());
+
         match (&self, &other) {
             (Self::Immutable(d1), Self::Immutable(d2)) if d1.fingerprint() == d2.fingerprint() => {
-                return Ok(self);
+                // Same content: return whichever side's marking already is the join, if any.
+                let e1 = d1.exhaustiveness_hash();
+                let e2 = d2.exhaustiveness_hash();
+                if e1.covers(e2) {
+                    return Ok(self);
+                }
+                if e2.covers(e1) {
+                    return Ok(other);
+                }
+                // Neither marking dominates: fall through and join pointwise.
             }
             (Self::Immutable(d1), d2) => {
                 let d2_len = match d2 {
-                    DirectoryBuilder::Mutable(m) => m.len(),
+                    DirectoryBuilder::Mutable { entries, .. } => entries.len(),
                     DirectoryBuilder::Immutable(im) => im.len(),
                 };
                 // Optimization: Merge the smaller directory into the larger one, since the work we
@@ -247,7 +334,8 @@ where
                     std::mem::swap(&mut self, &mut other);
                 }
             }
-            (Self::Mutable(m), _) if m.is_empty() => {
+            (Self::Mutable { entries, .. }, _) if entries.is_empty() => {
+                other.set_root_exhaustiveness(joined_exhaustiveness);
                 return Ok(other);
             }
             _ => {}
@@ -289,16 +377,28 @@ where
             )
         })?;
 
+        self.set_root_exhaustiveness(joined_exhaustiveness);
         Ok(self)
     }
 
     /// Old implementation of `merge_inner`, preserved for a/b test
     fn merge_inner_old(&mut self, mut other: Self) -> Result<(), PathAccumulator> {
-        match (&self, &other) {
-            (Self::Immutable(d1), Self::Immutable(d2)) if d1.fingerprint() == d2.fingerprint() => {
-                return Ok(());
+        let joined_exhaustiveness = self.root_exhaustiveness().join(other.root_exhaustiveness());
+
+        if let (Self::Immutable(d1), Self::Immutable(d2)) = (&*self, &other) {
+            if d1.fingerprint() == d2.fingerprint() {
+                // Same content: keep whichever side's marking already is the join, if any.
+                let e1 = d1.exhaustiveness_hash();
+                let e2 = d2.exhaustiveness_hash();
+                if e1.covers(e2) {
+                    return Ok(());
+                }
+                if e2.covers(e1) {
+                    *self = other;
+                    return Ok(());
+                }
+                // Neither marking dominates: fall through and join pointwise.
             }
-            _ => {}
         }
 
         let other = std::mem::take(other.as_mut());
@@ -322,6 +422,7 @@ where
             }
         }
 
+        self.set_root_exhaustiveness(joined_exhaustiveness);
         Ok(())
     }
 }
@@ -386,7 +487,7 @@ where
                             DirectoryEntry::Dir(v) => {
                                 let vnew = map_dir(
                                     ctx,
-                                    std::mem::replace(v, DirectoryBuilder::empty()),
+                                    std::mem::replace(v, DirectoryBuilder::empty_non_exhaustive()),
                                     k,
                                 )?;
                                 *entry.get_mut() = vnew.into_inner();
@@ -452,6 +553,7 @@ where
             }
             DirectoryEntry::Dir(d) => {
                 let fingerprint = d.fingerprint();
+                let exhaustiveness_hash = d.exhaustiveness_hash();
                 let dnew = match map_dir(ctx, d.dupe().into_builder(), &needle) {
                     Ok(MapEntryOperation::Overwrite(dnew)) => dnew,
                     Ok(MapEntryOperation::Keep(_)) => return ControlFlow::Break(Ok(())),
@@ -461,7 +563,9 @@ where
                     ImmutableDirectory::Shared(sharednew),
                 )) = &dnew
                 {
-                    if sharednew.fingerprint() == fingerprint {
+                    if sharednew.fingerprint() == fingerprint
+                        && sharednew.exhaustiveness_hash() == exhaustiveness_hash
+                    {
                         return ControlFlow::Break(Ok(()));
                     }
                 }
@@ -481,21 +585,31 @@ where
     L: Clone,
     H: DirectoryDigest,
 {
+    /// Converts to the `Mutable` representation, preserving this node's exhaustiveness flag:
+    /// mutating an exhaustive listing leaves it an exhaustive listing.
     pub(super) fn as_mut(
         &mut self,
     ) -> &mut SmallMap<FileNameBuf, DirectoryEntry<DirectoryBuilder<L, H>, L>> {
-        if let Self::Mutable(dir) = self {
-            return dir;
+        if let Self::Mutable { entries, .. } = self {
+            return entries;
         };
 
-        let entries = match std::mem::replace(self, DirectoryBuilder::Mutable(Default::default())) {
-            Self::Immutable(d) => d.collect_entries::<SmallMap<_, _>>(),
-            Self::Mutable(..) => unreachable!(),
-        };
+        let (entries, exhaustiveness) =
+            match std::mem::replace(self, DirectoryBuilder::empty_non_exhaustive()) {
+                Self::Immutable(d) => {
+                    let exhaustiveness = d.exhaustiveness_hash().own_exhaustiveness();
+                    (d.collect_entries::<SmallMap<_, _>>(), exhaustiveness)
+                }
+                Self::Mutable { .. } => unreachable!(),
+            };
 
         match self {
-            Self::Mutable(e) => {
+            Self::Mutable {
+                entries: e,
+                exhaustiveness: x,
+            } => {
                 *e = entries;
+                *x = exhaustiveness;
                 e
             }
             Self::Immutable(..) => unreachable!(),
@@ -506,7 +620,7 @@ where
         self,
     ) -> impl Iterator<Item = (FileNameBuf, DirectoryEntry<DirectoryBuilder<L, H>, L>)> {
         match self {
-            Self::Mutable(entries) => Either::Left(entries.into_iter()),
+            Self::Mutable { entries, .. } => Either::Left(entries.into_iter()),
             Self::Immutable(d) => Either::Right(d.into_entries()),
         }
     }
@@ -528,7 +642,10 @@ where
         path: &ForwardRelativePath,
     ) -> DirectoryEntry<DirectoryBuilder<L, H>, L> {
         let Some((path, last)) = path.split_last() else {
-            return DirectoryEntry::Dir(mem::replace(self, DirectoryBuilder::empty()));
+            return DirectoryEntry::Dir(mem::replace(
+                self,
+                DirectoryBuilder::empty_non_exhaustive(),
+            ));
         };
         let mut this = self;
         for name in path {
@@ -612,8 +729,9 @@ where
                     .map_dir(DirectoryBuilderDirectoryRef::Immutable),
             ),
             DirectoryBuilderDirectoryRef::Mutable(d) => match d {
-                DirectoryBuilder::Mutable(d) => Some(
-                    d.get(name)?
+                DirectoryBuilder::Mutable { entries, .. } => Some(
+                    entries
+                        .get(name)?
                         .as_ref()
                         .map_dir(|v| DirectoryBuilderDirectoryRef::Mutable(v)),
                 ),
@@ -630,7 +748,9 @@ where
         match self {
             Self::Immutable(d) => DirectoryBuilderDirectoryEntries::Immutable(d.entries()),
             Self::Mutable(d) => match d {
-                DirectoryBuilder::Mutable(d) => DirectoryBuilderDirectoryEntries::Mutable(d.iter()),
+                DirectoryBuilder::Mutable { entries, .. } => {
+                    DirectoryBuilderDirectoryEntries::Mutable(entries.iter())
+                }
                 DirectoryBuilder::Immutable(d) => DirectoryBuilderDirectoryEntries::Immutable(
                     ImmutableOrExclusiveDirectoryRef::from_immutable(d).entries(),
                 ),
@@ -692,13 +812,16 @@ where
 {
     pub fn fingerprint(self, hasher: &impl DirectoryDigester<L, H>) -> ImmutableDirectory<L, H> {
         match self {
-            Self::Mutable(entries) => {
+            Self::Mutable {
+                entries,
+                exhaustiveness,
+            } => {
                 let entries = entries
                     .into_iter()
                     .map(|(k, v)| (k, v.map_dir(|v| v.fingerprint(hasher))))
                     .collect();
                 ImmutableDirectory::Exclusive(ExclusiveDirectory {
-                    data: DirectoryData::new(entries, hasher),
+                    data: DirectoryData::new(entries, hasher, exhaustiveness),
                 })
             }
             Self::Immutable(c) => c,
@@ -743,6 +866,7 @@ mod tests {
     use crate::directory::directory_iterator::DirectoryIterator;
     use crate::directory::directory_ref::FingerprintedDirectoryRef;
     use crate::directory::entry::DirectoryEntry;
+    use crate::directory::fingerprinted_directory::FingerprintedDirectory;
     use crate::directory::immutable_directory::ImmutableDirectory;
     use crate::directory::test::NoHasherDirectoryBuilder;
     use crate::directory::test::NopEntry;
@@ -753,7 +877,7 @@ mod tests {
 
     #[test]
     fn test_insert() -> buck2_error::Result<()> {
-        let mut b = NoHasherDirectoryBuilder::empty();
+        let mut b = NoHasherDirectoryBuilder::empty_non_exhaustive();
 
         assert_matches!(
             b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry)),
@@ -777,10 +901,10 @@ mod tests {
 
     #[test]
     fn test_merge() -> buck2_error::Result<()> {
-        let mut a = TestDirectoryBuilder::empty();
+        let mut a = TestDirectoryBuilder::empty_non_exhaustive();
         a.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
 
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         b.insert(path("a/c"), DirectoryEntry::Leaf(NopEntry))?;
 
         a.merge(b)?;
@@ -809,10 +933,10 @@ mod tests {
 
     #[test]
     fn test_merge_overwrite() -> buck2_error::Result<()> {
-        let mut a = TestDirectoryBuilder::empty();
+        let mut a = TestDirectoryBuilder::empty_non_exhaustive();
         a.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
 
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         b.insert(path("a"), DirectoryEntry::Leaf(NopEntry))?;
 
         a.merge(b)?;
@@ -822,10 +946,10 @@ mod tests {
 
     #[test]
     fn test_merge_conflict() -> buck2_error::Result<()> {
-        let mut a = TestDirectoryBuilder::empty();
+        let mut a = TestDirectoryBuilder::empty_non_exhaustive();
         a.insert(path("a"), DirectoryEntry::Leaf(NopEntry))?;
 
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
 
         assert_matches!(
@@ -840,9 +964,9 @@ mod tests {
 
     #[test]
     fn test_copy_on_write() -> buck2_error::Result<()> {
-        let empty = TestDirectoryBuilder::empty().fingerprint(&TestHasher);
+        let empty = TestDirectoryBuilder::empty_non_exhaustive().fingerprint(&TestHasher);
 
-        let mut a = TestDirectoryBuilder::empty();
+        let mut a = TestDirectoryBuilder::empty_non_exhaustive();
         a.insert(path("a"), DirectoryEntry::Dir(empty.into_builder()))?;
 
         a.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
@@ -864,7 +988,7 @@ mod tests {
 
     #[test]
     fn test_mkdir() -> buck2_error::Result<()> {
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         b.mkdir(path("foo/bar"))?;
         b.mkdir(path("foo"))?;
 
@@ -887,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_mkdir_overwrite() -> buck2_error::Result<()> {
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
 
         assert_matches!(
@@ -902,7 +1026,7 @@ mod tests {
 
     #[test]
     fn test_remove_prefix_empty() {
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         assert_eq!(
             Vec::<ForwardRelativePathBuf>::new(),
             b.ordered_walk_leaves().paths().collect::<Vec<_>>()
@@ -918,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_remove_prefix_error() {
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))
             .unwrap();
         assert!(b.remove_prefix(path("a/b/c")).is_err());
@@ -930,7 +1054,7 @@ mod tests {
 
     #[test]
     fn test_remove_prefix_leaf() {
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         b.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))
             .unwrap();
         b.insert(path("a/x"), DirectoryEntry::Leaf(NopEntry))
@@ -944,7 +1068,7 @@ mod tests {
 
     #[test]
     fn test_remove_prefix_tree() {
-        let mut b = TestDirectoryBuilder::empty();
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
         b.insert(path("a/b/c"), DirectoryEntry::Leaf(NopEntry))
             .unwrap();
         b.insert(path("a/b/d"), DirectoryEntry::Leaf(NopEntry))
@@ -976,7 +1100,7 @@ mod tests {
     }
 
     fn make_directory(leaves: &[&'static str]) -> ImmutableDirectory<NopEntry, TestDigest> {
-        let mut d = DirectoryBuilder::<NopEntry, TestDigest>::empty();
+        let mut d = DirectoryBuilder::<NopEntry, TestDigest>::empty_non_exhaustive();
         for p in leaves {
             d.insert(
                 ForwardRelativePath::new(*p).unwrap(),
@@ -1036,7 +1160,7 @@ mod tests {
 
     #[test]
     fn test_reuse_when_merging_into_empty_dir() {
-        let mut merged = DirectoryBuilder::empty();
+        let mut merged = DirectoryBuilder::empty_non_exhaustive();
         merged.merge(make_directory(&["a"]).into_builder()).unwrap();
 
         let digester = CountingDigester(Cell::new(0), TestHasher);
@@ -1051,5 +1175,147 @@ mod tests {
 
         assert_impls_debug::<TestDirectoryBuilder>();
         assert_impls_clone::<TestDirectoryBuilder>();
+    }
+
+    fn make_exhaustive_directory(
+        leaves: &[&'static str],
+    ) -> ImmutableDirectory<NopEntry, TestDigest> {
+        let mut d = DirectoryBuilder::<NopEntry, TestDigest>::empty_non_exhaustive();
+        for p in leaves {
+            d.insert(
+                ForwardRelativePath::new(*p).unwrap(),
+                DirectoryEntry::Leaf(NopEntry),
+            )
+            .unwrap();
+        }
+        d.mark_uniformly_exhaustive();
+        let interner = DashMapDirectoryInterner::new();
+        ImmutableDirectory::Shared(d.fingerprint(&TestHasher).shared(&interner))
+    }
+
+    #[test]
+    fn test_mark_uniformly_exhaustive() {
+        let d = make_exhaustive_directory(&["a/b", "c"]);
+        assert!(d.exhaustiveness_hash().is_uniformly_exhaustive());
+
+        let scaffold = make_directory(&["a/b", "c"]);
+        assert!(scaffold.exhaustiveness_hash().is_uniformly_non_exhaustive());
+        assert_eq!(d.fingerprint(), scaffold.fingerprint());
+        assert_ne!(d, scaffold);
+    }
+
+    #[test]
+    fn test_copy_on_write_preserves_exhaustiveness() {
+        let mut b = make_exhaustive_directory(&["a/b"]).into_builder();
+        b.insert(path("a/c"), DirectoryEntry::Leaf(NopEntry))
+            .unwrap();
+        let d = b.fingerprint(&TestHasher);
+        // Inserting into an exhaustive listing leaves it an exhaustive listing.
+        assert!(d.exhaustiveness_hash().is_uniformly_exhaustive());
+    }
+
+    #[test]
+    fn test_merge_joins_exhaustiveness() {
+        let exhaustive = make_exhaustive_directory(&["a/b", "c"]);
+        let scaffold = make_directory(&["a/b", "c"]);
+
+        for (l, r) in [
+            (exhaustive.clone(), scaffold.clone()),
+            (scaffold.clone(), exhaustive.clone()),
+        ] {
+            let mut merged = l.clone().into_builder();
+            merged.merge(r.clone().into_builder()).unwrap();
+            let merged = merged.fingerprint(&TestHasher);
+            assert!(merged.exhaustiveness_hash().is_uniformly_exhaustive());
+            assert_eq!(merged.fingerprint(), exhaustive.fingerprint());
+
+            let mut merged_old = l.into_builder();
+            merged_old.merge_inner_old(r.into_builder()).unwrap();
+            let merged_old = merged_old.fingerprint(&TestHasher);
+            assert!(merged_old.exhaustiveness_hash().is_uniformly_exhaustive());
+        }
+    }
+
+    #[test]
+    fn test_merge_empty_fast_path_preserves_marking() {
+        // Empty scaffold ∪ X = X, marking included.
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
+        b.merge(make_exhaustive_directory(&["a/b"]).into_builder())
+            .unwrap();
+        let d = b.fingerprint(&TestHasher);
+        assert!(d.exhaustiveness_hash().is_uniformly_exhaustive());
+
+        // Exhaustively-empty ∪ empty scaffold joins to exhaustively empty. (A non-empty RHS
+        // would not be a legal merge: its entries would contradict the exhaustive listing.)
+        let mut b = TestDirectoryBuilder::empty_non_exhaustive();
+        b.mark_uniformly_exhaustive();
+        b.merge(TestDirectoryBuilder::empty_non_exhaustive())
+            .unwrap();
+        let d = b.fingerprint(&TestHasher);
+        assert!(d.exhaustiveness_hash().is_uniformly_exhaustive());
+    }
+
+    /// The identity-motivating case: `dir = {a, b}` assembled as one exhaustive region vs. as
+    /// two exhaustive regions `dir/a` + `dir/b` under scaffolding is byte-identical, but the
+    /// boundary markings differ deep in the tree and must neither conflate nor survive a merge
+    /// un-joined.
+    #[test]
+    fn test_one_region_vs_two_regions() {
+        let content_a = make_exhaustive_directory(&["x"]);
+        let content_b = make_exhaustive_directory(&["y"]);
+
+        let two_regions = {
+            let mut b = TestDirectoryBuilder::empty_non_exhaustive();
+            b.insert(
+                path("dir/a"),
+                DirectoryEntry::Dir(content_a.clone().into_builder()),
+            )
+            .unwrap();
+            b.insert(
+                path("dir/b"),
+                DirectoryEntry::Dir(content_b.clone().into_builder()),
+            )
+            .unwrap();
+            b.fingerprint(&TestHasher)
+        };
+
+        let one_region = {
+            let mut dir = TestDirectoryBuilder::empty_non_exhaustive();
+            dir.insert(path("a"), DirectoryEntry::Dir(content_a.into_builder()))
+                .unwrap();
+            dir.insert(path("b"), DirectoryEntry::Dir(content_b.into_builder()))
+                .unwrap();
+            dir.mark_uniformly_exhaustive();
+            let mut b = TestDirectoryBuilder::empty_non_exhaustive();
+            b.insert(path("dir"), DirectoryEntry::Dir(dir)).unwrap();
+            b.fingerprint(&TestHasher)
+        };
+
+        assert_eq!(two_regions.fingerprint(), one_region.fingerprint());
+        assert_ne!(
+            two_regions.exhaustiveness_hash(),
+            one_region.exhaustiveness_hash()
+        );
+
+        // The interner must keep both variants distinct.
+        let interner = DashMapDirectoryInterner::new();
+        let s1 = two_regions.clone().shared(&interner);
+        let s2 = one_region.clone().shared(&interner);
+        assert!(!s1.ptr_eq(&s2));
+
+        // Merging the variants joins to the one-region marking (exhaustive at `dir`).
+        for (l, r) in [
+            (two_regions.clone(), one_region.clone()),
+            (one_region.clone(), two_regions.clone()),
+        ] {
+            let mut merged = l.into_builder();
+            merged.merge(r.into_builder()).unwrap();
+            let merged = merged.fingerprint(&TestHasher);
+            assert_eq!(merged.fingerprint(), one_region.fingerprint());
+            assert_eq!(
+                merged.exhaustiveness_hash(),
+                one_region.exhaustiveness_hash()
+            );
+        }
     }
 }

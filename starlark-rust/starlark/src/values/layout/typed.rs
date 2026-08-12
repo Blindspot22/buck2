@@ -44,6 +44,7 @@ use crate::typing::Ty;
 use crate::values::AllocFrozenValue;
 use crate::values::AllocValue;
 use crate::values::Freeze;
+use crate::values::FreezeBranded;
 use crate::values::FreezeResult;
 use crate::values::Freezer;
 use crate::values::FrozenHeap;
@@ -210,6 +211,14 @@ impl<'v, T: StarlarkValue<'v>> ValueTyped<'v, T> {
         self.0
     }
 
+    /// Attempt to convert to a frozen-value handle without rechecking the type.
+    #[inline]
+    pub fn unpack_frozen(self) -> Option<FrozenValueTyped<'v, T>> {
+        let value = self.to_value().unpack_frozen()?;
+        // SAFETY: Type was checked when `self` was constructed.
+        Some(unsafe { FrozenValueTyped::new_unchecked(value) })
+    }
+
     /// Get the reference to the pointed value.
     #[inline]
     pub fn as_ref(self) -> &'v T {
@@ -290,7 +299,10 @@ impl<'v, T: StarlarkValue<'v>> FrozenValueTyped<'v, T> {
 
     /// Convert to the value.
     #[inline]
-    pub fn to_value(self) -> Value<'v> {
+    pub fn to_value<'v2>(self) -> Value<'v2>
+    where
+        'v: 'v2,
+    {
         self.0.to_value()
     }
 
@@ -412,6 +424,36 @@ where
     }
 }
 
+impl<'v, T> FreezeBranded for ValueTyped<'v, T>
+where
+    T: StarlarkValue<'v>,
+    T: FreezeBranded,
+    for<'fv> <T as FreezeBranded>::Frozen<'fv>: StarlarkValue<'fv>,
+{
+    type Frozen<'fv> = ValueTyped<'fv, <T as FreezeBranded>::Frozen<'fv>>;
+
+    fn freeze<'fv>(self, freezer: &Freezer<'fv>) -> FreezeResult<Self::Frozen<'fv>> {
+        Ok(ValueTyped::new_err(self.0.freeze_branded(freezer)?)
+            .expect("Freezing a value is known to be well-behaved"))
+    }
+}
+
+impl<'v, T> FreezeBranded for FrozenValueTyped<'v, T>
+where
+    T: StarlarkValue<'v>,
+    T: FreezeBranded,
+    for<'fv> <T as FreezeBranded>::Frozen<'fv>: StarlarkValue<'fv>,
+{
+    type Frozen<'fv> = FrozenValueTyped<'fv, <T as FreezeBranded>::Frozen<'fv>>;
+
+    fn freeze<'fv>(self, _freezer: &Freezer<'fv>) -> FreezeResult<Self::Frozen<'fv>> {
+        // The value is already frozen; the target heap takes over the source heap's
+        // dependencies, so re-typing at the new brand is all that's needed.
+        Ok(FrozenValueTyped::new_err(self.0)
+            .expect("a frozen value's type does not change across brands"))
+    }
+}
+
 impl<'v> AllocStringValue<'v> for StringValue<'v> {
     fn alloc_string_value(self, _heap: Heap<'v>) -> StringValue<'v> {
         self
@@ -464,7 +506,7 @@ impl<'v> AllocStringValue<'v> for FrozenStringValue {
     }
 }
 
-impl<'v, T: StarlarkValue<'v>> AllocFrozenValue for FrozenValueTyped<'v, T> {
+impl<'fv, 'v, T: StarlarkValue<'v>> AllocFrozenValue<'fv> for FrozenValueTyped<'v, T> {
     fn alloc_frozen_value(self, _heap: &FrozenHeap) -> FrozenValue {
         self.0
     }
@@ -490,8 +532,27 @@ impl<'v, T: StarlarkValue<'v>> crate::pagable::StarlarkDeserialize for FrozenVal
     }
 }
 
-impl AllocFrozenStringValue for FrozenStringValue {
-    fn alloc_frozen_string_value(self, _heap: &FrozenHeap) -> FrozenStringValue {
+/// Only frozen heaps are serialized; branded frozen types store their contents
+/// as `ValueTyped<'fv, T>`.
+impl<'v, T: StarlarkValue<'v>> crate::pagable::StarlarkSerialize for ValueTyped<'v, T> {
+    fn starlark_serialize(
+        &self,
+        ctx: &mut dyn crate::pagable::starlark_serialize::StarlarkSerializeContext,
+    ) -> crate::Result<()> {
+        self.to_value().starlark_serialize(ctx)
+    }
+}
+
+impl<'v, T: StarlarkValue<'v>> crate::pagable::StarlarkDeserialize for ValueTyped<'v, T> {
+    fn starlark_deserialize(
+        ctx: &mut dyn crate::pagable::starlark_deserialize::StarlarkDeserializeContext<'_>,
+    ) -> crate::Result<Self> {
+        Ok(FrozenValueTyped::<T>::starlark_deserialize(ctx)?.to_value_typed())
+    }
+}
+
+impl<'fv> AllocFrozenStringValue<'fv> for FrozenStringValue {
+    fn alloc_frozen_string_value(self, _heap: &'fv FrozenHeap) -> FrozenStringValue {
         self
     }
 }

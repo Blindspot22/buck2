@@ -240,11 +240,17 @@ def _get_link_group_info(
 
 def _compute_cxx_extension_info(ctx, deps) -> (CxxExtensionLinkInfo, CxxExtensionLinkInfoReduced):
     executable_deps = ctx.attrs.executable_deps
+
+    if getattr(ctx.attrs, "use_anon_target_for_analysis", False):
+        shared_deps = ctx.attrs.dlopen_deps + ctx.attrs.shared_only_deps
+    else:
+        shared_deps = ctx.attrs.deps + python_attr_preload_deps(ctx)
+
     extension_info = merge_cxx_extension_info(
         ctx.actions,
         deps + executable_deps,
         # Add in dlopen-enabled libs from first-order deps.
-        shared_deps = ctx.attrs.deps + python_attr_preload_deps(ctx),
+        shared_deps = shared_deps,
     )
     extension_info_reduced = reduce_cxx_extension_info(extension_info)
     return extension_info, extension_info_reduced
@@ -302,7 +308,12 @@ def _compute_cxx_executable_info(
     else:
         use_anon_target = getattr(ctx.attrs, "use_anon_target_for_analysis", False)
         if use_anon_target:
-            link_tree_name = getattr(ctx.attrs, "name", ctx.attrs.rpath)
+            # Under the anon target, ctx.attrs.name is "python_linking:<name>", but the
+            # link-tree dir (built by the outer python_binary rule) uses the bare name. The
+            # bare name is threaded through as the `rpath` attr; use it so the baked RPATH
+            # matches the real "<name>#link-tree" dir. (getattr(..., "name", ...) never falls
+            # back since `name` always exists, so it would emit a nonexistent RPATH.)
+            link_tree_name = ctx.attrs.rpath
         else:
             link_tree_name = ctx.attrs.name
 

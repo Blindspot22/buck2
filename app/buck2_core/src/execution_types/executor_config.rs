@@ -13,6 +13,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use allocative::Allocative;
@@ -21,7 +22,6 @@ use buck2_hash::BuckHasher;
 use derive_more::Display;
 use dupe::Dupe;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use pagable::Pagable;
 use starlark_map::small_map::SmallMap;
 use starlark_map::sorted_map::SortedMap;
@@ -127,12 +127,16 @@ pub enum ReGangLocality {
     Datacenter,
     /// Workers must be in the same network domain
     NetworkDomain,
+    /// Workers must be in the same rack
+    Rack,
 }
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(input)]
 enum ReGangLocalityErrors {
-    #[error("Invalid locality value `{0}`. Expected one of: region, datacenter, network_domain")]
+    #[error(
+        "Invalid locality value `{0}`. Expected one of: region, datacenter, network_domain, rack"
+    )]
     InvalidLocality(String),
 }
 
@@ -142,6 +146,7 @@ impl ReGangLocality {
             "region" => Ok(ReGangLocality::Region),
             "datacenter" => Ok(ReGangLocality::Datacenter),
             "network_domain" => Ok(ReGangLocality::NetworkDomain),
+            "rack" => Ok(ReGangLocality::Rack),
             _ => Err(ReGangLocalityErrors::InvalidLocality(s.to_owned()).into()),
         }
     }
@@ -159,6 +164,8 @@ pub struct ReGang {
     pub locality: Option<ReGangLocality>,
     /// Optional number of sub-groups for locality partitioning
     pub num_sub_groups: Option<i32>,
+    /// Optional resource_units each worker claims on its host
+    pub resource_units: Option<i32>,
 }
 
 #[derive(Debug, buck2_error::Error)]
@@ -180,6 +187,7 @@ impl ReGang {
         num_of_workers: i32,
         locality: Option<ReGangLocality>,
         num_sub_groups: Option<i32>,
+        resource_units: Option<i32>,
     ) -> buck2_error::Result<ReGang> {
         if num_of_workers <= 0 {
             return Err(ReGangErrors::InvalidNumOfWorkers(num_of_workers).into());
@@ -200,6 +208,7 @@ impl ReGang {
             num_of_workers,
             locality,
             num_sub_groups,
+            resource_units,
         })
     }
 }
@@ -294,8 +303,8 @@ impl RemoteExecutorUseCase {
     /// The "buck2-default" use case. This is meant to be used when no use case is configured. It's
     /// not meant to be used for convenience when a use case is not available where it's needed!
     pub fn buck2_default() -> Self {
-        static USE_CASE: Lazy<RemoteExecutorUseCase> =
-            Lazy::new(|| RemoteExecutorUseCase::new("buck2-default".to_owned()));
+        static USE_CASE: LazyLock<RemoteExecutorUseCase> =
+            LazyLock::new(|| RemoteExecutorUseCase::new("buck2-default".to_owned()));
         *USE_CASE
     }
 }
@@ -587,8 +596,8 @@ pub struct MetaInternalExtraParams {
 
 impl MetaInternalExtraParams {
     pub fn default_arc() -> Arc<MetaInternalExtraParams> {
-        static DEFAULT: Lazy<Arc<MetaInternalExtraParams>> =
-            Lazy::new(|| Arc::new(MetaInternalExtraParams::default()));
+        static DEFAULT: LazyLock<Arc<MetaInternalExtraParams>> =
+            LazyLock::new(|| Arc::new(MetaInternalExtraParams::default()));
         DEFAULT.clone()
     }
 }

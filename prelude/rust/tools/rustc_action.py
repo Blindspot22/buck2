@@ -61,8 +61,6 @@ INHERITED_ENV = [
     "DOTSLASH_CACHE",
     # Required to run Python on Windows (for linker wrapper).
     "SYSTEMROOT",
-    # Our rustc wrapper. https://fburl.com/code/qcos5aho
-    "SYSROOT_MULTIPLEXER_DEBUG",
     # Required on Windows for getpass.getuser() to work.
     "USERNAME",
     # Option to disable hg pre-fork client.
@@ -82,6 +80,7 @@ INHERITED_ENV = [
     "NIX_CFLAGS_COMPILE",
     "NIX_CFLAGS_COMPILE_FOR_TARGET",
     "NIX_COREFOUNDATION_RPATH",
+    "NIX_DEBUG",
     "NIX_DONT_SET_RPATH",
     "NIX_DONT_SET_RPATH_FOR_BUILD",
     "NIX_ENFORCE_NO_NATIVE",
@@ -406,7 +405,7 @@ async def main() -> int:  # noqa: C901
             stdin=subprocess.DEVNULL,
             stdout=None,  # Inherit
             stderr=subprocess.PIPE,
-            limit=1_000_000,
+            limit=20_000_000,
         )
         got_error_diag = await handle_output(proc, args, crate_map)
         res = await proc.wait()

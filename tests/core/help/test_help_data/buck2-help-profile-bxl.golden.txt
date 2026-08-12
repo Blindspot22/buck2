@@ -28,8 +28,8 @@ Options:
           event log. If this flag is specified, user events are additionally written to user event
           log. Log format is JSONL, uncompressed if no known extensions are detected, or you can
           explicitly specify the compression via the file extension (ex: `.json-lines.gz` would be
-          gzip compressed, `.json-lines.zst` would be zstd compressed). Resulting log is is
-          compatible with `buck2 log show-user`
+          gzip compressed, `.json-lines.zst` would be zstd compressed). Resulting log is compatible
+          with `buck2 log show-user`
 
       --build-report <PATH>
           Print a build report
@@ -389,6 +389,9 @@ Universal Options:
           Metadata key-value pairs to inject into Buck2's logging. Client metadata must be of the
           form `key=value`, where `key` is a snake_case identifier, and will be sent to backend
           datasets
+
+      --setting <KEY=VALUE>
+          Override a Buck setting using `key=value` or `section.key=value`
 
       --agent-context <AGENT_CONTEXT>
           Agent context key=value pairs for telemetry. Used by AI agents to pass structured

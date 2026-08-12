@@ -141,7 +141,14 @@ impl ErrorTagExtra for ErrorTag {
             ErrorSourceArea::Re
         } else if tag_name.starts_with("WATCHMAN") {
             ErrorSourceArea::Watchman
-        } else if *self == crate::ErrorTag::Tpx || *self == crate::ErrorTag::TestExecutor {
+        } else if matches!(
+            self,
+            crate::ErrorTag::Tpx
+                | crate::ErrorTag::TestExecutor
+                | crate::ErrorTag::TestExecutorSignaled
+                | crate::ErrorTag::TestExecutorNonZeroExit
+                | crate::ErrorTag::TestExecutorNoEndOfTests
+        ) {
             ErrorSourceArea::TestExecutor
         } else if tag_name.starts_with("INSTALLER") {
             ErrorSourceArea::Installer
@@ -194,7 +201,6 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::IoWindowsNoSystemResources => rank!(environment),
         ErrorTag::RePermissionDenied => rank!(environment),
         ErrorTag::ReUserBadCerts => rank!(environment),
-        ErrorTag::ReResourceExhausted => rank!(environment),
         ErrorTag::EPerm => rank!(environment),
         ErrorTag::IoPermissionDenied => rank!(environment),
         ErrorTag::IoStorageFull => rank!(environment),
@@ -388,7 +394,6 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::DiceDuplicatedChange => rank!(tier0),
         ErrorTag::DiceChangedToInvalid => rank!(tier0),
         ErrorTag::DiceInjectedKeyGotInvalidation => rank!(tier0),
-        ErrorTag::DiceCancelled => rank!(tier0),
         ErrorTag::DiceUnexpectedCycleGuardType => rank!(tier0),
         ErrorTag::DiceDuplicateActivationData => rank!(tier0),
         // "Resource temporarily unavailable"
@@ -446,6 +451,7 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::InstallerInput => rank!(input).hidden(),
         ErrorTag::BuildDeadlineExpired => rank!(input),
         ErrorTag::EventLogIndexOutOfBounds => rank!(input),
+        ErrorTag::ReResourceExhausted => rank!(input),
         ErrorTag::ReUserQuota => rank!(input),
         // Test runner hit fatal errors during test execution
         ErrorTag::TestFatal => rank!(input),
@@ -472,6 +478,9 @@ fn tag_metadata(tag: ErrorTag) -> TagMetadata {
         ErrorTag::CleanInterrupt => rank!(unspecified),
         ErrorTag::Tpx => rank!(unspecified),
         ErrorTag::TestExecutor => rank!(unspecified),
+        ErrorTag::TestExecutorSignaled => rank!(unspecified),
+        ErrorTag::TestExecutorNonZeroExit => rank!(unspecified),
+        ErrorTag::TestExecutorNoEndOfTests => rank!(unspecified),
         ErrorTag::IoBlockingExecutor => rank!(unspecified),
         ErrorTag::Http => rank!(unspecified),
         ErrorTag::DownloadFileHeadRequest => rank!(unspecified),

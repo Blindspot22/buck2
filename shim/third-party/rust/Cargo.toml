@@ -28,6 +28,7 @@ path = "top/main.rs"
 # and all options Cargo supports.
 [dependencies]
 annotate-snippets = { version = "0.9.1", features = ["color"] }
+anstyle-parse = "1.0.0"
 anyhow = "1.0.102"
 anymap3 = "1.0.1"
 arc-swap = "1.9.0"
@@ -43,8 +44,10 @@ atomic = "0.5.3"
 backtrace = "0.3.76"
 base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }
+bit-set = "0.9"
+bit-vec = "0.9"
 bitflags = "2.11.1"
-blake3 = { version = "=1.8.2", features = ["mmap", "rayon", "traits-preview"] } # Check overlay before updating
+blake3 = { version = "1.8", features = ["mmap", "rayon", "traits-preview"] }
 bstr = { version = "1.10.0", features = ["serde", "std", "unicode"] }
 buck-resources = "1"
 bumpalo = { version = "3.20.2", features = ["allocator_api", "collections"] }
@@ -91,7 +94,6 @@ fs4 = { version = "0.9.1", features = ["sync"] }
 futures = "0.3.31"
 futures-intrusive = "0.4.2"
 fxhash = "0.2.1"
-gazebo = { version = "0.8.1", features = ["str_pattern_extensions"] }
 glob = "0.3.2"
 globset = { version = "0.4.13", features = ["serde1"] }
 hashbrown = "0.17"
@@ -124,8 +126,7 @@ ipnetwork = "0.20.0"
 is_proc_translated = "0.1.1"
 itertools = "0.14.0"
 jemallocator = { version = "0.6.1", package = "tikv-jemallocator" }
-lalrpop = { version = "0.23.1", features = ["pico-args"], artifact = "bin:lalrpop", lib = true }
-lalrpop-util = "0.23.1"
+jiff = { version = "0.2", features = ["serde"] }
 libc = "0.2.183"
 libfuzzer-sys = "0.4.12"
 linked-hash-map = { version = "0.5", features = ["serde_impl"] }
@@ -182,6 +183,13 @@ ref-cast = "1.0.18"
 regex = "1.12.3"
 relative-path = { version = "1.7.0", features = ["serde"] }
 ring = "=0.17.14" # Upgrading this is possible, but a pain, so we don't want to pick up every new minor version
+ruff_formatter = "0.0.6"
+ruff_python_ast = "0.0.6"
+ruff_python_formatter = "0.0.6"
+ruff_python_parser = "0.0.6"
+ruff_python_trivia = "0.0.6"
+ruff_source_file = "0.0.6"
+ruff_text_size = "0.0.6"
 rusqlite = { version = "0.37.0", features = ["backup", "blob", "bundled", "column_decltype", "functions", "limits", "modern_sqlite", "serde_json"] }
 rustc-hash = "2.1.2"
 rustls = { version = "0.23.37", features = ["logging", "ring", "std", "tls12"], default-features = false }
@@ -207,10 +215,11 @@ static_assertions = "1.1.0"
 strsim = "0.11.1"
 structopt = "0.3.26"
 strum = { version = "0.27.1", features = ["derive"] }
-syn = { version = "2.0.117", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+syn = { version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 syn1 = { package = "syn", version = "1.0.109", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+syn2 = { package = "syn", version = "2.0.117", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = "1.0.2"
-synstructure = "0.12.6"
+synstructure = "0.14"
 sys-info = "0.9.1"
 sysinfo = "0.38.4"
 take_mut = "0.2"
@@ -240,10 +249,11 @@ tower-service = "0.3.3"
 tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 tracing-core = { version = "0.1.33", features = ["valuable"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-triomphe = "0.1.11"
+triomphe = { version = "0.1.11", features = ["arc-swap"] }
 twox-hash = "1.6.1"
 typed-arena = "2"
 unicode-segmentation = "1.13.2"
+unicode-width = "0.2.2"
 uuid = { version = "1.23.0", features = ["serde", "rng-getrandom", "v4", "v5", "v6", "v7", "v8"] }
 vt100 = "0.16.2"
 walkdir = "2.3"

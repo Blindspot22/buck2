@@ -8,7 +8,12 @@
  * above-listed licenses.
  */
 
-//!
+// For naming `AsyncFnOnce::CallOnceFuture` in the parallel compute APIs.
+// `DiceComputations::compute_many` has a comment documenting how to remove this should it be
+// needed.
+#![feature(async_fn_traits)]
+#![feature(unboxed_closures)]
+
 //! The dynamic incremental caching computation engine that powers buckv2.
 //!
 //! The computation engine will output values corresponding to given `Key`s,
@@ -29,6 +34,7 @@
 //!     use dice::DiceKeyDyn;
 //!     use dice::ValueSerialize;
 //!     use dice::NoValueSerialize;
+//!     use dupe::Dupe;
 //!     use pagable::Pagable;
 //!     use pagable::pagable_typetag;
 //!
@@ -37,7 +43,7 @@
 //!
 //!     impl<'compute, 'd> InjectConfigs<'compute, 'd> {
 //!         pub async fn get_config(&mut self) -> usize {
-//!             self.0.compute(&ConfigKey).await.unwrap()
+//!             *self.0.compute(&ConfigKey).await.unwrap()
 //!         }
 //!     }
 //!
@@ -88,12 +94,12 @@
 //!                 }
 //!             }
 //!
-//!             self.0.compute(&ComputeA(a, s)).await.unwrap()
+//!             self.0.compute(&ComputeA(a, s)).await.unwrap().dupe()
 //!         }
 //!
 //!         // second computation function
 //!         pub async fn compute_b(&mut self, a: usize) -> usize {
-//!                 self.0.compute(&ComputeB(a)).await.unwrap()
+//!                 *self.0.compute(&ComputeB(a)).await.unwrap()
 //!         }
 //!     }
 //!
@@ -169,7 +175,7 @@
 //!
 //! // request the computation from DICE
 //! rt.block_on(async {
-//!     assert_eq!("aaaaaaaa", &*MyComputation(&mut ctx).compute_a(4, "a".into()).await);
+//!     assert_eq!("aaaaaaaa", &*MyComputation(&mut ctx.ctx()).compute_a(4, "a".into()).await);
 //! });
 //!
 //! let mut ctx = engine.updater();
@@ -179,29 +185,28 @@
 //!
 //! // request the computation from DICE
 //! rt.block_on(async {
-//!     assert_eq!("aaaaaaaaaa", &*MyComputation(&mut ctx).compute_a(4, "a".into()).await);
+//!     assert_eq!("aaaaaaaaaa", &*MyComputation(&mut ctx.ctx()).compute_a(4, "a".into()).await);
 //! });
 //! ```
 
 // This sometimes flag false positives where proc-macros expand pass by value into pass by refs
 #![allow(clippy::trivially_copy_pass_by_ref)]
 
-#[macro_use]
-extern crate gazebo;
-
-#[macro_use]
-extern crate tracing;
-
 mod api;
 pub(crate) mod arc;
-mod ctx;
-pub(crate) mod future;
-mod impls;
+pub(crate) mod core;
+pub(crate) mod deps;
+pub(crate) mod dice;
+mod epoch;
 pub mod introspection;
+pub(crate) mod key;
+mod key_index;
 pub(crate) mod metrics;
-pub(crate) mod stats;
-mod transaction;
-mod transaction_update;
+pub(crate) mod opaque;
+pub(crate) mod storage;
+pub(crate) mod updater;
+pub(crate) mod user_cycle;
+pub(crate) mod value;
 mod versions;
 
 pub use dice_futures::cancellation::CancellationContext; // expose cancellation context as api
@@ -213,6 +218,7 @@ pub(crate) type HashSet<K> = buck2_hash::BuckHashSet<K>;
 
 pub use crate::api::activation_tracker::ActivationData;
 pub use crate::api::activation_tracker::ActivationTracker;
+pub use crate::api::activation_tracker::PageInPhase;
 pub use crate::api::computations::DiceComputations;
 pub use crate::api::computations::DiceComputationsData;
 pub use crate::api::computations::LinearRecomputeDiceComputations;
@@ -242,60 +248,21 @@ pub use crate::api::transaction::DiceTransactionUpdater;
 pub use crate::api::user_data::UserComputationData;
 pub use crate::api::user_data::UserCycleDetector;
 pub use crate::api::user_data::UserCycleDetectorGuard;
-pub use crate::impls::dice::Dice;
-pub use crate::impls::dice::DiceDataBuilder;
-pub use crate::impls::key::DiceKeyDyn;
-pub use crate::impls::key::DiceProjectionDyn;
-pub use crate::impls::opaque::OpaqueValue;
-pub use crate::impls::storage::DiceStorage;
-pub use crate::impls::value::DiceValueDyn;
+pub use crate::dice::Dice;
+pub use crate::dice::DiceDataBuilder;
+pub use crate::dice::PagableNodeCounts;
+pub use crate::dice::PagableStatus;
+pub use crate::dice::PagableTypeStat;
+pub use crate::dice::PageOutCancel;
 pub use crate::introspection::serialize_dense_graph;
 pub use crate::introspection::serialize_graph;
-pub use crate::stats::GlobalStats;
-use crate::transaction_update::DiceTransactionUpdaterImpl;
+pub use crate::key::DiceKeyDyn;
+pub use crate::key::DiceProjectionDyn;
+pub use crate::opaque::OpaqueValue;
+pub use crate::storage::DiceStorage;
+pub use crate::storage::PagableStorageBackend;
+pub use crate::value::DiceValueDyn;
 
 pub mod testing {
     pub use crate::api::dice::testing::DiceBuilder;
-}
-
-#[cfg(test)]
-pub(crate) mod testing_helpers {
-    use std::any::Any;
-
-    use dice_futures::spawner::TokioSpawner;
-    use futures::FutureExt;
-
-    use crate::api::key::Key;
-    use crate::arc::Arc;
-    use crate::impls::key::DiceKey;
-    use crate::impls::key::ParentKey;
-    use crate::impls::task::dice::DiceTask;
-    use crate::impls::task::spawn_dice_task;
-    use crate::impls::value::DiceComputedValue;
-    use crate::impls::value::DiceKeyValue;
-    use crate::impls::value::DiceValidValue;
-    use crate::impls::value::MaybeValidDiceValue;
-    use crate::impls::value::TrackedInvalidationPaths;
-    use crate::versions::VersionRanges;
-
-    pub(crate) async fn make_completed_task<K: Key>(key: DiceKey, val: K::Value) -> DiceTask {
-        let task = spawn_dice_task(key, &TokioSpawner, &(), |handle| {
-            async move {
-                handle.finished(DiceComputedValue::new(
-                    MaybeValidDiceValue::valid(DiceValidValue::testing_new(
-                        DiceKeyValue::<K>::new(val),
-                    )),
-                    Arc::new(VersionRanges::new()),
-                    TrackedInvalidationPaths::clean(),
-                ));
-
-                Box::new(()) as Box<dyn Any + Send>
-            }
-            .boxed()
-        });
-
-        task.depended_on_by(ParentKey::None).unwrap().await.unwrap();
-
-        task
-    }
 }

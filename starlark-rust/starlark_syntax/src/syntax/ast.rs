@@ -500,7 +500,7 @@ fn fmt_string_literal(f: &mut Formatter<'_>, s: &str) -> fmt::Result {
             '\n' => f.write_str("\\n")?,
             '\t' => f.write_str("\\t")?,
             '\r' => f.write_str("\\r")?,
-            '\0' => f.write_str("\\0")?,
+            '\0' => f.write_str("\\x00")?,
             '"' => f.write_str("\\\"")?,
             '\\' => f.write_str("\\\\")?,
             x => f.write_str(&x.to_string())?,
@@ -509,11 +509,26 @@ fn fmt_string_literal(f: &mut Formatter<'_>, s: &str) -> fmt::Result {
     f.write_str("\"")
 }
 
+fn fmt_postfix_receiver(f: &mut Formatter<'_>, e: &Expr) -> fmt::Result {
+    if matches!(e, Expr::Minus(_) | Expr::Plus(_) | Expr::BitNot(_)) {
+        write!(f, "({e})")
+    } else {
+        Display::fmt(e, f)
+    }
+}
+
 impl Display for AstLiteral {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             AstLiteral::Int(i) => write!(f, "{}", i.node),
-            AstLiteral::Float(n) => write!(f, "{}", n.node),
+            AstLiteral::Float(n) if n.node.is_infinite() => {
+                f.write_str(if n.node.is_sign_negative() {
+                    "-1e400"
+                } else {
+                    "1e400"
+                })
+            }
+            AstLiteral::Float(n) => write!(f, "{:?}", n.node),
             AstLiteral::String(s) => fmt_string_literal(f, &s.node),
             AstLiteral::Bytes(b) => {
                 f.write_str("b\"")?;
@@ -543,7 +558,14 @@ impl Display for Expr {
                 comma_separated_fmt(f, e, |x, f| write!(f, "{}", x.node), true)?;
                 f.write_str(")")
             }
-            Expr::Dot(e, s) => write!(f, "{}.{}", e.node, s.node),
+            Expr::Dot(e, s) => {
+                if matches!(&e.node, Expr::Literal(AstLiteral::Int(_))) {
+                    write!(f, "({}).{}", e.node, s.node)
+                } else {
+                    fmt_postfix_receiver(f, &e.node)?;
+                    write!(f, ".{}", s.node)
+                }
+            }
             Expr::Lambda(LambdaP {
                 params,
                 body,
@@ -556,7 +578,8 @@ impl Display for Expr {
                 f.write_str(")")
             }
             Expr::Call(e, args) => {
-                write!(f, "{}(", e.node)?;
+                fmt_postfix_receiver(f, &e.node)?;
+                f.write_str("(")?;
                 for (i, x) in args.args.iter().enumerate() {
                     if i != 0 {
                         f.write_str(", ")?;
@@ -567,14 +590,17 @@ impl Display for Expr {
             }
             Expr::Index(e_i) => {
                 let (e, i) = &**e_i;
-                write!(f, "{}[{}]", e.node, i.node)
+                fmt_postfix_receiver(f, &e.node)?;
+                write!(f, "[{}]", i.node)
             }
             Expr::Index2(a_i0_i1) => {
                 let (a, i0, i1) = &**a_i0_i1;
-                write!(f, "{}[{}, {}]", a.node, i0.node, i1.node)
+                fmt_postfix_receiver(f, &a.node)?;
+                write!(f, "[{}, {}]", i0.node, i1.node)
             }
             Expr::Slice(e, i1, i2, i3) => {
-                write!(f, "{}[]", e.node)?;
+                fmt_postfix_receiver(f, &e.node)?;
+                f.write_str("[")?;
                 if let Some(x) = i1 {
                     write!(f, "{}:", x.node)?
                 } else {
@@ -586,7 +612,7 @@ impl Display for Expr {
                 if let Some(x) = i3 {
                     write!(f, ":{}", x.node)?
                 }
-                Ok(())
+                f.write_str("]")
             }
             Expr::Identifier(s) => Display::fmt(&s.node, f),
             Expr::Not(e) => write!(f, "(not {})", e.node),
@@ -628,7 +654,8 @@ impl Display for Expr {
             Expr::Literal(x) => write!(f, "{x}"),
             Expr::FString(x) => {
                 // Write out the desugared form.
-                write!(f, "{}.format(", x.format.node)?;
+                fmt_string_literal(f, &x.format.node)?;
+                f.write_str(".format(")?;
                 comma_separated_fmt(f, &x.expressions, |x, f| write!(f, "{}", x.node), false)?;
                 f.write_str(")")
             }
@@ -650,10 +677,18 @@ impl Display for AssignTarget {
                 comma_separated_fmt(f, e, |x, f| write!(f, "{}", x.node), true)?;
                 f.write_str(")")
             }
-            AssignTarget::Dot(e, s) => write!(f, "{}.{}", e.node, s.node),
+            AssignTarget::Dot(e, s) => {
+                if matches!(&e.node, Expr::Literal(AstLiteral::Int(_))) {
+                    write!(f, "({}).{}", e.node, s.node)
+                } else {
+                    fmt_postfix_receiver(f, &e.node)?;
+                    write!(f, ".{}", s.node)
+                }
+            }
             AssignTarget::Index(e_i) => {
                 let (e, i) = &**e_i;
-                write!(f, "{}[{}]", e.node, i.node)
+                fmt_postfix_receiver(f, &e.node)?;
+                write!(f, "[{}]", i.node)
             }
             AssignTarget::Identifier(s) => write!(f, "{}", s.node),
         }
@@ -780,8 +815,12 @@ impl Stmt {
                     f,
                     &load.args,
                     |x, f| {
-                        write!(f, "{} = ", x.local.node)?;
-                        fmt_string_literal(f, &(x.their.node))
+                        if x.local.node.ident == x.their.node {
+                            fmt_string_literal(f, &x.their.node)
+                        } else {
+                            write!(f, "{} = ", x.local.node)?;
+                            fmt_string_literal(f, &x.their.node)
+                        }
                     },
                     false,
                 )?;

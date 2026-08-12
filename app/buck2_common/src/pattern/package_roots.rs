@@ -8,6 +8,8 @@
  * above-listed licenses.
  */
 
+use std::sync::LazyLock;
+
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::package::PackageLabel;
 use buck2_hash::StdBuckHashSet;
@@ -21,7 +23,6 @@ use futures::channel::mpsc;
 use futures::future::FutureExt;
 use futures::stream::FuturesUnordered;
 use gazebo::prelude::*;
-use once_cell::sync::Lazy;
 use tokio::sync::Semaphore;
 
 use crate::file_ops::trait_::DiceFileOps;
@@ -46,17 +47,21 @@ pub fn find_package_roots_stream(
 
     // We don't wait on the task finishing. The packages_rx we return will naturally end when the tx side is dropped.
     let ctx_data = ctx.per_transaction_data();
-    let mut ctx = ctx.dupe();
+    let ctx = ctx.dupe();
     let spawned = spawn_dropcancel(
         |_cancellations| {
             async move {
                 // ignore because the errors will be sent back via the stream
                 let _ignored = ctx
-                    .with_linear_recompute(|ctx| async move {
-                        collect_package_roots(&DiceFileOps(&ctx), paths, |res| {
-                            packages_tx.unbounded_send(res)
-                        })
-                        .await
+                    .ctx()
+                    .with_linear_recompute(|ctx| {
+                        async move {
+                            collect_package_roots(&DiceFileOps(ctx), paths, |res| {
+                                packages_tx.unbounded_send(res)
+                            })
+                            .await
+                        }
+                        .boxed()
                     })
                     .await;
 
@@ -81,7 +86,7 @@ pub async fn collect_package_roots<E>(
     // We should make sure this is less than the semaphore used for limiting total read_dir.
     // TODO(cjhopman): We could probably figure out some form of tiered semaphore and tokio
     // num threads configuration to coordinate these.
-    static SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(300));
+    static SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(300));
     let semaphore = &SEMAPHORE;
 
     let mut queue = FuturesUnordered::new();

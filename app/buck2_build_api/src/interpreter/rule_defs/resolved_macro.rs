@@ -18,20 +18,23 @@ use allocative::Allocative;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_node::attrs::attr_type::arg::ConfiguredStringWithMacros;
 use buck2_util::arc_str::ArcStr;
+use buck2_util::size_assert;
 use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
+use starlark::starlark_complex_value_branded;
 use starlark::values::Demand;
+use starlark::values::FreezeBranded;
 use starlark::values::FrozenValueTyped;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
+use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::starlark_value;
 use starlark::values::type_repr::StarlarkTypeRepr;
-use static_assertions::assert_eq_size;
 
 use crate::artifact_groups::ArtifactGroup;
 use crate::interpreter::rule_defs::artifact::starlark_artifact::StarlarkArtifact;
@@ -42,40 +45,42 @@ use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::CommandLineBuilder;
 use crate::interpreter::rule_defs::cmd_args::WriteToFileMacroVisitor;
 use crate::interpreter::rule_defs::cmd_args::command_line_arg_like_type::command_line_arg_like_impl;
-use crate::interpreter::rule_defs::cmd_args::value::FrozenCommandLineArg;
-use crate::interpreter::rule_defs::provider::builtin::default_info::FrozenDefaultInfo;
+use crate::interpreter::rule_defs::cmd_args::value::CommandLineArg;
+use crate::interpreter::rule_defs::provider::builtin::default_info::DefaultInfo;
 use crate::interpreter::rule_defs::resolve_query_macro::ResolvedQueryMacro;
 
 // TODO(cjhopman): Consider making DefaultOutputs implement CommandLineArgLike
 // itself, and then a resolved macro is just a CommandLineArgLike.
 
-// TODO(cjhopman): Consider making ResolvedMacro, ResolvedStringWithMacros etc
-// parameterized on a Value type so that we can have non-frozen things. At that
-// point we could get rid of the Query variant for ResolvedMacro.
-
-#[derive(Debug, PartialEq, Allocative, StarlarkPagable)]
+#[derive(Debug, PartialEq, Trace, FreezeBranded, Allocative, StarlarkPagable)]
 pub enum ResolvedMacro<'v> {
-    Location(FrozenValueTyped<'v, FrozenDefaultInfo>),
-    Source(#[starlark_pagable(pagable)] Artifact),
+    // `default_outputs()` hands out `StarlarkArtifact`s, which requires the frozen form.
+    Location(FrozenValueTyped<'v, DefaultInfo<'v>>),
+    Source(
+        #[trace(static)]
+        #[freeze_branded(identity)]
+        #[starlark_pagable(pagable)]
+        Artifact,
+    ),
     /// Holds an arg-like value
-    ArgLike(FrozenCommandLineArg),
+    ArgLike(CommandLineArg<'v>),
     /// Holds a resolved query placeholder
-    Query(ResolvedQueryMacro),
+    Query(
+        #[trace(static)]
+        #[freeze_branded(identity)]
+        ResolvedQueryMacro,
+    ),
 }
 
-assert_eq_size!(ResolvedMacro, [usize; 2]);
+size_assert::words_of_type!(ResolvedMacro, 2);
 
 impl<'v> Display for ResolvedMacro<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ResolvedMacro::Location(r) => {
-                let default_outputs = r.default_outputs();
-                if default_outputs.is_empty() {
-                    write!(f, "$(location ...)")
-                } else {
-                    write!(f, "$(location {})", &default_outputs[0])
-                }
-            }
+            ResolvedMacro::Location(r) => match r.default_outputs() {
+                Ok(outputs) if !outputs.is_empty() => write!(f, "$(location {})", outputs[0]),
+                _ => write!(f, "$(location ...)"),
+            },
             ResolvedMacro::Source(a) => write!(f, "$(source {a})"),
             ResolvedMacro::ArgLike(x) => Display::fmt(x, f),
             ResolvedMacro::Query(x) => Display::fmt(x, f),
@@ -105,15 +110,15 @@ fn add_outputs_to_arg(
 }
 
 impl<'v> ResolvedMacro<'v> {
-    pub fn add_to_arg(&self, fmt: &mut CommandLineBuilder) -> buck2_error::Result<()> {
+    pub fn add_to_arg(&self, fmt: &mut CommandLineBuilder<'v, '_>) -> buck2_error::Result<()> {
         match self {
             Self::Source(artifact) => {
                 fmt.push_artifact(artifact)?;
             }
             Self::Location(info) => {
-                let outputs = &info.default_outputs();
+                let outputs = info.default_outputs()?;
 
-                add_outputs_to_arg(fmt, outputs)?;
+                add_outputs_to_arg(fmt, &outputs)?;
             }
             Self::ArgLike(command_line_like) => {
                 fmt.push_scope_delimiter(" ");
@@ -150,9 +155,14 @@ impl<'v> ResolvedMacro<'v> {
     }
 }
 
-#[derive(Debug, PartialEq, Allocative, StarlarkPagable)]
+#[derive(Debug, PartialEq, Trace, FreezeBranded, Allocative, StarlarkPagable)]
 pub enum ResolvedStringWithMacrosPart<'v> {
-    String(#[starlark_pagable(pagable)] ArcStr),
+    String(
+        #[trace(static)]
+        #[freeze_branded(identity)]
+        #[starlark_pagable(pagable)]
+        ArcStr,
+    ),
     Macro(/* write_to_file */ bool, ResolvedMacro<'v>),
 }
 
@@ -173,20 +183,24 @@ impl<'v> Display for ResolvedStringWithMacrosPart<'v> {
 #[derive(
     Debug,
     PartialEq,
+    Trace,
+    FreezeBranded,
     ProvidesStaticType,
     NoSerialize,
     Allocative,
     StarlarkPagable
 )]
-pub struct ResolvedStringWithMacros {
-    parts: Vec<ResolvedStringWithMacrosPart<'static>>,
+pub struct ResolvedStringWithMacros<'v> {
+    parts: Vec<ResolvedStringWithMacrosPart<'v>>,
+    #[trace(static)]
+    #[freeze_branded(identity)]
     #[starlark_pagable(pagable)]
     configured_macros: Option<ConfiguredStringWithMacros>,
 }
 
-starlark_simple_value!(ResolvedStringWithMacros);
+starlark_complex_value_branded!(pub ResolvedStringWithMacros);
 
-impl Display for ResolvedStringWithMacros {
+impl<'v> Display for ResolvedStringWithMacros<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "\"")?;
         for x in &self.parts {
@@ -196,9 +210,9 @@ impl Display for ResolvedStringWithMacros {
     }
 }
 
-impl ResolvedStringWithMacros {
+impl<'v> ResolvedStringWithMacros<'v> {
     pub fn new(
-        parts: Vec<ResolvedStringWithMacrosPart<'static>>,
+        parts: Vec<ResolvedStringWithMacrosPart<'v>>,
         configured_macros: Option<&ConfiguredStringWithMacros>,
     ) -> Self {
         Self {
@@ -222,7 +236,7 @@ impl ResolvedStringWithMacros {
     }
 }
 
-impl<'v> CommandLineArgLike<'v> for ResolvedStringWithMacros {
+impl<'v> CommandLineArgLike<'v> for ResolvedStringWithMacros<'v> {
     fn register_me(&self) {
         command_line_arg_like_impl!(ResolvedStringWithMacros::starlark_type_repr());
     }
@@ -293,7 +307,7 @@ starlark::methods_static!(
 );
 
 #[starlark_value(type = "ResolvedStringWithMacros")]
-impl<'v> StarlarkValue<'v> for ResolvedStringWithMacros {
+impl<'v> StarlarkValue<'v> for ResolvedStringWithMacros<'v> {
     fn get_methods() -> Option<&'static Methods> {
         Some(RESOLVED_STRING_WITH_MACROS_METHODS.methods())
     }
@@ -315,8 +329,8 @@ impl<'v> StarlarkValue<'v> for ResolvedStringWithMacros {
 
 #[starlark_module]
 fn resolved_string_with_macros_methods(builder: &mut MethodsBuilder) {
-    fn startswith(
-        this: &ResolvedStringWithMacros,
+    fn startswith<'v>(
+        this: &ResolvedStringWithMacros<'v>,
         #[starlark(require = pos)] prefix: &str,
     ) -> starlark::Result<bool> {
         match this.parts.first() {
@@ -328,7 +342,7 @@ fn resolved_string_with_macros_methods(builder: &mut MethodsBuilder) {
 
 #[starlark_module]
 #[starlark_types(
-    ResolvedStringWithMacros as ResolvedStringWithMacros
+    ResolvedStringWithMacros<'static> as ResolvedStringWithMacros
 )]
 pub(crate) fn register_string_with_macros(globals: &mut GlobalsBuilder) {}
 
@@ -340,7 +354,7 @@ mod tests {
 
     use super::*;
 
-    fn make_string_resolved(s: &str) -> ResolvedStringWithMacros {
+    fn make_string_resolved<'v>(s: &str) -> ResolvedStringWithMacros<'v> {
         ResolvedStringWithMacros::new(
             vec![ResolvedStringWithMacrosPart::String(ArcStr::from(s))],
             None,
@@ -349,8 +363,8 @@ mod tests {
 
     #[test]
     fn test_equals_matching_string() {
-        let resolved = make_string_resolved("-matching-flag");
         Heap::temp(|heap| {
+            let resolved = make_string_resolved("-matching-flag");
             let str_val = heap.alloc_str("-matching-flag").to_value();
             assert_eq!(resolved.equals(str_val).unwrap(), true);
         });
@@ -358,8 +372,8 @@ mod tests {
 
     #[test]
     fn test_equals_non_matching_string() {
-        let resolved = make_string_resolved("-resolved-flag");
         Heap::temp(|heap| {
+            let resolved = make_string_resolved("-resolved-flag");
             let str_val = heap.alloc_str("-str-flag").to_value();
             assert_eq!(resolved.equals(str_val).unwrap(), false);
         });
@@ -367,17 +381,17 @@ mod tests {
 
     #[test]
     fn test_equals_resolved_string_vs_resolved_string() {
-        let resolved = make_string_resolved("-resolved-flag");
         Heap::temp(|heap| {
-            let other_val = heap.alloc_simple(make_string_resolved("-resolved-flag"));
+            let resolved = make_string_resolved("-resolved-flag");
+            let other_val = heap.alloc(make_string_resolved("-resolved-flag"));
             assert_eq!(resolved.equals(other_val).unwrap(), true);
         });
     }
 
     #[test]
     fn test_equals_resolved_string_vs_non_string_value() {
-        let resolved = make_string_resolved("-Wno-error");
         Heap::temp(|heap| {
+            let resolved = make_string_resolved("-Wno-error");
             let int_val = heap.alloc(42);
             assert_eq!(resolved.equals(int_val).unwrap(), false);
         });
@@ -385,14 +399,14 @@ mod tests {
 
     #[test]
     fn test_equals_resolved_macro_vs_non_string_value() {
-        let resolved = ResolvedStringWithMacros::new(
-            vec![ResolvedStringWithMacrosPart::Macro(
-                false,
-                ResolvedMacro::Query(ResolvedQueryMacro::Targets(Default::default())),
-            )],
-            None,
-        );
         Heap::temp(|heap| {
+            let resolved = ResolvedStringWithMacros::new(
+                vec![ResolvedStringWithMacrosPart::Macro(
+                    false,
+                    ResolvedMacro::Query(ResolvedQueryMacro::Targets(Default::default())),
+                )],
+                None,
+            );
             let int_val = heap.alloc(42);
             assert_eq!(resolved.equals(int_val).unwrap(), false);
         });

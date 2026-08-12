@@ -32,14 +32,12 @@ use buck2_execute::materialize::materializer::DeferredMaterializerSubscription;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::paths::abs_path::AbsPath;
-use chrono::DateTime;
-use chrono::Duration;
-use chrono::TimeZone;
-use chrono::Utc;
 use derivative::Derivative;
 use dupe::Dupe;
 use futures::stream::BoxStream;
 use futures::stream::StreamExt;
+use jiff::SignedDuration;
+use jiff::Timestamp;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
@@ -88,10 +86,7 @@ struct PathData {
 
 #[derive(Debug)]
 enum PathStage {
-    Materialized {
-        ts: DateTime<Utc>,
-        size: Option<u64>,
-    },
+    Materialized { ts: Timestamp, size: Option<u64> },
     Declared(Arc<ArtifactMaterializationMethod>),
 }
 
@@ -157,10 +152,8 @@ impl<T: IoHandler> ExtensionCommand<T> for Iterate {
                     ..
                 } => {
                     // drop nano-seconds
-                    let ts = Utc
-                        .timestamp_opt(last_access_time.timestamp(), 0)
-                        .single()
-                        .unwrap();
+                    let ts = Timestamp::from_second(last_access_time.as_second())
+                        .expect("whole seconds of a valid timestamp are in range");
                     PathStage::Materialized {
                         ts,
                         size: Some(artifact_metadata_size(metadata)),
@@ -280,7 +273,7 @@ impl<T: IoHandler> ExtensionCommand<T> for RefreshTtls {
         let task = create_ttl_refresh(
             &processor.tree,
             processor.io.re_client_manager(),
-            Duration::seconds(self.min_ttl),
+            SignedDuration::from_secs(self.min_ttl),
             processor.io.digest_config(),
         )
         .map(|f| processor.spawn(&EventDispatcher::error_on_event(), f));
@@ -466,10 +459,14 @@ impl<T: IoHandler> DeferredMaterializerExtensions for DeferredMaterializerAccess
             let min_ttl = args
                 .adaptive_min_ttl
                 .unwrap_or_else(|| std::time::Duration::from_secs(12 * 60 * 60));
-            let min_ttl_chrono = Duration::from_std(min_ttl).unwrap_or_else(|_| Duration::zero());
             crate::materializers::deferred::clean_stale::AdaptiveLowDiskParams {
                 threshold_percent,
-                min_access_time: Utc::now() - min_ttl_chrono,
+                // Clamping to MIN keeps everything protected, which is the safe direction
+                // for something that deletes artifacts.
+                min_access_time: Timestamp::now()
+                    .checked_sub(min_ttl)
+                    .unwrap_or(Timestamp::MIN),
+                delete_intermediate_within_min_ttl: true,
             }
         });
         let (sender, recv) = oneshot::channel();

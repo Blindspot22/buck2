@@ -23,6 +23,7 @@ use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::artifact_type::OutputArtifact;
 use buck2_error::internal_error;
 use buck2_hash::BuckIndexSet;
+use buck2_util::size_assert;
 use display_container::display_pair;
 use display_container::fmt_container;
 use display_container::iter_display_chain;
@@ -32,7 +33,6 @@ use gazebo::prelude::*;
 use serde::Serialize;
 use serde::Serializer;
 use starlark::any::ProvidesStaticType;
-use starlark::coerce::coerce;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
@@ -41,7 +41,7 @@ use starlark::static_starlark_value;
 use starlark::typing::Ty;
 use starlark::values::AllocValue;
 use starlark::values::Demand;
-use starlark::values::Freeze;
+use starlark::values::FreezeBranded;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
 use starlark::values::FrozenValue;
@@ -61,7 +61,6 @@ use starlark::values::list::UnpackList;
 use starlark::values::starlark_value;
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::type_repr::StarlarkTypeRepr;
-use static_assertions::assert_eq_size;
 
 use crate::artifact_groups::ArtifactGroup;
 use crate::interpreter::rule_defs::artifact::associated::AssociatedArtifacts;
@@ -84,7 +83,6 @@ use crate::interpreter::rule_defs::cmd_args::traits::CommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::traits::SimpleCommandLineArtifactVisitor;
 use crate::interpreter::rule_defs::cmd_args::traits::WriteToFileMacroVisitor;
 use crate::interpreter::rule_defs::cmd_args::value::CommandLineArg;
-use crate::interpreter::rule_defs::cmd_args::value::FrozenCommandLineArg;
 
 #[derive(Debug, buck2_error::Error)]
 pub enum CommandLineError {
@@ -378,20 +376,25 @@ impl<'v> Serialize for StarlarkCmdArgs<'v> {
 }
 
 #[derive(Debug, ProvidesStaticType, Allocative, StarlarkPagable)]
-pub struct FrozenStarlarkCmdArgs {
-    // Elements are `FrozenCommandLineArg`s
-    items: ThinBoxSliceFrozenValue<'static>,
-    hidden: ThinBoxSliceFrozenValue<'static>,
-    options: FrozenCommandLineOptions,
+pub struct FrozenStarlarkCmdArgs<'v> {
+    // Elements are frozen `CommandLineArg`s
+    items: ThinBoxSliceFrozenValue<'v>,
+    hidden: ThinBoxSliceFrozenValue<'v>,
+    options: FrozenCommandLineOptions<'v>,
 }
 
-static_starlark_value!(EMPTY_FROZEN_CMD_ARGS: FrozenStarlarkCmdArgs = FrozenStarlarkCmdArgs {
+starlark::register_simple_vtable_entry!(FrozenStarlarkCmdArgs<'static>);
+// SAFETY: The vtable entry is registered above; the deser type id is
+// lifetime-erased, so the `'static` instantiation covers all heap lifetimes.
+unsafe impl<'v> starlark::__derive_refs::VtableRegistered for FrozenStarlarkCmdArgs<'v> {}
+
+static_starlark_value!(EMPTY_FROZEN_CMD_ARGS: FrozenStarlarkCmdArgs<'static> = FrozenStarlarkCmdArgs {
     items: ThinBoxSliceFrozenValue::empty(),
     hidden: ThinBoxSliceFrozenValue::empty(),
     options: FrozenCommandLineOptions::empty(),
 });
 
-impl Serialize for FrozenStarlarkCmdArgs {
+impl<'v> Serialize for FrozenStarlarkCmdArgs<'v> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -417,17 +420,13 @@ impl<'a, 'v> Fields<'v> for Ref<'a, StarlarkCommandLineData<'v>> {
     }
 }
 
-impl<'v> Fields<'v> for FrozenStarlarkCmdArgs {
+impl<'v> Fields<'v> for FrozenStarlarkCmdArgs<'v> {
     fn items(&self) -> &[CommandLineArg<'v>] {
-        coerce(FrozenCommandLineArg::slice_from_frozen_value_unchecked(
-            &self.items,
-        ))
+        CommandLineArg::slice_from_frozen_value_unchecked(&self.items)
     }
 
     fn hidden(&self) -> &[CommandLineArg<'v>] {
-        coerce(FrozenCommandLineArg::slice_from_frozen_value_unchecked(
-            &self.hidden,
-        ))
+        CommandLineArg::slice_from_frozen_value_unchecked(&self.hidden)
     }
 
     fn options(&self) -> Option<&dyn CommandLineOptionsTrait<'v>> {
@@ -477,9 +476,9 @@ impl<'v, A: Fields<'v>, B: Fields<'v>> Fields<'v> for Either<A, B> {
 }
 
 // These types show up a lot in the frozen heaps, so make sure they don't regress
-assert_eq_size!(StarlarkCmdArgs<'static>, [usize; 8]);
-assert_eq_size!(FrozenStarlarkCmdArgs, [usize; 3]);
-assert_eq_size!(CommandLineOptions<'static>, [usize; 10]);
+size_assert::words_of_type!(StarlarkCmdArgs<'static>, 8);
+size_assert::words_of_type!(FrozenStarlarkCmdArgs<'static>, 3);
+size_assert::words_of_type!(CommandLineOptions<'static>, 10);
 
 impl<'v> Display for StarlarkCmdArgs<'v> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -490,7 +489,7 @@ impl<'v> Display for StarlarkCmdArgs<'v> {
     }
 }
 
-impl Display for FrozenStarlarkCmdArgs {
+impl<'v> Display for FrozenStarlarkCmdArgs<'v> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&FieldsRef(self, PhantomData), f)
     }
@@ -511,7 +510,7 @@ impl<'v> StarlarkCmdArgs<'v> {
     }
 }
 
-impl FrozenStarlarkCmdArgs {
+impl<'v> FrozenStarlarkCmdArgs<'v> {
     pub(crate) fn is_concat(&self) -> bool {
         FieldsRef(self, PhantomData).is_concat()
     }
@@ -527,10 +526,26 @@ impl<'v> StarlarkCmdArgs<'v> {
     }
 }
 
+/// Unpack a `cmd_args` in either form, at the value's own heap brand.
+#[derive(StarlarkTypeRepr, UnpackValue)]
+pub enum StarlarkCmdArgsUnpack<'v> {
+    Unfrozen(&'v StarlarkCmdArgs<'v>),
+    Frozen(&'v FrozenStarlarkCmdArgs<'v>),
+}
+
+impl<'v> StarlarkCmdArgsUnpack<'v> {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            StarlarkCmdArgsUnpack::Unfrozen(x) => x.is_empty(),
+            StarlarkCmdArgsUnpack::Frozen(x) => x.is_empty(),
+        }
+    }
+}
+
 starlark::methods_static!(CMD_ARGS_METHODS = cmd_args_methods);
 starlark::methods_static!(FROZEN_CMD_ARGS_METHODS = cmd_args_methods);
 
-#[starlark_value(type = "cmd_args")]
+#[starlark_value(type = "cmd_args", StarlarkTypeRepr, UnpackValue)]
 impl<'v> StarlarkValue<'v> for StarlarkCmdArgs<'v> {
     fn get_methods() -> Option<&'static Methods> {
         Some(CMD_ARGS_METHODS.methods())
@@ -554,8 +569,8 @@ impl<'v> StarlarkValue<'v> for StarlarkCmdArgs<'v> {
     }
 }
 
-#[starlark_value(type = "cmd_args")]
-impl<'v> StarlarkValue<'v> for FrozenStarlarkCmdArgs {
+#[starlark_value(type = "cmd_args", StarlarkTypeRepr, UnpackValue)]
+impl<'v> StarlarkValue<'v> for FrozenStarlarkCmdArgs<'v> {
     type Canonical = StarlarkCmdArgs<'v>;
 
     fn get_methods() -> Option<&'static Methods> {
@@ -571,7 +586,7 @@ impl<'v> StarlarkValue<'v> for FrozenStarlarkCmdArgs {
 
 impl<'v> AllocValue<'v> for StarlarkCmdArgs<'v> {
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
-        heap.alloc_complex(self)
+        heap.alloc_complex_branded(self)
     }
 }
 
@@ -605,7 +620,7 @@ impl<'v> CommandLineArgLike<'v> for StarlarkCmdArgs<'v> {
     }
 }
 
-impl<'v> CommandLineArgLike<'v> for FrozenStarlarkCmdArgs {
+impl<'v> CommandLineArgLike<'v> for FrozenStarlarkCmdArgs<'v> {
     fn register_me(&self) {
         command_line_arg_like_impl!(FrozenStarlarkCmdArgs::starlark_type_repr());
     }
@@ -634,29 +649,32 @@ impl<'v> CommandLineArgLike<'v> for FrozenStarlarkCmdArgs {
     }
 }
 
-impl<'v> Freeze for StarlarkCmdArgs<'v> {
-    type Frozen = FrozenStarlarkCmdArgs;
-    fn freeze(self, freezer: &Freezer) -> FreezeResult<Self::Frozen> {
+impl<'v> FreezeBranded for StarlarkCmdArgs<'v> {
+    type Frozen<'fv> = FrozenStarlarkCmdArgs<'fv>;
+
+    fn freeze<'fv>(self, freezer: &Freezer<'fv>) -> FreezeResult<Self::Frozen<'fv>> {
         let StarlarkCommandLineData {
             items,
             hidden,
             options,
         } = self.0.into_inner();
 
-        let items = ThinBoxSliceFrozenValue::from_iter(
-            items
-                .freeze(freezer)?
+        // The element storage is raw `FrozenValue`s, so freeze the elements'
+        // inner `Value`s directly.
+        fn freeze_elements<'fv>(
+            elements: Vec<CommandLineArg<'_>>,
+            freezer: &Freezer<'fv>,
+        ) -> FreezeResult<ThinBoxSliceFrozenValue<'fv>> {
+            let frozen = elements
                 .into_iter()
-                .map(|a| a.to_frozen_value()),
-        );
-        let hidden = ThinBoxSliceFrozenValue::from_iter(
-            hidden
-                .freeze(freezer)?
-                .into_iter()
-                .map(|a| a.to_frozen_value()),
-        );
+                .map(|x| x.to_value().freeze(freezer))
+                .collect::<FreezeResult<Vec<_>>>()?;
+            Ok(ThinBoxSliceFrozenValue::from_iter(frozen))
+        }
+        let items = freeze_elements(items, freezer)?;
+        let hidden = freeze_elements(hidden, freezer)?;
         let options = options
-            .try_map(|options| (*options).freeze(freezer))?
+            .try_map(|options| FreezeBranded::freeze(*options, freezer))?
             .unwrap_or_default();
 
         Ok(FrozenStarlarkCmdArgs {

@@ -11,7 +11,9 @@ license.workspace = true
 allocative.workspace = true
 anyhow.workspace = true
 anymap3.workspace = true
+arc-swap.workspace = true
 async-trait.workspace = true
+bit-set.workspace = true
 buck2_hash.workspace = true
 cmp_any.workspace = true
 dashmap.workspace = true
@@ -25,21 +27,20 @@ gazebo.workspace = true
 itertools.workspace = true
 lock_free_hashtable.workspace = true
 lock_free_vec.workspace = true
+mini_vec.workspace = true
 pagable = { workspace = true, optional = true }
 pagable_storage.workspace = true
 parking_lot.workspace = true
+pin-project.workspace = true
 ref-cast.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
-slab.workspace = true
 sorted_vector_map.workspace = true
 static_assertions.workspace = true
-take_mut.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 triomphe.workspace = true
-typed-arena.workspace = true
 
 [dev-dependencies]
 assert_matches.workspace = true

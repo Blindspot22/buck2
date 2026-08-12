@@ -27,24 +27,23 @@ use starlark_derive::starlark_value;
 
 use crate as starlark;
 use crate::any::ProvidesStaticType;
-use crate::coerce::Coerce;
 use crate::collections::Hashed;
 use crate::collections::SmallMap;
 use crate::collections::StarlarkHasher;
-use crate::starlark_complex_value;
+use crate::starlark_complex_value_branded;
 use crate::typing::Ty;
-use crate::values::Freeze;
+use crate::values::FreezeBranded;
 use crate::values::Heap;
 use crate::values::StarlarkPagable;
 use crate::values::StarlarkValue;
 use crate::values::Trace;
+use crate::values::UnpackValue;
 use crate::values::Value;
-use crate::values::ValueLifetimeless;
 use crate::values::ValueLike;
 use crate::values::comparison::equals_slice;
-use crate::values::record::field::FieldGen;
-use crate::values::record::record_type::FrozenRecordType;
-use crate::values::record::record_type::RecordType;
+use crate::values::record::field::Field;
+use crate::values::record::record_type::AnyRecordType;
+use crate::values::record::record_type::RecordVariant;
 use crate::values::record::record_type::record_fields;
 use crate::values::types::type_instance_id::TypeInstanceId;
 
@@ -53,40 +52,39 @@ use crate::values::types::type_instance_id::TypeInstanceId;
     Clone,
     Debug,
     Trace,
-    Coerce,
-    Freeze,
+    FreezeBranded,
     ProvidesStaticType,
     Allocative,
     StarlarkPagable
 )]
 #[repr(C)]
-pub struct RecordGen<V: ValueLifetimeless> {
-    pub(crate) typ: V, // Must be RecordType
-    pub(crate) values: Box<[V]>,
+pub struct Record<'v> {
+    pub(crate) typ: Value<'v>, // Must be RecordType
+    pub(crate) values: Box<[Value<'v>]>,
 }
 
-impl<'v, V: ValueLike<'v>> Display for RecordGen<V> {
+impl<'v> Display for Record<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = self.record_type_name().unwrap_or("anon");
         fmt_keyed_container(f, &format!("record[{name}]("), ")", "=", self.iter())
     }
 }
 
-starlark_complex_value!(pub Record);
+starlark_complex_value_branded!(pub Record);
 
-impl<'v, V: ValueLike<'v>> RecordGen<V> {
+impl<'v> Record<'v> {
     /// `type(x)` for records.
     pub const TYPE: &'static str = "record";
 
-    fn get_record_type(&self) -> Either<&'v RecordType<'v>, &'v FrozenRecordType> {
+    fn get_record_type(&self) -> AnyRecordType<'v> {
         // Safe to unwrap because we always ensure typ is RecordType
-        RecordType::from_value(self.typ.to_value()).unwrap()
+        AnyRecordType::unpack_value_err(self.typ.to_value()).unwrap()
     }
 
     fn record_type_name(&self) -> Option<&'v str> {
         match self.get_record_type() {
-            Either::Left(x) => Some(&x.ty_record_data.get()?.name),
-            Either::Right(x) => Some(&x.ty_record_data.as_ref()?.name),
+            Either::Left(x) => Some(&x.ty_record_data.get_ty()?.name),
+            Either::Right(x) => Some(&x.ty_record_data.get_ty()?.name),
         }
     }
 
@@ -97,12 +95,12 @@ impl<'v, V: ValueLike<'v>> RecordGen<V> {
         }
     }
 
-    fn get_record_fields(&self) -> &'v SmallMap<String, FieldGen<Value<'v>>> {
+    fn get_record_fields(&self) -> &'v SmallMap<String, Field<'v>> {
         record_fields(self.get_record_type())
     }
 
     /// Iterate over the elements in the record.
-    pub fn iter<'a>(&'a self) -> impl ExactSizeIterator<Item = (&'v str, V)> + 'a
+    pub fn iter<'a>(&'a self) -> impl ExactSizeIterator<Item = (&'v str, Value<'v>)> + 'a
     where
         'v: 'a,
     {
@@ -114,10 +112,7 @@ impl<'v, V: ValueLike<'v>> RecordGen<V> {
 }
 
 #[starlark_value(type = Record::TYPE)]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for RecordGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
+impl<'v> StarlarkValue<'v> for Record<'v> {
     fn equals(&self, other: Value<'v>) -> crate::Result<bool> {
         match Record::from_value(other) {
             Some(other) if self.typ.equals(other.typ)? => {
@@ -156,7 +151,7 @@ where
     }
 }
 
-impl<'v, V: ValueLike<'v>> Serialize for RecordGen<V> {
+impl<'v> Serialize for Record<'v> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,

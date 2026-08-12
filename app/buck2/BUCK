@@ -7,6 +7,10 @@ oncall("build_infra")
 
 prelude = native
 
+# Opt-in allocation-site fragmentation profiler (facebook/mem_frag). Enable with
+# `-c buck2_dev.memfrag=true`; off by default so normal builds are unaffected.
+_memfrag = read_config("buck2_dev", "memfrag", "") == "true"
+
 rust_library(
     name = "buck2",
     srcs = glob(["src/**/*.rs"]),
@@ -32,10 +36,11 @@ rust_library(
                     },
                 },
             },
+            "extra_check_cfgs": ["cfg(buck2_memfrag)"],
         },
     },
     rustc_flags = select({
-        ":buck2_client_only_build": ["--cfg=client_only"],
+        ":buck2_client_only_setting[build]": ["--cfg=client_only"],
         "DEFAULT": [],
     }),
     deps = [
@@ -67,7 +72,7 @@ rust_library(
         "//common/rust/shed/fbinit:fbinit",
     ]
     + select({
-        ":buck2_client_only_build": [],
+        ":buck2_client_only_setting[build]": [],
         "DEFAULT": [
             "//buck2/app/buck2_daemon:buck2_daemon",
             "//buck2/app/buck2_server:buck2_server",
@@ -113,8 +118,9 @@ buck_rust_binary(
     # Set via -c buck2.emit_relocs=true in the deploy script to produce a
     # binary with ELF relocations for BOLT post-link optimization.
     linker_flags = ["-Wl,--emit-relocs"] if read_config("buck2", "emit_relocs", "") == "true" else [],
-    rustc_flags = select({
-        ":buck2_client_only_build": ["--cfg=client_only"],
+    rustc_flags = (["--cfg=buck2_memfrag"] if _memfrag else [])
+    + select({
+        ":buck2_client_only_setting[build]": ["--cfg=client_only"],
         "DEFAULT": [],
     }),
     unittests = False,
@@ -140,7 +146,7 @@ buck_rust_binary(
         ],
     })
     + select({
-        ":buck2_client_only_build": [],
+        ":buck2_client_only_setting[build]": [],
         "DEFAULT": [
             "//buck2/app/buck2_action_impl:buck2_action_impl",
             "//buck2/app/buck2_analysis:buck2_analysis",
@@ -163,20 +169,28 @@ buck_rust_binary(
             "//buck2/app/buck2_transition:buck2_transition",
             "//buck2/app/buck2_validation:buck2_validation",
         ],
-    }),
+    })
+    + (
+        [
+            "//buck2/facebook/mem_frag:mem_frag",
+        ]
+        if _memfrag
+        else []
+    ),
 )
 
 platform_utils = None # @oss-enable
 
 _dtp = platform_utils.get_cxx_platform_for_base_path(prelude.package_name()).target_platform if platform_utils else None
 
-prelude.constraint_setting(
+constraint(
     name = "buck2_client_only_setting",
-)
-
-prelude.constraint_value(
-    name = "buck2_client_only_build",
-    constraint_setting = ":buck2_client_only_setting",
+    default = "unspecified",
+    values = [
+        "build",
+        "unspecified",
+    ],
+    visibility = ["PUBLIC"],
 )
 
 buck2_client_transition_alias(

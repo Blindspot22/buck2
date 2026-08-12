@@ -10,6 +10,7 @@
 
 use std::borrow::Cow;
 use std::io::Write;
+use std::sync::Arc;
 
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_build_api::audit_dep_files::AUDIT_DEP_FILES;
@@ -42,7 +43,11 @@ async fn audit_dep_files(
     identifier: Option<String>,
     stdout: &mut (dyn Write + Send),
 ) -> buck2_error::Result<()> {
-    let key = RunActionKey::new(BaseDeferredKey::TargetLabel(label), category, identifier);
+    let key = RunActionKey::new(
+        BaseDeferredKey::TargetLabel(label),
+        category,
+        identifier.map(Arc::from),
+    );
 
     let state = get_dep_files(&key)
         .ok_or_else(|| internal_error!("Failed to find dep files for key `{key}`"))?;
@@ -57,13 +62,14 @@ async fn audit_dep_files(
         }
     };
 
-    let artifact_fs = ctx.clone().get_artifact_fs().await?;
+    let artifact_fs = ctx.ctx().get_artifact_fs().await?;
+    let result = state.result();
     let dep_files = read_dep_files(
         state.has_signatures(),
         declared_dep_files,
-        state.result(),
-        &artifact_fs,
-        ctx.per_transaction_data().get_materializer().as_ref(),
+        result,
+        artifact_fs,
+        ctx.per_transaction_data().get_materializer(),
     )
     .await?
     .ok_or_else(|| internal_error!("Dep files have expired"))?;
@@ -72,7 +78,7 @@ async fn audit_dep_files(
         Cow::Owned(dep_files),
         true,
         ctx.global_data().get_digest_config(),
-        &artifact_fs,
+        artifact_fs,
     )?;
 
     let dirs = match &*fingerprints {

@@ -7,3 +7,5 @@
 # above-listed licenses.
 
 cargo_env = true
+
+buildscript.run = false

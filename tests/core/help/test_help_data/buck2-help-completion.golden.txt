@@ -7,6 +7,7 @@ using:
 - `source <(buck2 completion bash)`
 - `source <(buck2 completion zsh)`
 - `source (buck2 completion fish | psub)`
+- `buck2 completion powershell | Out-String | Invoke-Expression`
 
 Usage: buck2 completion [OPTIONS] <SHELL>
 
@@ -14,7 +15,7 @@ Arguments:
   <SHELL>
           shell for which to generate completion script
 
-          [possible values: bash, fish, zsh]
+          [possible values: bash, fish, zsh, powershell]
 
 Options:
   -h, --help
@@ -53,6 +54,9 @@ Universal Options:
           Metadata key-value pairs to inject into Buck2's logging. Client metadata must be of the
           form `key=value`, where `key` is a snake_case identifier, and will be sent to backend
           datasets
+
+      --setting <KEY=VALUE>
+          Override a Buck setting using `key=value` or `section.key=value`
 
       --agent-context <AGENT_CONTEXT>
           Agent context key=value pairs for telemetry. Used by AI agents to pass structured

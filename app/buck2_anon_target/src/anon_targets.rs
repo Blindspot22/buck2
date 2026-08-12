@@ -90,6 +90,7 @@ use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use dupe::ResultDupedErrExt;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use pagable::Pagable;
@@ -100,7 +101,6 @@ use starlark::values::DynStarlark;
 use starlark::values::Trace;
 use starlark::values::Value;
 use starlark::values::ValueTyped;
-use starlark::values::ValueTypedComplex;
 use starlark::values::dict::UnpackDictEntries;
 use starlark_map::ordered_map::OrderedMap;
 use starlark_map::small_map::SmallMap;
@@ -190,7 +190,7 @@ impl Key for AnonTargetKey {
             anon_target_split,
         })?;
 
-        ctx.analysis_complete(&deferred_key, &DeferredHolder::Analysis(res.dupe()))?;
+        ctx.analysis_complete(&deferred_key, &DeferredHolder::Analysis(&res))?;
         Ok(res)
     }
 
@@ -400,11 +400,11 @@ impl AnonTargetKey {
         AnonTargetAttr::from_coerced_attr(attr_name, x, ty)
     }
 
-    pub(crate) async fn resolve(
+    pub(crate) async fn resolve<'d>(
         &self,
-        dice: &mut DiceComputations<'_>,
-    ) -> buck2_error::Result<AnalysisResult> {
-        dice.compute(self).await?
+        dice: &mut DiceComputations<'d>,
+    ) -> buck2_error::Result<&'d AnalysisResult> {
+        dice.compute(self).await?.as_ref().duped_err()
     }
 
     fn run_analysis<'a>(
@@ -483,6 +483,7 @@ impl AnonTargetKey {
                     profile: None, // Not implemented for anon targets
                     declared_actions: res.as_ref().ok().map(|(v, _)| v.num_declared_actions),
                     declared_artifacts: res.as_ref().ok().map(|(v, _)| v.num_declared_artifacts),
+                    error: res.as_ref().err().map(|e| format!("{e:#}")),
                 };
                 (res, end)
             },
@@ -566,7 +567,7 @@ impl AnonTargetKey {
                     .get_fulfilled_promise_artifacts(promise_artifact_mappings, res, eval)
             })?;
 
-            let res = ValueTypedComplex::new(res)
+            let res = ValueTyped::new(res)
                 .ok_or_else(|| internal_error!("Just allocated the provider collection"))?;
 
             // Pull the ctx object back out, and steal ctx.action's state back
@@ -637,10 +638,10 @@ pub(crate) fn init_get_promised_artifact() {
     });
 }
 
-pub(crate) async fn get_artifact_from_anon_target_analysis(
+pub(crate) async fn get_artifact_from_anon_target_analysis<'d>(
     promise_id: &PromiseArtifactId,
-    ctx: &mut DiceComputations<'_>,
-) -> buck2_error::Result<Artifact> {
+    ctx: &mut DiceComputations<'d>,
+) -> buck2_error::Result<&'d Artifact> {
     let owner = promise_id.owner();
     let analysis_result = match owner {
         BaseDeferredKey::AnonTarget(anon_target) => {
@@ -660,8 +661,7 @@ pub(crate) async fn get_artifact_from_anon_target_analysis(
     Ok(analysis_result
         .promise_artifact_map()
         .get(promise_id)
-        .ok_or_else(|| PromiseArtifactResolveError::NotFoundInAnalysis(promise_id.clone()))?
-        .clone())
+        .ok_or_else(|| PromiseArtifactResolveError::NotFoundInAnalysis(promise_id.clone()))?)
 }
 
 pub(crate) fn init_anon_target_registry_new() {

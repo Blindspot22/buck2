@@ -11,6 +11,7 @@
 use std::fs::File;
 use std::fs::create_dir_all;
 use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use buck2_cli_proto::daemon_api_client::*;
@@ -60,7 +61,9 @@ enum LifecycleError {
 /// The connector wraps all buckd calls with flushing.
 pub struct BuckdClientConnector {
     client: BuckdClient,
-    pub cgroup_path_of_buck2_daemon: Option<String>,
+    pub(crate) daemon_pid: i64,
+    pub(crate) cgroup_path_of_buck2_daemon: Option<String>,
+    pub(crate) daemon_start_instant: Option<Instant>,
 }
 
 impl BuckdClientConnector {
@@ -589,7 +592,7 @@ impl FlushingBuckdClient<'_> {
     stream_method!(
         hydration,
         HydrationRequest,
-        GenericResponse,
+        HydrationResponse,
         NoPartialResult
     );
 

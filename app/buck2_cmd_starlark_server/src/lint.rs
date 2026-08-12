@@ -20,8 +20,8 @@ use buck2_common::io::IoProvider;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::name::CellName;
 use buck2_error::internal_error;
+use buck2_hash::IntentionallyStdHashSet;
 use buck2_hash::StdBuckHashMap;
-use buck2_hash::StdBuckHashSet;
 use buck2_interpreter::file_type::StarlarkFileType;
 use buck2_interpreter::paths::path::StarlarkPath;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
@@ -43,7 +43,7 @@ use crate::util::paths::starlark_files;
 /// The cache of names for a path, keyed by its CellName and its path type.
 struct Cache<'a> {
     dice: &'a DiceTransaction,
-    cached: StdBuckHashMap<(CellName, StarlarkFileType), Arc<StdBuckHashSet<String>>>,
+    cached: StdBuckHashMap<(CellName, StarlarkFileType), Arc<IntentionallyStdHashSet<String>>>,
 }
 
 impl<'a> Cache<'a> {
@@ -57,13 +57,13 @@ impl<'a> Cache<'a> {
     pub(crate) async fn get_names(
         &mut self,
         path: &StarlarkPath<'_>,
-    ) -> buck2_error::Result<Arc<StdBuckHashSet<String>>> {
+    ) -> buck2_error::Result<Arc<IntentionallyStdHashSet<String>>> {
         let path_type = path.file_type();
         let cell = path.cell();
         if let Some(res) = self.cached.get(&(cell, path_type)) {
             return Ok(res.dupe());
         }
-        let env: Environment = Environment::new(cell, path_type, &mut self.dice.clone()).await?;
+        let env: Environment = Environment::new(cell, path_type, &mut self.dice.ctx()).await?;
         let res = Arc::new(env.get_names(path_type, self.dice).await?);
         self.cached.insert((cell, path_type), res.dupe());
         Ok(res)
@@ -111,14 +111,20 @@ impl StarlarkServerSubcommand for StarlarkLintCommand {
         _client_ctx: ClientContext,
     ) -> buck2_error::Result<()> {
         server_ctx
-            .with_dice_ctx(|server_ctx, mut ctx| async move {
-                let cell_resolver = &ctx.get_cell_resolver().await?;
+            .with_dice_ctx(|server_ctx, ctx| async move {
+                let cell_resolver = &ctx.ctx().get_cell_resolver().await?;
                 let io = &ctx.global_data().get_io_provider();
 
                 let mut stdout = stdout.as_writer();
                 let mut lint_count = 0;
-                let files =
-                    starlark_files(&mut ctx, &self.paths, server_ctx, cell_resolver, &**io).await?;
+                let files = starlark_files(
+                    &mut ctx.ctx(),
+                    &self.paths,
+                    server_ctx,
+                    cell_resolver,
+                    &**io,
+                )
+                .await?;
                 let mut cache = Cache::new(&ctx);
 
                 for file in &files {

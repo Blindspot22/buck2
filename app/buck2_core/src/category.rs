@@ -15,10 +15,11 @@
 //! category of all actions that invoke a C++ compiler, of which there are potentially many in a single C++ rule
 //! implementation.
 
+use std::sync::LazyLock;
+
 use allocative::Allocative;
 use buck2_hash::BuckHasher;
 use dupe::Dupe;
-use once_cell::sync::Lazy;
 use pagable::Pagable;
 use pagable::PagableDeserialize;
 use pagable::PagableDeserializer;
@@ -27,6 +28,7 @@ use pagable::PagableSerializer;
 use regex::Regex;
 use static_interner::Intern;
 use static_interner::interner;
+use strong_hash::StrongHash;
 
 /// Interned category data, representing a family of actions.
 #[derive(
@@ -36,6 +38,7 @@ use static_interner::interner;
     Eq,
     Hash,
     Allocative,
+    StrongHash,
     derive_more::Display,
     Pagable
 )]
@@ -53,6 +56,7 @@ interner!(CATEGORY_INTERNER, BuckHasher, CategoryData, String);
     Eq,
     Hash,
     Allocative,
+    StrongHash,
     derive_more::Display
 )]
 pub struct Category(Intern<CategoryData>);
@@ -102,8 +106,8 @@ impl<'a> CategoryRef<'a> {
     }
 
     pub fn new(s: &'a str) -> buck2_error::Result<Self> {
-        static CATEGORY_REGEX: Lazy<Regex> =
-            Lazy::new(|| Regex::new("^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$").unwrap());
+        static CATEGORY_REGEX: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new("^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$").unwrap());
 
         if !CATEGORY_REGEX.is_match(s) {
             Err(CategoryParseError::NotSnakeCase(s.to_owned()).into())

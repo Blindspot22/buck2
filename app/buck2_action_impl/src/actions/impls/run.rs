@@ -49,13 +49,13 @@ use buck2_build_api::interpreter::rule_defs::cmd_args::SingletonCommandLineSink;
 use buck2_build_api::interpreter::rule_defs::cmd_args::StarlarkCmdArgs;
 use buck2_build_api::interpreter::rule_defs::cmd_args::path_format;
 use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
-use buck2_build_api::interpreter::rule_defs::provider::builtin::worker_info::FrozenWorkerInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::worker_info::WorkerInfo;
 use buck2_build_signals::env::WaitingCategory;
 use buck2_build_signals::env::WaitingData;
 use buck2_common::io::trace::TracingIoProvider;
 use buck2_core::category::Category;
 use buck2_core::category::CategoryRef;
+use buck2_core::configuration::pair::Configuration;
 use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
@@ -66,6 +66,7 @@ use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::buck_out_path::BuckOutPathKind;
 use buck2_core::fs::buck_out_path::BuildArtifactPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
+use buck2_core::target::label::label::TargetLabel;
 use buck2_error::BuckErrorContext;
 use buck2_error::buck2_error;
 use buck2_error::internal_error;
@@ -94,42 +95,42 @@ use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_hash::BuckIndexMap;
 use buck2_hash::BuckIndexSet;
 use buck2_hash::buck_indexmap;
-use buck2_util::thin_box::ThinBoxSlice;
 use derive_more::Display;
 use dupe::Dupe;
 use gazebo::prelude::*;
 use host_sharing::HostSharingRequirements;
 use host_sharing::WeightClass;
 use itertools::Itertools;
+use mini_vec::MiniBoxSlice;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use serde_json::json;
 use sorted_vector_map::SortedVectorMap;
 use starlark::collections::SmallSet;
+use starlark::values::AllocValue;
 use starlark::values::Freeze;
+use starlark::values::FreezeBranded;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
 use starlark::values::FrozenStringValue;
-use starlark::values::FrozenValueOfUnchecked;
-use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
-use starlark::values::OwnedFrozenValue;
-use starlark::values::OwnedFrozenValueTyped;
+use starlark::values::OwnedFrozen;
 use starlark::values::ProvidesStaticType;
 use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::StringValue;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
+use starlark::values::Value;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueTyped;
-use starlark::values::ValueTypedComplex;
 use starlark::values::dict::AllocDict;
 use starlark::values::dict::DictRef;
 use starlark::values::dict::DictType;
 use starlark::values::starlark_value;
+use strong_hash::StrongHash;
 
 use self::dep_files::DepFileBundle;
 use crate::actions::impls::offline;
@@ -168,7 +169,7 @@ impl Display for MetadataParameter {
 }
 
 /// A key that uniquely identifies a RunAction.
-#[derive(Eq, PartialEq, Hash, Display, Allocative)]
+#[derive(Eq, PartialEq, Hash, Clone, Dupe, Display, Allocative, StrongHash)]
 #[display(
     "{} {} {}",
     owner,
@@ -178,14 +179,25 @@ impl Display for MetadataParameter {
 pub(crate) struct RunActionKey {
     owner: BaseDeferredKey,
     category: Category,
-    identifier: Option<String>,
+    identifier: Option<Arc<str>>,
+}
+
+/// The configuration-independent identity of a `RunActionKey`
+#[derive(Eq, PartialEq, Hash, Clone, Dupe, Allocative, StrongHash)]
+pub(crate) enum LogicalActionKey {
+    Configured {
+        target: TargetLabel,
+        category: Category,
+        identifier: Option<Arc<str>>,
+    },
+    Other(RunActionKey),
 }
 
 impl RunActionKey {
     pub(crate) fn new(
         owner: BaseDeferredKey,
         category: Category,
-        identifier: Option<String>,
+        identifier: Option<Arc<str>>,
     ) -> Self {
         Self {
             owner,
@@ -194,11 +206,36 @@ impl RunActionKey {
         }
     }
 
+    pub(crate) fn owner(&self) -> &BaseDeferredKey {
+        &self.owner
+    }
+
+    /// The target configuration (`cfg` + `exec_cfg`) of this action, if it is owned by a configured
+    /// target. `None` for anon-target and BXL actions, which have no such configuration.
+    pub(crate) fn configuration(&self) -> Option<Configuration> {
+        self.owner()
+            .unpack_target_label()
+            .map(|t| t.cfg_pair().dupe())
+    }
+
     pub(crate) fn from_action_execution_target(target: ActionExecutionTarget<'_>) -> Self {
         Self {
             owner: target.owner().dupe(),
             category: target.category().to_owned(),
-            identifier: target.identifier().map(|t| t.to_owned()),
+            identifier: target.identifier().map(Arc::from),
+        }
+    }
+
+    pub(crate) fn to_logical(&self) -> LogicalActionKey {
+        match &self.owner {
+            BaseDeferredKey::TargetLabel(configured) => LogicalActionKey::Configured {
+                target: configured.unconfigured().dupe(),
+                category: self.category,
+                identifier: self.identifier.dupe(),
+            },
+            BaseDeferredKey::AnonTarget(_) | BaseDeferredKey::BxlLabel(_) => {
+                LogicalActionKey::Other(self.dupe())
+            }
         }
     }
 }
@@ -254,8 +291,8 @@ pub(crate) struct UnregisteredRunAction {
     pub(crate) allow_offline_output_cache: bool,
     pub(crate) force_full_hybrid_if_capable: bool,
     pub(crate) unique_input_inodes: bool,
-    pub(crate) remote_execution_dependencies: ThinBoxSlice<RemoteExecutorDependency>,
-    pub(crate) re_gang_workers: ThinBoxSlice<ReGangWorker>,
+    pub(crate) remote_execution_dependencies: MiniBoxSlice<RemoteExecutorDependency>,
+    pub(crate) re_gang_workers: MiniBoxSlice<ReGangWorker>,
     // Since this is usually None, use a Box to avoid using memory that is the size
     // of RemoteExecutorCustomImage.
     pub(crate) remote_execution_custom_image: Option<Box<RemoteExecutorCustomImage>>,
@@ -268,8 +305,8 @@ impl UnregisteredAction for UnregisteredRunAction {
     fn register(
         self: Box<Self>,
         outputs: BuckIndexSet<BuildArtifact>,
-        starlark_data: Option<OwnedFrozenValue>,
-        error_handler: Option<OwnedFrozenValue>,
+        starlark_data: Option<OwnedFrozen<Value<'static>>>,
+        error_handler: Option<OwnedFrozen<Value<'static>>>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         let starlark_values =
             starlark_data.ok_or_else(|| internal_error!("module data to be present"))?;
@@ -284,8 +321,8 @@ pub(crate) struct StarlarkRunActionValues<'v> {
     pub(crate) exe: ValueTyped<'v, StarlarkCmdArgs<'v>>,
     pub(crate) args: ValueTyped<'v, StarlarkCmdArgs<'v>>,
     pub(crate) env: Option<ValueOfUnchecked<'v, DictType<String, ValueAsCommandLineLike<'static>>>>,
-    pub(crate) worker: Option<ValueTypedComplex<'v, WorkerInfo<'v>>>,
-    pub(crate) remote_worker: Option<ValueTypedComplex<'v, WorkerInfo<'v>>>,
+    pub(crate) worker: Option<ValueTyped<'v, WorkerInfo<'v>>>,
+    pub(crate) remote_worker: Option<ValueTyped<'v, WorkerInfo<'v>>>,
     pub(crate) category: StringValue<'v>,
     pub(crate) identifier: Option<StringValue<'v>>,
     pub(crate) outputs_for_error_handler: Vec<ValueTyped<'v, StarlarkOutputArtifact<'v>>>,
@@ -294,37 +331,48 @@ pub(crate) struct StarlarkRunActionValues<'v> {
 #[derive(
     Debug,
     Display,
-    Trace,
     ProvidesStaticType,
     NoSerialize,
     Allocative,
     StarlarkPagable
 )]
 #[display("RunActionValues")]
-pub(crate) struct FrozenStarlarkRunActionValues {
-    pub(crate) exe: FrozenValueTyped<'static, FrozenStarlarkCmdArgs>,
-    pub(crate) args: FrozenValueTyped<'static, FrozenStarlarkCmdArgs>,
-    pub(crate) env:
-        Option<FrozenValueOfUnchecked<'static, DictType<String, ValueAsCommandLineLike<'static>>>>,
-    pub(crate) worker: Option<FrozenValueTyped<'static, FrozenWorkerInfo>>,
-    pub(crate) remote_worker: Option<FrozenValueTyped<'static, FrozenWorkerInfo>>,
+pub(crate) struct FrozenStarlarkRunActionValues<'v> {
+    pub(crate) exe: ValueTyped<'v, FrozenStarlarkCmdArgs<'v>>,
+    pub(crate) args: ValueTyped<'v, FrozenStarlarkCmdArgs<'v>>,
+    pub(crate) env: Option<ValueOfUnchecked<'v, DictType<String, ValueAsCommandLineLike<'static>>>>,
+    pub(crate) worker: Option<ValueTyped<'v, WorkerInfo<'v>>>,
+    pub(crate) remote_worker: Option<ValueTyped<'v, WorkerInfo<'v>>>,
+    // The strings stay unbranded so that `category`/`identifier` can hand out
+    // `&'static str`s.
     pub(crate) category: FrozenStringValue,
     pub(crate) identifier: Option<FrozenStringValue>,
-    pub(crate) outputs_for_error_handler:
-        Vec<FrozenValueTyped<'static, FrozenStarlarkOutputArtifact>>,
+    pub(crate) outputs_for_error_handler: Vec<ValueTyped<'v, FrozenStarlarkOutputArtifact<'v>>>,
 }
+
+starlark::register_simple_vtable_entry!(FrozenStarlarkRunActionValues<'static>);
+// SAFETY: The vtable entry is registered above; the deser type id is
+// lifetime-erased, so the `'static` instantiation covers all heap lifetimes.
+unsafe impl<'v> starlark::__derive_refs::VtableRegistered for FrozenStarlarkRunActionValues<'v> {}
 
 #[starlark_value(type = "RunActionValues")]
 impl<'v> StarlarkValue<'v> for StarlarkRunActionValues<'v> {}
 
 #[starlark_value(type = "RunActionValues")]
-impl<'v> StarlarkValue<'v> for FrozenStarlarkRunActionValues {
+impl<'v> StarlarkValue<'v> for FrozenStarlarkRunActionValues<'v> {
     type Canonical = StarlarkRunActionValues<'v>;
 }
 
-impl<'v> Freeze for StarlarkRunActionValues<'v> {
-    type Frozen = FrozenStarlarkRunActionValues;
-    fn freeze(self, freezer: &Freezer) -> FreezeResult<Self::Frozen> {
+impl<'v> AllocValue<'v> for StarlarkRunActionValues<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
+        heap.alloc_complex_branded(self)
+    }
+}
+
+impl<'v> FreezeBranded for StarlarkRunActionValues<'v> {
+    type Frozen<'fv> = FrozenStarlarkRunActionValues<'fv>;
+
+    fn freeze<'fv>(self, freezer: &Freezer<'fv>) -> FreezeResult<Self::Frozen<'fv>> {
         let StarlarkRunActionValues {
             exe,
             args,
@@ -335,20 +383,21 @@ impl<'v> Freeze for StarlarkRunActionValues<'v> {
             identifier,
             outputs_for_error_handler,
         } = self;
+
         Ok(FrozenStarlarkRunActionValues {
-            exe: exe.freeze(freezer)?,
-            args: args.freeze(freezer)?,
-            env: env.freeze(freezer)?,
-            worker: worker.freeze(freezer)?,
-            remote_worker: remote_worker.freeze(freezer)?,
-            category: category.freeze(freezer)?,
-            identifier: identifier.freeze(freezer)?,
+            exe: FreezeBranded::freeze(exe, freezer)?,
+            args: FreezeBranded::freeze(args, freezer)?,
+            env: FreezeBranded::freeze(env, freezer)?,
+            worker: FreezeBranded::freeze(worker, freezer)?,
+            remote_worker: FreezeBranded::freeze(remote_worker, freezer)?,
+            category: Freeze::freeze(category, freezer)?,
+            identifier: Freeze::freeze(identifier, freezer)?,
             // N.B. collect::<Result<_>> sets the lower bound to zero,
             // which can cause over-allocations in frozen containers.
             outputs_for_error_handler: {
                 let mut frozen_outputs = Vec::with_capacity(outputs_for_error_handler.len());
                 for output in outputs_for_error_handler {
-                    frozen_outputs.push(output.freeze(freezer)?);
+                    frozen_outputs.push(FreezeBranded::freeze(output, freezer)?);
                 }
                 frozen_outputs
             },
@@ -356,10 +405,8 @@ impl<'v> Freeze for StarlarkRunActionValues<'v> {
     }
 }
 
-impl FrozenStarlarkRunActionValues {
-    pub(crate) fn worker<'v>(
-        &'v self,
-    ) -> buck2_error::Result<Option<ValueOf<'v, &'v WorkerInfo<'v>>>> {
+impl<'v> FrozenStarlarkRunActionValues<'v> {
+    pub(crate) fn worker(&self) -> buck2_error::Result<Option<ValueOf<'v, &'v WorkerInfo<'v>>>> {
         let Some(worker) = self.worker else {
             return Ok(None);
         };
@@ -368,8 +415,8 @@ impl FrozenStarlarkRunActionValues {
             .map(Some)
     }
 
-    pub(crate) fn remote_worker<'v>(
-        &'v self,
+    pub(crate) fn remote_worker(
+        &self,
     ) -> buck2_error::Result<Option<ValueOf<'v, &'v WorkerInfo<'v>>>> {
         let Some(remote_worker) = self.remote_worker else {
             return Ok(None);
@@ -400,9 +447,9 @@ struct UnpackedRunActionValues<'v> {
 #[derive(Debug, Allocative, Pagable)]
 pub(crate) struct RunAction {
     inner: UnregisteredRunAction,
-    starlark_values: OwnedFrozenValueTyped<FrozenStarlarkRunActionValues>,
+    starlark_values: OwnedFrozen<ValueTyped<'static, FrozenStarlarkRunActionValues<'static>>>,
     outputs: BoxSliceSet<BuildArtifact>,
-    error_handler: Option<OwnedFrozenValue>,
+    error_handler: Option<OwnedFrozen<Value<'static>>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -459,7 +506,7 @@ impl RunAction {
         &'a self,
         artifact_visitor: &mut dyn CommandLineArtifactVisitor<'a>,
     ) -> buck2_error::Result<()> {
-        let values = Self::unpack(&self.starlark_values)?;
+        let values = Self::unpack(self.values())?;
         values.args.visit_artifacts(artifact_visitor)?;
         values.exe.visit_artifacts(artifact_visitor)?;
         if let Some(worker) = values.worker {
@@ -477,15 +524,20 @@ impl RunAction {
         Ok(())
     }
 
+    /// The branded view of `starlark_values`; confine to sync scopes.
+    fn values<'v>(&'v self) -> &'v FrozenStarlarkRunActionValues<'v> {
+        self.starlark_values.as_ref().value().as_ref()
+    }
+
     fn unpack<'v>(
-        values: &'v OwnedFrozenValueTyped<FrozenStarlarkRunActionValues>,
+        values: &'v FrozenStarlarkRunActionValues<'v>,
     ) -> buck2_error::Result<UnpackedRunActionValues<'v>> {
-        let exe: &dyn CommandLineArgLike = &*values.exe;
-        let args: &dyn CommandLineArgLike = &*values.args;
+        let exe: &dyn CommandLineArgLike = values.exe.as_ref();
+        let args: &dyn CommandLineArgLike = values.args.as_ref();
         let env = match values.env {
             None => Vec::new(),
             Some(env) => {
-                let d = DictRef::from_value(env.to_value().get())
+                let d = DictRef::from_value(env.get())
                     .ok_or_else(|| internal_error!("expecting dict"))?;
                 let mut res = Vec::with_capacity(d.len());
                 for (k, v) in d.iter() {
@@ -542,7 +594,7 @@ impl RunAction {
         Option<RemoteWorkerSpec>,
     )> {
         let fs = &action_execution_ctx.executor_fs();
-        let values = Self::unpack(&self.starlark_values)?;
+        let values = Self::unpack(self.values())?;
 
         // Creating the artifact_path_mapping isn't free, because we have to iterate TSets.
         // Therefore, only create a mapping if we're going to use it - i.e. if the input
@@ -804,15 +856,23 @@ impl RunAction {
 
     pub(crate) fn new(
         inner: UnregisteredRunAction,
-        starlark_values: OwnedFrozenValue,
+        starlark_values: OwnedFrozen<Value<'static>>,
         outputs: BuckIndexSet<BuildArtifact>,
-        error_handler: Option<OwnedFrozenValue>,
+        error_handler: Option<OwnedFrozen<Value<'static>>>,
     ) -> buck2_error::Result<Self> {
-        let starlark_values = starlark_values
-            .downcast_starlark()
+        let starlark_values: OwnedFrozen<
+            ValueTyped<'static, FrozenStarlarkRunActionValues<'static>>,
+        > = starlark_values
+            // The eta-expansion is load-bearing: a closure gets the
+            // higher-ranked signature `try_map` needs, the fn item does not.
+            .try_map(
+                #[allow(clippy::redundant_closure)]
+                |v| ValueTyped::new_err(v),
+            )
+            .map_err(buck2_error::Error::from)
             .internal_error("Must be `RunActionValues`")?;
 
-        Self::unpack(&starlark_values)?;
+        Self::unpack(starlark_values.as_ref().value().as_ref())?;
 
         // This is checked when declared, but we depend on it so make it clear that it's enforced.
         if outputs.is_empty() {
@@ -1269,7 +1329,7 @@ impl RunAction {
     }
 
     fn outputs_for_error_handler(&self) -> buck2_error::Result<Vec<BuildArtifactPath>> {
-        self.starlark_values
+        self.values()
             .outputs_for_error_handler
             .iter()
             .map(|artifact| {
@@ -1415,11 +1475,11 @@ impl Action for RunAction {
     }
 
     fn category(&self) -> CategoryRef<'_> {
-        CategoryRef::unchecked_new(self.starlark_values.category.as_str())
+        CategoryRef::unchecked_new(self.values().category.as_str())
     }
 
     fn identifier(&self) -> Option<&str> {
-        self.starlark_values.identifier.map(|x| x.as_str())
+        self.values().identifier.map(|x| x.as_str())
     }
 
     fn always_print_stderr(&self) -> bool {
@@ -1444,7 +1504,7 @@ impl Action for RunAction {
         artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> BuckIndexMap<String, String> {
         let mut cli_rendered = Vec::<String>::new();
-        let values = Self::unpack(&self.starlark_values).unwrap();
+        let values = Self::unpack(self.values()).unwrap();
         let mut fmt = CommandLineBuilder::new(&mut cli_rendered, artifact_path_mapping, fs);
         values.exe.add_to_command_line(&mut fmt).unwrap();
         values.args.add_to_command_line(&mut fmt).unwrap();
@@ -1468,7 +1528,7 @@ impl Action for RunAction {
         }
     }
 
-    fn error_handler(&self) -> Option<&OwnedFrozenValue> {
+    fn error_handler(&self) -> Option<&OwnedFrozen<Value<'static>>> {
         self.error_handler.as_ref()
     }
 
@@ -1479,10 +1539,10 @@ impl Action for RunAction {
         outputs: Option<&ActionOutputs>,
     ) -> buck2_error::Result<ValueOfUnchecked<'v, DictType<StarlarkArtifact, StarlarkArtifactValue>>>
     {
-        let mut artifact_value_dict =
-            Vec::with_capacity(self.starlark_values.outputs_for_error_handler.len());
+        let values = self.values();
+        let mut artifact_value_dict = Vec::with_capacity(values.outputs_for_error_handler.len());
 
-        for x in self.starlark_values.outputs_for_error_handler.iter() {
+        for x in values.outputs_for_error_handler.iter() {
             let artifact = x.inner().artifact();
 
             let content_based_path_hash = if artifact.path_resolution_requires_artifact_value() {
@@ -1636,7 +1696,7 @@ impl Action for RunAction {
         // Cache outputs if tracing and parameter enabled
         if self.inner.allow_offline_output_cache {
             let io_provider = ctx.io_provider();
-            if let Some(tracer) = TracingIoProvider::from_io(&*io_provider) {
+            if let Some(tracer) = TracingIoProvider::from_io(io_provider) {
                 for output in self.outputs.iter() {
                     if let Some(value) = outputs.get(output.get_path()) {
                         let offline_cache_path = offline::declare_copy_to_offline_output_cache(

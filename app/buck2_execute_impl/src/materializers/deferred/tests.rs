@@ -23,6 +23,7 @@ use buck2_execute::materialize::utils::dynamic_priority_handle::DynamicPriorityH
 use buck2_execute::materialize::utils::priority_semaphore::Priority;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_hash::StdBuckHashMap;
+use buck2_hash::StdBuckHashSet;
 use parking_lot::Mutex;
 
 use super::*;
@@ -40,7 +41,7 @@ fn test_find_artifacts() -> buck2_error::Result<()> {
     let file = FileMetadata::empty(DigestConfig::testing_default().cas_digest_config());
 
     // Build deps with artifacts 1-3, and non-artifacts 1-2
-    let mut builder = ActionDirectoryBuilder::empty();
+    let mut builder = ActionDirectoryBuilder::empty_non_exhaustive();
     insert_file(
         &mut builder,
         artifact1.join(ForwardRelativePath::new("f1").unwrap()),
@@ -118,6 +119,7 @@ mod state_machine {
     use buck2_fs::paths::RelativePathBuf;
     use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
     use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
+    use buck2_hash::IntentionallyStdHashMap;
     use buck2_util::threads::ignore_stack_overflow_checks_for_future;
     use buck2_wrapper_common::invocation_id::TraceId;
     use futures::StreamExt;
@@ -241,7 +243,7 @@ mod state_machine {
                 let _ignored = command_sender.send_low_priority(
                     LowPriorityMaterializerCommand::MaterializationFinished {
                         path,
-                        timestamp: Utc::now(),
+                        timestamp: jiff::Timestamp::now(),
                         version,
                         result: Ok(()),
                     },
@@ -326,7 +328,7 @@ mod state_machine {
         fn create_ttl_refresh(
             self: &Arc<Self>,
             _tree: &ArtifactTree,
-            _min_ttl: Duration,
+            _min_ttl: SignedDuration,
         ) -> Option<BoxFuture<'static, buck2_error::Result<()>>> {
             unimplemented!()
         }
@@ -427,8 +429,8 @@ mod state_machine {
     fn make_db(fs: &ProjectRoot) -> (MaterializerStateSqliteDb, Option<MaterializerState>) {
         let (db, state) = testing_materializer_state_sqlite_db(
             fs,
-            StdBuckHashMap::from([("version".to_owned(), "0".to_owned())]),
-            StdBuckHashMap::default(),
+            IntentionallyStdHashMap::from([("version".to_owned(), "0".to_owned())]),
+            IntentionallyStdHashMap::new(),
             None,
         )
         .unwrap();
@@ -495,6 +497,7 @@ mod state_machine {
     ) {
         let (mut processor, command_sender, command_receiver, daemon_dispatcher_events) =
             make_processor_for_io(io.dupe());
+        let stats = processor.stats.dupe();
 
         let handle = {
             let (sender, recv) = oneshot::channel();
@@ -513,7 +516,7 @@ mod state_machine {
                     command_receiver,
                     TtlRefreshConfiguration {
                         frequency: std::time::Duration::default(),
-                        min_ttl: chrono::Duration::zero(),
+                        min_ttl: jiff::SignedDuration::ZERO,
                         enabled: false,
                     },
                     AccessTimesUpdates::Disabled,
@@ -535,7 +538,7 @@ mod state_machine {
                 materializer_state_info: buck2_data::MaterializerStateInfo {
                     num_entries_from_sqlite: 0,
                 },
-                stats: Arc::new(DeferredMaterializerStats::default()),
+                stats,
             },
             handle,
             daemon_dispatcher_events,
@@ -591,7 +594,7 @@ mod state_machine {
                 .await;
             assert_eq!(dm.io.take_log(), &[(Op::Materialize, path.clone())]);
 
-            dm.testing_materialization_finished(path.clone(), Utc::now(), res);
+            dm.testing_materialization_finished(path.clone(), jiff::Timestamp::now(), res);
             assert_eq!(dm.io.take_log(), &[]);
 
             // When redeclaring the same artifact nothing happens.
@@ -619,7 +622,7 @@ mod state_machine {
         target_from_symlink: &RelativePathBuf,
         digest_config: DigestConfig,
     ) -> buck2_error::Result<ArtifactValue> {
-        let mut deps = ActionDirectoryBuilder::empty();
+        let mut deps = ActionDirectoryBuilder::empty_non_exhaustive();
         let target = ActionDirectoryEntry::Leaf(ActionDirectoryMember::File(FileMetadata::empty(
             digest_config.cas_digest_config(),
         )));
@@ -634,6 +637,168 @@ mod state_machine {
             ),
         );
         Ok(symlink_value)
+    }
+
+    #[tokio::test]
+    async fn test_final_output_accounting_includes_symlink_deps() -> buck2_error::Result<()> {
+        ignore_stack_overflow_checks_for_future(async {
+            let (mut dm, _) = make_processor(Default::default());
+            let digest_config = dm.io.digest_config();
+            let target_path = make_path("foo/target");
+            let symlink_path = make_path("foo/link");
+            let target_from_symlink = RelativePathBuf::from_system_path(Path::new("target"))?;
+            let content = b"target contents";
+            let target_value = ArtifactValue::file(FileMetadata {
+                digest: TrackedFileDigest::from_content(content, digest_config.cas_digest_config()),
+                is_executable: false,
+            });
+            let symlink_value = make_artifact_value_with_symlink_dep(
+                &target_path,
+                &target_from_symlink,
+                digest_config,
+            )?;
+
+            dm.testing_declare_existing(&target_path, target_value.dupe());
+            dm.testing_declare_existing(&symlink_path, symlink_value);
+            assert_eq!(
+                *dm.stats.sizes.read(),
+                MaterializerSizeStats {
+                    final_output: 0,
+                    intermediate_only: content.len() as u64,
+                }
+            );
+            let persisted = dm
+                .sqlite_db
+                .as_mut()
+                .expect("test processor should have sqlite state")
+                .materializer_state_table()
+                .read_materializer_state(digest_config)?;
+            assert_eq!(persisted.len(), 2);
+            assert!(
+                persisted
+                    .iter()
+                    .all(|entry| entry.classification == ArtifactClassification::IntermediateOnly)
+            );
+
+            let (sender, receiver) = oneshot::channel();
+            dm.testing_process_one_command(MaterializerCommand::Ensure(
+                vec![symlink_path.clone()],
+                MaterializationPurpose::FinalOutput,
+                EventDispatcher::null(),
+                None,
+                sender,
+            ));
+            let _materializations = receiver.await?;
+
+            for path in [&target_path, &symlink_path] {
+                let data = dm
+                    .tree
+                    .prefix_get(&mut path.iter())
+                    .expect("declared artifact should be present");
+                assert_eq!(data.classification, ArtifactClassification::FinalOutput);
+            }
+            assert_eq!(
+                *dm.stats.sizes.read(),
+                MaterializerSizeStats {
+                    final_output: content.len() as u64,
+                    intermediate_only: 0,
+                }
+            );
+            let persisted = dm
+                .sqlite_db
+                .as_mut()
+                .expect("test processor should have sqlite state")
+                .materializer_state_table()
+                .read_materializer_state(digest_config)?;
+            assert!(
+                persisted
+                    .iter()
+                    .all(|entry| entry.classification == ArtifactClassification::FinalOutput)
+            );
+
+            dm.testing_declare_existing(&target_path, target_value);
+            let data = dm
+                .tree
+                .prefix_get(&mut target_path.iter())
+                .expect("redeclared artifact should be present");
+            assert_eq!(data.classification, ArtifactClassification::FinalOutput);
+            assert_eq!(
+                *dm.stats.sizes.read(),
+                MaterializerSizeStats {
+                    final_output: content.len() as u64,
+                    intermediate_only: 0,
+                }
+            );
+
+            let (sender, receiver) = oneshot::channel();
+            dm.testing_process_one_command(MaterializerCommand::InvalidateFilePaths(
+                vec![target_path, symlink_path],
+                sender,
+                EventDispatcher::null(),
+                None,
+            ));
+            receiver.await?.await?;
+            assert_eq!(*dm.stats.sizes.read(), MaterializerSizeStats::default());
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_skipped_final_output_stays_intermediate_only() -> buck2_error::Result<()> {
+        ignore_stack_overflow_checks_for_future(async {
+            let io = Arc::new(StubIoHandler::new(temp_root()));
+            let digest_config = io.digest_config();
+            let path = make_path("foo/skipped");
+            let content = b"skipped contents";
+            let value = ArtifactValue::file(FileMetadata {
+                digest: TrackedFileDigest::from_content(content, digest_config.cas_digest_config()),
+                is_executable: false,
+            });
+            let (mut dm, _handle, _events) = make_materializer(io, None).await;
+            dm.materialize_final_artifacts = false;
+            dm.declare_existing(vec![DeclareArtifactPayload {
+                path: path.clone(),
+                artifact: value,
+                configuration_path: None,
+            }])
+            .await?;
+            assert!(dm.has_artifact_at(path.clone()).await?);
+
+            assert!(!dm.try_materialize_final_artifact(path.clone()).await?);
+            assert_eq!(
+                *dm.stats.sizes.read(),
+                MaterializerSizeStats {
+                    final_output: 0,
+                    intermediate_only: content.len() as u64,
+                }
+            );
+
+            let mut snapshot = buck2_data::Snapshot::default();
+            dm.add_snapshot_stats(&mut snapshot);
+            assert_eq!(snapshot.deferred_materializer_final_output_logical_bytes, 0);
+            assert_eq!(
+                snapshot.deferred_materializer_intermediate_only_logical_bytes,
+                content.len() as u64
+            );
+
+            dm.materialize_final_artifacts = true;
+            assert!(dm.try_materialize_final_artifact(path).await?);
+            let mut snapshot = buck2_data::Snapshot::default();
+            dm.add_snapshot_stats(&mut snapshot);
+            assert_eq!(
+                snapshot.deferred_materializer_final_output_logical_bytes,
+                content.len() as u64
+            );
+            assert_eq!(
+                snapshot.deferred_materializer_intermediate_only_logical_bytes,
+                0
+            );
+            dm.abort();
+            Ok(())
+        })
+        .await
     }
 
     #[tokio::test]
@@ -737,7 +902,7 @@ mod state_machine {
             assert_eq!(logs, &[(Op::Materialize, symlink_path.clone())]);
 
             // Mark the symlink as materialized
-            dm.testing_materialization_finished(symlink_path.clone(), Utc::now(), res);
+            dm.testing_materialization_finished(symlink_path.clone(), jiff::Timestamp::now(), res);
             assert_eq!(dm.io.take_log(), &[]);
 
             // Declare symlink target
@@ -1135,7 +1300,7 @@ mod state_machine {
 
             let res = dm
                 .clean_stale_artifacts(CleanStaleArtifactsArgs {
-                    keep_since_time: DateTime::<Utc>::MAX_UTC,
+                    keep_since_time: jiff::Timestamp::MAX,
                     dry_run: false,
                     tracked_only: false,
                     adaptive_low_disk_threshold: None,
@@ -1188,7 +1353,7 @@ mod state_machine {
             let dm = Arc::new(dm);
             let dm_dup = dm.dupe();
             let fut = dm_dup.clean_stale_artifacts(CleanStaleArtifactsArgs {
-                keep_since_time: DateTime::<Utc>::MAX_UTC,
+                keep_since_time: jiff::Timestamp::MAX,
                 dry_run: false,
                 tracked_only: false,
                 adaptive_low_disk_threshold: None,
@@ -1231,7 +1396,7 @@ mod state_machine {
             let dm = Arc::new(dm);
             let dm_dup = dm.dupe();
             let fut = dm_dup.clean_stale_artifacts(CleanStaleArtifactsArgs {
-                keep_since_time: DateTime::<Utc>::MAX_UTC,
+                keep_since_time: jiff::Timestamp::MAX,
                 dry_run: false,
                 tracked_only: false,
                 adaptive_low_disk_threshold: None,
@@ -1442,7 +1607,7 @@ mod state_machine {
             //   child/file.txt
             //   child/subdir/nested.txt
             //   top_file.txt
-            let mut builder = ActionDirectoryBuilder::empty();
+            let mut builder = ActionDirectoryBuilder::empty_non_exhaustive();
             insert_file(
                 &mut builder,
                 ProjectRelativePathBuf::unchecked_new("child/file.txt".to_owned()),
@@ -1458,6 +1623,7 @@ mod state_machine {
                 ProjectRelativePathBuf::unchecked_new("top_file.txt".to_owned()),
                 FileMetadata::empty(digest_config.cas_digest_config()),
             )?;
+            builder.mark_uniformly_exhaustive();
             let shared_dir = builder
                 .fingerprint(digest_config.as_directory_serializer())
                 .shared(&*INTERNER);
@@ -1546,6 +1712,17 @@ mod state_machine {
     ) {
         let digest_config = dm.io.digest_config();
         let value = ArtifactValue::file(digest_config.empty_file());
+        eager_declare_with_value(dm, path, value, configuration_path);
+    }
+
+    /// Like `eager_declare`, but lets the caller supply the `ArtifactValue` (e.g. a symlink
+    /// with deps) instead of defaulting to an empty file.
+    fn eager_declare_with_value<T: IoHandler>(
+        dm: &mut DeferredMaterializerCommandProcessor<T>,
+        path: &ProjectRelativePathBuf,
+        value: ArtifactValue,
+        configuration_path: Option<ProjectRelativePathBuf>,
+    ) {
         dm.testing_process_one_command(MaterializerCommand::Declare(
             DeclareArtifactPayload {
                 path: path.clone(),
@@ -1782,6 +1959,118 @@ mod state_machine {
                     .any(|(op, p)| *op == Op::Materialize && *p == path),
                 "Fresh materialize IO should have been dispatched"
             );
+        })
+        .await
+    }
+
+    /// Releasing an eager cluster must not cancel Low siblings when any member is High.
+    #[tokio::test]
+    async fn test_eager_release_skips_cancel_when_cluster_has_promoted_member() {
+        ignore_stack_overflow_checks_for_future(async {
+            let config_path = make_path("buck-out/v2/eager/cluster/config");
+            let artifact_a = make_path("buck-out/v2/eager/cluster/a");
+            let artifact_b = make_path("buck-out/v2/eager/cluster/b");
+            let (mut dm, _) = make_processor(Default::default());
+
+            let sender = dm.command_sender.dupe();
+            let leases = dm
+                .eager_materializations
+                .register(vec![config_path.clone()], &sender);
+
+            eager_declare(&mut dm, &artifact_a, Some(config_path.clone()));
+            eager_declare(&mut dm, &artifact_b, Some(config_path.clone()));
+            assert_eq!(
+                get_priority_control(&mut dm, &artifact_a).priority(),
+                Priority::Low
+            );
+            assert_eq!(
+                get_priority_control(&mut dm, &artifact_b).priority(),
+                Priority::Low
+            );
+
+            let _fut_a = dm
+                .materialize_artifact(&artifact_a, EventDispatcher::null())
+                .expect("Expected a materializing future");
+            assert_eq!(
+                get_priority_control(&mut dm, &artifact_a).priority(),
+                Priority::High
+            );
+            assert_eq!(
+                get_priority_control(&mut dm, &artifact_b).priority(),
+                Priority::Low
+            );
+
+            let token_a = get_priority_control(&mut dm, &artifact_a)
+                .cancel_token()
+                .clone();
+            let token_b = get_priority_control(&mut dm, &artifact_b)
+                .cancel_token()
+                .clone();
+
+            drop(leases);
+            dm.testing_process_one_command(MaterializerCommand::ReleaseEagerPath(Arc::new(
+                config_path,
+            )));
+
+            assert!(
+                !token_a.is_cancelled(),
+                "High-priority cluster member must not be cancelled"
+            );
+            assert!(
+                !token_b.is_cancelled(),
+                "Low-priority cluster member must not be cancelled when a sibling is High"
+            );
+        })
+        .await
+    }
+
+    /// High-priority promotion should propagate to direct symlink-dep targets.
+    #[tokio::test]
+    async fn test_priority_promotion_propagates_to_symlink_deps() -> buck2_error::Result<()> {
+        ignore_stack_overflow_checks_for_future(async {
+            let symlink_path = make_path("foo/parent_symlink");
+            let target_path = make_path("foo/dep_target");
+            let target_from_symlink = RelativePathBuf::from_system_path(Path::new("dep_target"))?;
+
+            let (mut dm, _) = make_processor(Default::default());
+            let digest_config = dm.io.digest_config();
+            let sender = dm.command_sender.dupe();
+
+            let _leases = dm
+                .eager_materializations
+                .register(vec![symlink_path.clone(), target_path.clone()], &sender);
+
+            eager_declare(&mut dm, &target_path, None);
+            assert_eq!(
+                get_priority_control(&mut dm, &target_path).priority(),
+                Priority::Low
+            );
+
+            let symlink_value = make_artifact_value_with_symlink_dep(
+                &target_path,
+                &target_from_symlink,
+                digest_config,
+            )?;
+            eager_declare_with_value(&mut dm, &symlink_path, symlink_value, None);
+            assert_eq!(
+                get_priority_control(&mut dm, &symlink_path).priority(),
+                Priority::Low
+            );
+
+            let _fut = dm
+                .materialize_artifact(&symlink_path, EventDispatcher::null())
+                .expect("Expected a materializing future");
+
+            assert_eq!(
+                get_priority_control(&mut dm, &symlink_path).priority(),
+                Priority::High,
+            );
+            assert_eq!(
+                get_priority_control(&mut dm, &target_path).priority(),
+                Priority::High,
+                "Direct symlink-dep target should be promoted to High along with its parent",
+            );
+            Ok(())
         })
         .await
     }

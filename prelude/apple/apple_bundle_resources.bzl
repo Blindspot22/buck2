@@ -97,7 +97,7 @@ def get_apple_bundle_resource_part_list(ctx: AnalysisContext) -> AppleBundleReso
         )
 
     cxx_sanitizer_runtime_info = get_default_binary_dep(ctx.attrs.binary).get(CxxSanitizerRuntimeInfo) if ctx.attrs.binary else None
-    if cxx_sanitizer_runtime_info:
+    if cxx_sanitizer_runtime_info and get_extension_attr(ctx) != "appex":
         runtime_resource_spec = AppleResourceSpec(
             files = cxx_sanitizer_runtime_info.runtime_files,
             destination = AppleResourceDestination("frameworks"),
@@ -455,7 +455,7 @@ def _bundle_parts_for_variant_files(ctx: AnalysisContext, spec: AppleResourceSpe
                 ctx = ctx,
                 file = variant_file,
                 destination = bundle_destination,
-                destination_relative_path = paths.join(locale, paths.basename(variant_file.short_path)),
+                destination_relative_path = paths.join(locale, variant_file.basename),
             )
             for variant_file in variant_files
         ]
@@ -468,7 +468,7 @@ def _run_ibtool(
     output: OutputArtifact,
     action_flags: list[str],
     target_device: [None, str],
-    action_identifier: str,
+    command_for_identifier: str,
     output_is_dir: bool,
 ) -> None:
     # TODO(T110378103): detect and add minimum deployment target automatically
@@ -484,31 +484,34 @@ def _run_ibtool(
     ibtool_command.extend(action_flags)
     if output_is_dir:
         ibtool_command.append('"$TMPDIR"')
+        copy_back = cmd_args(output, format = 'mkdir -p {} && cp -r "$TMPDIR"/ {}')
     else:
-        ibtool_command.append(output)
-    ibtool_command.append(raw_file)
+        output_for_tool_invocation = '"$TMPDIR"/"' + output.basename + '"'
+        ibtool_command.append(output_for_tool_invocation)
+        copy_back = cmd_args(output, format = "cp " + output_for_tool_invocation + " {}")
+    ibtool_command.append(cmd_args(raw_file, format = '"$EXEC_ROOT"/{}'))
 
-    if output_is_dir:
-        # Sandboxing and fs isolation on RE machines results in Xcode tools failing
-        # when those are working in freshly created directories in buck-out.
-        # See https://fb.workplace.com/groups/1042353022615812/permalink/1872164996301273/
-        # As a workaround create a directory in tmp, use it for Xcode tools, then
-        # copy the result to buck-out.
-        wrapper_script, _ = ctx.actions.write(
-            "ibtool_wrapper.sh",
-            [
-                cmd_args("set -euo pipefail"),
-                cmd_args('export TMPDIR="$(mktemp -d)"'),
-                cmd_args(cmd_args(ibtool_command), delimiter = " "),
-                cmd_args(output, format = 'mkdir -p {} && cp -r "$TMPDIR"/ {}'),
-            ],
-            allow_args = True,
-            has_content_based_path = False,
-        )
-        command = cmd_args(["/bin/sh", wrapper_script], hidden = [ibtool_command, output])
-    else:
-        command = ibtool_command
+    # Sandboxing and fs isolation on RE machines results in Xcode tools failing
+    # when those are working in freshly created directories in buck-out.
+    # See https://fb.workplace.com/groups/1042353022615812/permalink/1872164996301273/
+    # As a workaround create a directory in tmp, use it for Xcode tools, then
+    # copy the result to buck-out.
+    script_lines = [
+        cmd_args("set -euo pipefail"),
+        cmd_args('EXEC_ROOT="$PWD"'),
+        cmd_args('TMPDIR="$(mktemp -d)"'),
+        cmd_args(ibtool_command, delimiter = " "),
+        copy_back,
+    ]
 
+    wrapper_script, _ = ctx.actions.write(
+        "ibtool_wrapper_" + _wrapper_suffix(command_for_identifier, raw_file) + ".sh",
+        script_lines,
+        allow_args = True,
+        has_content_based_path = False,
+    )
+    command = cmd_args(["/bin/sh", wrapper_script], hidden = [ibtool_command, output])
+    action_identifier = _ibtool_identifier(command_for_identifier, raw_file)
     processing_options = get_bundle_resource_processing_options(ctx)
     ctx.actions.run(
         command,
@@ -519,15 +522,23 @@ def _run_ibtool(
         identifier = action_identifier,
     )
 
-def _ibtool_identifier(action: str, raw_file: Artifact) -> str:
-    "*.xib files can live in .lproj folders and have the same name, so we need to split the id"
+def _identifier_parts(raw_file: Artifact) -> list[str]:
     identifier_parts = []
-    variant_name = _get_variant_dirname(raw_file)
-    if variant_name:
+    variant_dirname = _get_variant_dirname(raw_file)
+    if variant_dirname:
         # variant_name is like "zh_TW.lproj", and we only want "zh_TW"
+        variant_name = paths.replace_extension(variant_dirname, "")
         identifier_parts.append(variant_name)
     identifier_parts += [raw_file.basename]
+    return identifier_parts
+
+def _ibtool_identifier(action: str, raw_file: Artifact) -> str:
+    "*.xib files can live in .lproj folders and have the same name, so we need to split the id"
+    identifier_parts = _identifier_parts(raw_file)
     return "ibtool_" + action + " " + "/".join(identifier_parts)
+
+def _wrapper_suffix(action: str, raw_file: Artifact) -> str:
+    return "_".join([action] + _identifier_parts(raw_file))
 
 def _compile_ui_resource(
     ctx: AnalysisContext, raw_file: Artifact, output: OutputArtifact, target_device: [None, str] = None, output_is_dir: bool = False
@@ -538,7 +549,7 @@ def _compile_ui_resource(
         output = output,
         action_flags = ["--compile"],
         target_device = target_device,
-        action_identifier = _ibtool_identifier("compile", raw_file),
+        command_for_identifier = "compile",
         output_is_dir = output_is_dir,
     )
 
@@ -549,7 +560,7 @@ def _link_ui_resource(ctx: AnalysisContext, raw_file: Artifact, output: OutputAr
         output = output,
         action_flags = ["--link"],
         target_device = target_device,
-        action_identifier = _ibtool_identifier("link", raw_file),
+        command_for_identifier = "link",
         output_is_dir = output_is_dir,
     )
 
@@ -563,7 +574,7 @@ def _process_apple_resource_file_if_needed(
     codesign_flags_override: list[str] | None = None,
 ) -> AppleBundlePart:
     output_dir = "_ProcessedResources"
-    basename = paths.basename(file.short_path)
+    basename = file.basename
     output_is_contents_dir = False
     if basename.endswith(".plist") or basename.endswith(".stringsdict"):
         processed = ctx.actions.declare_output(paths.join(output_dir, file.short_path), has_content_based_path = False)
@@ -581,14 +592,14 @@ def _process_apple_resource_file_if_needed(
         )
         if get_is_watch_bundle(ctx):
             output_is_contents_dir = True
-            _compile_ui_resource(ctx = ctx, raw_file = file, output = compiled.as_output(), target_device = "watch")
+            _compile_ui_resource(ctx = ctx, raw_file = file, output = compiled.as_output(), target_device = "watch", output_is_dir = True)
             processed = ctx.actions.declare_output(
                 paths.join(output_dir, paths.replace_extension(file.short_path, "_linked_storyboard")), dir = True, has_content_based_path = False
             )
             _link_ui_resource(ctx = ctx, raw_file = compiled, output = processed.as_output(), target_device = "watch", output_is_dir = True)
         else:
             processed = compiled
-            _compile_ui_resource(ctx, file, processed.as_output())
+            _compile_ui_resource(ctx, file, processed.as_output(), output_is_dir = True)
     elif basename.endswith(".xib"):
         if destination_relative_path:
             destination_relative_path = paths.replace_extension(destination_relative_path, ".nib")
@@ -616,7 +627,7 @@ def _get_dest_subpath_for_variant_file(variant_file: Artifact) -> str:
     dir_name = _get_variant_dirname(variant_file)
     if not dir_name:
         fail("Variant files have to be in a directory with name ending in '.lproj' but `{}` was not.".format(variant_file.short_path))
-    file_name = paths.basename(variant_file.short_path)
+    file_name = variant_file.basename
     return paths.join(dir_name, file_name)
 
 def _get_variant_dirname(variant_file: Artifact) -> str | None:

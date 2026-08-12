@@ -17,6 +17,7 @@ pub mod arc_str;
 pub mod async_move_clone;
 pub mod commas;
 pub mod cycle_detector;
+pub mod env_vars;
 pub mod future;
 pub mod golden_test_helper;
 pub mod indent;
@@ -33,7 +34,6 @@ pub mod self_ref;
 pub mod sliding_window;
 pub mod strong_hasher;
 pub mod system_stats;
-pub mod thin_box;
 pub mod threads;
 pub mod time_span;
 pub mod tokio_runtime;
@@ -41,3 +41,5 @@ pub mod truncate;
 
 // Re-export this to encourage people to use it in a fully qualified way.
 pub use async_move_clone::async_move_clone;
+// Re-export because not everything has `mini_vec` deps so this is a bit nicer.
+pub use mini_vec::size_assert;

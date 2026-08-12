@@ -51,7 +51,6 @@ use derive_more::Display;
 use dice::DiceComputations;
 use dice::LinearRecomputeDiceComputations;
 use dupe::Dupe;
-use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use gazebo::prelude::*;
@@ -100,7 +99,7 @@ pub(crate) trait UqueryDelegate: Send + Sync {
         path: &CellPath,
     ) -> buck2_error::Result<Vec<PackageLabel>>;
 
-    fn linear_dice_computations(&self) -> &LinearRecomputeDiceComputations<'_>;
+    fn linear_dice_computations(&self) -> LinearRecomputeDiceComputations<'_, '_>;
 
     fn ctx(&self) -> DiceComputations<'_>;
 }
@@ -117,6 +116,7 @@ pub(crate) trait QueryLiterals<T: QueryTarget>: Send + Sync {
 pub(crate) struct UqueryEnvironment<'c> {
     delegate: &'c dyn UqueryDelegate,
     literals: Arc<dyn QueryLiterals<TargetNode> + 'c>,
+    allow_partial_graph: bool,
 }
 
 pub(crate) struct PreresolvedQueryLiterals<T: QueryTarget> {
@@ -136,8 +136,8 @@ impl<T: QueryTarget> PreresolvedQueryLiterals<T> {
         dice: &mut DiceComputations<'_>,
     ) -> Self {
         let resolved_literal_results = dice
-            .compute_join(literals.iter(), |ctx, lit| {
-                async move { (lit.to_owned(), base.eval_literals(&[lit], ctx).await) }.boxed()
+            .compute_join(literals.iter(), async |ctx, lit| {
+                (lit.to_owned(), base.eval_literals(&[lit], ctx).await)
             })
             .await;
         let mut resolved_literals = StdBuckHashMap::default();
@@ -184,8 +184,13 @@ impl<'c> UqueryEnvironment<'c> {
     pub(crate) fn new(
         delegate: &'c dyn UqueryDelegate,
         literals: Arc<dyn QueryLiterals<TargetNode> + 'c>,
+        allow_partial_graph: bool,
     ) -> Self {
-        Self { delegate, literals }
+        Self {
+            delegate,
+            literals,
+            allow_partial_graph,
+        }
     }
 
     pub(crate) fn describe() -> QueryEnvironmentDescription {
@@ -210,6 +215,10 @@ impl<'c> UqueryEnvironment<'c> {
 #[async_trait]
 impl QueryEnvironment for UqueryEnvironment<'_> {
     type Target = TargetNode;
+
+    fn allow_partial_graph(&self) -> bool {
+        self.allow_partial_graph
+    }
 
     async fn get_node(&self, node_ref: &TargetLabel) -> buck2_error::Result<Self::Target> {
         UqueryEnvironment::get_node(self, node_ref).await
@@ -246,6 +255,7 @@ impl QueryEnvironment for UqueryEnvironment<'_> {
             root.iter_names(),
             traversal_delegate,
             visit,
+            self.allow_partial_graph,
         )
         .await
     }
@@ -263,6 +273,7 @@ impl QueryEnvironment for UqueryEnvironment<'_> {
             delegate,
             visit,
             depth,
+            self.allow_partial_graph,
         )
         .await
     }
@@ -316,7 +327,7 @@ impl QueryEnvironment for UqueryEnvironment<'_> {
                         buck2_error::Ok(owner_targets)
                     });
 
-                    for nodes in futures::future::join_all(package_futs).await.into_iter() {
+                    for nodes in buck2_util::future::join_all(package_futs).await.into_iter() {
                         for node in nodes?.into_iter() {
                             found_owner = true;
                             result.insert(node);
@@ -525,6 +536,7 @@ pub(crate) async fn rbuildfiles(
         all_top_level_imports.iter().map(NodeRef::ref_cast),
         delegate,
         visit,
+        false, // allow_partial_graph
     )
     .await?;
 
@@ -661,7 +673,7 @@ async fn first_order_imports(
 // Uquery and Cquery share ImportPath traversal logic, so we move the logic to this function.
 pub(crate) async fn get_transitive_loads(
     top_level_imports: Vec<ImportPath>,
-    ctx: &LinearRecomputeDiceComputations<'_>,
+    ctx: LinearRecomputeDiceComputations<'_, '_>,
 ) -> buck2_error::Result<Vec<ImportPath>> {
     #[derive(Clone, Dupe)]
     struct Node(Arc<ImportPath>);
@@ -698,7 +710,7 @@ pub(crate) async fn get_transitive_loads(
     let mut imports: Vec<ImportPath> = Vec::new();
 
     struct Delegate<'c, 'a> {
-        ctx: &'c LinearRecomputeDiceComputations<'a>,
+        ctx: LinearRecomputeDiceComputations<'c, 'a>,
     }
 
     let visit = |target: Node| {
@@ -729,7 +741,8 @@ pub(crate) async fn get_transitive_loads(
 
     let import_nodes = top_level_imports.iter().map(NodeRef::ref_cast);
 
-    async_depth_first_postorder_traversal(&lookup, import_nodes, traversal_delegate, visit).await?;
+    async_depth_first_postorder_traversal(&lookup, import_nodes, traversal_delegate, visit, false)
+        .await?;
 
     Ok(imports)
 }

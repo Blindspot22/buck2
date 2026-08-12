@@ -1,12 +1,11 @@
 oncall("build_infra")
 
-constraint_setting(
+constraint(
     name = "bootstrap",
-    visibility = ["PUBLIC"],
-)
-
-constraint_value(
-    name = "use_bootstrap",
-    constraint_setting = ":bootstrap",
+    default = "unspecified",
+    values = [
+        "use",
+        "unspecified",
+    ],
     visibility = ["PUBLIC"],
 )

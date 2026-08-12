@@ -47,7 +47,7 @@ impl<'fv> Freezer<'fv> {
     }
 
     /// Allocate a new value while freezing. Usually not a great idea.
-    pub fn alloc<'v, T: AllocFrozenValue>(&'v self, val: T) -> FrozenValue {
+    pub fn alloc<'v, T: AllocFrozenValue<'fv>>(&'v self, val: T) -> FrozenValue {
         val.alloc_frozen_value(self.heap)
     }
 
@@ -78,6 +78,11 @@ impl<'fv> Freezer<'fv> {
             }
             AValueOrForwardUnpack::Header(v) => unsafe { v.unpack().heap_freeze(self) },
         }
+    }
+
+    /// Freeze a nested value while freezing yourself.
+    pub fn freeze_branded<'v>(&self, value: Value<'v>) -> FreezeResult<Value<'fv>> {
+        self.freeze(value).map(|fv| fv.to_value())
     }
 
     /// Frozen heap where the values are frozen to.

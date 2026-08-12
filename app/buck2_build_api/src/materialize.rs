@@ -52,22 +52,12 @@ pub async fn materialize_and_upload_artifact_group(
 ) -> buck2_error::Result<ArtifactGroupValues> {
     let (values, _) = {
         let fut = ctx.try_compute2(
-            |ctx| {
-                let group = artifact_group;
-                async move {
-                    materialize_artifact_group(ctx, group, contexts.0, queue_tracker).await
-                }
-                .boxed()
+            async |ctx| {
+                materialize_artifact_group(ctx, artifact_group, contexts.0, queue_tracker).await
             },
-            |ctx| {
-                let group = artifact_group;
-                async move {
-                    match contexts.1 {
-                        UploadContext::Skip => Ok(()),
-                        UploadContext::Upload => ensure_uploaded(ctx, group).await,
-                    }
-                }
-                .boxed()
+            async |ctx| match contexts.1 {
+                UploadContext::Skip => Ok(()),
+                UploadContext::Upload => ensure_uploaded(ctx, artifact_group).boxed().await,
             },
         );
 
@@ -76,6 +66,18 @@ pub async fn materialize_and_upload_artifact_group(
 
     Ok(values)
 }
+
+#[cfg(fbcode_build)] // Relies on fbcode future sizes
+buck2_util::size_assert::words_of_async_fn_future!(
+    materialize_and_upload_artifact_group,
+    (_, _, _, _),
+    ~45
+);
+// These are here just for understanding
+#[cfg(fbcode_build)]
+buck2_util::size_assert::words_of_async_fn_future!(materialize_artifact_group, (_, _, _, _), ~26);
+#[cfg(fbcode_build)]
+buck2_util::size_assert::words_of_async_fn_future!(ensure_uploaded, (_, _), ~401);
 
 async fn materialize_artifact_group(
     ctx: &mut DiceComputations<'_>,
@@ -95,8 +97,8 @@ async fn materialize_artifact_group(
         let data = ctx.data();
         let shared_data = Arc::new((
             data.dupe(),
-            artifact_fs.clone(),
-            ctx.per_transaction_data().get_materializer(),
+            artifact_fs.dupe(),
+            ctx.per_transaction_data().get_materializer_handle(),
         ));
 
         let mut materialize_futs = Vec::new();
@@ -176,21 +178,23 @@ async fn ensure_uploaded(
 ) -> buck2_error::Result<()> {
     let digest_config = ctx.global_data().get_digest_config();
     let artifact_fs = ctx.get_artifact_fs().await?;
-    let mut dir = ActionDirectoryBuilder::empty();
-    let values = ctx.ensure_artifact_group(artifact_group).await?;
-    for (artifact, value) in values.iter() {
-        let path = artifact.resolve_path(
-            &artifact_fs,
-            if artifact.path_resolution_requires_artifact_value() {
-                Some(value.content_based_path_hash())
-            } else {
-                None
-            }
-            .as_ref(),
-        )?;
-        buck2_execute::directory::insert_artifact(&mut dir, path, value)?;
-    }
-    let dir = dir.fingerprint(digest_config.as_directory_serializer());
+    let dir = {
+        let mut dir = ActionDirectoryBuilder::empty_non_exhaustive();
+        let values = ctx.ensure_artifact_group(artifact_group).await?;
+        for (artifact, value) in values.iter() {
+            let path = artifact.resolve_path(
+                artifact_fs,
+                if artifact.path_resolution_requires_artifact_value() {
+                    Some(value.content_based_path_hash())
+                } else {
+                    None
+                }
+                .as_ref(),
+            )?;
+            buck2_execute::directory::insert_artifact(&mut dir, path, value)?;
+        }
+        dir.fingerprint(digest_config.as_directory_serializer())
+    };
     let re_use_case = ctx
         .get_legacy_root_config_on_dice()
         .await
@@ -207,10 +211,11 @@ async fn ensure_uploaded(
         });
     ctx.per_transaction_data()
         .get_re_client()
+        .dupe()
         .with_use_case(re_use_case)
         .upload(
             artifact_fs.fs(),
-            &ctx.per_transaction_data().get_materializer(),
+            ctx.per_transaction_data().get_materializer(),
             &ActionBlobs::new(digest_config),
             ProjectRelativePath::empty(),
             &dir,

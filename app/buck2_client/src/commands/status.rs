@@ -13,7 +13,7 @@ use std::time::Duration;
 use buck2_cli_proto::StatusResponse;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
 use buck2_client_ctx::common::BuckArgMatches;
-use buck2_client_ctx::daemon::client::connect::BuckdConnectConstraints;
+use buck2_client_ctx::daemon::client::connect::BuckdConnectOptions;
 use buck2_client_ctx::daemon::client::connect::connect_buckd;
 use buck2_client_ctx::daemon::client::connect::establish_connection_existing;
 use buck2_client_ctx::events_ctx::EventsCtx;
@@ -23,7 +23,6 @@ use buck2_common::argv::SanitizedArgv;
 use buck2_common::daemon_dir::DaemonDir;
 use buck2_error::conversion::from_any_with_tag;
 use buck2_error::internal_error;
-use chrono::DateTime;
 use humantime::format_duration;
 use walkdir::WalkDir;
 
@@ -84,7 +83,7 @@ impl StatusCommand {
                 buck2_client_ctx::println!("{}", serde_json::to_string_pretty(&statuses)?)?;
             } else {
                 match connect_buckd(
-                    BuckdConnectConstraints::ExistingOnly,
+                    BuckdConnectOptions::ExistingOnly,
                     &mut events_ctx,
                     ctx.paths()?,
                 )
@@ -122,10 +121,10 @@ impl StatusCommand {
     }
 }
 
-fn timestamp_to_string(seconds: u64, nanos: u32) -> buck2_error::Result<String> {
-    Ok(DateTime::from_timestamp(seconds as i64, nanos)
-        .ok_or_else(|| internal_error!("Incorrect seconds/nanos argument"))?
-        .format("%Y-%m-%dT%H:%M:%SZ")
+fn timestamp_to_string(seconds: i64, nanos: i32) -> buck2_error::Result<String> {
+    Ok(jiff::Timestamp::new(seconds, nanos)
+        .map_err(|_| internal_error!("Incorrect seconds/nanos argument"))?
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
         .to_string())
 }
 
@@ -137,12 +136,24 @@ fn duration_to_string(duration: Duration) -> String {
 pub(crate) fn process_status(status: StatusResponse) -> buck2_error::Result<serde_json::Value> {
     let timestamp = match status.start_time {
         None => "unknown".to_owned(),
-        Some(timestamp) => timestamp_to_string(timestamp.seconds as u64, timestamp.nanos as u32)?,
+        Some(timestamp) => timestamp_to_string(timestamp.seconds, timestamp.nanos)?,
     };
     let uptime = match status.uptime {
         None => "unknown".to_owned(),
         Some(uptime) => {
-            let uptime = Duration::new(uptime.seconds as u64, uptime.nanos as u32);
+            // Saturating: this is display-only, and the daemon shouldn't be trusted to
+            // report a well-formed value.
+            if uptime.seconds < 0 || !(0..=999_999_999).contains(&uptime.nanos) {
+                tracing::warn!(
+                    "Daemon reported out-of-range uptime: {}s {}ns",
+                    uptime.seconds,
+                    uptime.nanos
+                );
+            }
+            let uptime = Duration::new(
+                uptime.seconds.max(0) as u64,
+                uptime.nanos.clamp(0, 999_999_999) as u32,
+            );
             duration_to_string(uptime)
         }
     };

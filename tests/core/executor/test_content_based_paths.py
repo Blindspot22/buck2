@@ -121,6 +121,11 @@ async def test_run_remote_with_content_based_path(buck: Buck) -> None:
         "--remote-only",
     )
     what_ran1 = await read_what_ran(buck)
+    # Flush the local dep file cache so the second (cross-configuration) build still goes through the
+    # RE path and shows up in what-ran. Otherwise it would be served by the cross-configuration local
+    # action cache (this action is dedupe-eligible), and what-ran would be empty. The cross-config
+    # local cache hit itself is covered by test_dep_files.py::test_dep_file_hit_across_configurations.
+    await buck.debug("flush-dep-files")
     result2 = await buck.build(
         target,
         "--target-platforms",
@@ -213,6 +218,32 @@ async def test_symlinked_dir_with_content_based_path(buck: Buck) -> None:
     await build_target_with_different_platforms_and_verify_output_paths_are_identical(
         buck, target
     )
+
+
+@buck_test()
+async def test_assembled_dir_with_content_based_path(buck: Buck) -> None:
+    target = "root//:assembled_dir_with_content_based_path"
+    await build_target_with_different_platforms_and_verify_output_paths_are_identical(
+        buck, target
+    )
+
+    # Entry modes must be honored: `assembled_dir.copy` entries are laid out
+    # as real bytes, `assembled_dir.symlink` entries as symlinks.
+    result = await buck.build(
+        target,
+        "--target-platforms",
+        "root//:p_default",
+        "--show-output",
+    )
+    path = result.get_target_to_build_output().get(target)
+    assert path is not None
+    out = buck.cwd / path
+    assert out.is_dir()
+    for name in ["copied", "copied_dep"]:
+        assert (out / name).is_file()
+        assert not (out / name).is_symlink()
+    for name in ["symlinked", "symlinked_dep"]:
+        assert (out / name).is_symlink()
 
 
 @buck_test()
@@ -492,6 +523,11 @@ async def test_run_action_with_incremental_metadata(buck: Buck) -> None:
         "--remote-only",
     )
     what_ran1 = await read_what_ran(buck)
+    # Flush the local dep file cache so the second (cross-configuration) build still goes through the
+    # RE path and shows up in what-ran. Otherwise it would be served by the cross-configuration local
+    # action cache (this action is dedupe-eligible), and what-ran would be empty. The cross-config
+    # local cache hit itself is covered by test_dep_files.py::test_dep_file_hit_across_configurations.
+    await buck.debug("flush-dep-files")
     await buck.build(
         target,
         "--target-platforms",
@@ -558,6 +594,39 @@ async def test_run_with_anon_non_cbp_dep_eligible_for_dedupe(buck: Buck) -> None
         "--target-platforms",
         "root//:p_default",
     )
+    assert await is_eligible_for_action_dedup(buck) == ELIGIBLE_FOR_DEDUPE
+
+
+@buck_test()
+async def test_run_with_symlink_to_non_content_based_input_eligible_for_dedupe_bug(
+    buck: Buck,
+) -> None:
+    # TODO(T276504188): This test documents a BUG and asserts the buggy
+    # behavior, so it must be updated once the task is fixed.
+    #
+    # The `run_with_symlink_to_non_cbp_input` target's consuming `run` action
+    # depends on a symlink whose own path is content-based, but which points at
+    # a non-content-based (configuration-based) artifact. Because it is a `run`,
+    # the symlink (and therefore its target) is actually materialized as an
+    # input, so the action's resolved inputs still embed a configuration hash.
+    # The action is therefore NOT actually eligible for dedupe and should be
+    # reported as INELIGIBLE_INPUT.
+    #
+    # Instead it is wrongly reported as ELIGIBLE_FOR_DEDUPE: the eligibility
+    # check (`ArtifactGroup::is_eligible_for_dedupe`) only inspects each input
+    # artifact's own path and never follows a symlink to its target, so it
+    # misses the configuration-based target.
+    #
+    # When T276504188 is fixed, the consuming `run` action should instead be
+    # reported as INELIGIBLE_INPUT and this assertion must be flipped.
+    await buck.build(
+        "root//:run_with_symlink_to_non_cbp_input",
+        "--target-platforms",
+        "root//:p_default",
+    )
+
+    # The consuming run action executes last (it depends on every other action
+    # in the rule), so its eligibility verdict is the last event.
     assert await is_eligible_for_action_dedup(buck) == ELIGIBLE_FOR_DEDUPE
 
 

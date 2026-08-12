@@ -36,6 +36,17 @@ buck_filegroup(
 rust_library(
     name = "starlark",
     srcs = glob(["src/**/*.rs"]),
+    autocargo = {
+        "cargo_toml_config": {
+            "dependencies_override": {
+                "dependencies": {
+                    "blake3": {
+                        "version": "1.8",
+                    },
+                },
+            },
+        },
+    },
     # `pagable` controls type registration for starlark values which shouldn't be enforced everywhere.
     # `pagable_dep` controls whether to depend on pagable at all, used for OSS because to support stable rustc.
     features = select({
@@ -78,7 +89,6 @@ rust_library(
         "fbsource//third-party/rust:inventory",
         "fbsource//third-party/rust:itertools",
         "fbsource//third-party/rust:maplit",
-        "fbsource//third-party/rust:memoffset",
         "fbsource//third-party/rust:num-bigint",
         "fbsource//third-party/rust:num-traits",
         "fbsource//third-party/rust:once_cell",

@@ -2,6 +2,7 @@ load(
     ":defs.bzl",
     "anon_non_cbp_wrapper",
     "argsfile_with_incorrectly_declared_output",
+    "assembled_dir_rule",
     "cas_artifact_with_content_based_path",
     "copied_dir",
     "copy",
@@ -18,6 +19,7 @@ load(
     "resolve_promise_artifact",
     "run_with_anon_non_cbp_dep",
     "run_with_content_based_path",
+    "run_with_symlink_to_non_cbp_input",
     "rust_pattern_consumer",
     "rust_pattern_producer",
     "sets_inconsistent_params",
@@ -90,6 +92,10 @@ symlink_and_copy(
     name = "symlink_and_copy_with_content_based_path",
 )
 
+run_with_symlink_to_non_cbp_input(
+    name = "run_with_symlink_to_non_cbp_input",
+)
+
 copied_dir(
     name = "copied_dir_with_content_based_path",
     to_copy = ":write_with_content_based_path",
@@ -98,6 +104,11 @@ copied_dir(
 symlinked_dir(
     name = "symlinked_dir_with_content_based_path",
     to_symlink = ":write_with_content_based_path",
+)
+
+assembled_dir_rule(
+    name = "assembled_dir_with_content_based_path",
+    dep = ":write_with_content_based_path",
 )
 
 cas_artifact_with_content_based_path(
@@ -243,10 +254,7 @@ uses_exec_dep(
 # they race and one writer's remove returns ENOENT.
 _N = 200
 
-[
-    constraint_setting(name = "cfg_setting_{}".format(i))
-    for i in range(_N)
-]
+[constraint_setting(name = "cfg_setting_{}".format(i)) for i in range(_N)]
 
 [
     constraint_value(

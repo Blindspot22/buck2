@@ -20,13 +20,12 @@ use buck2_hash::BuckHashMap;
 use buck2_interpreter::types::cell_path::StarlarkCellPath;
 use buck2_interpreter::types::configured_providers_label::StarlarkConfiguredProvidersLabel;
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
-use either::Either;
+use buck2_util::threads::check_stack_overflow;
 use serde::Serialize;
 use serde::Serializer;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueLike;
-use starlark::values::ValueTypedComplex;
 use starlark::values::dict::DictRef;
 use starlark::values::enumeration::EnumValue;
 use starlark::values::list::ListRef;
@@ -41,7 +40,7 @@ use crate::bxl::select::StarlarkSelectConcat;
 use crate::bxl::select::StarlarkSelectDict;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::StarlarkInputArtifactLike;
 use crate::interpreter::rule_defs::artifact::starlark_artifact_like::ValueAsInputArtifactLike;
-use crate::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifact;
+use crate::interpreter::rule_defs::artifact::starlark_output_artifact::StarlarkOutputArtifactUnpack;
 use crate::interpreter::rule_defs::artifact_tagging::StarlarkTaggedValue;
 use crate::interpreter::rule_defs::cmd_args::ArtifactPathMapper;
 use crate::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
@@ -108,7 +107,7 @@ fn err<R, E: serde::ser::Error>(res: buck2_error::Result<R>) -> Result<R, E> {
 #[derive(UnpackValue, StarlarkTypeRepr)]
 pub enum JsonArtifact<'v> {
     ValueAsInputArtifactLike(ValueAsInputArtifactLike<'v>),
-    StarlarkOutputArtifact(ValueTypedComplex<'v, StarlarkOutputArtifact<'v>>),
+    StarlarkOutputArtifact(StarlarkOutputArtifactUnpack<'v>),
 }
 
 /// Partially unpack the value into JSON writable with `ctx.actions.write_json`.
@@ -143,6 +142,10 @@ impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
     where
         S: Serializer,
     {
+        // The recursion depth of this function is determined by the nesting
+        // depth of the value, which is unbounded. Detect such cases and return
+        // an error nicely rather than crashing.
+        err(check_stack_overflow())?;
         match &self.value {
             JsonUnpack::None(_) => serializer.serialize_none(),
             JsonUnpack::String(x) => serializer.serialize_str(x),
@@ -162,7 +165,14 @@ impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
             }
             JsonUnpack::Enum(x) => x.serialize(serializer),
             JsonUnpack::TransitiveSetJsonProjection(x) => {
-                serializer.collect_seq(err(x.iter_values())?.map(|v| self.with_value(v)))
+                match self.fs {
+                    // Skip validation when fs == None because it can be expensive.
+                    // TransitiveSet::new already did validate_json for projected values.
+                    None => serializer.collect_seq(std::iter::empty::<u8>()),
+                    Some(_) => {
+                        serializer.collect_seq(err(x.iter_values())?.map(|v| self.with_value(v)))
+                    }
+                }
             }
             JsonUnpack::TargetLabel(x) => {
                 // Users could do this with `str(ctx.label.raw_target())`, but in some benchmarks that causes
@@ -189,9 +199,11 @@ impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
                                 err(art.resolve_path(fs.fs(), self.artifact_path_mapping.get(&art)))?
                             }
                             JsonArtifact::StarlarkOutputArtifact(x) => {
-                                let art = match x.unpack() {
-                                    Either::Left(x) => err((*x.inner()).get_bound_artifact())?,
-                                    Either::Right(x) => x.inner().artifact(),
+                                let art = match x {
+                                    StarlarkOutputArtifactUnpack::Unfrozen(x) => {
+                                        err((*x.inner()).get_bound_artifact())?
+                                    }
+                                    StarlarkOutputArtifactUnpack::Frozen(x) => x.inner().artifact(),
                                 };
 
                                 err(art.resolve_path(
@@ -247,7 +259,7 @@ impl<'a, 'v> Serialize for SerializeValue<'a, 'v> {
             JsonUnpack::Provider(x) => {
                 serializer.collect_map(x.0.items().iter().map(|(k, v)| (k, self.with_value(*v))))
             }
-            JsonUnpack::TaggedValue(x) => self.with_value(*x.value()).serialize(serializer),
+            JsonUnpack::TaggedValue(x) => self.with_value(x.value()).serialize(serializer),
             JsonUnpack::BxlSelectConcat(x) => x.serialize(serializer),
             JsonUnpack::BxlSelectDict(x) => x.serialize(serializer),
         }
@@ -300,6 +312,10 @@ pub fn visit_json_artifacts<'v>(
     v: Value<'v>,
     visitor: &mut dyn CommandLineArtifactVisitor<'v>,
 ) -> buck2_error::Result<()> {
+    // The recursion depth of this function is determined by the nesting depth
+    // of the value, which is unbounded. Detect such cases and return an error
+    // nicely rather than crashing.
+    check_stack_overflow()?;
     match JsonUnpack::unpack_value_err(v)? {
         JsonUnpack::None(_)
         | JsonUnpack::String(_)
@@ -358,7 +374,7 @@ pub fn visit_json_artifacts<'v>(
         }
         JsonUnpack::TaggedValue(v) => {
             let mut visitor = v.wrap_visitor(visitor);
-            visit_json_artifacts(*v.value(), &mut visitor)?;
+            visit_json_artifacts(v.value(), &mut visitor)?;
         }
     }
     Ok(())

@@ -28,7 +28,6 @@ buck2_hash.workspace = true
 buck2_http.workspace = true
 buck2_interpreter.workspace = true
 buck2_util.workspace = true
-chrono.workspace = true
 ctor.workspace = true
 derive_more.workspace = true
 dice.workspace = true
@@ -41,7 +40,8 @@ hex.workspace = true
 host_sharing.workspace = true
 http.workspace = true
 itertools.workspace = true
-once_cell.workspace = true
+jiff.workspace = true
+mini_vec.workspace = true
 pagable.workspace = true
 parking_lot.workspace = true
 remote_execution.workspace = true
@@ -51,7 +51,7 @@ smallvec.workspace = true
 sorted_vector_map.workspace = true
 starlark.workspace = true
 starlark_map.workspace = true
-static_assertions.workspace = true
+strong_hash.workspace = true
 tracing.workspace = true
 
 [lints]

@@ -28,20 +28,20 @@ toolchain_alias(
     name = "rust",
     actual = select({
         "DEFAULT": ":rust_toolchain_with_compiled_rustc",
-        "bootstrap//:use_bootstrap": ":rust_bootstrap_toolchain",
+        "bootstrap//:bootstrap[use]": ":rust_bootstrap_toolchain",
     }),
     visibility = ["PUBLIC"],
 )
 
 system_rust_toolchain(
     name = "rust_bootstrap_toolchain",
-    default_edition = "2021",
+    default_edition = "2024",
 )
 
 rust_toolchain(
     name = "rust_toolchain_with_compiled_rustc",
     compiler = ":rustc_with_bootstrap_toolchain",
-    default_edition = "2021",
+    default_edition = "2024",
 )
 
 configured_alias(

@@ -1,0 +1,490 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is dual-licensed under either the MIT license found in the
+ * LICENSE-MIT file in the root directory of this source tree or the Apache
+ * License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+ * of this source tree. You may select, at your option, one of the
+ * above-listed licenses.
+ */
+
+//! Pagable storage backing for DICE node values.
+//!
+//! `DiceStorage` wraps any [`pagable::storage::traits::PagableStorage`] backend and
+//! exposes APIs for serializing a [`DiceValidValue`] to disk and deserializing it back.
+//! Serialization is performed via the bridging methods on [`DiceKeyDyn`] /
+//! [`DiceProjectionDyn`], which delegate to each concrete `Key`'s `value_serialize()`.
+//!
+//! See `Dice::page_out` for the user-facing entry point.
+
+use std::fmt;
+use std::fmt::Display;
+use std::path::Path;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
+
+use allocative::Allocative;
+use arc_swap::ArcSwap;
+use dashmap::DashMap;
+use dice_error::storage::PagableStorageBackendParseError;
+use dupe::Dupe;
+use pagable::DataKey;
+use pagable::storage::handle::PagableStorageHandle;
+use pagable::storage::noop::NoopPagableStorage;
+use pagable::storage::support::SerializerForPaging;
+use pagable::storage::traits::ArcSerCache;
+use pagable::storage::traits::PagableStorage;
+use pagable::storage::traits::PageOutError;
+use pagable_storage::storage::sled::SledBackedPagableStorage;
+use pagable_storage::storage::sqlite::SqliteBackedPagableStorage;
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::HashMap;
+use crate::core::state::CoreStateHandle;
+use crate::dice::PageOutCancel;
+use crate::key::DiceKey;
+use crate::key::DiceKeyErased;
+use crate::key_index::DiceKeyIndex;
+use crate::metrics::PageInKeyTypeMetrics;
+use crate::value::DiceValidValue;
+
+/// On-disk backend for pagable DICE storage, from `buck2_hydration.pagable_storage_backend`.
+#[derive(
+    Allocative,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq
+)]
+pub enum PagableStorageBackend {
+    /// SQLite database files.
+    #[default]
+    Sqlite,
+    /// Sled embedded key-value DB.
+    Sled,
+    /// Serializes but discards data (no I/O).
+    Noop,
+}
+
+impl PagableStorageBackend {
+    /// This backend, unless the `PAGABLE_STORAGE_BACKEND` env var is set, in which
+    /// case that overrides it. Lets benchmarks pick a backend without a buckconfig.
+    pub fn with_env_override(self) -> anyhow::Result<Self> {
+        match std::env::var("PAGABLE_STORAGE_BACKEND") {
+            Ok(s) => Ok(s.parse()?),
+            Err(_) => Ok(self),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            PagableStorageBackend::Sqlite => "sqlite",
+            PagableStorageBackend::Sled => "sled",
+            PagableStorageBackend::Noop => "noop",
+        }
+    }
+}
+
+impl Display for PagableStorageBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PagableStorageBackend {
+    type Err = PagableStorageBackendParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Empty (the buckconfig default) selects SQLite.
+        if s.is_empty() || s.eq_ignore_ascii_case("sqlite") {
+            Ok(PagableStorageBackend::Sqlite)
+        } else if s.eq_ignore_ascii_case("sled") {
+            Ok(PagableStorageBackend::Sled)
+        } else if s.eq_ignore_ascii_case("noop") {
+            Ok(PagableStorageBackend::Noop)
+        } else {
+            Err(PagableStorageBackendParseError {
+                value: s.to_owned(),
+            })
+        }
+    }
+}
+
+/// Pagable storage backing for DICE node values.
+///
+/// Cheaply cloneable: the underlying storage is shared via `Arc<dyn PagableStorage>`.
+#[derive(Allocative, Clone, Dupe)]
+pub struct DiceStorage {
+    #[allocative(skip)]
+    storage: Arc<dyn PagableStorage>,
+    // `Arc` so the per-worker `dupe()`s in bulk `page_in` share one counter set
+    // instead of each cloning a separate map.
+    #[allocative(skip)]
+    page_in_metrics: Arc<PageInMetrics>,
+    /// On-disk root of the store, for measuring its size. `None` when constructed
+    /// without a path (`new`, e.g. tests), which never has an on-disk footprint to
+    /// measure. `Arc<Path>` keeps `DiceStorage` cheap to `dupe`.
+    #[allocative(skip)]
+    path: Option<Arc<Path>>,
+    /// Cached on-disk store size (bytes), refreshed at page-out so the command-end read
+    /// needs no filesystem walk. Holds a `Result` so a failed walk surfaces (as a
+    /// `soft_error`) instead of reporting 0. `Arc` so `dupe`d handles share one cache.
+    #[allocative(skip)]
+    cached_db_size_bytes: Arc<ArcSwap<Result<u64, Arc<std::io::Error>>>>,
+}
+
+impl DiceStorage {
+    /// Construct a `DiceStorage` from any [`PagableStorage`] backend.
+    pub fn new(storage: Arc<dyn PagableStorage>) -> Self {
+        Self {
+            storage,
+            page_in_metrics: Arc::new(PageInMetrics::default()),
+            path: None,
+            cached_db_size_bytes: Arc::new(ArcSwap::new(Arc::new(Ok(0)))),
+        }
+    }
+
+    /// Cumulative page-in counters per key type since this `DiceStorage` was
+    /// created.
+    pub(crate) fn page_in_metrics_snapshot(&self) -> HashMap<&'static str, PageInKeyTypeMetrics> {
+        self.page_in_metrics.snapshot()
+    }
+
+    /// The last measured on-disk store size in bytes, or `None` if this storage has
+    /// no on-disk path (constructed via `new`). `Some(Err)` if the last measurement
+    /// walk failed. Cached at page-out, so it is cheap on the command-end path (no
+    /// filesystem walk).
+    pub(crate) fn on_disk_size_bytes(&self) -> Option<Result<u64, Arc<std::io::Error>>> {
+        self.path
+            .as_ref()
+            .map(|_| (**self.cached_db_size_bytes.load()).clone())
+    }
+
+    /// Walk the on-disk store and cache the resulting size (or the walk error), off
+    /// the executor via `spawn_blocking`. Called at the end of page-out, the only point
+    /// the append-only store changes. No-op without an on-disk path.
+    async fn refresh_db_size_bytes(&self) {
+        if let Some(path) = self.path.dupe() {
+            let result = tokio::task::spawn_blocking(move || dir_size_bytes(&path))
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+                .map_err(Arc::new);
+            self.cached_db_size_bytes.store(Arc::new(result));
+        }
+    }
+
+    /// Open (or create) a `DiceStorage` rooted at the given directory, using the
+    /// given on-disk `backend`.
+    pub fn open(path: &Path, backend: PagableStorageBackend) -> anyhow::Result<Self> {
+        let storage: Arc<dyn PagableStorage> = match backend {
+            PagableStorageBackend::Sled => Arc::new(SledBackedPagableStorage::try_new(path)?),
+            PagableStorageBackend::Noop => Arc::new(NoopPagableStorage::new()),
+            PagableStorageBackend::Sqlite => Arc::new(SqliteBackedPagableStorage::try_new(path)?),
+        };
+        // The store is empty until the first page-out, so the size cache starts at 0
+        // and is populated there rather than walked here on the async startup path.
+        Ok(Self {
+            path: Some(Arc::from(path)),
+            ..Self::new(storage)
+        })
+    }
+
+    /// Serialize and page out all paged-in values, then mark them as paged
+    /// out on the core state thread.
+    ///
+    /// `keys` comes from `CoreState::paged_in_keys()`. For entries with an
+    /// existing `DataKey` (on-disk copy still valid), no serialization is needed.
+    /// For entries without, the value is serialized via the key's `ValueSerialize`.
+    ///
+    /// Stops after the current chunk if `cancelled` is set, leaving the remaining
+    /// keys paged in (a valid state). Pass an always-`false` flag for an
+    /// uninterruptible page-out.
+    pub(crate) async fn page_out(
+        &self,
+        keys: Vec<(DiceKey, DiceValidValue)>,
+        key_index: &DiceKeyIndex,
+        state_handle: &CoreStateHandle,
+        cancelled: PageOutCancel,
+    ) -> anyhow::Result<usize> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        // Process this many keys in parallel at a time, limit peak RSS
+        const CHUNK_SIZE: usize = 32768;
+        let finished = Arc::new(ArcSerCache::new());
+        let num_workers = env_concurrency("BUCK2_DICE_PAGE_OUT_WORKERS");
+
+        let mut remaining = keys;
+        while !remaining.is_empty() {
+            if cancelled() {
+                break;
+            }
+            let split_at = remaining.len().min(CHUNK_SIZE);
+            let mut chunk = remaining.split_off(split_at);
+            std::mem::swap(&mut chunk, &mut remaining);
+
+            let worker_size = chunk.len().div_ceil(num_workers);
+            let mut chunk_iter = chunk.into_iter();
+            let mut handles = Vec::with_capacity(num_workers);
+
+            for _ in 0..num_workers {
+                // Stop spawning workers that would immediately cancel themselves if
+                // a command arrived mid-chunk.
+                if cancelled() {
+                    break;
+                }
+                let items: Vec<_> = (&mut chunk_iter)
+                    .take(worker_size)
+                    .map(|(k, v)| (k, key_index.get(k).dupe(), v))
+                    .collect();
+                if items.is_empty() {
+                    break;
+                }
+                let storage = self.dupe();
+                let finished = finished.clone();
+                let state_handle = state_handle.dupe();
+                handles.push(tokio::spawn(async move {
+                    storage.page_out_chunk(items, &finished, &state_handle, cancelled)
+                }));
+            }
+
+            for handle in handles {
+                handle.await??;
+            }
+        }
+
+        self.storage.flush()?;
+        self.storage.release_memory();
+        // The append-only store only changes here; refresh the cached size so the
+        // command-end path reports it without a filesystem walk.
+        self.refresh_db_size_bytes().await;
+        Ok(finished.len())
+    }
+
+    fn page_out_chunk(
+        &self,
+        items: Vec<(DiceKey, DiceKeyErased, DiceValidValue)>,
+        finished: &ArcSerCache,
+        state_handle: &CoreStateHandle,
+        cancelled: PageOutCancel,
+    ) -> anyhow::Result<()> {
+        const EVICT_BATCH_SIZE: usize = 1000;
+        let mut pending_evictions = Vec::with_capacity(EVICT_BATCH_SIZE);
+        // Candidates whose value could not be serialized; marked so they aren't
+        // offered as page-out candidates again (until recomputed).
+        let mut non_pageable = Vec::new();
+        for (dice_key, key_dyn, value) in items {
+            // Stop promptly on cancellation; keys not yet processed stay paged
+            // in, which is a valid state.
+            if cancelled() {
+                break;
+            }
+            if let Some(data_key) = self.page_out_value(&key_dyn, value, finished)? {
+                pending_evictions.push((dice_key, data_key));
+                if pending_evictions.len() >= EVICT_BATCH_SIZE {
+                    state_handle.evict_keys(std::mem::replace(
+                        &mut pending_evictions,
+                        Vec::with_capacity(EVICT_BATCH_SIZE),
+                    ));
+                }
+            } else {
+                non_pageable.push(dice_key);
+            }
+        }
+        self.storage.flush()?;
+        if !pending_evictions.is_empty() {
+            state_handle.evict_keys(pending_evictions);
+        }
+        if !non_pageable.is_empty() {
+            state_handle.mark_non_pageable(non_pageable);
+        }
+        Ok(())
+    }
+
+    fn page_out_value(
+        &self,
+        key_dyn: &DiceKeyErased,
+        value: DiceValidValue,
+        finished: &ArcSerCache,
+    ) -> anyhow::Result<Option<DataKey>> {
+        let storage_context = self.storage.storage_context();
+        let mut serializer = SerializerForPaging::new(storage_context);
+        let serialize_result = match key_dyn {
+            DiceKeyErased::Key(k) => k.pagable_serialize_value(value.as_dyn(), &mut serializer),
+            DiceKeyErased::Projection(p) => p
+                .proj()
+                .pagable_serialize_value(value.as_dyn(), &mut serializer),
+        };
+        match serialize_result {
+            None => {
+                tracing::debug!(
+                    "Skipping page-out of `{}`: no value serializer",
+                    key_dyn.key_type_name()
+                );
+                Ok(None)
+            }
+            Some(Err(e)) => Err(e),
+            Some(Ok(())) => {
+                let (data, arcs) = serializer.finish();
+                match self
+                    .storage
+                    .page_out_item(data, arcs, finished, storage_context)
+                {
+                    Ok(key) => Ok(Some(key)),
+                    Err(PageOutError::Failed(e)) => Err(e),
+                    Err(PageOutError::AlreadyFailed) => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// Rehydrate all paged-out values in parallel, sending rehydrate messages
+    /// back to the core state thread.
+    pub(crate) async fn page_in(
+        &self,
+        keys: Vec<(DiceKey, DataKey)>,
+        key_index: &DiceKeyIndex,
+        state_handle: &CoreStateHandle,
+    ) -> anyhow::Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let num_workers = env_concurrency("BUCK2_DICE_PAGE_IN_WORKERS");
+        let worker_size = keys.len().div_ceil(num_workers);
+
+        let handles: Vec<_> = keys
+            .chunks(worker_size)
+            .map(|worker_chunk| {
+                let storage = self.dupe();
+                let state_handle = state_handle.dupe();
+                let items: Vec<_> = worker_chunk
+                    .iter()
+                    .map(|(k, dk)| (*k, key_index.get(*k).dupe(), *dk))
+                    .collect();
+                tokio::spawn(async move {
+                    for (dice_key, key_dyn, data_key) in &items {
+                        let value = storage.hydrate(key_dyn, *data_key).await?;
+                        state_handle.rehydrate(*dice_key, value);
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.await??;
+        }
+        Ok(())
+    }
+
+    /// Deserialize the value at `data_key` back into a `DiceValidValue` via `key_dyn`'s
+    /// `ValueSerialize`.
+    pub(crate) async fn hydrate(
+        &self,
+        key_dyn: &DiceKeyErased,
+        data_key: DataKey,
+    ) -> anyhow::Result<DiceValidValue> {
+        let fetch_start = Instant::now();
+        let data = self.storage.fetch_data(&data_key).await?;
+        let fetch_us = fetch_start.elapsed().as_micros() as u64;
+        let bytes = data.data.len() as u64;
+
+        // pagable_deserialize_value lazily fetches nested `PagableArc` sub-values,
+        // so deser_us also covers that nested I/O, not just CPU.
+        let deser_start = Instant::now();
+        let handle = PagableStorageHandle::new(self.storage.dupe());
+        let mut deserializer = handle.root_deserializer(data_key, &data);
+        let arc = match key_dyn {
+            DiceKeyErased::Key(k) => k.pagable_deserialize_value(&mut deserializer)?,
+            DiceKeyErased::Projection(p) => {
+                p.proj().pagable_deserialize_value(&mut deserializer)?
+            }
+        };
+        let deser_us = deser_start.elapsed().as_micros() as u64;
+
+        self.page_in_metrics
+            .record(key_dyn.key_type_name(), fetch_us, deser_us, bytes);
+
+        Ok(DiceValidValue::from_arc(arc))
+    }
+}
+
+/// Cumulative page-in counters for a `DiceStorage`, broken down by key type.
+#[derive(Default)]
+struct PageInMetrics {
+    // DashMap keyed by `&'static str`: bulk `page_in` records from parallel
+    // workers (no global lock), and static keys avoid per-record allocation.
+    by_key_type: DashMap<&'static str, PageInKeyTypeMetrics>,
+}
+
+impl PageInMetrics {
+    fn record(&self, key_type: &'static str, fetch_us: u64, deser_us: u64, bytes: u64) {
+        let mut entry = self.by_key_type.entry(key_type).or_default();
+        entry.count += 1;
+        entry.fetch_us += fetch_us;
+        entry.deser_us += deser_us;
+        entry.bytes += bytes;
+    }
+
+    fn snapshot(&self) -> HashMap<&'static str, PageInKeyTypeMetrics> {
+        self.by_key_type
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect()
+    }
+}
+
+fn env_concurrency(var: &str) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
+}
+
+/// Sum the sizes of all files under `path`, recursing into subdirectories. Any
+/// read or stat error aborts the walk and is returned to the caller.
+fn dir_size_bytes(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        total += if metadata.is_dir() {
+            dir_size_bytes(&entry.path())?
+        } else {
+            metadata.len()
+        };
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::PageInMetrics;
+
+    #[test]
+    fn page_in_metrics_breakdown() {
+        let metrics = PageInMetrics::default();
+        metrics.record("A", 10, 20, 100);
+        metrics.record("A", 5, 5, 50);
+        metrics.record("B", 1, 2, 3);
+
+        // Snapshot is per-key-type only; "A"'s two records collapse into one
+        // entry, and summing across types is the caller's job.
+        let snap = metrics.snapshot();
+        let a = snap.get("A").expect("A was recorded");
+        assert_eq!((a.count, a.fetch_us, a.deser_us, a.bytes), (2, 15, 25, 150));
+        let b = snap.get("B").expect("B was recorded");
+        assert_eq!((b.count, b.fetch_us, b.deser_us, b.bytes), (1, 1, 2, 3));
+    }
+}

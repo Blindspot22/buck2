@@ -17,6 +17,8 @@ use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_cli_proto::*;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::file_ops::dice::DiceFileComputations;
+use buck2_common::legacy_configs::dice::HasLegacyConfigs;
+use buck2_common::legacy_configs::key::BuckconfigKeyRef;
 use buck2_common::package_listing::dice::DicePackageListingResolver;
 use buck2_core::bxl::BxlFilePath;
 use buck2_core::bzl::ImportPath;
@@ -27,6 +29,7 @@ use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::package::package_relative_path::PackageRelativePath;
 use buck2_core::package::source_path::SourcePath;
+use buck2_core::pattern::pattern::InferTargetNames;
 use buck2_core::pattern::pattern::ParsedPattern;
 use buck2_core::pattern::pattern::TargetParsingRel;
 use buck2_core::pattern::pattern_type::ProvidersPatternExtra;
@@ -56,6 +59,7 @@ use buck2_server_ctx::streaming_request_handler::StreamingRequestHandler;
 use dice::DiceEquality;
 use dice::DiceTransaction;
 use dupe::Dupe;
+use dupe::ResultDupedExt;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -99,9 +103,9 @@ struct DocsCacheManager {
 }
 
 impl DocsCacheManager {
-    async fn new(fs: ProjectRoot, mut dice_ctx: DiceTransaction) -> buck2_error::Result<Self> {
+    async fn new(fs: ProjectRoot, dice_ctx: DiceTransaction) -> buck2_error::Result<Self> {
         Ok(Self {
-            docs_cache: Mutex::new(Self::new_docs_cache(&fs, &mut dice_ctx).await?),
+            docs_cache: Mutex::new(Self::new_docs_cache(&fs, &dice_ctx).await?),
             fs,
             valid_at: dice_ctx.equality_token(),
         })
@@ -109,7 +113,7 @@ impl DocsCacheManager {
 
     async fn get_cache(
         &self,
-        mut current_dice_ctx: DiceTransaction,
+        current_dice_ctx: DiceTransaction,
     ) -> buck2_error::Result<MutexGuard<'_, DocsCache>> {
         let mut docs_cache = self.docs_cache.lock().await;
 
@@ -117,7 +121,7 @@ impl DocsCacheManager {
         match self.is_reusable(&current_dice_ctx) {
             true => (),
             false => {
-                let new_docs_cache = Self::new_docs_cache(fs, &mut current_dice_ctx).await?;
+                let new_docs_cache = Self::new_docs_cache(fs, &current_dice_ctx).await?;
                 *docs_cache = new_docs_cache
             }
         };
@@ -131,11 +135,11 @@ impl DocsCacheManager {
 
     async fn new_docs_cache(
         fs: &ProjectRoot,
-        dice_ctx: &mut DiceTransaction,
+        dice_ctx: &DiceTransaction,
     ) -> buck2_error::Result<DocsCache> {
         let mut builtin_docs = Vec::new();
 
-        let cell_resolver = dice_ctx.get_cell_resolver().await?;
+        let cell_resolver = dice_ctx.ctx().get_cell_resolver().await?;
         builtin_docs.push((None, get_builtin_globals_docs(dice_ctx).await?));
 
         let builtin_names = builtin_docs
@@ -145,14 +149,13 @@ impl DocsCacheManager {
         if let Some((import_path, docs)) = get_prelude_docs(dice_ctx, &builtin_names).await? {
             builtin_docs.push((Some(import_path), docs));
         }
-        DocsCache::new(&builtin_docs, fs, &cell_resolver).await
+        DocsCache::new(&builtin_docs, fs, cell_resolver).await
     }
 }
 
-async fn get_builtin_globals_docs(
-    dice_ctx: &mut DiceTransaction,
-) -> buck2_error::Result<DocModule> {
+async fn get_builtin_globals_docs(dice_ctx: &DiceTransaction) -> buck2_error::Result<DocModule> {
     Ok(dice_ctx
+        .ctx()
         .get_global_interpreter_state()
         .await?
         .globals()
@@ -163,9 +166,9 @@ async fn get_prelude_docs(
     ctx: &DiceTransaction,
     existing_globals: &StdBuckHashSet<&str>,
 ) -> buck2_error::Result<Option<(ImportPath, DocModule)>> {
-    let ctx = &mut ctx.clone();
+    let mut ctx = ctx.ctx();
     let cell_resolver = ctx.get_cell_resolver().await?;
-    let Some(prelude_path) = prelude_path(&cell_resolver)? else {
+    let Some(prelude_path) = prelude_path(cell_resolver)? else {
         return Ok(None);
     };
     let import_path = prelude_path.import_path();
@@ -352,10 +355,17 @@ impl<'a> BuckLspContext<'a> {
     async fn import_path(&self, path: &Path) -> buck2_error::Result<OwnedStarlarkModulePath> {
         let abs_path = AbsPath::new(path)?;
         let relative_path = self.fs.relativize_any(abs_path)?;
-        let cell_resolver = self
-            .with_dice_ctx(|mut dice_ctx| async move { dice_ctx.get_cell_resolver().await })
+        let cell_path = self
+            .with_dice_ctx(|dice_ctx| async move {
+                buck2_error::Ok(
+                    dice_ctx
+                        .ctx()
+                        .get_cell_resolver()
+                        .await?
+                        .get_cell_path(&relative_path),
+                )
+            })
             .await?;
-        let cell_path = cell_resolver.get_cell_path(&relative_path);
 
         match path.extension() {
             Some(e) if e == "bxl" => Ok(OwnedStarlarkModulePath::BxlFile(BxlFilePath::new(
@@ -382,7 +392,9 @@ impl<'a> BuckLspContext<'a> {
         // to get a ProjectRelativePath. We already guaranteed that things start with a '/'
         // (rooted from `starlark:`, see LspUri), so just drop it.
         let cell_resolver = self
-            .with_dice_ctx(|mut dice_ctx| async move { dice_ctx.get_cell_resolver().await })
+            .with_dice_ctx(
+                |dice_ctx| async move { dice_ctx.ctx().get_cell_resolver().await.duped() },
+            )
             .await?;
 
         let path_str = path
@@ -434,7 +446,8 @@ impl<'a> BuckLspContext<'a> {
             .into()),
         }?;
 
-        self.with_dice_ctx(|mut dice_ctx| async move {
+        self.with_dice_ctx(|dice_ctx| async move {
+            let mut dice_ctx = dice_ctx.ctx();
             let calculator = dice_ctx
                 .get_interpreter_calculator(import_path.clone().into_starlark_path())
                 .await?;
@@ -466,11 +479,15 @@ impl<'a> BuckLspContext<'a> {
     ) -> buck2_error::Result<Option<StringLiteralResult>> {
         match ForwardRelativePath::new(literal) {
             Ok(package_relative) => {
-                let cell_resolver = self
-                    .with_dice_ctx(|mut dice_ctx| async move { dice_ctx.get_cell_resolver().await })
+                let relative_path = self
+                    .with_dice_ctx(|dice_ctx| async move {
+                        dice_ctx
+                            .ctx()
+                            .get_cell_resolver()
+                            .await?
+                            .resolve_path(current_package.join(package_relative).as_ref())
+                    })
                     .await?;
-                let relative_path =
-                    cell_resolver.resolve_path(current_package.join(package_relative).as_ref())?;
 
                 let path = self.fs.resolve(&relative_path);
                 let uri = Uri::from_file_path(path)
@@ -492,67 +509,79 @@ impl<'a> BuckLspContext<'a> {
         current_package: CellPathRef<'_>,
         literal: &str,
     ) -> buck2_error::Result<Option<StringLiteralResult>> {
-        let (artifact_fs, cell_alias_resolver, dir_with_allowed_relative_dirs) = self
-            .with_dice_ctx(|mut dice_ctx| async move {
-                Ok((
-                    dice_ctx.get_artifact_fs().await?,
-                    dice_ctx
-                        .get_cell_alias_resolver(current_package.cell())
-                        .await?,
-                    dice_ctx
-                        .dirs_allowing_relative_paths(current_package.to_owned())
-                        .await?,
-                ))
-            })
-            .await?;
-        let cell_resolver = artifact_fs.cell_resolver();
-        match ParsedPattern::<ProvidersPatternExtra>::parse_not_relaxed(
-            literal,
-            if dir_with_allowed_relative_dirs.has_allowed_relative_dir() {
-                TargetParsingRel::AllowRelative(&dir_with_allowed_relative_dirs, None)
+        self.with_dice_ctx(|dice_ctx| async move {
+            let artifact_fs = dice_ctx.ctx().get_artifact_fs().await?;
+            let infer_target_names = if dice_ctx
+                .ctx()
+                .parse_legacy_config_property(
+                    artifact_fs.cell_resolver().root_cell(),
+                    BuckconfigKeyRef {
+                        section: "buck2",
+                        property: "infer_target_names",
+                    },
+                )
+                .await?
+                .unwrap_or(false)
+            {
+                InferTargetNames::Yes
             } else {
-                TargetParsingRel::AllowLimitedRelative(current_package)
-            },
-            cell_resolver,
-            &cell_alias_resolver,
-        ) {
-            Ok(ParsedPattern::Target(package, target, _)) => {
-                let res = self
-                    .with_dice_ctx(|mut dice_ctx| async move {
-                        Ok(DicePackageListingResolver(&mut dice_ctx)
-                            .resolve_package_listing(package.dupe())
-                            .await
-                            .and_then(|listing| {
-                                // In the case of external cells, we need to actually materialize
-                                // this thing on disk, so treat it like a source artifact
-                                let buildfile: &PackageRelativePath =
-                                    PackageRelativePath::new(listing.buildfile())?;
-                                let source_path = SourcePath::new(package.dupe(), buildfile.into());
-                                let relative_path =
-                                    artifact_fs.resolve_source(source_path.as_ref())?;
-                                let path = self.fs.resolve(&relative_path);
-                                let uri = Uri::from_file_path(&path).ok_or_else(|| {
-                                    internal_error!("Failed to convert path to file URI: {}", path)
-                                })?;
-                                match uri.try_into() {
-                                    Ok(uri) => {
-                                        let string_literal = StringLiteralResult {
-                                            uri,
-                                            location_finder: Some(Box::new(|ast| {
-                                                Ok(Self::find_target(ast, target))
-                                            })),
-                                        };
-                                        Ok(Some(string_literal))
-                                    }
-                                    Err(e) => Err(from_any_with_tag(e, buck2_error::ErrorTag::Lsp)),
+                InferTargetNames::No
+            };
+            let (cell_alias_resolver, dir_with_allowed_relative_dirs) = (
+                dice_ctx
+                    .ctx()
+                    .get_cell_alias_resolver(current_package.cell())
+                    .await?,
+                dice_ctx
+                    .ctx()
+                    .dirs_allowing_relative_paths(current_package.to_owned())
+                    .await?,
+            );
+            let cell_resolver = artifact_fs.cell_resolver();
+            match ParsedPattern::<ProvidersPatternExtra>::parse_not_relaxed(
+                literal,
+                if dir_with_allowed_relative_dirs.has_allowed_relative_dir() {
+                    TargetParsingRel::AllowRelative(dir_with_allowed_relative_dirs, None)
+                } else {
+                    TargetParsingRel::AllowLimitedRelative(current_package)
+                },
+                cell_resolver,
+                cell_alias_resolver,
+                infer_target_names,
+            ) {
+                Ok(ParsedPattern::Target(package, target, _)) => {
+                    DicePackageListingResolver(&mut dice_ctx.ctx())
+                        .resolve_package_listing(package.dupe())
+                        .await
+                        .and_then(|listing| {
+                            // In the case of external cells, we need to actually materialize
+                            // this thing on disk, so treat it like a source artifact
+                            let buildfile: &PackageRelativePath =
+                                PackageRelativePath::new(listing.buildfile())?;
+                            let source_path = SourcePath::new(package.dupe(), buildfile.into());
+                            let relative_path = artifact_fs.resolve_source(source_path.as_ref())?;
+                            let path = self.fs.resolve(&relative_path);
+                            let uri = Uri::from_file_path(&path).ok_or_else(|| {
+                                internal_error!("Failed to convert path to file URI: {}", path)
+                            })?;
+                            match uri.try_into() {
+                                Ok(uri) => {
+                                    let string_literal = StringLiteralResult {
+                                        uri,
+                                        location_finder: Some(Box::new(|ast| {
+                                            Ok(Self::find_target(ast, target))
+                                        })),
+                                    };
+                                    Ok(Some(string_literal))
                                 }
-                            }))
-                    })
-                    .await?;
-                Ok(res?)
+                                Err(e) => Err(from_any_with_tag(e, buck2_error::ErrorTag::Lsp)),
+                            }
+                        })
+                }
+                _ => Ok(None),
             }
-            _ => Ok(None),
-        }
+        })
+        .await
     }
 
     fn find_target(ast: &AstModule, target: TargetName) -> Option<Span> {
@@ -588,7 +617,8 @@ impl LspContext for BuckLspContext<'_> {
                         let current_import_path = self.import_path(current_file).await?;
                         let borrowed_current_import_path = current_import_path.borrow();
                         let uri = self
-                            .with_dice_ctx(|mut dice_ctx| async move {
+                            .with_dice_ctx(|dice_ctx| async move {
+                                let mut dice_ctx = dice_ctx.ctx();
                                 let calculator = dice_ctx
                                     .get_interpreter_calculator(OwnedStarlarkPath::new(
                                         borrowed_current_import_path.starlark_path(),
@@ -679,9 +709,9 @@ impl LspContext for BuckLspContext<'_> {
                     LspUri::File(path) => {
                         let path = self.import_path(path).await?;
 
-                        self.with_dice_ctx(|mut dice_ctx| async move {
+                        self.with_dice_ctx(|dice_ctx| async move {
                             DiceFileComputations::read_file_if_exists(
-                                &mut dice_ctx,
+                                &mut dice_ctx.ctx(),
                                 path.borrow().path().as_ref(),
                             )
                             .await

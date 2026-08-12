@@ -20,41 +20,74 @@ use derive_more::Display;
 use futures::Stream;
 use futures::TryStreamExt;
 use serde::Serialize;
+use similar::ChangeTag;
+use similar::TextDiff;
 
 use crate::diff::diff_options::DiffEventLogOptions;
 
 const PROJECT_ROOT: &str = "";
+
+/// Output format options for log diff external-config.
+///
+/// Determines how the command output is formatted and displayed.
+#[derive(Debug, Clone, clap::ValueEnum)]
+#[clap(rename_all = "snake_case")]
+enum ExternalConfigDiffFormat {
+    /// Human-readable output (default).
+    Readable,
+    /// JSON format, one object per line.
+    Json,
+}
 
 /// Identifies the diff between external buckconfigs between two commands.
 #[derive(Debug, clap::Parser)]
 pub struct ExternalConfigDiffCommand {
     #[clap(flatten)]
     diff_event_log: DiffEventLogOptions,
+    #[clap(
+        long,
+        help = "Which output format to use for this command",
+        default_value = "readable",
+        ignore_case = true,
+        value_enum
+    )]
+    format: ExternalConfigDiffFormat,
 }
 
-fn insert_config_value(dict: &mut BTreeMap<String, String>, config: &buck2_data::ConfigValue) {
+fn insert_config_value(
+    dict: &mut BTreeMap<String, String>,
+    order: &mut Vec<String>,
+    config: &buck2_data::ConfigValue,
+) {
     let config_cell = config
         .cell
         .clone()
         .map_or(PROJECT_ROOT.to_owned(), |cell| format!("({cell})"));
-    dict.insert(
-        format!(
-            "{}{}.{}",
-            config_cell,
-            config.section.clone(),
-            config.key.clone()
-        ),
-        config.value.clone(),
+    let key = format!(
+        "{}{}.{}",
+        config_cell,
+        config.section.clone(),
+        config.key.clone()
     );
+    order.push(format!("{key}={}", config.value));
+    dict.insert(key, config.value.clone());
 }
 
-fn insert_config_values(dict: &mut BTreeMap<String, String>, configs: &[buck2_data::ConfigValue]) {
+fn insert_config_values(
+    dict: &mut BTreeMap<String, String>,
+    order: &mut Vec<String>,
+    configs: &[buck2_data::ConfigValue],
+) {
     configs
         .iter()
-        .for_each(|config_value| insert_config_value(dict, config_value))
+        .for_each(|config_value| insert_config_value(dict, order, config_value))
 }
 
-fn process_buckconfig_data(dict: &mut BTreeMap<String, String>, event: &buck2_data::BuckEvent) {
+fn process_buckconfig_data(
+    dict: &mut BTreeMap<String, String>,
+    order: &mut Vec<String>,
+    event: &buck2_data::BuckEvent,
+) {
     use buck2_data::buckconfig_component::Data::ConfigFile;
     use buck2_data::buckconfig_component::Data::ConfigValue;
     use buck2_data::buckconfig_component::Data::GlobalExternalConfigFile;
@@ -69,21 +102,24 @@ fn process_buckconfig_data(dict: &mut BTreeMap<String, String>, event: &buck2_da
                 .components
                 .iter()
                 .for_each(|component| match component.data.as_ref() {
-                    Some(ConfigValue(config_value)) => insert_config_value(dict, config_value),
+                    Some(ConfigValue(config_value)) => {
+                        insert_config_value(dict, order, config_value)
+                    }
                     Some(ConfigFile(config_file)) => config_file
                         .data
                         .as_ref()
                         .into_iter()
                         .for_each(|data| match data {
                             ProjectRelativePath(p) => {
+                                order.push(p.clone());
                                 dict.insert(p.clone(), "".to_owned());
                             }
                             GlobalExternalConfig(external_config_values) => {
-                                insert_config_values(dict, &external_config_values.values)
+                                insert_config_values(dict, order, &external_config_values.values)
                             }
                         }),
                     Some(GlobalExternalConfigFile(external_config_file)) => {
-                        insert_config_values(dict, &external_config_file.values)
+                        insert_config_values(dict, order, &external_config_file.values)
                     }
                     _ => {}
                 });
@@ -93,18 +129,33 @@ fn process_buckconfig_data(dict: &mut BTreeMap<String, String>, event: &buck2_da
 
 async fn get_external_buckconfig_dict(
     mut events: impl Stream<Item = buck2_error::Result<StreamValue>> + Unpin + Send,
-) -> buck2_error::Result<BTreeMap<String, String>> {
+) -> buck2_error::Result<(BTreeMap<String, String>, Vec<String>)> {
     let mut dict: BTreeMap<String, String> = BTreeMap::new();
+    let mut order: Vec<String> = Vec::new();
     while let Some(event) = events.try_next().await? {
         if let StreamValue::Event(event) = event {
-            process_buckconfig_data(&mut dict, &event);
+            process_buckconfig_data(&mut dict, &mut order, &event);
         }
     }
-    Ok(dict)
+    Ok((dict, order))
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Serialize)]
-pub enum DiffType<'a> {
+#[serde(rename_all = "lowercase")]
+enum DiffTag {
+    Equal,
+    Delete,
+    Insert,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Serialize)]
+struct DiffChange {
+    tag: DiffTag,
+    value: String,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Serialize)]
+enum DiffType<'a> {
     Changed {
         key: &'a str,
         old_value: &'a str,
@@ -118,6 +169,9 @@ pub enum DiffType<'a> {
         key: &'a str,
         value: &'a str,
     },
+    FullDiff {
+        changes: Vec<DiffChange>,
+    },
 }
 
 impl Display for DiffType<'_> {
@@ -130,6 +184,18 @@ impl Display for DiffType<'_> {
             } => write!(f, "{key}: {old_value} | {new_value}"),
             DiffType::FirstOnly { key, value } => write!(f, "{key}: {value} | _"),
             DiffType::SecondOnly { key, value } => write!(f, "{key}: _ | {value}"),
+            DiffType::FullDiff { changes } => {
+                writeln!(f, "\n=== Full Diff ===")?;
+                for change in changes {
+                    let sign = match change.tag {
+                        DiffTag::Delete => "-",
+                        DiffTag::Insert => "+",
+                        DiffTag::Equal => " ",
+                    };
+                    writeln!(f, "{sign} {}", change.value)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -143,7 +209,12 @@ impl BuckSubcommand for ExternalConfigDiffCommand {
         ctx: ClientCommandContext<'_>,
         _events_ctx: &mut EventsCtx,
     ) -> ExitResult {
-        let (log_path1, log_path2) = self.diff_event_log.get(&ctx).await?;
+        let Self {
+            diff_event_log,
+            format,
+        } = self;
+
+        let (log_path1, log_path2) = diff_event_log.get(&ctx).await?;
 
         let (invocation1, events1) = log_path1.unpack_stream().await?;
         let (invocation2, events2) = log_path2.unpack_stream().await?;
@@ -156,8 +227,8 @@ impl BuckSubcommand for ExternalConfigDiffCommand {
 
         // External buckconfigs are stored in the event log in order and can have overrides
         // We first resolve them into a single dict
-        let dict1 = get_external_buckconfig_dict(events1).await?;
-        let dict2 = get_external_buckconfig_dict(events2).await?;
+        let (dict1, order1) = get_external_buckconfig_dict(events1).await?;
+        let (dict2, order2) = get_external_buckconfig_dict(events2).await?;
         let mut diffs = Vec::new();
         for (key, value) in dict1.iter() {
             if let Some(new_value) = dict2.get(key) {
@@ -178,8 +249,43 @@ impl BuckSubcommand for ExternalConfigDiffCommand {
                 diffs.push(DiffType::SecondOnly { key, value });
             }
         }
-        let json_diffs = serde_json::to_string_pretty(&diffs)?;
-        buck2_client_ctx::println!("{}", json_diffs)?;
+
+        if order1 != order2 {
+            let first: Vec<&str> = order1.iter().map(String::as_str).collect();
+            let second: Vec<&str> = order2.iter().map(String::as_str).collect();
+            let changes = TextDiff::from_slices(&first, &second)
+                .iter_all_changes()
+                .map(|change| DiffChange {
+                    tag: match change.tag() {
+                        ChangeTag::Equal => DiffTag::Equal,
+                        ChangeTag::Delete => DiffTag::Delete,
+                        ChangeTag::Insert => DiffTag::Insert,
+                    },
+                    value: change.value().to_owned(),
+                })
+                .collect();
+            diffs.push(DiffType::FullDiff { changes });
+        }
+
+        buck2_client_ctx::stdio::print_with_writer::<buck2_error::Error, _>(async move |w| {
+            match format {
+                ExternalConfigDiffFormat::Readable => {
+                    writeln!(w, "=== Summary Diff ===")?;
+                    for diff in &diffs {
+                        writeln!(w, "{diff}")?;
+                    }
+                }
+                ExternalConfigDiffFormat::Json => {
+                    for diff in &diffs {
+                        serde_json::to_writer(&mut *w, diff)?;
+                        writeln!(w)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await?;
+
         ExitResult::success()
     }
 }

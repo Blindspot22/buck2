@@ -45,6 +45,7 @@ use buck2_error::internal_error;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::digest_config::HasDigestConfig;
 use buck2_execute::materialize::materializer::HasMaterializer;
+use buck2_execute::materialize::materializer::MaterializationPurpose;
 use buck2_execute::materialize::materializer::WriteRequest;
 use buck2_external_cells_bundled::BundledCell;
 use buck2_external_cells_bundled::BundledFile;
@@ -360,7 +361,7 @@ fn get_file_ops_delegate_impl(
     digest_config: DigestConfig,
 ) -> buck2_error::Result<BundledFileOpsDelegate> {
     let mut builder: DirectoryBuilder<ContentsAndMetadata, BundledDirectoryDigest> =
-        DirectoryBuilder::empty();
+        DirectoryBuilder::empty_non_exhaustive();
     let source_digest_config = digest_config.cas_digest_config().source_files_config();
     for file in data.files {
         let path = ForwardRelativePath::new(file.path)
@@ -457,7 +458,9 @@ pub(crate) async fn get_file_ops_delegate(
         }
     }
 
-    ctx.compute(&BundledFileOpsDelegateKey(cell_name)).await?
+    ctx.compute(&BundledFileOpsDelegateKey(cell_name))
+        .await?
+        .dupe()
 }
 
 pub(crate) async fn materialize_all(
@@ -478,7 +481,9 @@ pub(crate) async fn materialize_all(
         paths.push(path);
     }
 
-    materializer.ensure_materialized(paths).await?;
+    materializer
+        .ensure_materialized(paths, MaterializationPurpose::IntermediateOnly)
+        .await?;
     Ok(buck_out_resolver.resolve_external_cell_source(
         CellRelativePath::unchecked_new(""),
         ExternalCellOrigin::Bundled(cell),

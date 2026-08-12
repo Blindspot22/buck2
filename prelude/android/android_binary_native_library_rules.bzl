@@ -26,6 +26,8 @@ load("@prelude//android:voltron.bzl", "ROOT_MODULE", "all_targets_in_root_module
     # @oss-disable[end= ]: "gatorade_deferred_libs",
     # @oss-disable[end= ]: "gatorade_libraries",
     # @oss-disable[end= ]: "is_late_gatorade_enabled",
+    # @oss-disable[end= ]: "middle_gatorade_merge_args",
+    # @oss-disable[end= ]: "relink_for_native_libs",
 # @oss-disable[end= ]: )
 load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo", "PicBehavior")
 load(
@@ -100,6 +102,17 @@ load("@prelude//utils:utils.bzl", "dedupe_by_value")
 #    Native libraries that are not part of the root module (i.e. it is part of some other Voltron
 #    module) are controlled by `package_voltron_asset_libraries` and `can_be_asset` flags.
 #    Similarly, the metadata for each module is stored at `assets/<module_name>/libs.txt`.
+
+def _merged_lib_provided_by_apk_under_test(merged_lib, shared_libraries_to_exclude: set) -> bool:
+    # True when every primary constituent of a merged library is provided by the
+    # apk-under-test, so the instrumentation APK can drop its own copy and resolve
+    # the library at runtime from the apk-under-test instead.
+    if not shared_libraries_to_exclude or not merged_lib.primary_constituents:
+        return False
+    for constituent in merged_lib.primary_constituents:
+        if constituent.raw_target() not in shared_libraries_to_exclude:
+            return False
+    return True
 
 def get_android_binary_native_library_info(
     enhance_ctx: EnhancementContext,
@@ -241,6 +254,15 @@ def get_android_binary_native_library_info(
         relinked_libs_manifest = ctx.actions.declare_output("relinked_libs_manifest.json")
         dynamic_outputs.append(relinked_libs_output)
         dynamic_outputs.append(relinked_libs_manifest)
+
+    # Aggregate of every native library before the relinker's dead-code-stripping
+    # pass, exposed as the [unrelinked_libs] sub-target (the pre-relink counterpart
+    # of [relinked_libs]). Only the relinker produces an unrelinked vs relinked
+    # distinction, so this only exists when relinking is enabled.
+    unrelinked_libs_output = None
+    if enable_relinker:
+        unrelinked_libs_output = ctx.actions.declare_output("unrelinked_libs", dir = True)
+        dynamic_outputs.append(unrelinked_libs_output)
 
     lib_outputs_by_platform = _declare_library_subtargets(
         ctx, dynamic_outputs, original_shared_libs_by_platform, native_library_merge_map, native_library_merge_sequence, enable_relinker
@@ -396,8 +418,19 @@ def get_android_binary_native_library_info(
 
             ctx.actions.symlinked_dir(outputs[native_merge_debug], native_library_merge_debug_outputs)
 
+            # Merged libraries are assembled from the full linkable graph, so unlike the
+            # non-merging path (which filters via get_default_shared_libs) they do not
+            # otherwise honor shared_libraries_to_exclude. Drop any merged library whose
+            # primary constituents are all provided by the apk-under-test: re-emitting it
+            # would ship a duplicate merged .so that loads alongside the apk-under-test's
+            # copy in the instrumentation process and re-runs its link_whole static
+            # initializers. shared_libraries_to_exclude is empty for non-instrumentation
+            # binaries, so this is a no-op there.
             final_shared_libs_by_platform = {
-                platform: {soname: d.lib for soname, d in merged_shared_libs.items()} for platform, merged_shared_libs in merged_shared_libs_by_platform.items()
+                platform: {
+                    soname: d.lib for soname, d in merged_shared_libs.items() if not _merged_lib_provided_by_apk_under_test(d, shared_libraries_to_exclude)
+                }
+                for platform, merged_shared_libs in merged_shared_libs_by_platform.items()
             }
         elif enable_relinker:
             final_shared_libs_by_platform, native_library_merge_debug_outputs = _create_all_relinkable_links(
@@ -412,7 +445,7 @@ def get_android_binary_native_library_info(
 
         if enable_relinker and not defer_relink:
             unrelinked_shared_libs_by_platform = final_shared_libs_by_platform
-            final_shared_libs_by_platform = relink_libraries(ctx, final_shared_libs_by_platform)
+            final_shared_libs_by_platform = _relink_for_native_libs(ctx, final_shared_libs_by_platform)
             _link_library_subtargets(
                 ctx,
                 outputs,
@@ -424,22 +457,20 @@ def get_android_binary_native_library_info(
                 native_merge_debug,
                 unrelinked = True,
             )
+            _write_native_libs_dir_and_manifest(
+                ctx,
+                unrelinked_shared_libs_by_platform,
+                outputs[unrelinked_libs_output],
+                None,
+                stripped = False,
+            )
 
         if defer_relink:
             # Run relinking as separate actions that can execute in parallel with other build steps.
             # The relinked libs are exposed as [relinked_libs] sub-target for the combine genrule.
             # A JSON manifest listing the <abi>/<soname> entries is produced alongside so that
             # the combine script knows exactly which libraries to replace without guessing.
-            relinked_libs_by_platform = relink_libraries(ctx, final_shared_libs_by_platform)
-
-            def write_relinked_libs_outputs(ctx, libs_by_platform, out_dir, out_manifest):
-                relinked_lib_files = {}
-                for platform, libs in libs_by_platform.items():
-                    abi_directory = CPU_FILTER_TO_ABI_DIRECTORY[platform]
-                    for soname, shlib in libs.items():
-                        relinked_lib_files["{}/{}".format(abi_directory, soname)] = shlib.stripped_lib or shlib.lib.output
-                ctx.actions.symlinked_dir(out_dir, relinked_lib_files)
-                ctx.actions.write_json(out_manifest, sorted(relinked_lib_files.keys()))
+            relinked_libs_by_platform = _relink_for_native_libs(ctx, final_shared_libs_by_platform)
 
             if False: # @oss-enable
             # @oss-disable[end= ]: if is_late_gatorade_enabled(ctx):
@@ -447,7 +478,9 @@ def get_android_binary_native_library_info(
                 # the deferred relinked libs. The callback writes the final
                 # Gatorade-processed libs to the relinked_libs_output artifacts.
                 def deferred_gatorade_output(ctx, gatorade_libs_by_platform, dyn_outputs):
-                    write_relinked_libs_outputs(ctx, gatorade_libs_by_platform, dyn_outputs[relinked_libs_output], dyn_outputs[relinked_libs_manifest])
+                    _write_native_libs_dir_and_manifest(
+                        ctx, gatorade_libs_by_platform, dyn_outputs[relinked_libs_output], dyn_outputs[relinked_libs_manifest], stripped = True
+                    )
 
                 # @oss-disable[end= ]: gatorade_deferred_libs(
                     # @oss-disable[end= ]: ctx,
@@ -456,7 +489,9 @@ def get_android_binary_native_library_info(
                     # @oss-disable[end= ]: [outputs[relinked_libs_output], outputs[relinked_libs_manifest]],
                 # @oss-disable[end= ]: )
             else:
-                write_relinked_libs_outputs(ctx, relinked_libs_by_platform, outputs[relinked_libs_output], outputs[relinked_libs_manifest])
+                _write_native_libs_dir_and_manifest(
+                    ctx, relinked_libs_by_platform, outputs[relinked_libs_output], outputs[relinked_libs_manifest], stripped = True
+                )
 
             # Bind unrelinked subtarget outputs (same as final since we skipped inline relinking)
             _link_library_subtargets(
@@ -469,6 +504,13 @@ def get_android_binary_native_library_info(
                 split_groups,
                 native_merge_debug,
                 unrelinked = True,
+            )
+            _write_native_libs_dir_and_manifest(
+                ctx,
+                final_shared_libs_by_platform,
+                outputs[unrelinked_libs_output],
+                None,
+                stripped = False,
             )
 
         if ctx.attrs._android_toolchain[AndroidToolchainInfo].cross_module_native_deps_check:
@@ -591,6 +633,8 @@ def get_android_binary_native_library_info(
         enhance_ctx.debug_output("relinked_libs", relinked_libs_output)
     if relinked_libs_manifest:
         enhance_ctx.debug_output("relinked_libs_manifest", relinked_libs_manifest)
+    if unrelinked_libs_output:
+        enhance_ctx.debug_output("unrelinked_libs", unrelinked_libs_output)
 
     native_libs_for_primary_apk, exopackage_info = _get_exopackage_info(ctx, native_libs_always_in_primary_apk, native_libs, native_libs_metadata)
     return AndroidBinaryNativeLibsInfo(
@@ -610,6 +654,25 @@ _NativeLibSubtargetArtifacts = record(
     linker_command = Artifact | None,
     linker_argsfile = Artifact | None,
 )
+
+# Writes a directory of <abi>/<soname> shared libraries, and optionally a JSON
+# manifest listing those entries. Shared by the [relinked_libs] and
+# [unrelinked_libs] sub-targets. [relinked_libs] feeds the combine genrule and
+# wants the packaged (stripped) form plus the manifest (so the combine step
+# knows which libraries to replace); [unrelinked_libs] mirrors the per-library
+# [unrelinked] sub-target, exposing the unstripped linker output, and needs no
+# manifest (pass out_manifest = None).
+def _write_native_libs_dir_and_manifest(ctx, libs_by_platform, out_dir, out_manifest, stripped):
+    lib_files = {}
+    for platform in libs_by_platform:
+        libs = libs_by_platform[platform]
+        abi_directory = CPU_FILTER_TO_ABI_DIRECTORY[platform]
+        for soname in libs:
+            shlib = libs[soname]
+            lib_files["{}/{}".format(abi_directory, soname)] = (shlib.stripped_lib or shlib.lib.output) if stripped else shlib.lib.output
+    ctx.actions.symlinked_dir(out_dir, lib_files)
+    if out_manifest != None:
+        ctx.actions.write_json(out_manifest, sorted(lib_files.keys()))
 
 def _post_native_lib_graph_finalization_steps(
     ctx: AnalysisContext,
@@ -1696,6 +1759,8 @@ def _get_merged_linkables_for_platform(
         if soname in merge_linker_args:
             link_args += [LinkArgs(flags = merge_linker_args[soname])]
 
+        # Emit the Middle Gatorade container from the merge link; {} when off.
+        # @oss-disable[end= ]: mg_args = middle_gatorade_merge_args(ctx, output_path, cxx_toolchain)
         shared_lib = create_shared_lib(
             ctx,
             output_path = output_path,
@@ -1705,6 +1770,7 @@ def _get_merged_linkables_for_platform(
             shared_lib_deps = [link_group_linkable_nodes[label].shared_lib.soname.ensure_str() for label in shlib_deps],
             label = group_data.constituents[0],
             can_be_asset = can_be_asset,
+            # @oss-disable[end= ]: **mg_args,
         )
 
         link_group_linkable_nodes[group] = LinkGroupLinkableNode(
@@ -2138,6 +2204,10 @@ def relink_libraries(ctx: AnalysisContext, libraries_by_platform: dict[str, dict
             relinked_libraries[soname] = shared_lib
 
     return relinked_libraries_by_platform
+
+def _relink_for_native_libs(ctx: AnalysisContext, libraries_by_platform: dict[str, dict[str, SharedLibrary]]) -> dict[str, dict[str, SharedLibrary]]:
+    return relink_libraries(ctx, libraries_by_platform) # @oss-enable
+    # @oss-disable[end= ]: return relink_for_native_libs(ctx, libraries_by_platform, relink_libraries, create_shared_lib)
 
 def extract_provided_symbols(ctx: AnalysisContext, toolchain: CxxToolchainInfo, lib: Artifact) -> Artifact:
     return extract_defined_syms(ctx, toolchain, lib, "relinker_extract_provided_symbols")

@@ -20,24 +20,21 @@ use buck2_interpreter::types::configured_providers_label::StarlarkProvidersLabel
 use buck2_interpreter::types::target_label::StarlarkTargetLabel;
 use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
-use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::MethodsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
-use starlark::values::Freeze;
+use starlark::values::FreezeBranded;
 use starlark::values::Heap;
 use starlark::values::StarlarkPagable;
 use starlark::values::Trace;
 use starlark::values::UnpackAndDiscard;
 use starlark::values::Value;
-use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
-use starlark::values::ValueOfUncheckedGeneric;
-use starlark::values::ValueTypedComplex;
+use starlark::values::ValueTyped;
 use starlark::values::dict::AllocDict;
 use starlark::values::dict::DictMut;
 use starlark::values::dict::DictRef;
@@ -60,23 +57,21 @@ use crate::interpreter::rule_defs::provider::builtin::constraint_value_info::Fro
 #[derive(
     Debug,
     Trace,
-    Coerce,
-    Freeze,
+    FreezeBranded,
     ProvidesStaticType,
     Allocative,
     StarlarkPagable
 )]
 #[repr(C)]
-pub struct ConfigurationInfoGen<V: ValueLifetimeless> {
-    constraints:
-        ValueOfUncheckedGeneric<V, DictType<StarlarkTargetLabel, FrozenConstraintValueInfo>>,
-    values: ValueOfUncheckedGeneric<V, DictType<String, String>>,
+pub struct ConfigurationInfo<'v> {
+    constraints: ValueOfUnchecked<'v, DictType<StarlarkTargetLabel, FrozenConstraintValueInfo>>,
+    values: ValueOfUnchecked<'v, DictType<String, String>>,
 }
 
-impl<'v, V: ValueLike<'v>> ConfigurationInfoGen<V> {
+impl<'v> ConfigurationInfo<'v> {
     pub fn to_config_setting_data(&self) -> ConfigSettingData {
-        let constraints = DictRef::from_value(self.constraints.get().to_value())
-            .expect("type checked on construction");
+        let constraints =
+            DictRef::from_value(self.constraints.get()).expect("type checked on construction");
         let mut converted_constraints = BTreeMap::new();
         for (k, v) in constraints.iter() {
             let key_target = StarlarkTargetLabel::from_value(k.to_value())
@@ -92,8 +87,7 @@ impl<'v, V: ValueLike<'v>> ConfigurationInfoGen<V> {
             converted_constraints.insert(constraint_key, constraint_value);
         }
 
-        let values = DictRef::from_value(self.values.get().to_value())
-            .expect("type checked on construction");
+        let values = DictRef::from_value(self.values.get()).expect("type checked on construction");
         let mut converted_values = BTreeMap::new();
         for (k, v) in values.iter() {
             let key_config = k.to_value().to_str();
@@ -117,9 +111,7 @@ impl<'v, V: ValueLike<'v>> ConfigurationInfoGen<V> {
         }
         Ok(ConfigurationDataData { constraints })
     }
-}
 
-impl<'v> ConfigurationInfo<'v> {
     /// Create a provider from configuration data.
     pub fn from_configuration_data(conf: &ConfigurationDataData, heap: Heap<'v>) -> Self {
         let mut constraints = SmallMap::new();
@@ -142,12 +134,12 @@ impl<'v> ConfigurationInfo<'v> {
                 constraint_setting_label
                     .get_hashed()
                     .expect("StarlarkTargetLabel is hashable"),
-                heap.alloc_complex(constraint_value),
+                heap.alloc(constraint_value),
             );
             assert!(prev.is_none());
         }
 
-        ConfigurationInfoGen {
+        ConfigurationInfo {
             constraints: ValueOfUnchecked::new(heap.alloc(constraints)),
             values: heap.alloc_typed_unchecked(AllocDict([("", ""); 0])).cast(),
         }
@@ -272,14 +264,14 @@ fn configuration_info_methods(builder: &mut MethodsBuilder) {
         this: &ConfigurationInfo<'v>,
         #[starlark(require = pos)] key: ValueOf<'v, &'v ConstraintSettingInfo<'v>>,
         heap: Heap<'v>,
-    ) -> starlark::Result<NoneOr<ValueTypedComplex<'v, ConstraintValueInfo<'v>>>> {
-        let constraints = DictRef::from_value(this.constraints.get().to_value())
-            .expect("type checked on construction");
+    ) -> starlark::Result<NoneOr<ValueTyped<'v, ConstraintValueInfo<'v>>>> {
+        let constraints =
+            DictRef::from_value(this.constraints.get()).expect("type checked on construction");
 
         let label = key.typed.label();
         match constraints.get(label.to_value())? {
             Some(v) => {
-                let v = ValueTypedComplex::new_err(v).expect("type checked on construction");
+                let v = ValueTyped::new_err(v).expect("type checked on construction");
                 Ok(NoneOr::Other(v))
             }
             // if not find in the constraints, we return the default constraint value
@@ -313,12 +305,12 @@ fn configuration_info_methods(builder: &mut MethodsBuilder) {
         this: &ConfigurationInfo<'v>,
         #[starlark(require = pos)] value: ValueOf<'v, &'v ConstraintValueInfo<'v>>,
         heap: Heap<'v>,
-    ) -> starlark::Result<NoneOr<ValueTypedComplex<'v, ConstraintValueInfo<'v>>>> {
+    ) -> starlark::Result<NoneOr<ValueTyped<'v, ConstraintValueInfo<'v>>>> {
         let constraint_value = value.typed;
         let setting_info = constraint_value.setting();
         let label = setting_info.typed.label();
 
-        let mut constraints = DictMut::from_value(this.constraints.get().to_value())?;
+        let mut constraints = DictMut::from_value(this.constraints.get())?;
 
         let v = constraints.aref.insert_hashed(
             label
@@ -330,7 +322,7 @@ fn configuration_info_methods(builder: &mut MethodsBuilder) {
 
         match v {
             Some(v) => {
-                let v = ValueTypedComplex::new_err(v).expect("type checked on construction");
+                let v = ValueTyped::new_err(v).expect("type checked on construction");
                 Ok(NoneOr::Other(v))
             }
             // if not found in the constraints, we return the default constraint value
@@ -367,9 +359,9 @@ fn configuration_info_methods(builder: &mut MethodsBuilder) {
         this: &ConfigurationInfo<'v>,
         #[starlark(require = pos)] key: ValueOf<'v, &'v ConstraintSettingInfo<'v>>,
         heap: Heap<'v>,
-    ) -> starlark::Result<NoneOr<ValueTypedComplex<'v, ConstraintValueInfo<'v>>>> {
+    ) -> starlark::Result<NoneOr<ValueTyped<'v, ConstraintValueInfo<'v>>>> {
         let label = key.typed.label();
-        let mut constraints = DictMut::from_value(this.constraints.get().to_value())?;
+        let mut constraints = DictMut::from_value(this.constraints.get())?;
 
         // Remove and return the value
         let removed = constraints.aref.remove_hashed(
@@ -381,7 +373,7 @@ fn configuration_info_methods(builder: &mut MethodsBuilder) {
 
         match removed {
             Some(v) => {
-                let v = ValueTypedComplex::new_err(v).expect("type checked on construction");
+                let v = ValueTyped::new_err(v).expect("type checked on construction");
                 Ok(NoneOr::Other(v))
             }
             // if not found in the constraints, we return the default constraint value
@@ -411,8 +403,8 @@ fn configuration_info_methods(builder: &mut MethodsBuilder) {
         heap: Heap<'v>,
     ) -> starlark::Result<ConfigurationInfo<'v>> {
         // Copy constraints dict
-        let constraints = DictRef::from_value(this.constraints.get().to_value())
-            .expect("type checked on construction");
+        let constraints =
+            DictRef::from_value(this.constraints.get()).expect("type checked on construction");
         let mut new_constraints = SmallMap::new();
         for (k, v) in constraints.iter() {
             let key_hashed = k.get_hashed().expect("should be hashable");
@@ -420,8 +412,7 @@ fn configuration_info_methods(builder: &mut MethodsBuilder) {
         }
 
         // Copy values dict
-        let values = DictRef::from_value(this.values.get().to_value())
-            .expect("type checked on construction");
+        let values = DictRef::from_value(this.values.get()).expect("type checked on construction");
         let mut new_values = SmallMap::new();
         for (k, v) in values.iter() {
             let key_hashed = k.get_hashed().expect("should be hashable");
@@ -440,9 +431,9 @@ fn configuration_info_methods(builder: &mut MethodsBuilder) {
 fn get_default_constraint_value<'v>(
     key: ValueOf<'v, &'v ConstraintSettingInfo<'v>>,
     heap: Heap<'v>,
-) -> NoneOr<ValueTypedComplex<'v, ConstraintValueInfo<'v>>> {
+) -> NoneOr<ValueTyped<'v, ConstraintValueInfo<'v>>> {
     NoneOr::from_option(
         ConstraintValueInfo::default_from_constraint_setting(key)
-            .map(|constraint_value| heap.alloc_typed(constraint_value).into()),
+            .map(|constraint_value| heap.alloc_typed(constraint_value)),
     )
 }

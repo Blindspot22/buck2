@@ -10,6 +10,7 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::sync::LazyLock;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -33,7 +34,6 @@ use derive_more::Add;
 use faccess::PathExt;
 use futures::Future;
 use futures::future::try_join;
-use once_cell::sync::Lazy;
 use pathdiff::diff_paths;
 use tokio::sync::Semaphore;
 
@@ -183,7 +183,9 @@ async fn build_dir_from_disk(
     blocking_executor: &dyn BlockingExecutor,
     project_root: &AbsNormPath,
 ) -> buck2_error::Result<(ActionDirectoryBuilder, HashingInfo)> {
-    let mut builder = ActionDirectoryBuilder::empty();
+    // A disk scan is a complete listing of what's there, so the tree this builds is uniformly
+    // exhaustive (each level is built from its own builder, bottom-up).
+    let mut builder = ActionDirectoryBuilder::empty_exhaustive();
     let mut hashing_info = HashingInfo::default();
 
     let mut directory_names: Vec<FileNameBuf> = Vec::new();
@@ -266,7 +268,7 @@ fn build_file_metadata(
     disk_path: AbsNormPathBuf,
     digest_config: FileDigestConfig,
 ) -> impl Future<Output = buck2_error::Result<(FileMetadata, HashingInfo)>> {
-    static SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(100));
+    static SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(100));
     let io_task = move || {
         do_normalize_permissions(&disk_path)?;
         let hashing_start = Instant::now();

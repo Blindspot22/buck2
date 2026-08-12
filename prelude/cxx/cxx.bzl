@@ -353,6 +353,8 @@ def cxx_binary_impl(ctx: AnalysisContext) -> list[Provider]:
         separate_debug_info = ctx.attrs.separate_debug_info,
         cuda_compile_style = CudaCompileStyle(ctx.attrs.cuda_compile_style),
         link_preference = LinkPreference(ctx.attrs.link_preference),
+        # @oss-disable[end= ]: extra_linker_outputs_factory = get_extra_linker_outputs,
+        # @oss-disable[end= ]: extra_linker_outputs_flags_factory = get_extra_linker_output_flags,
     )
     output = cxx_executable(ctx, params)
 
@@ -401,13 +403,15 @@ def cxx_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     # will ignore them and obtain debuginfo via the single packed debuginfo file
     # instead.
     #
-    # But materializing unpacked debuginfo is the right tradeoff because it
-    # means the output of `buck2 build :main` is always immediately usable in a
-    # debugger.
+    # But materializing unpacked debuginfo is usually the right tradeoff
+    # because it means the output of `buck2 build :main` is always immediately
+    # usable in a debugger. Toolchains whose debugging workflow materializes
+    # debuginfo on demand instead (via the `[debuginfo]` or `[dwp]`
+    # sub-targets) can opt out with `materialize_external_debug_info = False`.
     #
     # External debuginfo is *not* materialized when an executable is depended on
     # by another rule, such as by $(exe ...) or exec_dep.
-    other_outputs = output.runtime_files + output.external_debug_info_artifacts
+    other_outputs = output.runtime_files + (output.external_debug_info_artifacts if get_cxx_toolchain_info(ctx).materialize_external_debug_info else [])
 
     return [
         DefaultInfo(
@@ -1065,7 +1069,7 @@ def cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
     providers = [
         DefaultInfo(
             default_output = output.binary,
-            other_outputs = output.runtime_files + output.external_debug_info_artifacts,
+            other_outputs = output.runtime_files + (output.external_debug_info_artifacts if get_cxx_toolchain_info(ctx).materialize_external_debug_info else []),
             sub_targets = output.sub_targets,
         ),
         output.compilation_db,

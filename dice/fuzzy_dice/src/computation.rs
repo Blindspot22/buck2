@@ -25,9 +25,7 @@ use dice::NoValueSerialize;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
-use futures::FutureExt;
 use futures::future;
-use futures::future::BoxFuture;
 use pagable::Pagable;
 use pagable::PagablePanic;
 use pagable::pagable_typetag;
@@ -63,14 +61,10 @@ async fn resolve_units<'a>(
 ) -> anyhow::Result<Vec<bool>> {
     let futs = ctx.compute_many(units.iter().map(|unit| {
         let state = state.dupe();
-        DiceComputations::declare_closure(
-            move |ctx: &mut DiceComputations| -> BoxFuture<Result<bool, anyhow::Error>> {
-                match unit {
-                    Unit::Variable(var) => ctx.eval(state, *var).boxed(),
-                    Unit::Literal(lit) => futures::future::ready(Ok(*lit)).boxed(),
-                }
-            },
-        )
+        DiceComputations::declare_closure(async move |ctx| match unit {
+            Unit::Variable(var) => ctx.eval(state, *var).await,
+            Unit::Literal(lit) => Ok(*lit),
+        })
     }));
     future::join_all(futs).await.into_iter().collect()
 }
@@ -87,7 +81,7 @@ pub enum Expr {
 }
 
 async fn lookup_unit(ctx: &mut DiceComputations<'_>, var: Var) -> anyhow::Result<Arc<Expr>> {
-    Ok(ctx.compute(&LookupVar(var)).await?)
+    Ok(ctx.compute(&LookupVar(var)).await?.dupe())
 }
 
 #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative, Pagable)]
@@ -137,11 +131,10 @@ pub trait FuzzMath {
 #[async_trait]
 impl FuzzMath for DiceComputations<'_> {
     async fn eval(&mut self, state: Arc<FuzzState>, var: Var) -> anyhow::Result<bool> {
-        Ok(*self
-            .compute(&state.eval_var(var))
-            .await?
-            .map_err(|e| anyhow::anyhow!(format!("{:#}", e)))?
-            .as_ref())
+        match self.compute(&state.eval_var(var)).await? {
+            Ok(v) => Ok(*v.as_ref()),
+            Err(e) => Err(anyhow::anyhow!(format!("{:#}", e))),
+        }
     }
 }
 
@@ -290,7 +283,7 @@ mod tests {
     pub async fn test_smoke() -> anyhow::Result<()> {
         let empty_state = Arc::new(FuzzState::new());
         let dice = Dice::builder().build(DetectCycles::Disabled);
-        let mut ctx = {
+        let ctx = {
             let mut ctx = dice.updater();
             // let x1 = true
             ctx.set_equation(Var(1), Expr::Unit(Unit::Literal(true)))?;
@@ -312,10 +305,10 @@ mod tests {
             )?;
             ctx.commit().await
         };
-        assert!(ctx.eval(empty_state.dupe(), Var(1)).await?);
-        assert!(ctx.eval(empty_state.dupe(), Var(2)).await?);
-        assert!(!ctx.eval(empty_state.dupe(), Var(3)).await?);
-        assert!(ctx.eval(empty_state.dupe(), Var(4)).await?);
+        assert!(ctx.ctx().eval(empty_state.dupe(), Var(1)).await?);
+        assert!(ctx.ctx().eval(empty_state.dupe(), Var(2)).await?);
+        assert!(!ctx.ctx().eval(empty_state.dupe(), Var(3)).await?);
+        assert!(ctx.ctx().eval(empty_state.dupe(), Var(4)).await?);
         Ok(())
     }
 }

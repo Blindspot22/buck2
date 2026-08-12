@@ -135,7 +135,6 @@ use crate::arc_erase::ArcEraseType;
 use crate::arc_erase::StdArcEraseType;
 use crate::arc_erase::deserialize_arc;
 use crate::storage::data::DataKey;
-use crate::storage::data::OptionalDataKey;
 use crate::storage::handle::PagableStorageHandle;
 use crate::storage::traits::PagableStorage;
 
@@ -437,7 +436,7 @@ impl<T: Pagable> PagableArc<T> {
         self.pointer.is_paged_out()
     }
 
-    pub(crate) fn get_data_key(&self) -> OptionalDataKey {
+    pub(crate) fn get_data_key(&self) -> Option<DataKey> {
         self.pointer.get_data_key()
     }
 
@@ -654,7 +653,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for PagableArcInner<T> {
 
 #[derive(Debug)]
 struct PagableArcInnerData<T> {
-    key: OptionalDataKey,
+    key: Option<DataKey>,
     value: PagableArcInnerState<T>,
 }
 
@@ -668,7 +667,7 @@ impl<T> PagableArcInnerData<T> {
 
     fn new_pinned(value: std::sync::Arc<T>) -> Self {
         Self {
-            key: OptionalDataKey::None,
+            key: None,
             value: PagableArcInnerState::Pinned(value),
         }
     }
@@ -731,12 +730,13 @@ impl<T> PagableArcInnerState<T> {
 }
 
 // On 64-bit platforms, all fields (including AtomicU64) are usize-aligned so
-// the struct packs into 8 usizes.  On 32-bit targets (e.g. wasm32), fixed-size
+// the struct packs into 8 usizes.  On 32-bit wasm32, fixed-size
 // fields like AtomicU64 stay 8 bytes while usize shrinks to 4, so the struct
-// occupies 12 usizes instead.
+// occupies 12 usizes instead. Other 32-bit targets like armv7 have different
+// Mutex layout and pack tighter, so we do not assert a fixed size there.
 #[cfg(target_pointer_width = "64")]
 static_assertions::assert_eq_size!(PagableArcInner<[usize; 4]>, [usize; 8]);
-#[cfg(target_pointer_width = "32")]
+#[cfg(target_arch = "wasm32")]
 static_assertions::assert_eq_size!(PagableArcInner<[usize; 4]>, [usize; 12]);
 
 impl<T: Pagable> PagableArcInner<T> {
@@ -895,7 +895,7 @@ impl<T: Pagable> PagableArcInner<T> {
         }
     }
 
-    pub(crate) fn get_data_key(&self) -> OptionalDataKey {
+    pub(crate) fn get_data_key(&self) -> Option<DataKey> {
         let _lock = self.lock.lock();
         unsafe { &*self.data.get() }.key
     }
@@ -975,6 +975,10 @@ impl<T: Pagable> ArcErase for PagableArc<T> {
 
     fn set_data_key(&self, k: DataKey) {
         self.set_data_key(k);
+    }
+
+    fn data_key(&self) -> Option<DataKey> {
+        self.get_data_key()
     }
 
     fn needs_paging_out(&self) -> bool {

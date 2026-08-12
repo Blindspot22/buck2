@@ -177,7 +177,7 @@ fn test_top_level_comment() {
 
 #[test]
 fn test_top_level_load() {
-    let want = "load(\"//top/level/load.bzl\", top-level = \"top-level\")\n";
+    let want = "load(\"//top/level/load.bzl\", \"top-level\")\n";
     assert_eq!(
         parse("\nload(\"//top/level/load.bzl\", \"top-level\")\n"),
         want
@@ -190,6 +190,7 @@ fn test_top_level_load() {
         parse("\nload(\n  \"//top/level/load.bzl\",\n  \"top-level\",\n)\n"),
         want
     );
+    assert_eq!(parse(want), want);
 }
 
 #[test]
@@ -309,6 +310,9 @@ fn test_bytes_literal() {
     assert_eq!(parse(r#"x = b"""triple""""#), "x = b\"triple\"\n");
     assert_eq!(parse(r#"x = rb"\n""#), "x = b\"\\\\n\"\n");
     assert_eq!(parse(r#"print(b"hi")"#), "print(b\"hi\")\n");
+    assert_eq!(parse(r#"x = (1, b"")"#), "x = (1, b\"\")\n");
+    assert_eq!(parse(r#"x = (b"", 1)"#), "x = (b\"\", 1)\n");
+    assert_eq!(parse(r#"x = (1, b"", 2)"#), "x = (1, b\"\", 2)\n");
 }
 
 #[test]
@@ -746,10 +750,11 @@ fn test_identifier_led_call_arguments_continue_parsing() {
 
 #[test]
 fn test_load_alias_forms() {
-    assert_eq!(
-        parse("load(\"m.bzl\", alias = \"real\", \"plain\",)"),
-        "load(\"m.bzl\", alias = \"real\", plain = \"plain\")\n"
+    assert_display_roundtrip(
+        "load(\"m.bzl\", alias = \"real\", \"plain\",)",
+        "load(\"m.bzl\", alias = \"real\", \"plain\")\n",
     );
+    assert_display_roundtrip("load(\"m.bzl\", \"if\")", "load(\"m.bzl\", \"if\")\n");
 }
 
 #[test]
@@ -757,6 +762,59 @@ fn test_slice_forms_cover_all_components() {
     assert_assignment_rhs_is_slice("x = a[:2]", "a", None, Some("2"), None);
     assert_assignment_rhs_is_slice("x = a[1:]", "a", Some("1"), None, None);
     assert_assignment_rhs_is_slice("x = a[1:2:3]", "a", Some("1"), Some("2"), Some("3"));
+    assert_display_roundtrip("a[1:2]", "a[1:2]\n");
+}
+
+#[test]
+fn test_f_string_display_roundtrip() {
+    assert_display_roundtrip(r#"f"a{x}b""#, "\"a{}b\".format(x)\n");
+}
+
+#[test]
+fn test_nul_display_roundtrip() {
+    assert_display_roundtrip(r#"x = "\x001""#, "x = \"\\x001\"\n");
+    assert_display_roundtrip(r#"x = f"\x001{y}""#, "x = \"\\x001{}\".format(y)\n");
+    assert_display_roundtrip(
+        r#"load("m", symbol = "\x001")"#,
+        "load(\"m\", symbol = \"\\x001\")\n",
+    );
+}
+
+#[test]
+fn test_integer_dot_display_roundtrip() {
+    assert_display_roundtrip("(1).imag", "(1).imag\n");
+}
+
+#[test]
+fn test_integer_dot_assignment_display_roundtrip() {
+    assert_display_roundtrip("(1).field = value", "(1).field = value\n");
+}
+
+#[test]
+fn test_unary_assignment_receiver_display_roundtrip() {
+    assert_display_roundtrip("(-x).field = value", "(-x).field = value\n");
+    assert_display_roundtrip("(+x)[0] = value", "(+x)[0] = value\n");
+    assert_display_roundtrip("(~x).field += value", "(~x).field += value\n");
+}
+
+#[test]
+fn test_unary_postfix_receiver_display_roundtrip() {
+    assert_display_roundtrip("(-x).field", "(-x).field\n");
+    assert_display_roundtrip("(+f)()", "(+f)()\n");
+    assert_display_roundtrip("(~x)[i]", "(~x)[i]\n");
+    assert_display_roundtrip("(-x)[i, j]", "(-x)[i, j]\n");
+    assert_display_roundtrip("(-x)[a:b:c]", "(-x)[a:b:c]\n");
+}
+
+#[test]
+fn test_float_display_roundtrip() {
+    assert_display_roundtrip("1.0", "1.0\n");
+}
+
+#[test]
+fn test_infinite_float_display_roundtrip() {
+    assert_display_roundtrip("1e400", "1e400\n");
+    assert_display_roundtrip("-1e400", "-1e400\n");
 }
 
 #[test]
@@ -795,6 +853,12 @@ fn test_error_tuple_trailing_comma() {
 
 pub fn parse(program: &str) -> String {
     parse_ast(program).statement.to_string()
+}
+
+fn assert_display_roundtrip(program: &str, expected: &str) {
+    let displayed = parse(program);
+    assert_eq!(displayed, expected);
+    assert_eq!(parse(&displayed), displayed);
 }
 
 pub fn parse_ast(program: &str) -> AstModule {

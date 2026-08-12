@@ -14,12 +14,8 @@ use dupe::Dupe;
 use regex::Regex;
 use serde::Serialize;
 use serde::Serializer;
-use starlark::values::Freeze;
-use starlark::values::FreezeError;
-use starlark::values::FreezeResult;
-use starlark::values::Freezer;
-use starlark::values::FrozenStringValue;
-use starlark::values::FrozenValueTyped;
+use starlark::any::ProvidesStaticType;
+use starlark::values::FreezeBranded;
 use starlark::values::StarlarkPagable;
 use starlark::values::StringValue;
 use starlark::values::Trace;
@@ -36,7 +32,10 @@ use starlark::values::type_repr::StarlarkTypeRepr;
     Dupe,
     Copy,
     Trace,
-    Allocative
+    FreezeBranded,
+    ProvidesStaticType,
+    Allocative,
+    StarlarkPagable
 )]
 pub(crate) enum CmdArgsRegex<'v> {
     /// Deprecated.
@@ -56,15 +55,7 @@ impl<'v> CmdArgsRegex<'v> {
         }
         Ok(())
     }
-}
 
-#[derive(Debug, Clone, Dupe, Copy, Allocative, StarlarkPagable)]
-pub(crate) enum FrozenCmdArgsRegex {
-    Str(FrozenStringValue),
-    Regex(FrozenValueTyped<'static, StarlarkBuckRegex>),
-}
-
-impl<'v> CmdArgsRegex<'v> {
     pub(crate) fn as_str(&self) -> &str {
         match self {
             Self::Str(s) => s.as_str(),
@@ -73,35 +64,7 @@ impl<'v> CmdArgsRegex<'v> {
     }
 }
 
-impl<'v> Freeze for CmdArgsRegex<'v> {
-    type Frozen = FrozenCmdArgsRegex;
-
-    fn freeze(self, freezer: &Freezer) -> FreezeResult<Self::Frozen> {
-        Ok(match self {
-            Self::Str(s) => FrozenCmdArgsRegex::Str(s.freeze(freezer)?),
-            Self::Regex(r) => FrozenCmdArgsRegex::Regex(
-                match FrozenValueTyped::new_err(r.to_value().freeze(freezer)?) {
-                    Ok(r) => r,
-                    Err(e) => return Err(FreezeError::new(e.to_string())),
-                },
-            ),
-        })
-    }
-}
-
 impl<'v> Serialize for CmdArgsRegex<'v> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::Str(s) => serializer.collect_str(s),
-            Self::Regex(r) => serializer.collect_str(r.as_ref().as_str()),
-        }
-    }
-}
-
-impl Serialize for FrozenCmdArgsRegex {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

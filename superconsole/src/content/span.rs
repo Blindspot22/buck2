@@ -22,15 +22,31 @@ use crossterm::style::SetAttributes;
 use crossterm::style::SetBackgroundColor;
 use crossterm::style::SetForegroundColor;
 use crossterm::style::StyledContent;
-use termwiz::cell;
-use termwiz::cell::Hyperlink;
 use unicode_segmentation::Graphemes;
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpanError {
     #[error("Word {0} contains non-space whitespace")]
     InvalidWhitespace(String),
+}
+
+/// A hyperlink that can be attached to a [`Span`], rendered as an OSC 8 terminal
+/// escape sequence so supporting terminals make the span's text clickable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Hyperlink(String);
+
+impl Hyperlink {
+    /// Creates a hyperlink pointing at `uri`.
+    pub fn new(uri: impl Into<String>) -> Self {
+        Self(uri.into())
+    }
+
+    /// Returns the target URI of the hyperlink.
+    pub fn uri(&self) -> &str {
+        &self.0
+    }
 }
 
 /// A `Span` is a segment of text that may or may not have [`style`](crate::style) applied to it.
@@ -198,8 +214,7 @@ impl Span {
 
     /// Returns the number of graphemes in the span.
     pub fn len(&self) -> usize {
-        // Pulled this dep from another FB employee's project - better unicode support for terminal column widths.
-        cell::unicode_column_width(&self.content, None)
+        self.content.width()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -417,6 +432,26 @@ mod tests {
         let foot = "\u{1f9b6}";
         let span = Span::new_unstyled(foot).unwrap();
         assert_eq!(span.len(), 2);
+    }
+
+    #[test]
+    fn multi_codepoint_emoji() {
+        let emoji = "\u{1F469}\u{1F3FF}\u{200D}\u{1F91D}\u{200D}\u{1F469}\u{1F3FC}";
+        let span = Span::new_unstyled(emoji).unwrap();
+        assert_eq!(span.len(), 2);
+    }
+
+    #[test]
+    fn render_hyperlink() {
+        let span = Span::new_unstyled("example")
+            .unwrap()
+            .with_hyperlink(Some(Hyperlink::new("https://example.com")));
+        let mut rendered = String::new();
+        span.render(&mut rendered).unwrap();
+        assert_eq!(
+            rendered,
+            "\x1B]8;;https://example.com\x1B\\example\x1B]8;;\x1B\\"
+        );
     }
 
     #[test]

@@ -14,7 +14,6 @@ use std::sync::Arc;
 use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
 use buck2_cli_proto::build_request::Materializations;
 use buck2_cli_proto::build_request::Uploads;
-use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::data::HasIoProvider;
 use buck2_common::events::HasEvents;
 use buck2_core::cells::cell_path::CellPathRef;
@@ -425,7 +424,6 @@ pub(crate) fn bxl_context_methods(builder: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<BxlActions<'v>> {
         let heap = eval.heap();
-        let frozen_heap = eval.frozen_heap();
         Ok(this.via_dice(eval, |ctx| {
             ctx.via(|ctx| {
                 async {
@@ -524,7 +522,6 @@ pub(crate) fn bxl_context_methods(builder: &mut MethodsBuilder) {
                         exec_deps.to_vec(),
                         toolchains.to_vec(),
                         heap,
-                        frozen_heap,
                         ctx,
                     )
                     .await
@@ -702,27 +699,15 @@ pub(crate) fn bxl_context_methods(builder: &mut MethodsBuilder) {
     }
 
     /// Returns the `audit_ctx` that holds all the audit functions.
-    fn audit<'v>(
-        this: ValueTyped<'v, BxlContext<'v>>,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<StarlarkAuditCtx<'v>> {
-        let (working_dir, cell_resolver) = this.via_dice(eval, |ctx| {
-            ctx.via(|ctx| {
-                async move {
-                    Ok((
-                        this.cell_resolver()
-                            .get(this.cell_name())?
-                            .path()
-                            .as_project_relative_path()
-                            .to_buf(),
-                        ctx.get_cell_resolver().await?,
-                    ))
-                }
-                .boxed_local()
-            })
-        })?;
+    fn audit<'v>(this: ValueTyped<'v, BxlContext<'v>>) -> starlark::Result<StarlarkAuditCtx<'v>> {
+        let working_dir = this
+            .cell_resolver()
+            .get(this.cell_name())?
+            .path()
+            .as_project_relative_path()
+            .to_buf();
 
-        Ok(StarlarkAuditCtx::new(this, working_dir, cell_resolver)?)
+        Ok(StarlarkAuditCtx::new(this, working_dir)?)
     }
 
     /// Awaits a promise and returns an optional value of the promise.

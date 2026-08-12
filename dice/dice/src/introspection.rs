@@ -19,6 +19,18 @@ pub(crate) mod introspect;
 pub use crate::introspection::introspect::serialize_dense_graph;
 pub use crate::introspection::introspect::serialize_graph;
 
+/// A point-in-time snapshot of a `DiceTask`'s state, surfaced for graph introspection (e.g.
+/// `graph::GraphIntrospectable::keys_currently_running`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiceTaskState {
+    /// Task is in progress (not yet completed)
+    InProgress,
+    /// Value is ready to be used
+    Ready,
+    /// Task will never become Ready
+    Terminated,
+}
+
 #[cfg(test)]
 mod tests {
     use allocative::Allocative;
@@ -37,7 +49,7 @@ mod tests {
     use crate::api::key::Key;
     use crate::api::key::NoValueSerialize;
     use crate::api::key::ValueSerialize;
-    use crate::impls::dice::Dice;
+    use crate::dice::Dice;
     use crate::introspection::graph::SerializedGraphNodeForKey;
     use crate::introspection::serialize_graph;
 
@@ -100,7 +112,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_serialization() -> anyhow::Result<()> {
         let dice = Dice::builder().build(DetectCycles::Disabled);
-        let mut ctx = dice.updater().commit().await;
+        let ctx = dice.updater().commit().await;
         ctx.compute(&KeyA(3)).await?;
 
         let mut nodes = Vec::new();
@@ -155,7 +167,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_serialization_dense() -> anyhow::Result<()> {
         let dice = Dice::builder().build(DetectCycles::Disabled);
-        let mut ctx = dice.updater().commit().await;
+        let ctx = dice.updater().commit().await;
         ctx.compute(&KeyA(3)).await?;
 
         let node =

@@ -36,7 +36,6 @@ use derivative::Derivative;
 use derive_more::Display;
 use dice::DiceComputations;
 use dupe::Dupe;
-use futures::FutureExt;
 use gazebo::prelude::SliceExt;
 use pagable::Pagable;
 use starlark::any::ProvidesStaticType;
@@ -44,7 +43,6 @@ use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::starlark_module;
 use starlark::values::AllocValue;
-use starlark::values::FrozenHeap;
 use starlark::values::Heap;
 use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
@@ -204,11 +202,10 @@ impl<'v> BxlActions<'v> {
         exec_deps: Vec<ConfiguredProvidersLabel>,
         toolchains: Vec<ConfiguredProvidersLabel>,
         heap: Heap<'v>,
-        frozen_heap: &FrozenHeap,
         ctx: &'c mut DiceComputations<'_>,
     ) -> buck2_error::Result<BxlActions<'v>> {
-        let exec_deps = alloc_deps(exec_deps, heap, frozen_heap, ctx).await?;
-        let toolchains = alloc_deps(toolchains, heap, frozen_heap, ctx).await?;
+        let exec_deps = alloc_deps(exec_deps, heap, ctx).await?;
+        let toolchains = alloc_deps(toolchains, heap, ctx).await?;
         Ok(Self {
             actions,
             exec_deps,
@@ -232,19 +229,15 @@ impl<'v> BxlActions<'v> {
 async fn alloc_deps<'v>(
     deps: Vec<ConfiguredProvidersLabel>,
     heap: Heap<'v>,
-    frozen_heap: &FrozenHeap,
     ctx: &mut DiceComputations<'_>,
 ) -> buck2_error::Result<ValueOfUnchecked<'v, DictType<StarlarkProvidersLabel, Dependency<'v>>>> {
     let analysis_results: Vec<_> = ctx
-        .try_compute_join(deps, |ctx, target| {
-            async move {
-                let res = ctx
-                    .get_analysis_result(target.target())
-                    .await?
-                    .require_compatible()?;
-                buck2_error::Ok((target, res))
-            }
-            .boxed()
+        .try_compute_join(deps, async |ctx, target| {
+            let res = ctx
+                .get_analysis_result(target.target())
+                .await
+                .require_compatible()?;
+            buck2_error::Ok((target, res.dupe()))
         })
         .await?;
 
@@ -257,7 +250,7 @@ async fn alloc_deps<'v>(
             let dependency = Dependency::new(
                 heap,
                 configured,
-                v.value().owned_frozen_value_typed(frozen_heap),
+                v.add_heap_ref(heap).to_value_typed(),
                 None,
             );
 

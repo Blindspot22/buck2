@@ -329,6 +329,9 @@ message UqueryRequest {
   repeated string output_attributes = 3;
   // The literals for a repeated query (one containing `%s`).
   repeated string query_args = 4;
+  // Skip nodes/edges that fail to load and return a best-effort partial
+  // result.
+  bool allow_partial_graph = 7;
 
   // These should possibly be deleted and never become real options. Let's not
   // pollute the low ids (and then forever need a comment about them).
@@ -484,8 +487,10 @@ message BuildRequest {
     reserved 2;
     // Include target outputs? [default: false]
     bool return_outputs = 1;
+    // Include the target's resolved run command line? Set only by
+    // `buck run`. [default: false]
+    bool return_run_args = 3;
     // TODO(rafaelc): bool return_targets_without_data
-    // TODO(rafaelc): bool return_run_args
   }
   // Options regarding which data to include in the response.
   ResponseOptions response_options = 4;
@@ -564,12 +569,14 @@ message TestRequest {
   bool ignore_tests_attribute = 13;
 
   // Whether `DefaultInfo` providers for targets matching `target_patterns`
-  // should be built instead of only `ExternalTestInfo` providers.
-  bool build_default_info = 15;
+  // should be built instead of only test providers. When unset, this defaults
+  // to the `buck2.test_builds_targets` buckconfig.
+  optional bool build_default_info = 15;
 
   // Whether `RunInfo` providers for targets matching `target_patterns`
-  // should be built instead of only `ExternalTestInfo` providers.
-  bool build_run_info = 16;
+  // should be built instead of only test providers. When unset, this defaults
+  // to the `buck2.test_builds_targets` buckconfig.
+  optional bool build_run_info = 16;
 }
 
 message BxlRequest {
@@ -736,6 +743,7 @@ message CommandResult {
     TraceIoResponse trace_io_response = 22;
     ConfiguredTargetsResponse configured_targets_response = 23;
     DapResponse dap_response = 24;
+    HydrationResponse hydration_response = 25;
     GenericResponse generic_response = 100;
     NewGenericResponseMessage new_generic_response_message = 101;
   }
@@ -817,6 +825,9 @@ message UnstableAllocatorStatsRequest {
   // Options to pass to the allocator stats backend (JEMalloc's
   // malloc_stats_print, see <https://linux.die.net/man/3/jemalloc>).
   string options = 1;
+  // If jemalloc is in use, force it to return dirty and muzzy pages to the OS
+  // before reading stats. Nop otherwise.
+  bool purge = 2;
 }
 
 message UnstableAllocatorStatsResponse {
@@ -959,11 +970,20 @@ message FlushDepFilesRequest {
 enum HydrationSubcommand {
   PAGE_OUT = 0;
   PAGE_IN = 1;
+  STATUS = 2;
 }
 
 message HydrationRequest {
   ClientContext context = 1;
   HydrationSubcommand subcommand = 2;
+  // `status --wait`: block until any in-progress idle page-out finishes.
+  bool wait = 3;
+}
+
+message HydrationResponse {
+  // Human-readable status report. Set only for `status`;
+  // absent for page-out / page-in.
+  optional string summary = 1;
 }
 
 message SetLogFilterRequest {

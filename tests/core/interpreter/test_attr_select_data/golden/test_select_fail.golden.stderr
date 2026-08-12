@@ -84,16 +84,16 @@ Error evaluating expression:
 Caused by:
     0: Error evaluating build file: `root//:TARGETS.fixture`
     1: error: Error coercing attribute `data` of `root//:foo2`
-         --> TARGETS.fixture:51:1
+         --> TARGETS.fixture:50:1
           |
-       51 | / error_rule(
-       52 | |     name = "foo2",
-       53 | |     data = select_fail("bad use") if read_root_config("user", "check_bad_coercion") != None else "",
-       54 | | )
+       50 | / error_rule(
+       51 | |     name = "foo2",
+       52 | |     data = select_fail("bad use") if read_root_config("user", "check_bad_coercion") != None else "",
+       53 | | )
           | |_^
           |
        Traceback (most recent call last):
-         * TARGETS.fixture:51, in <module>
+         * TARGETS.fixture:50, in <module>
              error_rule(
        
     2: Error coercing attribute `data` of type `attrs.string()`

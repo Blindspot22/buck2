@@ -1,4 +1,3 @@
-load("@fbsource//tools/build_defs:fb_native_wrapper.bzl", "fb_native")
 load("@prelude//cfg/modifier:conditional_modifier.bzl", "conditional_modifier")
 
 oncall("build_infra")
@@ -6,24 +5,23 @@ oncall("build_infra")
 # This is for testing `conditional_modifier` rule builds. The bxl tests will test that the produced values
 # do what we expect them to do for modifier resolution
 
-fb_native.constraint_setting(name = "test")
-
-fb_native.constraint_value(
-    name = "test1",
-    constraint_setting = ":test",
-)
-
-fb_native.constraint_value(
-    name = "test2",
-    constraint_setting = ":test",
+constraint(
+    name = "test",
+    default = "unspecified",
+    values = [
+        "test1",
+        "test2",
+        "unspecified",
+    ],
+    visibility = [],
 )
 
 conditional_modifier(
     name = "test_conditional_modifier",
     modifier = {
         # Test different types of relative target labels for modifiers
-        "DEFAULT": ":test1",
-        "ovr_config//os:linux": "//buck2/tests/e2e/configurations/cfg_constructor/conditional_modifier:test2",
+        "DEFAULT": ":test[test1]",
+        "ovr_config//os:linux": "//buck2/tests/e2e/configurations/cfg_constructor/conditional_modifier:test[test2]",
     },
 )
 
@@ -31,8 +29,8 @@ conditional_modifier(
     name = "test_nested_conditional_modifier",
     modifier = {
         "DEFAULT": {
-            "ovr_config//cpu:arm64": ":test2",
-            "ovr_config//cpu:x86_64": ":test1",
+            "ovr_config//cpu:arm64": ":test[test2]",
+            "ovr_config//cpu:x86_64": ":test[test1]",
         },
         "ovr_config//os:linux": None,
     },
@@ -41,7 +39,7 @@ conditional_modifier(
 conditional_modifier(
     name = "test_conditional_modifier_with_relative_key",
     modifier = {
-        ":test1": "ovr_config//cpu/constraints:arm64",
+        ":test[test1]": "ovr_config//cpu/constraints:arm64",
         "DEFAULT": None,
     },
 )

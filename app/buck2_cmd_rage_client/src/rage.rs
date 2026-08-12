@@ -38,11 +38,9 @@ use buck2_events::sink::remote::ScribeConfig;
 use buck2_events::sink::remote::new_remote_event_sink_if_enabled;
 use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_hash::StdBuckHashMap;
+use buck2_hash::IntentionallyStdHashMap;
 use buck2_util::process::async_background_command;
 use buck2_wrapper_common::invocation_id::TraceId;
-use chrono::DateTime;
-use chrono::offset::Local;
 use derive_more::Display;
 use dupe::Dupe;
 use futures::future::FutureExt;
@@ -285,7 +283,7 @@ impl RageCommand {
             .map(|inv| inv.to_string())
             .unwrap_or_default();
 
-        let mut string_data: StdBuckHashMap<String, _> = [
+        let mut string_data: IntentionallyStdHashMap<String, _> = [
             ("dice_dump", dice_dump.clone()),
             ("materializer_state", materializer_state.clone()),
             ("materializer_fsck", materializer_fsck.clone()),
@@ -314,11 +312,12 @@ impl RageCommand {
         insert_if_some(&mut string_data, "os", os.clone());
         insert_if_some(&mut string_data, "os_version", os_version.clone());
 
-        let mut int_data = StdBuckHashMap::default();
+        let mut int_data = IntentionallyStdHashMap::new();
         let daemon_uptime_s = build_info.get_field(|o| o.daemon_uptime_s);
         insert_if_some(&mut int_data, "daemon_uptime_s", daemon_uptime_s);
 
-        let timestamp = build_info.get_field(|o| Some(SystemTime::from(o.timestamp).into()));
+        let timestamp =
+            build_info.get_field(|o| Some(SystemTime::from(o.timestamp.timestamp()).into()));
         let command_duration = build_info.get_field(|o| {
             Some(prost_types::Duration {
                 seconds: o.command_duration?.as_secs() as i64,
@@ -496,7 +495,7 @@ where
     }
 }
 
-fn insert_if_some<D>(data: &mut StdBuckHashMap<String, D>, key: &str, value: Option<D>) {
+fn insert_if_some<D>(data: &mut IntentionallyStdHashMap<String, D>, key: &str, value: Option<D>) {
     if let Some(value) = value {
         data.insert(key.to_owned(), value);
     }
@@ -525,7 +524,7 @@ async fn upload_re_logs_impl(
     re_session_id: String,
 ) -> buck2_error::Result<String> {
     let bucket = Bucket::RAGE_DUMPS;
-    let filename = format!("flat/{}-re_logs.zst", &re_session_id);
+    let filename = format!("flat/{}-re_logs.zst", re_session_id);
     upload_re_logs(manifold, bucket, re_logs_dir, &re_session_id, &filename).await?;
 
     Ok(manifold_leads(&bucket, filename))
@@ -620,7 +619,7 @@ async fn user_prompt_select_log(
     logs: &[EventLogPathBuf],
 ) -> buck2_error::Result<usize> {
     buck2_client_ctx::eprintln!("Which buck invocation would you like to report?\n")?;
-    let logs_summary = futures::future::join_all(
+    let logs_summary = buck2_util::future::join_all(
         logs.iter()
             .map(|log_path| async move { log_path.get_summary().await.ok() }),
     )
@@ -665,11 +664,13 @@ fn print_log_summary(
     if let Some(log_summary) = log_summary {
         let cmd = crate::build_info::format_cmd(&log_summary.invocation);
 
-        let timestamp: DateTime<Local> = log_summary.timestamp.into();
+        let timestamp = jiff::Timestamp::try_from(log_summary.timestamp)
+            .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+            .to_zoned(jiff::tz::TimeZone::system());
         Ok(buck2_client_ctx::eprintln!(
             "{:<7} {}    {}",
             format!("[{}].", index),
-            timestamp.format("%c %Z"),
+            timestamp.strftime("%c %Z"),
             cmd
         )?)
     } else {

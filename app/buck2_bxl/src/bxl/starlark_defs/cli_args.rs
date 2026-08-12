@@ -62,7 +62,6 @@ use starlark::values::UnpackValue;
 use starlark::values::Value;
 use starlark::values::ValueError;
 use starlark::values::ValueLike;
-use starlark::values::dict::Dict;
 use starlark::values::float::StarlarkFloat;
 use starlark::values::list::AllocList;
 use starlark::values::list::ListRef;
@@ -261,7 +260,7 @@ impl JsonCliArgValueData {
                         v.as_starlark(heap),
                     );
                 }
-                heap.alloc(Dict::new(res))
+                heap.alloc_dict(res)
             }
         }
     }
@@ -659,14 +658,18 @@ impl CliArgType {
                 CliArgType::List(inner) => match clap.values_of() {
                     None => None,
                     Some(values) => Some(CliArgValue::List(
-                        futures::future::join_all(values.map(|v| async move {
-                            try {
-                                inner
-                                    .parse_clap(ArgAccessor::Literal(v), ctx)
-                                    .await?
-                                    .expect("shouldn't be empty when parsing list items")
-                            }
-                        }))
+                        buck2_util::future::join_all(
+                            values
+                                .map(|v| async move {
+                                    try {
+                                        inner
+                                            .parse_clap(ArgAccessor::Literal(v), ctx)
+                                            .await?
+                                            .expect("shouldn't be empty when parsing list items")
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                        )
                         .await
                         .into_iter()
                         .collect::<buck2_error::Result<_>>()?,
@@ -727,7 +730,7 @@ impl CliArgType {
 
                     Some(CliArgValue::ConfiguredTargetLabel(
                         ctx.dice
-                            .clone()
+                            .ctx()
                             .get_configured_target(
                                 &parsed_pattern.as_target_label(x)?,
                                 local_cfg_options,
@@ -760,7 +763,7 @@ impl CliArgType {
                         &ctx.cell_alias_resolver,
                     )?;
                     let loaded = load_patterns(
-                        &mut ctx.dice.clone(),
+                        &mut ctx.dice.ctx(),
                         vec![pattern],
                         MissingTargetBehavior::Fail,
                     )
@@ -783,7 +786,7 @@ impl CliArgType {
                             &ctx.cell_alias_resolver,
                         )?;
                     let result = load_compatible_patterns_with_modifiers(
-                        &mut ctx.dice.clone(),
+                        &mut ctx.dice.ctx(),
                         vec![pattern_with_modifiers],
                         &ctx.global_cfg_options,
                         MissingTargetBehavior::Fail,
@@ -808,7 +811,7 @@ impl CliArgType {
                         &ctx.cell_alias_resolver,
                     )?;
                     let loaded = load_patterns(
-                        &mut ctx.dice.clone(),
+                        &mut ctx.dice.ctx(),
                         vec![pattern],
                         MissingTargetBehavior::Fail,
                     )

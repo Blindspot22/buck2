@@ -20,6 +20,7 @@ import com.facebook.buck.jvm.kotlin.cd.analytics.logger.model.KotlinCDLogEntry
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.concurrent.Executor
 import org.junit.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
@@ -32,6 +33,8 @@ internal class KotlinCDLoggerAnalyticsTest {
   private val kotlinCDLogger: KotlinCDLogger = mock()
 
   private val clock = Clock.fixed(Instant.parse("2018-08-22T10:00:00Z"), ZoneOffset.UTC)
+
+  private val directExecutor = Executor { it.run() }
 
   @Test
   fun `when buildUuid is null, data are not logged`() {
@@ -82,7 +85,7 @@ internal class KotlinCDLoggerAnalyticsTest {
     val expectedEntry = createExpectedKotlinCDLogEntry(extras = """{"testKey": ["testValue"]}""")
 
     kotlinCDAnalytics.log(
-        createKotlinCDLoggingContext(extras = mapOf("testKey" to listOf("testValue")))
+        createKotlinCDLoggingContext(extras = mapOf("testKey" to listOf("testValue"))),
     )
 
     verify(kotlinCDLogger, times(1)).log(expectedEntry)
@@ -96,8 +99,8 @@ internal class KotlinCDLoggerAnalyticsTest {
 
     kotlinCDAnalytics.log(
         createKotlinCDLoggingContext(
-            extras = mapOf("testKey" to listOf("testValue1", "testValue2"))
-        )
+            extras = mapOf("testKey" to listOf("testValue1", "testValue2")),
+        ),
     )
 
     verify(kotlinCDLogger, times(1)).log(expectedEntry)
@@ -106,11 +109,10 @@ internal class KotlinCDLoggerAnalyticsTest {
   @Test
   fun `when extras contains a list of key-list pairs, correct json data are logged`() {
     val kotlinCDAnalytics = createFakeKotlinCDAnalytics()
-    val expectedEntry =
-        createExpectedKotlinCDLogEntry(
-            extras =
-                """{"testKey1": ["testValue1", "testValue2"], "testKey2": ["testValue3", "testValue4"]}"""
-        )
+    val expectedEntry = createExpectedKotlinCDLogEntry(
+        extras =
+            """{"testKey1": ["testValue1", "testValue2"], "testKey2": ["testValue3", "testValue4"]}""",
+    )
 
     kotlinCDAnalytics.log(
         createKotlinCDLoggingContext(
@@ -118,8 +120,8 @@ internal class KotlinCDLoggerAnalyticsTest {
                 mapOf(
                     "testKey1" to listOf("testValue1", "testValue2"),
                     "testKey2" to listOf("testValue3", "testValue4"),
-                )
-        )
+                ),
+        ),
     )
 
     verify(kotlinCDLogger, times(1)).log(expectedEntry)
@@ -138,8 +140,8 @@ internal class KotlinCDLoggerAnalyticsTest {
                     ClasspathChangesParam.NO_CHANGES,
                     setOf(AbsPath.get("/B"), AbsPath.get("/A")),
                     emptySet(),
-                )
-        )
+                ),
+        ),
     )
 
     verify(kotlinCDLogger, times(1)).log(expectedEntry)
@@ -158,8 +160,8 @@ internal class KotlinCDLoggerAnalyticsTest {
                     ClasspathChangesParam.NO_CHANGES,
                     emptySet(),
                     setOf(AbsPath.get("/B"), AbsPath.get("/A")),
-                )
-        )
+                ),
+        ),
     )
 
     verify(kotlinCDLogger, times(1)).log(expectedEntry)
@@ -172,7 +174,7 @@ internal class KotlinCDLoggerAnalyticsTest {
         createExpectedKotlinCDLogEntry(numKotlinTokens = 1000L, numJavaTokens = 500L)
 
     kotlinCDAnalytics.log(
-        createKotlinCDLoggingContext(numKotlinTokens = 1000L, numJavaTokens = 500L)
+        createKotlinCDLoggingContext(numKotlinTokens = 1000L, numJavaTokens = 500L),
     )
 
     verify(kotlinCDLogger, times(1)).log(expectedEntry)
@@ -204,18 +206,20 @@ internal class KotlinCDLoggerAnalyticsTest {
     return context
   }
 
-  private fun createFakeKotlinCDAnalytics(buildUuid: String? = DEFAULT_BUILDUUID) =
-      KotlinCDLoggerAnalytics(
-          kotlinCDLogger = kotlinCDLogger,
-          buildUuid = buildUuid,
-          target = TARGET,
-          subtarget = SUBTARGET,
-          executionPlatform = EXECTION_PLATFORM,
-          numJavaFiles = NUM_JAVA_FILES,
-          numKotlinFiles = NUM_KOTLIN_FILES,
-          incremental = INCREMENTAL,
-          clock = clock,
-      )
+  private fun createFakeKotlinCDAnalytics(
+      buildUuid: String? = DEFAULT_BUILDUUID,
+  ) = KotlinCDLoggerAnalytics(
+      kotlinCDLogger = kotlinCDLogger,
+      buildUuid = buildUuid,
+      target = TARGET,
+      subtarget = SUBTARGET,
+      executionPlatform = EXECTION_PLATFORM,
+      numJavaFiles = NUM_JAVA_FILES,
+      numKotlinFiles = NUM_KOTLIN_FILES,
+      incremental = INCREMENTAL,
+      clock = clock,
+      executor = directExecutor,
+  )
 
   private fun createExpectedKotlinCDLogEntry(
       step: StepParam = StepParam.KOTLINC,
@@ -227,27 +231,26 @@ internal class KotlinCDLoggerAnalyticsTest {
       removedFiles: Set<String> = emptySet(),
       numKotlinTokens: Long? = null,
       numJavaTokens: Long? = null,
-  ) =
-      KotlinCDLogEntry(
-          time = Instant.now(clock).epochSecond,
-          eventTime = Instant.now(clock).epochSecond.toDouble(),
-          target = TARGET,
-          subtarget = SUBTARGET,
-          buildUuid = BUILD_UUID,
-          executionPlatform = EXECTION_PLATFORM,
-          numKotlinFiles = NUM_KOTLIN_FILES,
-          numJavaFiles = NUM_JAVA_FILES,
-          incremental = INCREMENTAL,
-          mode = kotlincMode?.value,
-          classpathChanges = (kotlincMode as? ModeParam.Incremental)?.classpathChangesParam?.value,
-          step = step.value,
-          languageVersion = languageVersion,
-          extras = extras,
-          addedAndModifiedFiles = modifiedFiles,
-          removedFiles = removedFiles,
-          numKotlinTokens = numKotlinTokens,
-          numJavaTokens = numJavaTokens,
-      )
+  ) = KotlinCDLogEntry(
+      time = Instant.now(clock).epochSecond,
+      eventTime = Instant.now(clock).epochSecond.toDouble(),
+      target = TARGET,
+      subtarget = SUBTARGET,
+      buildUuid = BUILD_UUID,
+      executionPlatform = EXECTION_PLATFORM,
+      numKotlinFiles = NUM_KOTLIN_FILES,
+      numJavaFiles = NUM_JAVA_FILES,
+      incremental = INCREMENTAL,
+      mode = kotlincMode?.value,
+      classpathChanges = (kotlincMode as? ModeParam.Incremental)?.classpathChangesParam?.value,
+      step = step.value,
+      languageVersion = languageVersion,
+      extras = extras,
+      addedAndModifiedFiles = modifiedFiles,
+      removedFiles = removedFiles,
+      numKotlinTokens = numKotlinTokens,
+      numJavaTokens = numJavaTokens,
+  )
 
   companion object TestParams {
     private const val TARGET = "target"

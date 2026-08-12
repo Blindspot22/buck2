@@ -16,8 +16,8 @@
 # @unsorted-dict-items
 NAMED_CONSTRAINT_SETTINGS = {
     # TODO(scottcao): Add OSS constraints as well
-    "ovr_config//build_mode/constraints:core_build_mode": None,
-    "ovr_config//os/constraints:os": None,
+    "ovr_config//build_mode/constraints:core_build_mode": (lambda label: str(label.sub_target[0])),
+    "ovr_config//os/constraints:os": (lambda label: str(label.sub_target[0])),
     "ovr_config//cpu/constraints:cpu": None,
     "ovr_config//runtime/constraints:runtime": None,
     "ovr_config//runtime/constraints:runtime_version": None,
@@ -27,8 +27,8 @@ NAMED_CONSTRAINT_SETTINGS = {
     "ovr_config//toolchain/clang/constraints:clang-toolchain-version": (lambda label: "clang" + str(label.name)),
     "ovr_config//build_mode:sanitizer_type": (lambda label: str(label.sub_target[0])),
     "fbcode//fdo/constraints:fdo": (lambda label: str(label.name)),
-    "ovr_config//build_mode/default_opt_cxx:default_opt_cxx_setting": (lambda label: "opt-by-default" if str(label.name) == "enabled" else None),
-    "ovr_config//build_mode:arvr_mode": (lambda label: "arvr" if str(label.name) == "arvr_mode_enabled" else None),
+    "ovr_config//build_mode/default_opt_cxx:default_opt_cxx_setting": (lambda label: "opt-by-default" if str(label.sub_target[0]) == "enabled" else None),
+    "ovr_config//build_mode:arvr_mode": (lambda label: "arvr" if str(label.sub_target[0]) == "enabled" else None),
 }
 
 # Mark all modifier generated configurations with a `cfg:` prefix.

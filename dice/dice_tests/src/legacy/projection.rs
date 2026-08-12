@@ -242,13 +242,14 @@ async fn smoke() -> anyhow::Result<()> {
         ..Default::default()
     });
 
-    let mut ctx = ctx.commit().await;
+    let ctx = ctx.commit().await;
 
     let file = ctx
         .compute(&FileKey {
             name: "file.fl".to_owned(),
         })
         .await?
+        .clone()
         .map_err(|e| anyhow::anyhow!(format!("{:#}", e)))?;
     assert_eq!("<X>", &*file);
 
@@ -262,7 +263,7 @@ async fn smoke() -> anyhow::Result<()> {
         tracker.lock().computations.as_slice()
     );
 
-    let mut ctx = ctx.into_updater();
+    let mut ctx = dice.updater();
     ctx.changed([ConfigKey])?;
     ctx.commit().await;
     tracker.lock().computations.clear();
@@ -275,13 +276,14 @@ async fn smoke() -> anyhow::Result<()> {
     data.data.set(GlobalConfig {
         config: HashMap::from_iter([("x".to_owned(), "X".to_owned())]),
     });
-    let mut ctx = dice.updater_with_data(data).commit().await;
+    let ctx = dice.updater_with_data(data).commit().await;
 
     let file = ctx
         .compute(&FileKey {
             name: "file.fl".to_owned(),
         })
         .await?
+        .clone()
         .map_err(|e| anyhow::anyhow!(format!("{:#}", e)))?;
     assert_eq!("<X>", &*file);
 
@@ -290,7 +292,7 @@ async fn smoke() -> anyhow::Result<()> {
         tracker.lock().computations.as_slice()
     );
 
-    let mut ctx = ctx.into_updater();
+    let mut ctx = dice.updater();
     ctx.changed([ConfigKey])?;
     ctx.commit().await;
     tracker.lock().computations.clear();
@@ -307,13 +309,14 @@ async fn smoke() -> anyhow::Result<()> {
             ("y".to_owned(), "Y".to_owned()),
         ]),
     });
-    let mut ctx = dice.updater_with_data(data).commit().await;
+    let ctx = dice.updater_with_data(data).commit().await;
 
     let file = ctx
         .compute(&FileKey {
             name: "file.fl".to_owned(),
         })
         .await?
+        .clone()
         .map_err(|e| anyhow::anyhow!(format!("{:#}", e)))?;
     assert_eq!("<X>", &*file);
 

@@ -27,7 +27,7 @@ load(":coverage.bzl", "GoCoverageMode")
 load(":link.bzl", "GoBuildMode", "get_inherited_link_pkgs", "link")
 load(":package_builder.bzl", "GoBuildConfig", "GoSourceInputs", "declare_package_build")
 load(":packages.bzl", "go_attr_pkg_name")
-load(":toolchain.bzl", "evaluate_cgo_enabled")
+load(":toolchain.bzl", "GoToolchainInfo", "evaluate_cgo_enabled")
 
 def _gen_test_main(
     ctx: AnalysisContext,
@@ -53,7 +53,7 @@ def _gen_test_main(
         cmd.extend(["--cover-mode", coverage_mode.value])
     cmd.append(cmd_args(cover_pkgs_argsfile, format = "@{}"))
     cmd.append(cmd_args(test_go_files_argsfile, format = "@{}"))
-    ctx.actions.run(cmd_args(cmd), category = "go_test_main_gen")
+    ctx.actions.run(cmd_args(cmd), category = "go_test_main_gen", allow_cache_upload = ctx.attrs._go_toolchain[GoToolchainInfo].allow_cache_upload)
     return output
 
 def is_subpackage_of(other_pkg_import_path: str, pkg_import_path: str) -> bool:
@@ -163,18 +163,28 @@ def go_test_impl(ctx: AnalysisContext) -> list[Provider]:
     # Setup RE executors based on the `remote_execution` param.
     re_executors = get_re_executors_from_props(ctx)
 
+    # Emit TPX_LIST_TESTS_COMMAND so TPX can enumerate tests via AST parsing
+    # of the *_test.go sources instead of running the compiled binary with
+    # -test.list. Eliminates cgo and TestMain startup costs from listing.
+    # The lister mirrors `go test -list <regex>`
+    env = dict(ctx.attrs.env)
+    env["TPX_LIST_TESTS_COMMAND"] = cmd_args(
+        [ctx.attrs._list_tests[RunInfo]],
+        "-match=^Test.*",
+        cmd_args(test_go_files_argsfile, format = "@{}"),
+    )
+
     return inject_test_run_info(
         ctx,
         ExternalRunnerTestInfo(
             type = "go",
             command = [run_cmd],
-            env = ctx.attrs.env,
+            env = env,
             labels = ctx.attrs.labels,
             contacts = ctx.attrs.contacts,
             default_executor = re_executors.default_executor,
             executor_overrides = re_executors.executor_overrides,
-            # FIXME: Consider setting to true
-            run_from_project_root = re_executors.run_from_project_root,
+            run_from_project_root = True,
             use_project_relative_paths = re_executors.use_project_relative_paths,
         ),
     ) + [

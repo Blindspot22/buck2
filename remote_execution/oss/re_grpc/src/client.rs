@@ -15,6 +15,7 @@ use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
@@ -37,7 +38,6 @@ use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use gazebo::prelude::*;
 use lru::LruCache;
-use once_cell::sync::Lazy;
 use prost::Message;
 use re_grpc_proto::build::bazel::remote::execution::v2::ActionResult;
 use re_grpc_proto::build::bazel::remote::execution::v2::BatchReadBlobsRequest;
@@ -156,7 +156,22 @@ fn ttimestamp_from(ts: Option<::prost_types::Timestamp>) -> TTimestamp {
     }
 }
 
-/// Contains information queried from the the Remote Execution Capabilities service.
+fn tany_to(any: TAny) -> ::prost_types::Any {
+    ::prost_types::Any {
+        type_url: any.type_url,
+        value: any.value,
+    }
+}
+
+fn tany_from(any: ::prost_types::Any) -> TAny {
+    TAny {
+        type_url: any.type_url,
+        value: any.value,
+        ..Default::default()
+    }
+}
+
+/// Contains information queried from the Remote Execution Capabilities service.
 pub struct RECapabilities {
     /// Largest size of a message before being uploaded using bytestream service.
     /// 0 indicates no limit beyond constraint of underlying transport (which is unknown).
@@ -650,7 +665,7 @@ impl REClient {
 
     pub async fn get_action_result(
         &self,
-        metadata: RemoteExecutionMetadata,
+        metadata: &RemoteExecutionMetadata,
         request: ActionResultRequest,
     ) -> anyhow::Result<ActionResultResponse> {
         retry(|| async {
@@ -663,7 +678,7 @@ impl REClient {
                         action_digest: Some(tdigest_to(request.digest.clone())),
                         ..Default::default()
                     },
-                    metadata.clone(),
+                    metadata,
                     self.runtime_opts.use_fbcode_metadata,
                 ))
                 .await?;
@@ -678,7 +693,7 @@ impl REClient {
 
     pub async fn write_action_result(
         &self,
-        metadata: RemoteExecutionMetadata,
+        metadata: &RemoteExecutionMetadata,
         request: WriteActionResultRequest,
     ) -> anyhow::Result<WriteActionResultResponse> {
         let action_result = convert_t_action_result2(request.action_result)?;
@@ -695,7 +710,7 @@ impl REClient {
                         results_cache_policy: None,
                         ..Default::default()
                     },
-                    metadata.clone(),
+                    metadata,
                     self.runtime_opts.use_fbcode_metadata,
                 ))
                 .await?;
@@ -710,7 +725,7 @@ impl REClient {
 
     pub async fn execute_with_progress(
         &self,
-        metadata: RemoteExecutionMetadata,
+        metadata: &RemoteExecutionMetadata,
         mut execute_request: ExecuteRequest,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<ExecuteWithProgressResponse>>> {
         // TODO(aloiscochard): Map those properly in the request
@@ -735,7 +750,7 @@ impl REClient {
                         action_digest: Some(action_digest.clone()),
                         ..Default::default()
                     },
-                    metadata.clone(),
+                    metadata,
                     self.runtime_opts.use_fbcode_metadata,
                 ))
                 .await?
@@ -840,7 +855,7 @@ impl REClient {
 
     pub async fn upload(
         &self,
-        metadata: RemoteExecutionMetadata,
+        metadata: &RemoteExecutionMetadata,
         request: UploadRequest,
     ) -> anyhow::Result<UploadResponse> {
         upload_impl(
@@ -849,35 +864,29 @@ impl REClient {
             self.bystream_compressor,
             self.capabilities.max_total_batch_size,
             self.runtime_opts.max_concurrent_uploads_per_action,
-            |re_request| {
-                let metadata = metadata.clone();
-                async move {
-                    let resp = self
-                        .cas_client()
-                        .await?
-                        .batch_update_blobs(with_re_metadata(
-                            re_request,
-                            metadata,
-                            self.runtime_opts.use_fbcode_metadata,
-                        ))
-                        .await?;
-                    Ok(resp.into_inner())
-                }
+            |re_request| async move {
+                let resp = self
+                    .cas_client()
+                    .await?
+                    .batch_update_blobs(with_re_metadata(
+                        re_request,
+                        metadata,
+                        self.runtime_opts.use_fbcode_metadata,
+                    ))
+                    .await?;
+                Ok(resp.into_inner())
             },
-            |segments| {
-                let metadata = metadata.clone();
-                async move {
-                    let resp = self
-                        .bytestream_client()
-                        .await?
-                        .write(with_re_metadata(
-                            futures::stream::iter(segments),
-                            metadata,
-                            self.runtime_opts.use_fbcode_metadata,
-                        ))
-                        .await?;
-                    Ok(resp.into_inner())
-                }
+            |segments| async move {
+                let resp = self
+                    .bytestream_client()
+                    .await?
+                    .write(with_re_metadata(
+                        futures::stream::iter(segments),
+                        metadata,
+                        self.runtime_opts.use_fbcode_metadata,
+                    ))
+                    .await?;
+                Ok(resp.into_inner())
             },
         )
         .await
@@ -887,7 +896,7 @@ impl REClient {
         &self,
         blob: Vec<u8>,
         digest: TDigest,
-        metadata: RemoteExecutionMetadata,
+        metadata: &RemoteExecutionMetadata,
     ) -> anyhow::Result<TDigest> {
         let blob = InlinedBlobWithDigest {
             digest: digest.clone(),
@@ -910,7 +919,7 @@ impl REClient {
 
     pub async fn download(
         &self,
-        metadata: RemoteExecutionMetadata,
+        metadata: &RemoteExecutionMetadata,
         request: DownloadRequest,
     ) -> anyhow::Result<DownloadResponse> {
         download_impl(
@@ -918,36 +927,30 @@ impl REClient {
             request,
             self.bystream_compressor,
             self.capabilities.max_total_batch_size,
-            |re_request| {
-                let metadata = metadata.clone();
-                async move {
-                    let resp = self
-                        .cas_client()
-                        .await?
-                        .batch_read_blobs(with_re_metadata(
-                            re_request,
-                            metadata,
-                            self.runtime_opts.use_fbcode_metadata,
-                        ))
-                        .await?;
-                    Ok(resp.into_inner())
-                }
+            |re_request| async move {
+                let resp = self
+                    .cas_client()
+                    .await?
+                    .batch_read_blobs(with_re_metadata(
+                        re_request,
+                        metadata,
+                        self.runtime_opts.use_fbcode_metadata,
+                    ))
+                    .await?;
+                Ok(resp.into_inner())
             },
-            |read_request| {
-                let metadata = metadata.clone();
-                async move {
-                    let response = self
-                        .bytestream_client()
-                        .await?
-                        .read(with_re_metadata(
-                            read_request,
-                            metadata,
-                            self.runtime_opts.use_fbcode_metadata,
-                        ))
-                        .await?
-                        .into_inner();
-                    Ok(Box::pin(response.into_stream()))
-                }
+            |read_request| async move {
+                let response = self
+                    .bytestream_client()
+                    .await?
+                    .read(with_re_metadata(
+                        read_request,
+                        metadata,
+                        self.runtime_opts.use_fbcode_metadata,
+                    ))
+                    .await?
+                    .into_inner();
+                Ok(Box::pin(response.into_stream()))
             },
         )
         .await
@@ -955,7 +958,7 @@ impl REClient {
 
     pub async fn get_digests_ttl(
         &self,
-        metadata: RemoteExecutionMetadata,
+        metadata: &RemoteExecutionMetadata,
         request: GetDigestsTtlRequest,
     ) -> anyhow::Result<GetDigestsTtlResponse> {
         let mut remote_results: HashMap<TDigest, DigestRemoteState> = HashMap::new();
@@ -995,7 +998,7 @@ impl REClient {
                                 blob_digests: blob_digests.clone(),
                                 ..Default::default()
                             },
-                            metadata.clone(),
+                            metadata,
                             self.runtime_opts.use_fbcode_metadata,
                         ))
                         .await
@@ -1040,7 +1043,7 @@ impl REClient {
 
     pub async fn extend_digest_ttl(
         &self,
-        _metadata: RemoteExecutionMetadata,
+        _metadata: &RemoteExecutionMetadata,
         _request: ExtendDigestsTtlRequest,
     ) -> anyhow::Result<TDigest> {
         // TODO(arr)
@@ -1191,6 +1194,7 @@ fn convert_action_result(action_result: ActionResult) -> anyhow::Result<TActionR
             output_upload_completed_timestamp: ttimestamp_from(
                 execution_metadata.output_upload_completed_timestamp,
             ),
+            auxiliary_metadata: execution_metadata.auxiliary_metadata.into_map(tany_from),
             input_analyzing_start_timestamp: Default::default(),
             input_analyzing_completed_timestamp: Default::default(),
             execution_dir: "".to_owned(),
@@ -1237,7 +1241,7 @@ fn convert_t_action_result2(t_action_result: TActionResult2) -> anyhow::Result<A
         output_upload_completed_timestamp: Some(ttimestamp_to(
             t_execution_metadata.output_upload_completed_timestamp,
         )),
-        auxiliary_metadata: Vec::new(),
+        auxiliary_metadata: t_execution_metadata.auxiliary_metadata.into_map(tany_to),
     });
 
     let output_files = t_action_result
@@ -1737,7 +1741,7 @@ where
 
 fn with_re_metadata<T>(
     t: T,
-    metadata: RemoteExecutionMetadata,
+    metadata: &RemoteExecutionMetadata,
     use_fbcode_metadata: bool,
 ) -> tonic::Request<T> {
     // This creates a new Tonic request with attached metadata for the RE
@@ -1768,7 +1772,7 @@ fn with_re_metadata<T>(
         // wrong), we just inline it here. This is a small hack that lets us use
         // our internal RE using this GRPC client for testing.
         //
-        // This is defined in `fbcode/remote_execution/grpc/metadata.proto`.
+        // This is defined in `fbcode/remote_execution/re_cas_common/grpc/proto/metadata.proto`.
         #[derive(prost::Message)]
         struct Metadata {
             #[prost(message, optional, tag = "15")]
@@ -1779,8 +1783,8 @@ fn with_re_metadata<T>(
 
         let mut encoded = Vec::new();
         Metadata {
-            platform: metadata.platform,
-            use_case_id: Some(metadata.use_case_id),
+            platform: metadata.platform.clone(),
+            use_case_id: Some(metadata.use_case_id.clone()),
         }
         .encode(&mut encoded)
         .expect("Encoding into a Vec cannot not fail");
@@ -1798,7 +1802,8 @@ fn with_re_metadata<T>(
             action_id: "".to_owned(),
             tool_invocation_id: metadata
                 .buck_info
-                .map_or(String::new(), |buck_info| buck_info.build_id),
+                .as_ref()
+                .map_or(String::new(), |buck_info| buck_info.build_id.clone()),
             correlated_invocations_id: "".to_owned(),
             action_mnemonic: "".to_owned(),
             target_id: "".to_owned(),
@@ -1824,7 +1829,8 @@ fn substitute_env_vars_impl(
     s: &str,
     getter: impl Fn(&str) -> Result<String, VarError>,
 ) -> anyhow::Result<String> {
-    static ENV_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new("\\$[a-zA-Z_][a-zA-Z_0-9]*").unwrap());
+    static ENV_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new("\\$[a-zA-Z_][a-zA-Z_0-9]*").unwrap());
 
     let mut out = String::with_capacity(s.len());
     let mut last_idx = 0;

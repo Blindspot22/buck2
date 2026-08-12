@@ -11,7 +11,7 @@
 use std::borrow::Borrow;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use buck2_common::cas_digest::TrackedCasDigest;
@@ -33,10 +33,9 @@ use buck2_directory::directory::fingerprinted_directory::FingerprintedDirectory;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
 use buck2_error::internal_error;
+use buck2_hash::IntentionallyStdHashMap;
 use buck2_hash::StdBuckHashMap;
 use buck2_hash::StdBuckHashSet;
-use chrono::Duration;
-use chrono::Utc;
 use dupe::Dupe;
 use either::Either;
 use futures::FutureExt;
@@ -45,7 +44,8 @@ use futures::future::BoxFuture;
 use futures::future::Shared;
 use futures::stream::FuturesUnordered;
 use gazebo::prelude::*;
-use once_cell::sync::Lazy;
+use jiff::SignedDuration;
+use jiff::Timestamp;
 use remote_execution::GetDigestsTtlResponse;
 use remote_execution::InlinedBlobWithDigest;
 use remote_execution::NamedDigest;
@@ -62,16 +62,18 @@ use crate::directory::ReDirectorySerializer;
 use crate::execute::blobs::ActionBlobs;
 use crate::materialize::materializer::ArtifactNotMaterializedReason;
 use crate::materialize::materializer::CasDownloadInfo;
+use crate::materialize::materializer::MaterializationPurpose;
 use crate::materialize::materializer::Materializer;
 use crate::re::action_identity::ReActionIdentity;
 use crate::re::client::RemoteExecutionClient;
 use crate::re::error::with_error_handler;
 use crate::re::metadata::RemoteExecutionMetadataExt;
+use crate::re::ttl::re_expiration_from_ttl;
 
 #[derive(Clone, Debug, Default)]
 pub struct UploadStats {
     pub total: ReUploadMetrics,
-    pub by_extension: StdBuckHashMap<String, ReUploadMetrics>,
+    pub by_extension: IntentionallyStdHashMap<String, ReUploadMetrics>,
 }
 
 pub struct Uploader {}
@@ -90,13 +92,13 @@ impl Uploader {
         StdBuckHashSet<&'a TrackedCasDigest<FileDigestKind>>,
     )> {
         // RE mentions they usually take 5-10 minutes of leeway so we mirror this here.
-        let now = Utc::now();
+        let now = Timestamp::now();
         let ttl_wanted = if buck2_core::is_open_source() {
             1
         } else {
             600i64
         };
-        let ttl_deadline = now + Duration::seconds(ttl_wanted);
+        let ttl_deadline = now + SignedDuration::from_secs(ttl_wanted);
 
         // See if anything needs uploading
         let mut input_digests = blobs.keys().collect::<StdBuckHashSet<_>>();
@@ -126,8 +128,8 @@ impl Uploader {
 
         let digests_and_ttls_iterator = if deduplicate_get_digests_ttl_calls {
             let (fut, reqs, new) = {
-                static GET_DIGESTS_TTL_DEDUP: Lazy<Mutex<GetDigestsTtlDeduper>> =
-                    Lazy::new(|| Mutex::new(GetDigestsTtlDeduper::default()));
+                static GET_DIGESTS_TTL_DEDUP: LazyLock<Mutex<GetDigestsTtlDeduper>> =
+                    LazyLock::new(|| Mutex::new(GetDigestsTtlDeduper::default()));
 
                 GetDigestsTtlDeduper::get_ttls(
                     &GET_DIGESTS_TTL_DEDUP,
@@ -178,7 +180,7 @@ impl Uploader {
             let client = client.clone();
             let metadata = use_case.metadata(identity);
             let digests = input_digests.iter().map(|d| d.to_re()).collect();
-            let digests_ttl = client.get_digests_ttl(digests, metadata).await;
+            let digests_ttl = client.get_digests_ttl(digests, &metadata, true).await;
 
             let input_digests = input_digests.iter().copied().collect();
 
@@ -212,20 +214,7 @@ impl Uploader {
                 }
             } else {
                 tracing::debug!(digest=%digest, ttl=digest_ttl, "Not uploading");
-                let Some(ttl) = Duration::try_seconds(digest_ttl) else {
-                    let _ignored = soft_error!(
-                        "re_digest_ttl_out_of_bounds",
-                        buck2_error::buck2_error!(
-                            buck2_error::ErrorTag::ReInvalidGetCasResponse,
-                            "RE returned digest TTL outside the supported duration range; skipping digest expiration update. Digest: `{}`, TTL seconds: `{}`",
-                            digest,
-                            digest_ttl
-                        ),
-                        quiet: true
-                    );
-                    continue;
-                };
-                digest.update_expires(now + ttl);
+                digest.update_expires(re_expiration_from_ttl(now, digest_ttl, digest));
             }
         }
 
@@ -235,7 +224,7 @@ impl Uploader {
     pub async fn upload(
         fs: &ProjectRoot,
         client: &RemoteExecutionClient,
-        materializer: &Arc<dyn Materializer>,
+        materializer: &dyn Materializer,
         dir_path: &ProjectRelativePath,
         input_dir: &ActionImmutableDirectory,
         blobs: &ActionBlobs,
@@ -400,7 +389,10 @@ impl Uploader {
 
         if !paths_to_materialize.is_empty() {
             materializer
-                .ensure_materialized(paths_to_materialize)
+                .ensure_materialized(
+                    paths_to_materialize,
+                    MaterializationPurpose::IntermediateOnly,
+                )
                 .await
                 .buck_error_context("Error materializing paths for upload")?;
         }
@@ -408,7 +400,7 @@ impl Uploader {
         // Compute stats of digests we're about to upload so we can report them
         // to the span end event of this stage of execution.
         let stats = {
-            let mut stats_by_extension = StdBuckHashMap::default();
+            let mut stats_by_extension = IntentionallyStdHashMap::new();
             let mut named_digest_byte_count: u64 = 0;
             for nd in &upload_files {
                 // Aggregate metrics by file extension.
@@ -444,7 +436,7 @@ impl Uploader {
                 client.get_session_id(),
                 client.get_raw_re_client()
                     .upload(
-                        use_case.metadata(identity),
+                        &use_case.metadata(identity),
                         UploadRequest {
                             files_with_digest: Some(upload_files),
                             inlined_blobs_with_digest: Some(upload_blobs),
@@ -456,7 +448,6 @@ impl Uploader {
                     )
                     .await,
             )
-            .await
             .map_err(|e| {
                 if e.tags().contains(&buck2_error::ErrorTag::ReInvalidArgument) {
                     buck2_error::buck2_error!(
@@ -475,6 +466,19 @@ impl Uploader {
     }
 }
 
+#[cfg(fbcode_build)] // Relies on fbcode future sizes
+buck2_util::size_assert::words_of_async_fn_future!(
+    Uploader::upload,
+    (_, _, _, _, _, _, _, _, _, _),
+    ~327
+);
+#[cfg(fbcode_build)] // Relies on fbcode future sizes
+buck2_util::size_assert::words_of_async_fn_future!(
+    Uploader::find_missing,
+    (_, _, _, _, _, _, _),
+    ~260
+);
+
 fn should_error_for_missing_digest(info: &CasDownloadInfo) -> bool {
     // RE sometimes reports things that exist as missing. We don't fully understand why at this
     // time and this is being investigated, but we know that RE normally ensures that anything it
@@ -486,7 +490,7 @@ fn should_error_for_missing_digest(info: &CasDownloadInfo) -> bool {
     // tells us a digest doesn't exist even though it does) in order to provide better UX when we
     // hit a true positive.
     if let Some(age) = info.action_age() {
-        age >= Duration::seconds(3600 * 5)
+        age >= SignedDuration::from_hours(5)
     } else {
         true
     }
@@ -677,7 +681,7 @@ fn query_digest_ttls<'s>(
     let digests = input_digests.iter().map(|d| d.to_re()).collect();
 
     async move {
-        let digests_ttl = client.get_digests_ttl(digests, metadata).await;
+        let digests_ttl = client.get_digests_ttl(digests, &metadata, true).await;
 
         {
             let mut guard = deduper.lock().expect("Poisoned lock");

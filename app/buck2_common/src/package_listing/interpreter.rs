@@ -52,10 +52,8 @@ impl PackageListingResolver for InterpreterPackageListingResolver<'_, '_> {
         let buildfile_candidates = DiceFileComputations::buildfiles(self.ctx, path.cell()).await?;
         if let Some(path) = path.parent() {
             for path in path.ancestors() {
-                let listing = DiceFileComputations::read_dir(self.ctx, path)
-                    .await?
-                    .included;
-                if find_buildfile(&buildfile_candidates, &listing).is_some() {
+                let listing = DiceFileComputations::read_dir(self.ctx, path).await?;
+                if find_buildfile(buildfile_candidates, &listing.included).is_some() {
                     return PackageLabel::from_cell_path(path);
                 }
             }
@@ -80,10 +78,8 @@ impl PackageListingResolver for InterpreterPackageListingResolver<'_, '_> {
                     // stop when we are no longer within the enclosing path
                     break;
                 }
-                let listing = DiceFileComputations::read_dir(self.ctx, path.dupe())
-                    .await?
-                    .included;
-                if find_buildfile(&buildfile_candidates, &listing).is_some() {
+                let listing = DiceFileComputations::read_dir(self.ctx, path.dupe()).await?;
+                if find_buildfile(buildfile_candidates, &listing.included).is_some() {
                     packages.push(PackageLabel::from_cell_path(path)?);
                 }
             }
@@ -229,7 +225,7 @@ impl std::fmt::Display for GatherPackageListingError {
         let (package, submessage) = match self {
             GatherPackageListingError::Error { package, .. } => {
                 // in this case we return the buck2_error as our source and we're just displayed as context
-                write!(f, "gathering package listing for `{}`", &package)?;
+                write!(f, "gathering package listing for `{}`", package)?;
                 return Ok(());
             }
             GatherPackageListingError::NoBuildFile {
@@ -327,7 +323,7 @@ impl std::fmt::Display for GatherPackageListingError {
                         "{}\n    dir `{}` does not exist (project.ignore contains `{}`)",
                         underlined(&path_as_str),
                         path_as_str,
-                        &pattern
+                        pattern
                     ),
                 )
             }
@@ -467,13 +463,10 @@ impl Directory {
             let mut subpackages = Vec::new();
 
             for res in ctx
-                .compute_join(subdirs, |ctx: &mut DiceComputations, path| {
-                    async move {
-                        let res = Directory::gather(ctx, buildfile_candidates, root, &path, false)
-                            .await?;
-                        Ok((path, res))
-                    }
-                    .boxed()
+                .compute_join(subdirs, async |ctx: &mut DiceComputations, path| {
+                    let res =
+                        Directory::gather(ctx, buildfile_candidates, root, &path, false).await?;
+                    Ok((path, res))
                 })
                 .await
             {
@@ -537,7 +530,7 @@ async fn gather_package_listing_impl(
         .map_err(|e| GatherPackageListingError::error(cell_path, e))?;
     Ok(Directory::gather(
         ctx,
-        &buildfile_candidates,
+        buildfile_candidates,
         cell_path,
         PackageRelativePath::empty(),
         true,

@@ -19,7 +19,7 @@ use pagable::storage::data::PagableData;
 use pagable::storage::support::SerializerForPaging;
 use pagable::storage::traits::DeserializedArcCache;
 use pagable::storage::traits::PagableStorage;
-use pagable::traits::SessionContext;
+use pagable::traits::StorageContext;
 
 /// Sled-backed storage backend for pagable data.
 ///
@@ -35,7 +35,7 @@ pub struct SledBackedPagableStorage {
     db: sled::Db,
     arcs: DeserializedArcCache,
     pending: Mutex<SledPendingPageOut>,
-    session_context: SessionContext,
+    storage_context: StorageContext,
 }
 
 /// Internal state for tracking pending paging operations.
@@ -59,7 +59,7 @@ impl SledBackedPagableStorage {
                 pending_messages: receiver,
                 pending: Vec::new(),
             }),
-            session_context: SessionContext::new(),
+            storage_context: StorageContext::new(),
         })
     }
 
@@ -82,7 +82,7 @@ impl SledBackedPagableStorage {
         &self,
         roots: Vec<Box<dyn ArcEraseDyn>>,
         finished: &mut HashMap<usize, DataKey>,
-        session_context: &SessionContext,
+        storage_context: &StorageContext,
     ) -> anyhow::Result<()> {
         enum Task {
             Start(Box<dyn ArcEraseDyn>),
@@ -98,7 +98,13 @@ impl SledBackedPagableStorage {
                         continue;
                     }
 
-                    let mut serializer = SerializerForPaging::new(session_context);
+                    if let Some(key) = v.data_key() {
+                        self.associate_arc_with_data_key(&*v, key);
+                        finished.insert(v.identity(), key);
+                        continue;
+                    }
+
+                    let mut serializer = SerializerForPaging::new(storage_context);
                     v.serialize(&mut serializer)?;
                     let (data, arcs) = serializer.finish();
 
@@ -123,7 +129,7 @@ impl SledBackedPagableStorage {
 
                     let key = self.store_data(PagableData { data, arcs })?;
                     finished.insert(arc.identity(), key);
-                    arc.set_data_key(key);
+                    self.associate_arc_with_data_key(&*arc, key);
                 }
             }
         }
@@ -142,7 +148,7 @@ impl SledBackedPagableStorage {
     pub fn page_out_pending(&self) -> anyhow::Result<()> {
         loop {
             // Drain the channel and pop one item while holding the pending lock,
-            // then drop it before acquiring session_context to avoid deadlock.
+            // then drop it before accessing storage_context to avoid deadlock.
             let item = {
                 let mut lock = self.pending.lock().expect("lock poisoned");
                 while let Ok(v) = lock.pending_messages.try_recv() {
@@ -154,7 +160,7 @@ impl SledBackedPagableStorage {
             match item {
                 Some(v) if v.needs_paging_out() => {
                     let mut finished: HashMap<usize, DataKey> = HashMap::new();
-                    self.serialize_arcs(vec![v], &mut finished, &self.session_context)?;
+                    self.serialize_arcs(vec![v], &mut finished, &self.storage_context)?;
                 }
                 Some(_) => continue,
                 None => break,
@@ -222,9 +228,9 @@ impl SledBackedPagableStorage {
         let arcs = (0..arcs_len)
             .map(|i| {
                 let offset = 16 + data_len + i * 16;
-                bytemuck::pod_read_unaligned(&bytes[offset..offset + 16])
+                DataKey::from_stored_bytes(bytes[offset..offset + 16].try_into()?)
             })
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Arc::new(PagableData { data, arcs }))
     }
 }
@@ -264,8 +270,8 @@ impl PagableStorage for SledBackedPagableStorage {
         drop(self.sender.send(arc));
     }
 
-    fn session_context(&self) -> &SessionContext {
-        &self.session_context
+    fn storage_context(&self) -> &StorageContext {
+        &self.storage_context
     }
 
     /// Serialize `PagableData` into the on-disk byte format and insert into sled.

@@ -21,6 +21,12 @@ load(
 load(":swift_output_file_map.bzl", "add_output_file_map_flags", "add_serialized_diagnostics_output")
 load(":swift_toolchain.bzl", "get_swift_toolchain_info")
 load(":swift_toolchain_types.bzl", "SwiftToolchainInfo")
+load(
+    ":swift_types.bzl",
+    "EXPLICIT_MODULES_CATEGORY_SUFFIX",
+    "SWIFTMODULE_COMPILE_CATEGORY",
+    "SWIFT_COMPILE_CATEGORY",
+)
 
 CompileWithArgsFileCmdOutput = record(
     cmd = field(cmd_args),
@@ -33,10 +39,10 @@ CompileWithArgsFileCmdOutput = record(
 )
 
 ENFORCED_CATEGORIES = [
-    "swiftmodule_compile_with_explicit_mods",
-    "swiftmodule_compile",
-    "swift_compile_with_explicit_mods",
-    "swift_compile",
+    SWIFTMODULE_COMPILE_CATEGORY + EXPLICIT_MODULES_CATEGORY_SUFFIX,
+    SWIFTMODULE_COMPILE_CATEGORY,
+    SWIFT_COMPILE_CATEGORY + EXPLICIT_MODULES_CATEGORY_SUFFIX,
+    SWIFT_COMPILE_CATEGORY,
 ]
 
 # def _get_should_expect_eligible_for_dedupe(ctx: AnalysisContext, category: str) -> bool:
@@ -46,6 +52,38 @@ ENFORCED_CATEGORIES = [
 #     expect_eligible_for_dedupe = toolchain.enforce_dedupe_eligibility and uses_content_based_paths and category in ENFORCED_CATEGORIES
 #
 #     return expect_eligible_for_dedupe
+
+def _is_swiftmodule_emit_category(category: str) -> bool:
+    return "swiftmodule" in category
+
+def _is_swiftmodule_or_pcm_category(category: str) -> bool:
+    # Matches swiftmodule_compile[_with_explicit_mods] and every *pcm_compile
+    # category (swift_pcm_compile, swift_underlying_pcm_compile,
+    # swift_prebuilt_framework_pcm_compile).
+    return _is_swiftmodule_emit_category(category) or "pcm_compile" in category
+
+def _is_swift_object_category(category: str) -> bool:
+    # Bulk Swift object compiles (not swiftmodule/pcm).
+    return category in (SWIFT_COMPILE_CATEGORY, SWIFT_COMPILE_CATEGORY + EXPLICIT_MODULES_CATEGORY_SUFFIX)
+
+def _low_pass_filter_for_category(category: str, prioritized: bool) -> bool:
+    # Disable low-pass gating for prioritized swiftmodule and PCM actions.
+    if prioritized and _is_swiftmodule_or_pcm_category(category):
+        return False
+    return True
+
+def _prefer_local_for_category(
+    category: str,
+    prioritized: bool,
+    local_only: bool,
+    prefer_local: bool,
+) -> bool:
+    if local_only:
+        return prefer_local
+
+    if prioritized and _is_swiftmodule_emit_category(category):
+        return True
+    return prefer_local
 
 def compile_with_argsfile_cmd(
     ctx: AnalysisContext,
@@ -222,6 +260,12 @@ def compile_with_argsfile(
     # TODO(xcshen): Re-enable when content-based paths for PCMs no longer
     # leak into .swiftmodule files, breaking @_implementationOnly blast radius.
     expect_eligible_for_dedupe = False  # _get_should_expect_eligible_for_dedupe(ctx, category)
+    if toolchain.prioritize_swift_critical_path and _is_swift_object_category(category):
+        # Empirically tuned to preserve local capacity for prioritized swiftmodule
+        # emits. Re-benchmark builds before changing.
+        weight = num_threads * 4
+    else:
+        weight = num_threads
     ctx.actions.run(
         cmd_output.cmd,
         allow_cache_upload = allow_cache_upload,
@@ -230,12 +274,13 @@ def compile_with_argsfile(
         dep_files = dep_files,
         error_handler = swift_error_handler if cmd_output.error_deserializer else apple_build_error_handler,
         local_only = local_only,
+        low_pass_filter = _low_pass_filter_for_category(category, toolchain.prioritize_swift_critical_path),
         no_outputs_cleanup = no_outputs_cleanup,
         incremental_remote_outputs = incremental_remote_outputs,
         outputs_for_error_handler = cmd_output.error_outputs,
-        prefer_local = prefer_local,
+        prefer_local = _prefer_local_for_category(category, toolchain.prioritize_swift_critical_path, local_only, prefer_local),
         unique_input_inodes = True,
-        weight = num_threads,
+        weight = weight,
         expect_eligible_for_dedupe = expect_eligible_for_dedupe,
     )
 

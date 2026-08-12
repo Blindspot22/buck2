@@ -59,7 +59,7 @@ use crate::bxl::starlark_defs::lazy_ctx::operation::uquery::LazyUqueryOperation;
 use crate::bxl::starlark_defs::lazy_ctx::operation::uquery::LazyUqueryResult;
 use crate::bxl::starlark_defs::nodes::unconfigured::StarlarkTargetNode;
 use crate::bxl::starlark_defs::result::StarlarkError;
-use crate::bxl::starlark_defs::result::StarlarkResultGen;
+use crate::bxl::starlark_defs::result::StarlarkResult;
 use crate::bxl::starlark_defs::target_list_expr::OwnedConfiguredTargetNodeArg;
 use crate::bxl::starlark_defs::target_list_expr::OwnedTargetNodeArg;
 use crate::bxl::starlark_defs::target_list_expr::SingleOrCompatibleConfiguredTargets;
@@ -133,7 +133,7 @@ impl LazyResult {
                     Ok(res) => Ok(res.into_value(heap, bxl_eval_extra)?),
                     Err(e) => Err(e),
                 };
-                Ok(heap.alloc(StarlarkResultGen::from_result(val)))
+                Ok(heap.alloc(StarlarkResult::from_result(val)))
             }
         }
     }
@@ -227,19 +227,18 @@ impl LazyOperation {
                 Ok(LazyResult::BuildArtifact(artifact.artifact()))
             }
             LazyOperation::Join(lazy0, lazy1) => {
-                let compute0 = DiceComputations::declare_closure(|dice| {
-                    async move { lazy0.resolve(dice, core_data).await }.boxed()
-                });
-                let compute1 = DiceComputations::declare_closure(|dice| {
-                    async move { lazy1.resolve(dice, core_data).await }.boxed()
-                });
-                let (res0, res1) = dice.try_compute2(compute0, compute1).await?;
+                let (res0, res1) = dice
+                    .try_compute2(
+                        async |dice| lazy0.resolve(dice, core_data).await,
+                        async |dice| lazy1.resolve(dice, core_data).await,
+                    )
+                    .await?;
                 Ok(LazyResult::Join(Box::new((res0, res1))))
             }
             LazyOperation::Batch(lazies) => {
                 let res = dice
-                    .try_compute_join(lazies, |dice, lazy| {
-                        async move { lazy.resolve(dice, core_data).await }.boxed()
+                    .try_compute_join(lazies, async |dice, lazy| {
+                        lazy.resolve(dice, core_data).await
                     })
                     .await?;
                 Ok(LazyResult::Batch(res))
@@ -348,10 +347,12 @@ async fn analysis(
     dice: &mut DiceComputations<'_>,
     label: &ConfiguredProvidersLabel,
 ) -> buck2_error::Result<StarlarkAnalysisResult> {
-    let maybe_result = dice.get_analysis_result(label.target()).await?;
+    let maybe_result = dice.get_analysis_result(label.target()).await.ok()?;
     match maybe_result {
         MaybeCompatible::Incompatible(reason) => Err(reason.to_err()),
-        MaybeCompatible::Compatible(result) => StarlarkAnalysisResult::new(result, label.dupe()),
+        MaybeCompatible::Compatible(result) => {
+            StarlarkAnalysisResult::new(result.dupe(), label.dupe())
+        }
     }
 }
 

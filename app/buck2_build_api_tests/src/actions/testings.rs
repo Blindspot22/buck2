@@ -34,7 +34,8 @@ use dupe::Dupe;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use sorted_vector_map::sorted_vector_map;
-use starlark::values::OwnedFrozenValue;
+use starlark::values::OwnedFrozen;
+use starlark::values::Value;
 
 /// A simple unregistered action that will eventually be resolved into an action that runs the
 /// given cmd as the action execution command. Used for testing
@@ -98,8 +99,8 @@ impl UnregisteredAction for SimpleUnregisteredAction {
     fn register(
         self: Box<Self>,
         outputs: BuckIndexSet<BuildArtifact>,
-        _starlark_data: Option<OwnedFrozenValue>,
-        _error_handler: Option<OwnedFrozenValue>,
+        _starlark_data: Option<OwnedFrozen<Value<'static>>>,
+        _error_handler: Option<OwnedFrozen<Value<'static>>>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         Ok(Box::new(SimpleAction {
             inputs: BoxSliceSet::from(self.inputs),

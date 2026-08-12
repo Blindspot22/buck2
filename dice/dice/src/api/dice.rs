@@ -29,6 +29,7 @@
 //!     use dice::DiceKeyDyn;
 //!     use dice::ValueSerialize;
 //!     use dice::NoValueSerialize;
+//!     use dupe::Dupe;
 //!     use pagable::Pagable;
 //!     use pagable::pagable_typetag;
 //!
@@ -37,7 +38,7 @@
 //!
 //!     impl<'compute, 'd> InjectConfigs<'compute, 'd> {
 //!         pub async fn get_config(&mut self) -> usize {
-//!             self.0.compute(&ConfigKey).await.unwrap()
+//!             *self.0.compute(&ConfigKey).await.unwrap()
 //!         }
 //!     }
 //!
@@ -88,12 +89,12 @@
 //!                 }
 //!             }
 //!
-//!             self.0.compute(&ComputeA(a, s)).await.unwrap()
+//!             self.0.compute(&ComputeA(a, s)).await.unwrap().dupe()
 //!         }
 //!
 //!         // second computation function
 //!         pub async fn compute_b(&mut self, a: usize) -> usize {
-//!                 self.0.compute(&ComputeB(a)).await.unwrap()
+//!                 *self.0.compute(&ComputeB(a)).await.unwrap()
 //!         }
 //!     }
 //!
@@ -169,7 +170,7 @@
 //!
 //! // request the computation from DICE
 //! rt.block_on(async {
-//!     assert_eq!("aaaaaaaa", &*MyComputation(&mut ctx).compute_a(4, "a".into()).await);
+//!     assert_eq!("aaaaaaaa", &*MyComputation(&mut ctx.ctx()).compute_a(4, "a".into()).await);
 //! });
 //!
 //! let mut ctx = engine.updater();
@@ -179,7 +180,7 @@
 //!
 //! // request the computation from DICE
 //! rt.block_on(async {
-//!     assert_eq!("aaaaaaaaaa", &*MyComputation(&mut ctx).compute_a(4, "a".into()).await);
+//!     assert_eq!("aaaaaaaaaa", &*MyComputation(&mut ctx.ctx()).compute_a(4, "a".into()).await);
 //! });
 //! ```
 

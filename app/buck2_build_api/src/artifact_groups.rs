@@ -21,13 +21,13 @@ pub use artifact_group_values::ArtifactGroupValues;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
+use buck2_util::size_assert;
 use derive_more::Display;
 use dice::DiceComputations;
 use dupe::Dupe;
 use gazebo::variants::UnpackVariants;
 use pagable::Pagable;
 use starlark::values::StarlarkPagableViaPagable;
-use static_assertions::assert_eq_size;
 
 use self::calculation::EnsureTransitiveSetProjectionKey;
 use crate::actions::calculation::BuildKey;
@@ -94,7 +94,7 @@ pub enum ArtifactGroup {
     Promise(Arc<PromiseArtifactWrapper>),
 }
 
-assert_eq_size!(ArtifactGroup, [usize; 2]);
+size_assert::words_of_type!(ArtifactGroup, 2);
 
 impl ArtifactGroup {
     /// Gets the resolved artifact group, which is used further downstream to use DICE to get
@@ -103,17 +103,17 @@ impl ArtifactGroup {
     /// look get the results via the `EnsureTransitiveSetProjectionKey`, which expands the underlying
     /// tset. For the `Promise` variant, we will look up the promised artifact values by getting
     /// the analysis results of the owning anon target's analysis.
-    pub async fn resolved_artifact(
-        &self,
-        ctx: &mut DiceComputations<'_>,
-    ) -> buck2_error::Result<ResolvedArtifactGroup<'_>> {
+    pub async fn resolved_artifact<'a, 'd: 'a>(
+        &'a self,
+        ctx: &mut DiceComputations<'d>,
+    ) -> buck2_error::Result<ResolvedArtifactGroup<'a>> {
         Ok(match self {
-            ArtifactGroup::Artifact(a) => ResolvedArtifactGroup::Artifact(a.clone()),
+            ArtifactGroup::Artifact(a) => ResolvedArtifactGroup::Artifact(a),
             ArtifactGroup::TransitiveSetProjection(a) => {
                 ResolvedArtifactGroup::TransitiveSetProjection(&a.key)
             }
             ArtifactGroup::Promise(p) => match p.promise_artifact.get() {
-                Some(a) => ResolvedArtifactGroup::Artifact(a.clone()),
+                Some(a) => ResolvedArtifactGroup::Artifact(a),
                 None => {
                     let artifact = (GET_PROMISED_ARTIFACT.get()?)(&p.promise_artifact, ctx).await?;
                     ResolvedArtifactGroup::Artifact(artifact)
@@ -184,9 +184,9 @@ impl ArtifactGroup {
 // TODO(@wendyy) if we move PromiseArtifact into ArtifactKind someday, we should probably
 // split the Artifact variant into two cases (artifact by ref and by value) to prevent memory
 // regressions.
-#[derive(Clone)]
+#[derive(Clone, Copy, Dupe)]
 pub enum ResolvedArtifactGroup<'a> {
-    Artifact(Artifact),
+    Artifact(&'a Artifact),
     TransitiveSetProjection(&'a TransitiveSetProjectionKey),
 }
 

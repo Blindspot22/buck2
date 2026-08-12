@@ -19,9 +19,6 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
 use allocative::Allocative;
-use chrono::DateTime;
-use chrono::TimeZone;
-use chrono::Utc;
 use derivative::Derivative;
 use derive_more::Display;
 use digest::Digest;
@@ -818,15 +815,21 @@ impl<Kind: CasDigestKind> TrackedCasDigest<Kind> {
 
     pub fn new_expires(
         data: CasDigest<Kind>,
-        expiry: DateTime<Utc>,
+        expiry: jiff::Timestamp,
         config: CasDigestConfig,
     ) -> Self
     where
         Kind: CasDigestKind,
     {
-        let res = Self::new(data, config);
-        res.update_expires(expiry);
-        res
+        if data.size() == 0 {
+            return Self::empty(config);
+        }
+        Self {
+            inner: Arc::new(TrackedCasDigestInner {
+                data,
+                expires: AtomicI64::new(expiry.as_second()),
+            }),
+        }
     }
 
     pub fn empty(config: CasDigestConfig) -> Self
@@ -872,26 +875,21 @@ impl<Kind: CasDigestKind> TrackedCasDigest<Kind> {
         self.inner.data.size()
     }
 
-    pub fn expires(&self) -> buck2_error::Result<DateTime<Utc>> {
-        match Utc.timestamp_opt(self.inner.expires.load(Ordering::Relaxed), 0) {
-            chrono::MappedLocalTime::Single(t) => Ok(t),
-            chrono::MappedLocalTime::None => Err(buck2_error::buck2_error!(
+    pub fn expires(&self) -> buck2_error::Result<jiff::Timestamp> {
+        let expires = self.inner.expires.load(Ordering::Relaxed);
+        jiff::Timestamp::from_second(expires).map_err(|_| {
+            buck2_error::buck2_error!(
                 buck2_error::ErrorTag::Environment,
-                "CAS Digest expiration is an invalid local time"
-            )),
-            chrono::MappedLocalTime::Ambiguous(t1, t2) => Err(buck2_error::buck2_error!(
-                buck2_error::ErrorTag::Environment,
-                "Cas Digest expiration is ambiguous, ranging from {:?} to {:?}",
-                t1,
-                t2
-            )),
-        }
+                "CAS Digest expiration is out of the representable time range: {}",
+                expires
+            )
+        })
     }
 
-    pub fn update_expires(&self, time: DateTime<Utc>) {
+    pub fn update_expires(&self, time: jiff::Timestamp) {
         self.inner
             .expires
-            .store(time.timestamp(), Ordering::Relaxed)
+            .store(time.as_second(), Ordering::Relaxed)
     }
 }
 
@@ -967,7 +965,9 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_ops::metadata::FileDigest;
     use crate::file_ops::metadata::FileDigestKind;
+    use crate::file_ops::metadata::TrackedFileDigest;
 
     #[test]
     fn test_digest_from_str() {
@@ -1127,5 +1127,40 @@ mod tests {
         ] {
             assert_eq!(v, v.to_string().parse().unwrap());
         }
+    }
+
+    #[test]
+    fn test_new_expires_empty_does_not_mutate_shared_singleton() {
+        // For zero-size data, `new_expires` must return the shared empty-digest
+        // singleton without touching its expiration. The previous implementation
+        // called `update_expires` on the singleton, corrupting the expiration
+        // observed by every other holder of the empty digest.
+        let config = testing::sha1();
+
+        // The singleton is created with expiration at the unix epoch.
+        let original_expiry = TrackedFileDigest::empty(config).expires().unwrap();
+        assert_eq!(
+            original_expiry,
+            jiff::Timestamp::UNIX_EPOCH,
+            "empty-digest singleton should start at the unix epoch"
+        );
+
+        let requested = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24 * 7);
+        let from_empty =
+            TrackedFileDigest::new_expires(FileDigest::empty(config), requested, config);
+
+        // The shared singleton is untouched ...
+        assert_eq!(
+            TrackedFileDigest::empty(config).expires().unwrap(),
+            original_expiry,
+            "new_expires on empty data must not mutate the shared empty-digest singleton"
+        );
+        // ... and the value returned for empty data is that same untouched
+        // singleton, not one carrying the requested (future) expiration.
+        assert_eq!(
+            from_empty.expires().unwrap(),
+            original_expiry,
+            "new_expires on empty data should return the singleton, ignoring the requested expiry"
+        );
     }
 }

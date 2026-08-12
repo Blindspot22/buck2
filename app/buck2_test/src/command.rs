@@ -29,10 +29,12 @@ use buck2_build_api::build::build_configured_label;
 use buck2_build_api::build::build_report::build_report_opts;
 use buck2_build_api::build::build_report::write_build_report;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::internal_runner_test_info::FrozenInternalRunnerTestInfo;
+use buck2_build_api::interpreter::rule_defs::provider::builtin::internal_runner_test_info::OwnedInternalRunnerTestInfo;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::run_info::FrozenRunInfo;
 use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollectionValue;
 use buck2_build_api::interpreter::rule_defs::provider::test_provider::TestProvider;
 use buck2_build_api::interpreter::rule_defs::provider::test_provider::build_external_runner_spec;
+use buck2_build_api::interpreter::rule_defs::provider::test_provider::test_provider_from_collection;
 use buck2_build_api::materialize::MaterializationAndUploadContext;
 use buck2_cli_proto::HasClientContext;
 use buck2_cli_proto::TestRequest;
@@ -49,9 +51,12 @@ use buck2_common::liveliness_observer::TimeoutLivelinessObserver;
 use buck2_common::pattern::parse_from_cli::parse_patterns_with_modifiers_from_cli_args;
 use buck2_common::pattern::resolve::ResolveTargetPatterns;
 use buck2_common::pattern::resolve::ResolvedPattern;
+use buck2_common::tenting::HasTentingAclProvider;
+use buck2_common::tenting::TentingStatus;
 use buck2_core::cells::CellResolver;
 use buck2_core::cells::name::CellName;
 use buck2_core::configuration::compatibility::ResultMaybeCompatible;
+use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::global_cfg_options::GlobalCfgOptions;
 use buck2_core::package::PackageLabelWithModifiers;
 use buck2_core::pattern::pattern::Modifiers;
@@ -145,10 +150,10 @@ struct ExecutorReport {
 }
 
 impl ExecutorReport {
-    fn ingest(&mut self, status: &ExecutorMessage) {
+    fn ingest(&mut self, status: &ExecutorMessage, session: &TestSession) {
         match status {
             ExecutorMessage::TestResult(res) => {
-                self.statuses.ingest(res);
+                self.statuses.ingest(res, session);
             }
             ExecutorMessage::ExitCode(exit_code) => {
                 self.exit_code = Some(*exit_code);
@@ -206,19 +211,24 @@ struct TestStatuses {
     listing_failed: CounterWithExamples,
 }
 impl TestStatuses {
-    fn ingest(&mut self, result: &TestResult) {
+    fn ingest(&mut self, result: &TestResult, session: &TestSession) {
+        let display_name: std::borrow::Cow<'_, str> = match session.get(result.target) {
+            Ok(label) => std::borrow::Cow::Owned(format!("{} ({})", result.name, label.cfg())),
+            Err(_) => std::borrow::Cow::Borrowed(result.name.as_str()),
+        };
+        let name = display_name.as_ref();
         match result.status {
-            TestStatus::PASS => self.passed.add(&result.name),
-            TestStatus::FAIL => self.failed.add(&result.name),
-            TestStatus::SKIP => self.skipped.add(&result.name),
-            TestStatus::OMITTED => self.omitted.add(&result.name),
-            TestStatus::FATAL => self.fatals.add(&result.name),
-            TestStatus::TIMEOUT => self.timed_out.add(&result.name),
-            TestStatus::INFRA_FAILURE => self.infra_failure.add(&result.name),
+            TestStatus::PASS => self.passed.add(name),
+            TestStatus::FAIL => self.failed.add(name),
+            TestStatus::SKIP => self.skipped.add(name),
+            TestStatus::OMITTED => self.omitted.add(name),
+            TestStatus::FATAL => self.fatals.add(name),
+            TestStatus::TIMEOUT => self.timed_out.add(name),
+            TestStatus::INFRA_FAILURE => self.infra_failure.add(name),
             TestStatus::UNKNOWN => {}
             TestStatus::RERUN => {}
-            TestStatus::LISTING_SUCCESS => self.listing_success.add(&result.name),
-            TestStatus::LISTING_FAILED => self.listing_failed.add(&result.name),
+            TestStatus::LISTING_SUCCESS => self.listing_success.add(name),
+            TestStatus::LISTING_FAILED => self.listing_failed.add(name),
         }
     }
 }
@@ -325,14 +335,32 @@ impl ServerCommandTemplate for TestServerCommand {
 
 async fn test(
     server_ctx: &dyn ServerCommandContextTrait,
-    mut ctx: DiceTransaction,
+    ctx: DiceTransaction,
     request: &TestRequest,
 ) -> buck2_error::Result<TestResponse> {
     // TODO (torozco): Should the --fail-fast flag work here?
 
     let cwd = server_ctx.working_dir();
-    let cell_resolver = ctx.get_cell_resolver().await?;
+    let cell_resolver = ctx.ctx().get_cell_resolver().await?;
     let working_dir_cell = cell_resolver.find(cwd);
+
+    let test_builds_targets =
+        if request.build_default_info.is_none() || request.build_run_info.is_none() {
+            ctx.ctx()
+                .parse_legacy_config_property::<bool>(
+                    cell_resolver.root_cell(),
+                    BuckconfigKeyRef {
+                        section: "buck2",
+                        property: "test_builds_targets",
+                    },
+                )
+                .await?
+                .unwrap_or(false)
+        } else {
+            false
+        };
+    let build_default_info = request.build_default_info.unwrap_or(test_builds_targets);
+    let build_run_info = request.build_run_info.unwrap_or(test_builds_targets);
 
     let client_ctx = request.client_context()?;
     let global_cfg_options = global_cfg_options_from_client_context(
@@ -341,13 +369,14 @@ async fn test(
             .as_ref()
             .ok_or_else(|| internal_error!("target_cfg must be set"))?,
         server_ctx,
-        &mut ctx,
+        &mut ctx.ctx(),
     )
     .await?;
 
     // Get the test runner from the config. Note that we use a different key from v1 since the API
     // is completely different, so there is not expectation that the same binary works for both.
     let test_executor_config = ctx
+        .ctx()
         .get_legacy_config_property(
             cell_resolver.root_cell(),
             BuckconfigKeyRef {
@@ -364,7 +393,8 @@ async fn test(
                 .with_buck_error_context(|| format!("Invalid `test.v2_test_executor`: {config}"))?;
             let mut test_executor_args =
                 vec!["--buck-trace-id".to_owned(), client_ctx.trace_id.clone()];
-            let platform = match (*ctx)
+            let platform = match ctx
+                .ctx()
                 .get_interpreter_configuror()
                 .await?
                 .host_info()
@@ -394,7 +424,7 @@ async fn test(
     };
 
     let parsed_patterns_with_modifiers =
-        parse_patterns_with_modifiers_from_cli_args(&mut ctx, &request.target_patterns, cwd)
+        parse_patterns_with_modifiers_from_cli_args(&mut ctx.ctx(), &request.target_patterns, cwd)
             .await?;
     server_ctx.log_target_pattern_with_modifiers(&parsed_patterns_with_modifiers);
 
@@ -405,9 +435,11 @@ async fn test(
         return Err(ModifiersError::PatternModifiersWithGlobalModifiers.into());
     }
 
-    let resolved_pattern =
-        ResolveTargetPatterns::resolve_with_modifiers(&mut ctx, &parsed_patterns_with_modifiers)
-            .await?;
+    let resolved_pattern = ResolveTargetPatterns::resolve_with_modifiers(
+        &mut ctx.ctx(),
+        &parsed_patterns_with_modifiers,
+    )
+    .await?;
 
     let launcher: Box<dyn ExecutorLauncher> = Box::new(OutOfProcessTestExecutor {
         executable: test_executor,
@@ -469,8 +501,8 @@ async fn test(
         MissingTargetBehavior::from_skip(build_opts.skip_missing_targets),
         timeout,
         request.ignore_tests_attribute,
-        request.build_default_info,
-        request.build_run_info,
+        build_default_info,
+        build_run_info,
         tpx_experiments,
     )
     .await?;
@@ -563,13 +595,18 @@ async fn test(
     };
 
     let serialized_build_report = if build_opts.unstable_print_build_report {
-        let artifact_fs = ctx.get_artifact_fs().await?;
-        let build_report_opts =
-            build_report_opts(&mut ctx, &cell_resolver, build_opts, Default::default()).await?;
+        let artifact_fs = ctx.ctx().get_artifact_fs().await?;
+        let build_report_opts = build_report_opts(
+            &mut ctx.ctx(),
+            &cell_resolver,
+            build_opts,
+            Default::default(),
+        )
+        .await?;
 
         write_build_report(
             build_report_opts,
-            &artifact_fs,
+            artifact_fs,
             &cell_resolver,
             server_ctx.project_root(),
             cwd,
@@ -603,7 +640,7 @@ async fn test(
 }
 
 async fn test_targets(
-    mut ctx: DiceTransaction,
+    ctx: DiceTransaction,
     pattern: ResolvedPattern<ConfiguredProvidersPatternExtra>,
     global_cfg_options: GlobalCfgOptions,
     external_runner_args: Vec<String>,
@@ -675,6 +712,7 @@ async fn test_targets(
     let (test_status_sender, test_status_receiver) = mpsc::unbounded();
 
     let internal_test_timeout = ctx
+        .ctx()
         .get_legacy_config_property(
             cell_resolver.root_cell(),
             BuckconfigKeyRef {
@@ -688,15 +726,16 @@ async fn test_targets(
         .unwrap_or(Duration::from_secs(600));
 
     let internal_runner_config = InternalRunnerConfig::parse(
-        ctx.get_legacy_config_property(
-            cell_resolver.root_cell(),
-            BuckconfigKeyRef {
-                section: "test",
-                property: "use_internal_runner",
-            },
-        )
-        .await?
-        .as_deref(),
+        ctx.ctx()
+            .get_legacy_config_property(
+                cell_resolver.root_cell(),
+                BuckconfigKeyRef {
+                    section: "test",
+                    property: "use_internal_runner",
+                },
+            )
+            .await?
+            .as_deref(),
     );
 
     let internal_test_status_sender = test_status_sender.clone();
@@ -789,7 +828,7 @@ async fn test_targets(
                 // Wait for the tests to finish running.
                 let test_statuses = test_status_receiver
                     .try_fold(ExecutorReport::default(), |mut acc, result| {
-                        acc.ingest(&result);
+                        acc.ingest(&result, &session);
                         future::ready(Ok(acc))
                     })
                     .await
@@ -802,7 +841,7 @@ async fn test_targets(
                     .await
                     .buck_error_context("Failed to shutdown orchestrator")?;
 
-                let local_resource_registry = ctx.get_local_resource_registry()?;
+                let local_resource_registry = ctx.ctx().get_local_resource_registry()?;
 
                 local_resource_registry
                     .release_all_resources()
@@ -828,11 +867,21 @@ async fn test_targets(
         .await
         .buck_error_context("Failed to retrieve executor exit code")?;
 
-    if executor_output.exit_code != 0 {
+    if executor_output.signal.is_some() {
+        // The executor was killed by a signal: a crash (e.g. SIGSEGV) or an OOM kill,
+        // as opposed to an orderly non-zero exit.
         return Err(buck2_error::buck2_error!(
-            ErrorTag::TestExecutor,
+            ErrorTag::TestExecutorSignaled,
             "{}",
-            executor_output.to_string()
+            executor_output.termination_message()
+        ));
+    }
+
+    if executor_output.exit_code != Some(0) {
+        return Err(buck2_error::buck2_error!(
+            ErrorTag::TestExecutorNonZeroExit,
+            "{}",
+            executor_output.termination_message()
         ));
     }
 
@@ -843,7 +892,7 @@ async fn test_targets(
     // case we're about to get this Err out of test_statuses), then this will ensure we don't wait
     // forever on the executor to notify us!
     let _ignored = test_status_sender.unbounded_send(Err(buck2_error::buck2_error!(
-        ErrorTag::TestExecutor,
+        ErrorTag::TestExecutorNoEndOfTests,
         "Executor exited without reporting end-of-tests",
     )));
 
@@ -883,12 +932,14 @@ enum TestDriverTask {
         label_with_modifiers: ProvidersLabelWithModifiers,
         skippable: bool,
         test_config_unification_rollout: bool,
+        tenting_acl_names: TentingStatus,
     },
     BuildTarget {
         label: ConfiguredProvidersLabel,
         modifiers: Modifiers,
         test_config_unification_rollout: bool,
         oncall: Option<String>,
+        tenting_acl_names: TentingStatus,
     },
     TestTarget {
         label: ConfiguredProvidersLabel,
@@ -897,6 +948,7 @@ enum TestDriverTask {
         build_target_result: BuildTargetResult,
         test_config_unification_rollout: bool,
         oncall: Option<String>,
+        tenting_acl_names: TentingStatus,
     },
 }
 
@@ -984,11 +1036,13 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                                 label_with_modifiers,
                                 skippable,
                                 test_config_unification_rollout,
+                                tenting_acl_names,
                             } => {
                                 self.configure_target(
                                     label_with_modifiers,
                                     skippable,
                                     test_config_unification_rollout,
+                                    tenting_acl_names,
                                 );
                             }
                             TestDriverTask::BuildTarget {
@@ -996,12 +1050,14 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                                 modifiers,
                                 test_config_unification_rollout,
                                 oncall,
+                                tenting_acl_names,
                             } => {
                                 self.build_target(
                                     label,
                                     modifiers,
                                     test_config_unification_rollout,
                                     oncall,
+                                    tenting_acl_names,
                                 );
                             }
                             TestDriverTask::TestTarget {
@@ -1011,6 +1067,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                                 build_target_result,
                                 test_config_unification_rollout,
                                 oncall,
+                                tenting_acl_names,
                             } => {
                                 self.test_target(
                                     label,
@@ -1019,6 +1076,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                                     build_target_result,
                                     test_config_unification_rollout,
                                     oncall,
+                                    tenting_acl_names,
                                 );
                             }
                         }
@@ -1043,7 +1101,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
             async move {
                 let res = match state
                     .ctx
-                    .clone()
+                    .ctx()
                     .get_interpreter_results(package.dupe())
                     .await
                 {
@@ -1104,6 +1162,26 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                     }
                 }
 
+                let tenting_acl_names = if let Ok(project_path) =
+                    state.cell_resolver.resolve_path(package.as_cell_path())
+                {
+                    if let Ok(rel_path) = ProjectRelativePathBuf::try_from(project_path.to_string())
+                    {
+                        match state.ctx.global_data().get_tenting_acl_provider() {
+                            Some(provider) => provider
+                                .get_tenting_acl_names(&rel_path)
+                                .await
+                                .unwrap_or(TentingStatus::Unknown),
+                            // No provider configured: we cannot determine tenting.
+                            None => TentingStatus::Unknown,
+                        }
+                    } else {
+                        TentingStatus::Unknown
+                    }
+                } else {
+                    TentingStatus::Unknown
+                };
+
                 let labels =
                     targets
                         .into_iter()
@@ -1132,6 +1210,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                             label_with_modifiers,
                             skippable,
                             test_config_unification_rollout,
+                            tenting_acl_names: tenting_acl_names.dupe(),
                         }
                     })
                     .collect();
@@ -1147,6 +1226,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         label_with_modifiers: ProvidersLabelWithModifiers,
         skippable: bool,
         test_config_unification_rollout: bool,
+        tenting_acl_names: TentingStatus,
     ) {
         if !self
             .labels_configured
@@ -1173,7 +1253,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         let fut = async move {
             let label = match state
                 .ctx
-                .clone()
+                .ctx()
                 .get_configured_provider_label(&providers_label, &local_cfg_options)
                 .await
             {
@@ -1188,11 +1268,11 @@ impl<'a, 'e> TestDriver<'a, 'e> {
 
             let node = match state
                 .ctx
-                .clone()
+                .ctx()
                 .get_configured_target_node(label.target())
                 .await
             {
-                ResultMaybeCompatible::Compatible(node) => node,
+                ResultMaybeCompatible::Compatible(node) => node.dupe(),
                 ResultMaybeCompatible::Incompatible(reason) => {
                     if skippable {
                         //TODO: add aggregated error message
@@ -1221,6 +1301,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 modifiers: modifiers.dupe(),
                 test_config_unification_rollout,
                 oncall,
+                tenting_acl_names: tenting_acl_names.dupe(),
             }];
 
             // If this node is a forward, it'll get flattened when we do analysis and run the
@@ -1229,7 +1310,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
             // flatten it?
             let node = node.forward_target().unwrap_or(&node);
 
-            // Look up `tests` in the the target we're testing, and if we find any tests, add them to the test backlog.
+            // Look up `tests` in the target we're testing, and if we find any tests, add them to the test backlog.
             if !state.ignore_tests_attribute {
                 for test in node.tests() {
                     work.push(TestDriverTask::ConfigureTarget {
@@ -1241,6 +1322,9 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                         // should change.
                         skippable: false,
                         test_config_unification_rollout,
+                        // Tenting is resolved per top-level target, not for targets
+                        // pulled in via the `tests` attribute; treat as undetermined.
+                        tenting_acl_names: TentingStatus::Unknown,
                     });
                 }
             }
@@ -1258,6 +1342,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         modifiers: Modifiers,
         test_config_unification_rollout: bool,
         oncall: Option<String>,
+        tenting_acl_names: TentingStatus,
     ) {
         if !self.labels_tested.insert(label.dupe()) {
             self.work.push(
@@ -1276,21 +1361,25 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         let state = self.state;
         let build_label = label.dupe();
         let fut = async move {
-            let ctx = &mut state.ctx.clone();
+            let ctx = state.ctx.clone();
 
             let modifiers_dupe = modifiers.dupe();
 
             let result = match ctx
-                .with_linear_recompute(|ctx| async move {
-                    build_target_result(
-                        &ctx,
-                        state.label_filtering,
-                        build_label,
-                        modifiers_dupe,
-                        state.build_default_info,
-                        state.build_run_info,
-                    )
-                    .await
+                .ctx()
+                .with_linear_recompute(|ctx| {
+                    async move {
+                        build_target_result(
+                            ctx,
+                            state.label_filtering,
+                            build_label,
+                            modifiers_dupe,
+                            state.build_default_info,
+                            state.build_run_info,
+                        )
+                        .await
+                    }
+                    .boxed()
                 })
                 .await
             {
@@ -1309,6 +1398,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 modifiers,
                 test_config_unification_rollout,
                 oncall,
+                tenting_acl_names,
             }])
         }
         .boxed();
@@ -1324,6 +1414,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
         build_target_result: BuildTargetResult,
         test_config_unification_rollout: bool,
         oncall: Option<String>,
+        tenting_acl_names: TentingStatus,
     ) {
         let should_test = !build_target_result.build_failed && !build_target_result.is_empty();
         self.build_target_result.extend(build_target_result);
@@ -1346,6 +1437,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
                 state.internal_test_timeout,
                 test_config_unification_rollout,
                 oncall,
+                tenting_acl_names,
             )
             .await
             {
@@ -1363,7 +1455,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
 }
 
 async fn build_target_result(
-    ctx: &LinearRecomputeDiceComputations<'_>,
+    ctx: LinearRecomputeDiceComputations<'_, '_>,
     label_filtering: &TestLabelFiltering,
     label: ConfiguredProvidersLabel,
     modifiers: Modifiers,
@@ -1384,7 +1476,7 @@ async fn build_target_result(
     // 1. It's a test (aka it produces a TestInfo provider) and it is not skipped by label filtering
     // 2. --build-default-info is requested
     // 3. --build-run-info is requested and the target produces a RunInfo
-    if let Some(test_info) = <dyn TestProvider>::from_collection(collections) {
+    if let Some(test_info) = test_provider_from_collection(collections) {
         let skip_build_based_on_labels = !label_filtering.build_filtered_targets
             && label_filtering.is_excluded(test_info.labels());
         if skip_build_based_on_labels {
@@ -1424,6 +1516,7 @@ async fn build_target_result(
                 BuildConfiguredLabelOptions {
                     skippable: false,
                     graph_properties: Default::default(),
+                    return_run_args: false,
                 },
                 None, // TODO: is this right?
             ),
@@ -1444,20 +1537,31 @@ async fn test_target<'a, 'e>(
     internal_test_timeout: Duration,
     test_config_unification_rollout: bool,
     oncall: Option<String>,
+    tenting_acl_names: TentingStatus,
 ) -> buck2_error::Result<Option<ConfiguredProvidersLabel>> {
     let collection = providers.provider_collection();
 
     // Check for InternalRunnerTestInfo first — run in-process.
     // Gated by [test].use_internal_runner (default true, comma-separated framework types,
     // or false to force TPX fallback).
-    if let Some(internal_provider) = collection.builtin_provider::<FrozenInternalRunnerTestInfo>() {
-        let framework_type = internal_provider.as_ref().test_type();
-        if driver_state
-            .internal_runner_config
-            .should_use(framework_type)
-        {
-            let test_info: &dyn TestProvider = internal_provider.as_ref();
-            if label_filtering.is_excluded(test_info.labels()) {
+    let internal_provider: Option<OwnedInternalRunnerTestInfo> = providers
+        .builtin_provider_value::<FrozenInternalRunnerTestInfo>()
+        .map(Into::into);
+    if let Some(internal_provider) = internal_provider {
+        // `'v`-branded views of the provider must not be held across awaits (only the
+        // `OwnedFrozen` may be), so views are derived in scopes that end before the next await.
+        let use_internal_runner = {
+            let provider = internal_provider.as_ref().value().as_ref();
+            driver_state
+                .internal_runner_config
+                .should_use(provider.test_type())
+        };
+        if use_internal_runner {
+            let excluded = {
+                let provider = internal_provider.as_ref().value().as_ref();
+                label_filtering.is_excluded(provider.labels().collect())
+            };
+            if excluded {
                 return Ok(None);
             }
 
@@ -1488,30 +1592,35 @@ async fn test_target<'a, 'e>(
                 })
                 .await?;
 
-            let provider = internal_provider.as_ref();
-            let listing_spec = build_external_runner_spec(
-                provider.listing_command(),
-                provider.env().map(|(k, _)| k),
-                provider.test_type(),
-                provider.labels(),
-                provider.contacts(),
-                handle.clone(),
-                working_dir_cell,
-            );
-            let spec = build_external_runner_spec(
-                provider.command(),
-                provider.env().map(|(k, _)| k),
-                provider.test_type(),
-                provider.labels(),
-                provider.contacts(),
-                handle,
-                working_dir_cell,
-            );
+            let (spec, listing_spec) = {
+                let provider = internal_provider.as_ref().value().as_ref();
+                let listing_spec = build_external_runner_spec(
+                    provider.listing_command(),
+                    provider.env().map(|(k, _)| k),
+                    provider.test_type(),
+                    provider.labels(),
+                    provider.contacts(),
+                    handle.clone(),
+                    working_dir_cell,
+                    &tenting_acl_names,
+                );
+                let spec = build_external_runner_spec(
+                    provider.command(),
+                    provider.env().map(|(k, _)| k),
+                    provider.test_type(),
+                    provider.labels(),
+                    provider.contacts(),
+                    handle,
+                    working_dir_cell,
+                    &tenting_acl_names,
+                );
+                (spec, listing_spec)
+            };
             crate::internal_runner::run_internal_test(
                 orchestrator.as_ref(),
                 spec,
                 listing_spec,
-                internal_provider.as_ref(),
+                &internal_provider,
                 internal_test_timeout,
             )
             .await?;
@@ -1519,7 +1628,7 @@ async fn test_target<'a, 'e>(
         }
     }
 
-    let fut = match <dyn TestProvider>::from_collection(collection) {
+    let fut = match test_provider_from_collection(collection) {
         Some(test_info) => {
             if label_filtering.is_excluded(test_info.labels()) {
                 return Ok(None);
@@ -1533,6 +1642,7 @@ async fn test_target<'a, 'e>(
                 working_dir_cell,
                 test_config_unification_rollout,
                 oncall,
+                tenting_acl_names,
             )
             .map(|l| Some(l).transpose())
             .left_future()
@@ -1569,12 +1679,13 @@ fn convert_error(build_result: &BuildTargetResult) -> Vec<buck2_error::Error> {
 fn run_tests<'a, 'b>(
     test_executor: Arc<dyn TestExecutor + 'a>,
     providers_label: ConfiguredProvidersLabel,
-    test_info: &'b dyn TestProvider,
+    test_info: &'b dyn TestProvider<'b>,
     session: &'b TestSession,
     cell_resolver: &'b CellResolver,
     working_dir_cell: CellName,
     test_config_unification_rollout: bool,
     oncall: Option<String>,
+    tenting_acl_names: TentingStatus,
 ) -> BoxFuture<'a, buck2_error::Result<ConfiguredProvidersLabel>> {
     let maybe_handle = build_configured_target_handle(
         providers_label.dupe(),
@@ -1586,7 +1697,8 @@ fn run_tests<'a, 'b>(
 
     match maybe_handle {
         Ok(handle) => {
-            let fut = test_info.dispatch(handle, test_executor, working_dir_cell);
+            let fut =
+                test_info.dispatch(handle, test_executor, working_dir_cell, tenting_acl_names);
 
             (async move {
                 fut.await
@@ -1820,7 +1932,7 @@ fn ai_agent_tpx_args(agent_context: &[buck2_data::AgentContextEntry]) -> Vec<Str
     };
 
     push_tag("ai-agent".to_owned());
-    push_tag(format!("ai_agent_id={}", &id_entry.value));
+    push_tag(format!("ai_agent_id={}", id_entry.value));
 
     if let Some(inv) = find(AgentContextEntry::KEY_INVOCATION_ID) {
         let inv_id = inv

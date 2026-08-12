@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::local_resource_info::FrozenLocalResourceInfo;
+use buck2_build_api::interpreter::rule_defs::provider::builtin::local_resource_info::OwnedLocalResourceInfo;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::soft_error;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
@@ -20,9 +21,7 @@ use buck2_error::internal_error;
 use buck2_test_api::data::RequiredLocalResources;
 use buck2_test_api::data::TestStage;
 use dice::DiceComputations;
-use futures::FutureExt;
 use itertools::Itertools;
-use starlark::values::OwnedFrozenValueTyped;
 
 pub(crate) enum TestStageSimple {
     Listing,
@@ -43,12 +42,7 @@ pub(crate) async fn required_providers<'v>(
     available_resources: HashMap<&'v str, Option<&'v ConfiguredProvidersLabel>>,
     rule_required_resource_names: Vec<&'v str>,
     required_local_resources: &'v RequiredLocalResources,
-) -> buck2_error::Result<
-    Vec<(
-        &'v ConfiguredTargetLabel,
-        OwnedFrozenValueTyped<FrozenLocalResourceInfo>,
-    )>,
-> {
+) -> buck2_error::Result<Vec<(&'v ConfiguredTargetLabel, OwnedLocalResourceInfo)>> {
     let targets = required_local_resources
         .resources
         .iter()
@@ -73,8 +67,8 @@ pub(crate) async fn required_providers<'v>(
         })
         .collect::<Result<Vec<_>, buck2_error::Error>>()?;
 
-    dice.compute_join(targets, |dice, target| {
-        async move { get_local_resource_info(dice, target).await }.boxed()
+    dice.compute_join(targets, async |dice, target| {
+        get_local_resource_info(dice, target).await
     })
     .await
     .into_iter()
@@ -84,21 +78,14 @@ pub(crate) async fn required_providers<'v>(
 async fn get_local_resource_info<'v>(
     dice: &mut DiceComputations<'_>,
     target: &'v ConfiguredProvidersLabel,
-) -> buck2_error::Result<(
-    &'v ConfiguredTargetLabel,
-    OwnedFrozenValueTyped<FrozenLocalResourceInfo>,
-)> {
+) -> buck2_error::Result<(&'v ConfiguredTargetLabel, OwnedLocalResourceInfo)> {
     let local_resource_info = dice
         .get_providers(target)
         .await?
         .require_compatible()?
-        .value
-        .maybe_map(|c| {
-            c.as_ref()
-                .builtin_provider_value::<FrozenLocalResourceInfo>()
-        })
+        .builtin_provider_value::<FrozenLocalResourceInfo>()
         .ok_or_else(|| {
             internal_error!("Target `{target}` expected to contain `LocalResourceInfo` provider")
         })?;
-    Ok((target.target(), local_resource_info))
+    Ok((target.target(), local_resource_info.into()))
 }

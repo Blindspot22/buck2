@@ -49,21 +49,18 @@ use dupe::Dupe;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use starlark::any::ProvidesStaticType;
-use starlark::coerce::Coerce;
 use starlark::environment::GlobalsBuilder;
-use starlark::starlark_complex_value;
+use starlark::starlark_complex_value_branded;
 use starlark::starlark_module;
 use starlark::values::Demand;
-use starlark::values::Freeze;
+use starlark::values::FreezeBranded;
 use starlark::values::NoSerialize;
-use starlark::values::OwnedFrozenValue;
+use starlark::values::OwnedFrozen;
 use starlark::values::StarlarkPagable;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
-use starlark::values::ValueLifetimeless;
-use starlark::values::ValueLike;
 use starlark::values::starlark_value;
 use starlark::values::type_repr::StarlarkTypeRepr;
 
@@ -111,8 +108,8 @@ impl UnregisteredAction for UnregisteredWriteJsonAction {
     fn register(
         self: Box<Self>,
         outputs: BuckIndexSet<BuildArtifact>,
-        starlark_data: Option<OwnedFrozenValue>,
-        _error_handler: Option<OwnedFrozenValue>,
+        starlark_data: Option<OwnedFrozen<Value<'static>>>,
+        _error_handler: Option<OwnedFrozen<Value<'static>>>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         let contents = starlark_data.expect("module data to be present");
         let action = WriteJsonAction::new(contents, outputs, *self)?;
@@ -122,18 +119,20 @@ impl UnregisteredAction for UnregisteredWriteJsonAction {
 
 #[derive(Debug, Allocative, Pagable)]
 struct WriteJsonAction {
-    contents: OwnedFrozenValue, // JSON value
+    contents: OwnedFrozen<Value<'static>>, // JSON value
     output: BuildArtifact,
     inner: UnregisteredWriteJsonAction,
 }
 
 impl WriteJsonAction {
     fn new(
-        contents: OwnedFrozenValue,
+        contents: OwnedFrozen<Value<'static>>,
         outputs: BuckIndexSet<BuildArtifact>,
         inner: UnregisteredWriteJsonAction,
     ) -> buck2_error::Result<Self> {
-        validate_json(JsonUnpack::unpack_value_err(contents.value())?)?;
+        contents.by_ref(|v| -> buck2_error::Result<()> {
+            validate_json(JsonUnpack::unpack_value_err(*v)?)
+        })?;
 
         let mut outputs = outputs.into_iter();
 
@@ -158,14 +157,16 @@ impl WriteJsonAction {
         artifact_path_mapping: &dyn ArtifactPathMapper,
     ) -> buck2_error::Result<Vec<u8>> {
         let mut writer = Vec::new();
-        json::write_json(
-            JsonUnpack::unpack_value_err(self.contents.value())?,
-            Some(fs),
-            &mut writer,
-            self.inner.pretty,
-            self.inner.absolute,
-            artifact_path_mapping,
-        )?;
+        self.contents.by_ref(|v| -> buck2_error::Result<()> {
+            json::write_json(
+                JsonUnpack::unpack_value_err(*v)?,
+                Some(fs),
+                &mut writer,
+                self.inner.pretty,
+                self.inner.absolute,
+                artifact_path_mapping,
+            )
+        })?;
         Ok(writer)
     }
 }
@@ -183,7 +184,8 @@ impl Action for WriteJsonAction {
         }
 
         let mut visitor = CommandLineContentBasedInputVisitor::new();
-        json::visit_json_artifacts(self.contents.value(), &mut visitor)?;
+        self.contents
+            .by_ref(|v| json::visit_json_artifacts(*v, &mut visitor))?;
         Ok(Cow::Owned(
             visitor.content_based_inputs.into_iter().collect(),
         ))
@@ -295,57 +297,51 @@ impl Action for WriteJsonAction {
     Debug,
     Clone,
     Trace,
-    Coerce,
-    Freeze,
+    FreezeBranded,
     ProvidesStaticType,
     Allocative,
     StarlarkPagable
 )]
 #[derive(NoSerialize)] // TODO we should probably have a serialization for transitive set
-#[repr(C)]
-pub(crate) struct StarlarkWriteJsonCommandLineArgGen<V: ValueLifetimeless> {
-    artifact: V,
+pub(crate) struct StarlarkWriteJsonCommandLineArg<'v> {
+    artifact: Value<'v>,
     // The list of artifacts here could be large and we don't want to hold those explicitly (due to
     // the memory cost) and so we hold the same content value that the write_json action itself will and
     // only traverse it when artifacts are requested.
-    content: V,
+    content: Value<'v>,
 }
 
-impl<'v, V: ValueLike<'v>> fmt::Display for StarlarkWriteJsonCommandLineArgGen<V> {
+impl<'v> fmt::Display for StarlarkWriteJsonCommandLineArg<'v> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("<WriteJsonCliArgs>")
     }
 }
 
-starlark_complex_value!(pub(crate) StarlarkWriteJsonCommandLineArg);
+starlark_complex_value_branded!(pub(crate) StarlarkWriteJsonCommandLineArg);
 
 #[starlark_value(type = "WriteJsonCliArgs")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for StarlarkWriteJsonCommandLineArgGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
+impl<'v> StarlarkValue<'v> for StarlarkWriteJsonCommandLineArg<'v> {
     fn provide(&'v self, demand: &mut Demand<'_, 'v>) {
         demand.provide_value::<&dyn CommandLineArgLike>(self);
     }
 }
 
-impl<'v, V: ValueLike<'v>> StarlarkWriteJsonCommandLineArgGen<V> {
+impl<'v> StarlarkWriteJsonCommandLineArg<'v> {
     pub fn visit_contents(
         &self,
         visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
-        let content = self.content.to_value();
-        json::visit_json_artifacts(content, visitor)
+        json::visit_json_artifacts(self.content, visitor)
     }
 }
 
-impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for StarlarkWriteJsonCommandLineArgGen<V> {
+impl<'v> CommandLineArgLike<'v> for StarlarkWriteJsonCommandLineArg<'v> {
     fn register_me(&self) {
         command_line_arg_like_impl!(StarlarkWriteJsonCommandLineArg::starlark_type_repr());
     }
 
     fn add_to_command_line(&self, fmt: &mut CommandLineBuilder<'v, '_>) -> buck2_error::Result<()> {
-        ValueAsCommandLineLike::unpack_value_err(self.artifact.to_value())?
+        ValueAsCommandLineLike::unpack_value_err(self.artifact)?
             .0
             .add_to_command_line(fmt)
     }
@@ -354,12 +350,10 @@ impl<'v, V: ValueLike<'v>> CommandLineArgLike<'v> for StarlarkWriteJsonCommandLi
         &self,
         visitor: &mut dyn CommandLineArtifactVisitor<'v>,
     ) -> buck2_error::Result<()> {
-        let artifact = self.artifact.to_value();
-        let content = self.content.to_value();
-        ValueAsCommandLineLike::unpack_value_err(artifact)?
+        ValueAsCommandLineLike::unpack_value_err(self.artifact)?
             .0
             .visit_artifacts(visitor)?;
-        json::visit_json_artifacts(content, visitor)
+        json::visit_json_artifacts(self.content, visitor)
     }
 
     fn contains_arg_attr(&self) -> bool {

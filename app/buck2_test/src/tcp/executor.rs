@@ -56,7 +56,7 @@ pub(crate) async fn spawn(
     let proc = command.spawn().with_buck_error_context(|| {
         format!(
             "Failed to start {} for OutOfProcessTestExecutor",
-            &executable.display()
+            executable.display()
         )
     })?;
 
@@ -72,7 +72,7 @@ pub(crate) async fn spawn(
         .with_buck_error_context(|| {
             format!(
                 "Failed to accept TCP connection from {}",
-                &executable.display()
+                executable.display()
             )
         })?;
 
@@ -86,7 +86,7 @@ pub(crate) async fn spawn(
     match futures::future::select(exec, conns).await {
         Either::Left((output, _)) => Err(buck2_error::internal_error!(
             "Executor exited before connecting: {}",
-            output?
+            output?.termination_message()
         )),
         Either::Right((conns, exec)) => {
             let (orchestrator_tcp_stream, executor_tcp_stream) = conns?;

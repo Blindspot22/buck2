@@ -36,7 +36,8 @@ use dupe::Dupe;
 use gazebo::prelude::*;
 use pagable::Pagable;
 use pagable::pagable_typetag;
-use starlark::values::OwnedFrozenValue;
+use starlark::values::OwnedFrozen;
+use starlark::values::Value;
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(tag = Input)]
@@ -47,7 +48,7 @@ enum CopyActionValidationError {
     UnsupportedInput(ArtifactGroup),
 }
 
-#[derive(Debug, Allocative, Pagable)]
+#[derive(Debug, Allocative, Pagable, Clone, Copy, Dupe)]
 pub(crate) enum CopyMode {
     Copy {
         // Override the destination executable bit to +x (true) or -x (false)
@@ -72,8 +73,8 @@ impl UnregisteredAction for UnregisteredCopyAction {
     fn register(
         self: Box<Self>,
         outputs: BuckIndexSet<BuildArtifact>,
-        _starlark_data: Option<OwnedFrozenValue>,
-        _error_handler: Option<OwnedFrozenValue>,
+        _starlark_data: Option<OwnedFrozen<Value<'static>>>,
+        _error_handler: Option<OwnedFrozen<Value<'static>>>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         Ok(Box::new(CopyAction::new(self.copy, self.src, outputs)?))
     }

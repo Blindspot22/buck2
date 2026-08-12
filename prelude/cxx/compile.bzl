@@ -1219,20 +1219,26 @@ def _is_standalone_header(header: CHeader) -> bool:
     return True
 
 def _convert_raw_header(target_label: Label, raw_header: Artifact, include_dirs: list[CellPath]) -> CHeader:
-    package_prefix = str(target_label.path)
-    ns = paths.dirname(raw_header.short_path)
+    full_path = str(target_label.path) + "/" + raw_header.short_path
+    best_dir = None
     for d in include_dirs:
         abs_dir = str(d)
-        if paths.starts_with(abs_dir, package_prefix):
-            prefix = paths.relativize(abs_dir, package_prefix)
-            if paths.starts_with(ns, prefix):
-                ns = paths.relativize(ns, prefix)
-                break
+        if paths.starts_with(full_path, abs_dir) and (best_dir == None or len(abs_dir) > len(best_dir)):
+            best_dir = abs_dir
+    if best_dir != None:
+        ns = paths.dirname(paths.relativize(full_path, best_dir))
+    else:
+        ns = paths.dirname(raw_header.short_path)
     return CHeader(
         artifact = raw_header,
         name = raw_header.basename,
         namespace = ns,
         named = False,
+    )
+
+def _get_raw_header_include_dirs(preprocessors: list[CPreprocessor]) -> list[CellPath]:
+    return flatten([x.include_dirs for x in preprocessors]) + flatten(
+        [x.system_include_dirs.include_dirs for x in preprocessors if x.system_include_dirs != None]
     )
 
 def _create_precompile_cmd(
@@ -1245,7 +1251,7 @@ def _create_precompile_cmd(
     extra_preprocessors: list[CPreprocessor],
     cmd: CxxCompileCommand,
 ) -> CxxSrcPrecompileCommand:
-    include_dirs = flatten([x.include_dirs for x in preprocessors])
+    include_dirs = _get_raw_header_include_dirs(preprocessors)
     converted_headers = [_convert_raw_header(target_label, raw_header, include_dirs) for raw_header in flatten([x.raw_headers for x in preprocessors])]
     header_group_regex = regex(header_group, fancy = False) if header_group else None
 
@@ -1815,16 +1821,51 @@ def _mk_argsfiles(
     argsfiles = []
     args_list = []
 
-    def mk_argsfile(filename: str, args, use_dep_files_placeholder_for_content_based_paths: bool = False) -> Artifact:
+    def mk_argsfile(filename: str, args, absolute: bool = False, use_dep_files_placeholder_for_content_based_paths: bool = False) -> Artifact:
         content = create_cmd_args(is_nasm, is_xcode_argsfile, args)
         argsfile, _ = actions.write(
             filename,
             content,
             allow_args = True,
+            absolute = absolute,
             has_content_based_path = uses_content_based_paths,
             use_dep_files_placeholder_for_content_based_paths = use_dep_files_placeholder_for_content_based_paths,
         )
         return argsfile
+
+    def write_for_dep_file_filtering(filename: str, content, absolute: bool = False) -> (Artifact, Artifact):
+        # We write two versions of the file:
+        # - The first is a tagged file with the optionally content-based paths, which
+        #   will be passed to the compiler as usual, but will NOT be marked used, so
+        #   whether the paths in it change or not, the action will NOT rerun.
+        # - The second is an untagged file with the same content except content-based
+        #   paths are replaced by placeholders. This file is not read by the compiler,
+        #   but is passed as a hidden input of the compiler action, so that if
+        #   something OTHER than paths in the file changes, this redacted version will
+        #   change and trigger a rerun.
+        output, _ = actions.write(
+            filename,
+            content,
+            allow_args = True,
+            absolute = absolute,
+            has_content_based_path = uses_content_based_paths,
+        )
+        redacted_output, _ = actions.write(
+            filename + "_redacted",
+            content,
+            allow_args = True,
+            absolute = absolute,
+            has_content_based_path = uses_content_based_paths,
+            use_dep_files_placeholder_for_content_based_paths = True,
+        )
+        return (output, redacted_output)
+
+    def mk_argsfile_for_dep_file_filtering(filename: str, args, absolute: bool = False) -> (Artifact, Artifact):
+        return write_for_dep_file_filtering(
+            filename,
+            create_cmd_args(is_nasm, is_xcode_argsfile, args),
+            absolute = absolute,
+        )
 
     def make_toolchain_argsfile():
         compiler_info_flags = _add_compiler_info_flags(compiler_info)
@@ -1896,24 +1937,8 @@ def _mk_argsfiles(
         if preprocessor.set.reduce("uses_modules"):
             deps_args.append(headers_tag.tag_artifacts(preprocessor.set.project_as_args("modular_args")))
 
-        # We write two versions of the argsfile:
-        # - deps_argsfile_for_compiler: a tagged argsfile with the (optionally)
-        #   content-based paths to the hmaps, which will be passed to the compiler as
-        #   usual, but will NOT be marked used, so that whether the paths in it change
-        #   or not, the action will NOT rerun.
-        # - deps_argsfile_for_buck_action_rerun: an untagged argsfile with the same
-        #   content except content-based paths are replaced by placeholders; this file
-        #   is not read by the compiler but passed as a hidden input of the compiler
-        #   action, so that if something OTHER than paths in the argsfiles changes, this
-        #   redacted version will change and trigger a rerun.
         # filename example: .cpp.deps_cxx_args, .cpp.deps_cxx_args_redacted
-        deps_argsfile_filename = filename_prefix + "deps_cxx_args"
-        deps_argsfile_for_compiler = mk_argsfile(deps_argsfile_filename, deps_args)
-        deps_argsfile_for_buck_action_rerun = mk_argsfile(
-            deps_argsfile_filename + "_redacted",
-            deps_args,
-            use_dep_files_placeholder_for_content_based_paths = True,
-        )
+        deps_argsfile_for_compiler, deps_argsfile_for_buck_action_rerun = mk_argsfile_for_dep_file_filtering(filename_prefix + "deps_cxx_args", deps_args)
         argsfiles.append(
             cmd_args(
                 headers_tag.tag_artifacts(deps_argsfile_for_compiler),
@@ -1963,6 +1988,11 @@ def _mk_argsfiles(
             # The precompile_args field overrides these.
             return
 
+        if compiler_info.compiler_type in ("nasm", "windows_ml64"):
+            # NASM/MASM don't understand -ffile-prefix-map. .s/.sx/.S go through the gcc/clang
+            # driver (as_compiler_info) and do accept these flags.
+            return
+
         # Put file_prefix_args in argsfile, make sure they do not appear when evaluating $(cxxppflags)
         # to avoid "argument too long" errors
         file_prefix_args = headers_tag.tag_artifacts(preprocessor.set.project_as_args("file_prefix_args"))
@@ -1996,16 +2026,28 @@ def _mk_argsfiles(
                 file_prefix_args,
                 delimiter = " ",
             )
-            specs_file, _ = actions.write(
+            specs_file, specs_file_for_buck_action_rerun = write_for_dep_file_filtering(
                 file_prefix_args_filename + ".specs",
                 specs_content,
-                allow_args = True,
-                has_content_based_path = uses_content_based_paths,
             )
-            prefix_ref = cmd_args(specs_file, format = "-specs={}")
+            prefix_ref = cmd_args(
+                headers_tag.tag_artifacts(specs_file),
+                format = "-specs={}",
+                hidden = specs_file_for_buck_action_rerun,
+            )
         else:
             prefix_ref = file_prefix_args
-        argsfiles.append(mk_argsfile(file_prefix_args_filename, prefix_ref))
+
+        file_prefix_argsfile_for_compiler, file_prefix_argsfile_for_buck_action_rerun = mk_argsfile_for_dep_file_filtering(
+            file_prefix_args_filename,
+            prefix_ref,
+        )
+        argsfiles.append(
+            cmd_args(
+                headers_tag.tag_artifacts(file_prefix_argsfile_for_compiler),
+                hidden = file_prefix_argsfile_for_buck_action_rerun,
+            )
+        )
         args_list.append(prefix_ref)
 
     make_file_prefix_argsfile()
@@ -2021,21 +2063,19 @@ def _mk_argsfiles(
     file_name = filename_prefix + "cxx_compile_argsfile"
 
     # For Xcode to parse argsfiles of argsfiles, the paths in the former must be absolute.
-    argsfile, _ = actions.write(
+    argsfile, argsfile_for_buck_action_rerun = write_for_dep_file_filtering(
         file_name,
         file_args,
-        allow_args = True,
         absolute = is_xcode_argsfile,
-        has_content_based_path = uses_content_based_paths,
     )
 
     args = create_cmd_args(is_nasm, is_xcode_argsfile, args_list)
     input_args = [args, file_args]
 
     cmd_form = cmd_args(
-        argsfile,
+        headers_tag.tag_artifacts(argsfile),
         format = "-@{}" if is_nasm else "@{}",
-        hidden = input_args,
+        hidden = input_args + [argsfile_for_buck_action_rerun],
     )
 
     return CompileArgsfile(

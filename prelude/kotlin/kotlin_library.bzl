@@ -73,6 +73,7 @@ def _create_kotlin_sources(
     additional_classpath_entries: JavaCompilingDepsTSet | None,
     bootclasspath_entries: list[Artifact],
     plugins: list[tuple],
+    target_level: int,
     output_artifact_prefix: str = "",
 ) -> (Artifact, Artifact | None, Artifact | None):
     """
@@ -131,11 +132,18 @@ def _create_kotlin_sources(
     )
 
     # this is required for the Kotlin compiler to be able to use jspecify annotations
-    kotlinc_cmd_args.add(["-Xjspecify-annotations=strict", "-Xtype-enhancement-improvements-strict-mode"])
+    kotlinc_cmd_args.add(["-Xjspecify-annotations=strict"])
 
     jdk_release = getattr(ctx.attrs, "jdk_release", None) or ctx.attrs.java_version
+    jvm_target = None
     if jdk_release and not ctx.attrs.no_x_jdk_release:
         kotlinc_cmd_args.add(["-Xjdk-release=" + jdk_release])
+    else:
+        jvm_target = get_kotlinc_compatible_target(str(target_level))
+        kotlinc_cmd_args.add([
+            "-jvm-target",
+            jvm_target,
+        ])
 
     module_name = ctx.label.package.replace("/", ".") + "." + ctx.label.name
     kotlinc_cmd_args.add(
@@ -148,13 +156,6 @@ def _create_kotlin_sources(
         + ctx.attrs.extra_kotlinc_arguments
         + get_language_version_arg(ctx),
     )
-
-    jvm_target = get_kotlinc_compatible_target(ctx.attrs.target) if ctx.attrs.target else None
-    if jvm_target:
-        kotlinc_cmd_args.add([
-            "-jvm-target",
-            jvm_target,
-        ])
 
     kapt_generated_sources_output = None
     if annotation_processor_properties.annotation_processors:
@@ -443,7 +444,8 @@ def build_kotlin_library(
         bootclasspath_for_kotlinc = custom_jdk_info.bootclasspath if custom_jdk_info else []
         bootclasspath_jar_snapshots_for_kotlinc = custom_jdk_info.bootclasspath_jar_snapshots if custom_jdk_info and ctx.attrs.incremental else []
 
-        javac_tool = derive_javac(ctx.attrs.javac) if ctx.attrs.javac else None
+        javac_tool = derive_javac(ctx.attrs.javac) if getattr(ctx.attrs, "javac", None) else None
+        source_level, target_level = get_java_version_attributes(ctx)
 
         kotlin_toolchain = ctx.attrs._kotlin_toolchain[KotlinToolchainInfo]
         if javac_tool or kotlin_toolchain.kotlinc_protocol == "classic":
@@ -455,7 +457,8 @@ def build_kotlin_library(
                 ksp_annotation_processor_properties,
                 additional_classpath_entries,
                 bootclasspath_for_kotlinc,
-                plugins = ctx.attrs.kotlin_compiler_plugins,
+                ctx.attrs.kotlin_compiler_plugins,
+                target_level,
             )
             semanticdb_res = _semanticdb_plugin(ctx, kotlin_toolchain)
             if not ctx.attrs._is_building_android_binary and semanticdb_res:
@@ -468,7 +471,8 @@ def build_kotlin_library(
                     ksp_annotation_processor_properties,
                     additional_classpath_entries,
                     bootclasspath_for_kotlinc,
-                    plugins = semanticdb_plugin,
+                    semanticdb_plugin,
+                    target_level,
                     output_artifact_prefix = "semanticdb",
                 )
                 extra_sub_targets = extra_sub_targets | {"semanticdb": [DefaultInfo(default_output = semanticdb_output)]}
@@ -515,7 +519,6 @@ def build_kotlin_library(
                 "Kotlin compiler mode: kotlincd and java compiler mode: {} don't match.".format(ctx.attrs._java_toolchain[JavaToolchainInfo].javac_protocol)
                 + "\nHint: If you have a Java toolchain with a custom javac, you should also provide a custom kotlinc for your Kotlin toolchain.",
             )
-            source_level, target_level = get_java_version_attributes(ctx)
             extra_arguments = cmd_args(
                 ctx.attrs.extra_arguments + extra_arguments,
                 # The outputs of validation_deps need to be added as hidden arguments
@@ -603,11 +606,9 @@ def build_kotlin_library(
                 generated_sources = []
 
             java_toolchain = ctx.attrs._java_toolchain[JavaToolchainInfo]
-            maybe_has_java_srcs = lazy.is_any(
-                lambda src: src.extension == ".java" or src.basename.endswith(".src.zip") or src.basename.endswith("-sources.jar"), srcs
-            )
             if not java_toolchain.is_bootstrap_toolchain and not ctx.attrs._is_building_android_binary:
-                if maybe_has_java_srcs:
+                # Skip Nullsafe for Kotlin-only targets (no real .java) — its javac step crashes on them.
+                if lazy.is_any(lambda src: src.extension == ".java", srcs):
                     extra_sub_targets = _nullsafe_subtarget(ctx, extra_sub_targets, common_kotlincd_kwargs)
                 extra_sub_targets = _semanticdb_subtarget(ctx, extra_sub_targets, kotlin_toolchain, java_toolchain, common_kotlincd_kwargs)
 
@@ -637,7 +638,6 @@ def build_kotlin_library(
                 provided_deps = ctx.attrs.provided_deps + provided_deps_query,
                 exported_provided_deps = ctx.attrs.exported_provided_deps,
                 runtime_deps = ctx.attrs.runtime_deps,
-                needs_desugar = source_level > 7 or target_level > 7,
                 generated_sources = generated_sources,
                 has_srcs = bool(srcs),
                 sources_jar = sources_jar,

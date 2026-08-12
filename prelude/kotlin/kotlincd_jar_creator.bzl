@@ -196,7 +196,7 @@ def create_jar_artifact_kotlincd(
     )
 
     # this is required for the Kotlin compiler to be able to use jspecify annotations
-    extra_kotlinc_arguments = ["-Xjspecify-annotations=strict", "-Xtype-enhancement-improvements-strict-mode"] + extra_kotlinc_arguments
+    extra_kotlinc_arguments = ["-Xjspecify-annotations=strict"] + extra_kotlinc_arguments
 
     kotlin_extra_params = _encode_kotlin_extra_params(
         kotlin_toolchain = kotlin_toolchain,
@@ -358,9 +358,6 @@ def _encode_kotlin_extra_params(
     kosabiPluginOptionsMap = {}
     is_source_only_abi = actual_abi_generation_mode == AbiGenerationMode("source_only")
 
-    if kotlin_toolchain.kosabi_stubs_gen_plugin != None:
-        kosabiPluginOptionsMap["kosabi_stubs_gen_plugin"] = kotlin_toolchain.kosabi_stubs_gen_plugin
-
     if kotlin_toolchain.kosabi_stubs_gen_k2_plugin != None:
         kosabiPluginOptionsMap["kosabi_stubs_gen_k2_plugin"] = kotlin_toolchain.kosabi_stubs_gen_k2_plugin
 
@@ -391,10 +388,9 @@ def _encode_kotlin_extra_params(
         shouldKsp2RunIncrementally = should_ksp2_run_incrementally,
         incrementalStateDir = incremental_state_dir.as_output() if incremental_state_dir else None,
         languageVersion = language_version,
-        shouldKosabiJvmAbiGenUseK2 = True,
         kotlinClassesDir = kotlin_classes.as_output(),
         javaBinary = cmd_args(kotlin_toolchain.java_binary_for_kotlincd[RunInfo], delimiter = " ") if kotlin_toolchain.java_binary_for_kotlincd else "",
-        sourceOnlyAbiApplicabilityClasspathPaths = source_only_abi_applicability_classpath,
+        applicabilityClasspath = source_only_abi_applicability_classpath,
     )
 
 def _command_builder(

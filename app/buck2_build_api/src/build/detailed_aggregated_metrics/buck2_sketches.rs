@@ -45,7 +45,6 @@ use dice::Key;
 use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dupe::Dupe;
-use futures::FutureExt;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use starlark::values::FrozenHeapName;
@@ -61,7 +60,7 @@ use crate::build::sketch_impl::DEFAULT_SKETCH_VERSION;
 use crate::build::sketch_impl::MergeableGraphSketch;
 use crate::build::sketch_impl::Sketcher;
 use crate::build::sketch_impl::VersionedSketcher;
-use crate::deferred::calculation::DeferredHolder;
+use crate::deferred::calculation::OwnedDeferredHolder;
 
 /// Computes an unweighted sketch of the action graph by traversing from root artifacts.
 ///
@@ -74,7 +73,7 @@ use crate::deferred::calculation::DeferredHolder;
 /// failed analysis or dynamic nodes).
 pub fn compute_action_graph_sketch<'a>(
     root_artifacts: impl IntoIterator<Item = &'a ArtifactGroup>,
-    state: &buck2_hash::BuckHashMap<DeferredHolderKey, DeferredHolder>,
+    state: &buck2_hash::BuckHashMap<DeferredHolderKey, OwnedDeferredHolder>,
 ) -> buck2_error::Result<(bool, MergeableGraphSketch<ActionKey, ActionGraphSketch>)> {
     let mut sketcher = DEFAULT_SKETCH_VERSION.create_sketcher();
     let complete = compute_action_graph_sketch_impl(root_artifacts, state, &mut sketcher)?;
@@ -84,7 +83,7 @@ pub fn compute_action_graph_sketch<'a>(
 /// Private implementation that accepts any Sketcher for testing.
 fn compute_action_graph_sketch_impl<'a>(
     root_artifacts: impl IntoIterator<Item = &'a ArtifactGroup>,
-    state: &buck2_hash::BuckHashMap<DeferredHolderKey, DeferredHolder>,
+    state: &buck2_hash::BuckHashMap<DeferredHolderKey, OwnedDeferredHolder>,
     sketcher: &mut impl Sketcher<ActionKey>,
 ) -> buck2_error::Result<bool> {
     let (complete, actions) =
@@ -235,12 +234,12 @@ pub(crate) async fn compute_artifact_path_sketches_for_target(
         .collect();
 
     let values: Vec<ArtifactGroupValues> = ctx
-        .try_compute_join(filtered.iter(), |ctx, artifact_group| {
-            async move { ctx.ensure_artifact_group(artifact_group).await }.boxed()
+        .try_compute_join(filtered.iter(), async |ctx, artifact_group| {
+            ctx.ensure_artifact_group(artifact_group).await
         })
         .await?;
 
-    let artifact_fs = artifact_fs.clone();
+    let artifact_fs = artifact_fs.dupe();
     tokio::task::spawn_blocking(move || {
         compute_artifact_path_sketches(values, &artifact_fs, sketch_size, sketch_count)
     })
@@ -288,7 +287,7 @@ impl Key for AnalysisGraphPropertiesKey {
         ctx: &mut DiceComputations,
         _cancellation: &CancellationContext,
     ) -> Self::Value {
-        let analysis_result = ctx.get_analysis_result(&self.label).await?;
+        let analysis_result = ctx.get_analysis_result(&self.label).await.ok()?;
         analysis_result.try_map(|analysis_result| {
             Ok(gather_heap_graph_sketch(
                 analysis_result
@@ -362,17 +361,14 @@ impl Key for LoadGraphPropertiesKey {
             .await
             .require_compatible()?;
 
-        let packages = collect_transitive_packages(&configured_node);
+        let packages = collect_transitive_packages(configured_node);
         let mut sketcher = DEFAULT_SKETCH_VERSION.create_sketcher();
 
         let pkg_results = ctx
-            .try_compute_join(packages.iter(), |ctx, pkg| {
-                async move {
-                    ctx.get_interpreter_results(pkg.dupe())
-                        .await
-                        .map(|r| (pkg.dupe(), r))
-                }
-                .boxed()
+            .try_compute_join(packages.iter(), async |ctx, pkg| {
+                ctx.get_interpreter_results(pkg.dupe())
+                    .await
+                    .map(|r| (pkg.dupe(), r.dupe()))
             })
             .await?;
 
@@ -387,13 +383,10 @@ impl Key for LoadGraphPropertiesKey {
         }
 
         let loaded_modules = ctx
-            .try_compute_join(imports.iter(), |ctx, import| {
-                async move {
-                    ctx.get_loaded_module_from_import_path(import)
-                        .await
-                        .map(|m| m.env().frozen_heap().dupe())
-                }
-                .boxed()
+            .try_compute_join(imports.iter(), async |ctx, import| {
+                ctx.get_loaded_module_from_import_path(import)
+                    .await
+                    .map(|m| m.env().frozen_heap().dupe())
             })
             .await?;
 
@@ -525,7 +518,7 @@ mod tests {
     use crate::artifact_groups::ArtifactGroup;
     use crate::build::detailed_aggregated_metrics::buck2_sketches::compute_artifact_path_sketches_impl;
     use crate::build::sketch_impl::Sketcher;
-    use crate::deferred::calculation::DeferredHolder;
+    use crate::deferred::calculation::OwnedDeferredHolder;
 
     /// A mock sketcher that records all sketch calls for verification in tests.
     struct MockSketcher<T: Clone> {
@@ -720,7 +713,7 @@ mod tests {
 
         let analysis_values =
             RecordedAnalysisValues::testing_new_actions_only(holder_key.dupe(), recorded_actions);
-        let holder = DeferredHolder::Analysis(AnalysisResult::new(
+        let holder = OwnedDeferredHolder::Analysis(AnalysisResult::new(
             analysis_values,
             None,
             HashMap::new(),
@@ -759,7 +752,7 @@ mod tests {
         let digest_config = DigestConfig::testing_default();
         let cas = digest_config.cas_digest_config();
 
-        let mut deps_builder = ActionDirectoryBuilder::empty();
+        let mut deps_builder = ActionDirectoryBuilder::empty_non_exhaustive();
         insert_file(
             &mut deps_builder,
             p_shared.clone(),
@@ -781,7 +774,7 @@ mod tests {
             (p_other.clone(), make_value()),
         ];
 
-        let mut builder = ActionDirectoryBuilder::empty();
+        let mut builder = ActionDirectoryBuilder::empty_non_exhaustive();
         for (path, value) in input {
             insert_artifact(&mut builder, path, &value)?;
         }

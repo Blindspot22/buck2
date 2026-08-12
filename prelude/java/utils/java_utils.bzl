@@ -94,6 +94,14 @@ def to_java_version(java_version: str) -> int:
     else:
         return int(java_version)
 
+def get_string_concat_inline_javac_args(source_level: int) -> list[str]:
+    # Android build tools before SDK 36 lack java.lang.invoke.StringConcatFactory, which javac
+    # targets for invokedynamic string concatenation at -source 9+ (JEP 280). Force javac to emit
+    # classic StringBuilder concatenation instead so the bytecode compiles and runs against those SDKs.
+    if source_level >= 9:
+        return ["-XDstringConcat=inline"]
+    return []
+
 def get_abi_generation_mode(abi_generation_mode):
     return {
         None: None,
@@ -149,23 +157,26 @@ def get_class_to_source_map_info(
 ) -> (JavaClassToSourceMapInfo, Artifact | None, dict):
     sub_targets = {}
     class_to_srcs = None
-    class_to_srcs_debuginfo = None
+    mapping_debuginfo = None
     sources_jar = None
     if outputs != None:
         name = ctx.label.name
+        java_toolchain = ctx.attrs._java_toolchain[JavaToolchainInfo]
+        mapping_debuginfo = maybe_create_class_to_source_map_debuginfo(
+            actions = ctx.actions,
+            java_toolchain = java_toolchain,
+            name = name + ".debuginfo.json",
+            srcs = ctx.attrs.srcs,
+        )
         class_to_srcs, sources_jar = create_class_to_source_map_from_jar(
             actions = ctx.actions,
-            java_toolchain = ctx.attrs._java_toolchain[JavaToolchainInfo],
+            java_toolchain = java_toolchain,
             name = name + ".class_to_srcs.json",
             jar = outputs.classpath_entry.full_library,
             srcs = ctx.attrs.srcs,
+            owner_target = str(ctx.label.raw_target()),
             sources_jar_name = "{}-sources.jar".format(name) if generate_sources_jar else None,
-        )
-        class_to_srcs_debuginfo = maybe_create_class_to_source_map_debuginfo(
-            actions = ctx.actions,
-            java_toolchain = ctx.attrs._java_toolchain[JavaToolchainInfo],
-            name = name + ".debuginfo.json",
-            srcs = ctx.attrs.srcs,
+            debuginfo = mapping_debuginfo,
         )
         sub_targets["class-to-srcs"] = [DefaultInfo(default_output = class_to_srcs)]
         if sources_jar:
@@ -177,7 +188,7 @@ def get_class_to_source_map_info(
     class_to_src_map_info = create_class_to_source_map_info(
         ctx = ctx,
         mapping = class_to_srcs,
-        mapping_debuginfo = class_to_srcs_debuginfo,
+        mapping_debuginfo = mapping_debuginfo,
         deps = all_classmap_deps,
     )
     if outputs != None:

@@ -36,6 +36,7 @@ use buck2_core::configuration::data::ConfigurationData;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
 use buck2_core::fs::project::ProjectRootTemp;
 use buck2_core::package::PackageLabel;
+use buck2_core::pattern::pattern::InferTargetNames;
 use buck2_core::provider::id::ProviderId;
 use buck2_core::provider::id::testing::ProviderIdExt;
 use buck2_core::target::label::interner::ConcurrentTargetLabelInterner;
@@ -43,7 +44,7 @@ use buck2_core::target::label::label::TargetLabel;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::digest_config::SetDigestConfig;
-use buck2_hash::StdBuckHashMap;
+use buck2_hash::IntentionallyStdHashMap;
 use buck2_interpreter::dice::starlark_debug::SetStarlarkDebugger;
 use buck2_interpreter::extra::InterpreterHostArchitecture;
 use buck2_interpreter::extra::InterpreterHostPlatform;
@@ -76,7 +77,10 @@ async fn test_analysis_calculation() -> buck2_error::Result<()> {
         ),
     ]);
     let mut interpreter = Tester::with_cells((
-        CellAliasResolver::new(CellName::testing_new("cell"), StdBuckHashMap::default())?,
+        CellAliasResolver::new(
+            CellName::testing_new("cell"),
+            IntentionallyStdHashMap::new(),
+        )?,
         resolver.dupe(),
         LegacyBuckConfig::empty(),
         CellPathWithAllowedRelativeDir::new(CellPath::testing_new("cell//pkg"), None),
@@ -169,18 +173,20 @@ async fn test_analysis_calculation() -> buck2_error::Result<()> {
             None,
             false,
             false,
+            InferTargetNames::No,
             None,
             Arc::new(ConcurrentTargetLabelInterner::default()),
         )?,
     )?;
-    let mut dice = dice.commit().await;
+    let dice = dice.commit().await;
 
-    let analysis = dice
+    let mut ctx = dice.ctx();
+    let analysis = ctx
         .get_analysis_result(
             &TargetLabel::testing_parse("cell//pkg:rule1")
                 .configure(ConfigurationData::testing_new()),
         )
-        .await?
+        .await
         .require_compatible()?;
 
     assert_eq!(analysis.analysis_values().iter_actions().count(), 0);

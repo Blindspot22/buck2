@@ -26,7 +26,6 @@ use crate::values::FrozenHeap;
 use crate::values::FrozenValue;
 use crate::values::Heap;
 use crate::values::Value;
-use crate::values::dict::Dict;
 use crate::values::dict::value::FrozenDictData;
 use crate::values::layout::value::ValueLike;
 use crate::values::type_repr::StarlarkTypeRepr;
@@ -87,17 +86,17 @@ where
                 v.alloc_value(heap),
             );
         }
-        heap.alloc(Dict::new(map))
+        heap.alloc_dict(map)
     }
 }
 
-impl<D, K, V> AllocFrozenValue for AllocDict<D>
+impl<'fv, D, K, V> AllocFrozenValue<'fv> for AllocDict<D>
 where
     D: IntoIterator<Item = (K, V)>,
-    K: AllocFrozenValue,
-    V: AllocFrozenValue,
+    K: AllocFrozenValue<'fv>,
+    V: AllocFrozenValue<'fv>,
 {
-    fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
+    fn alloc_frozen_value(self, heap: &'fv FrozenHeap) -> FrozenValue {
         let iter = self.0.into_iter();
         let mut map = SmallMap::with_capacity(iter.size_hint().0);
         for (k, v) in iter {

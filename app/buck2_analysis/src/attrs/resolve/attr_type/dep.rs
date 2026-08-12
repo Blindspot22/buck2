@@ -8,7 +8,7 @@
  * above-listed licenses.
  */
 
-use buck2_build_api::interpreter::rule_defs::provider::collection::FrozenProviderCollection;
+use buck2_build_api::interpreter::rule_defs::provider::collection::ProviderCollection;
 use buck2_build_api::interpreter::rule_defs::provider::dependency::Dependency;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
@@ -39,14 +39,14 @@ enum ResolutionError {
 pub trait DepAttrTypeExt {
     fn check_providers(
         required_providers: &ProviderIdSet,
-        providers: &FrozenProviderCollection,
+        providers: &ProviderCollection<'_>,
         target: &ConfiguredProvidersLabel,
     ) -> buck2_error::Result<()>;
 
     fn alloc_dependency<'v>(
         env: &Module<'v>,
         target: &ConfiguredProvidersLabel,
-        v: FrozenValueTyped<'v, FrozenProviderCollection>,
+        v: FrozenValueTyped<'v, ProviderCollection<'v>>,
         execution_platform_resolution: Option<&ExecutionPlatformResolution>,
     ) -> Value<'v>;
 
@@ -66,7 +66,7 @@ pub trait DepAttrTypeExt {
 impl DepAttrTypeExt for DepAttrType {
     fn check_providers(
         required_providers: &ProviderIdSet,
-        providers: &FrozenProviderCollection,
+        providers: &ProviderCollection<'_>,
         target: &ConfiguredProvidersLabel,
     ) -> buck2_error::Result<()> {
         for provider_id in required_providers {
@@ -85,13 +85,13 @@ impl DepAttrTypeExt for DepAttrType {
     fn alloc_dependency<'v>(
         env: &Module<'v>,
         target: &ConfiguredProvidersLabel,
-        v: FrozenValueTyped<'v, FrozenProviderCollection>,
+        v: FrozenValueTyped<'v, ProviderCollection<'v>>,
         execution_platform_resolution: Option<&ExecutionPlatformResolution>,
     ) -> Value<'v> {
         env.heap().alloc(Dependency::new(
             env.heap(),
             target.clone(),
-            v,
+            v.to_value_typed(),
             execution_platform_resolution,
         ))
     }

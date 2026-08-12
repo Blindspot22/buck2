@@ -91,8 +91,6 @@ use crate::values::bool::value::VALUE_FALSE_TRUE;
 use crate::values::demand::request_value_impl;
 use crate::values::dict::FrozenDictRef;
 use crate::values::dict::value::VALUE_EMPTY_FROZEN_DICT;
-use crate::values::enumeration::EnumType;
-use crate::values::enumeration::FrozenEnumValue;
 use crate::values::function::FUNCTION_TYPE;
 use crate::values::function::FrozenBoundMethod;
 use crate::values::function::NativeFunction;
@@ -115,8 +113,6 @@ use crate::values::layout::vtable::AValueVTable;
 use crate::values::list::value::VALUE_EMPTY_FROZEN_LIST;
 use crate::values::none::none_type::VALUE_NONE;
 use crate::values::range::Range;
-use crate::values::record::instance::FrozenRecord;
-use crate::values::record::record_type::RecordType;
 use crate::values::recursive_repr_or_json_guard::json_stack_push;
 use crate::values::recursive_repr_or_json_guard::repr_stack_push;
 use crate::values::stack_guard;
@@ -402,6 +398,15 @@ impl<'v> Value<'v> {
         }
     }
 
+    /// Obtain the underlying `bool`.
+    ///
+    /// # Safety
+    /// The caller must ensure the value is a boolean.
+    #[inline]
+    pub unsafe fn unpack_bool_unchecked(self) -> bool {
+        self.ptr_eq(Value::new_bool(true))
+    }
+
     /// Obtain the underlying integer if it fits in an `i32`.
     /// Note floats are not considered integers, i. e. `unpack_i32` for `1.0` will return `None`.
     #[inline]
@@ -446,18 +451,23 @@ impl<'v> Value<'v> {
     #[inline]
     pub fn unpack_starlark_str(self) -> Option<&'v StarlarkStr> {
         if self.is_str() {
-            unsafe {
-                Some(
-                    &self
-                        .0
-                        .unpack_ptr_no_int_unchecked()
-                        .unpack_header_unchecked()
-                        .as_repr::<StarlarkStr>()
-                        .payload,
-                )
-            }
+            Some(unsafe { self.unpack_starlark_str_unchecked() })
         } else {
             None
+        }
+    }
+
+    /// # Safety
+    /// The caller must ensure the value is a string.
+    #[inline]
+    unsafe fn unpack_starlark_str_unchecked(self) -> &'v StarlarkStr {
+        unsafe {
+            &self
+                .0
+                .unpack_ptr_no_int_unchecked()
+                .unpack_header_unchecked()
+                .as_repr::<StarlarkStr>()
+                .payload
         }
     }
 
@@ -465,6 +475,15 @@ impl<'v> Value<'v> {
     #[inline]
     pub fn unpack_str(self) -> Option<&'v str> {
         self.unpack_starlark_str().map(|s| s.as_str())
+    }
+
+    /// Obtain the underlying `str`.
+    ///
+    /// # Safety
+    /// The caller must ensure the value is a string.
+    #[inline]
+    pub unsafe fn unpack_str_unchecked(self) -> &'v str {
+        unsafe { self.unpack_starlark_str_unchecked() }.as_str()
     }
 
     /// Obtain the underlying `str` if it is a string, otherwise return an error for users.
@@ -856,6 +875,11 @@ impl<'v> Value<'v> {
         freezer.freeze(self)
     }
 
+    /// Convert a value to a frozen value using a supplied [`Freezer`].
+    pub fn freeze_branded<'fv>(self, freezer: &Freezer<'fv>) -> FreezeResult<Value<'fv>> {
+        freezer.freeze_branded(self)
+    }
+
     /// Implement the `str()` function - converts a string value to itself,
     /// otherwise calls `collect_str()` (which handles bytes, etc.).
     pub fn to_str(self) -> String {
@@ -1201,10 +1225,6 @@ impl FrozenValue {
             || FrozenValueTyped::<FrozenDef>::new(self).is_some()
             || FrozenValueTyped::<NativeFunction>::new(self).is_some()
             || FrozenValueTyped::<FrozenStruct>::new(self).is_some()
-            || FrozenValueTyped::<RecordType>::new(self).is_some()
-            || FrozenValueTyped::<FrozenRecord>::new(self).is_some()
-            || FrozenValueTyped::<EnumType>::new(self).is_some()
-            || FrozenValueTyped::<FrozenEnumValue>::new(self).is_some()
     }
 
     /// Can `invoke` be called on this object speculatively?
@@ -1262,6 +1282,25 @@ impl StarlarkSerialize for FrozenValue {
 impl StarlarkDeserialize for FrozenValue {
     fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
         ctx.deserialize_frozen_value()
+    }
+}
+
+/// Only frozen heaps are serialized, so a `Value` reached during serialization
+/// is always frozen; branded frozen types store their contents as `Value<'fv>`.
+impl<'v> StarlarkSerialize for Value<'v> {
+    fn starlark_serialize(&self, ctx: &mut dyn StarlarkSerializeContext) -> crate::Result<()> {
+        match self.unpack_frozen() {
+            Some(fv) => fv.starlark_serialize(ctx),
+            None => Err(value_error!(
+                "Attempted to serialize a non-frozen value; only frozen heaps can be serialized"
+            )),
+        }
+    }
+}
+
+impl<'v> StarlarkDeserialize for Value<'v> {
+    fn starlark_deserialize(ctx: &mut dyn StarlarkDeserializeContext<'_>) -> crate::Result<Self> {
+        Ok(FrozenValue::starlark_deserialize(ctx)?.to_value())
     }
 }
 

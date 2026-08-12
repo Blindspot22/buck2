@@ -28,6 +28,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use allocative::Allocative;
+use artifact_tree::ArtifactClassification;
 use artifact_tree::ArtifactMaterializationMethod;
 use artifact_tree::ArtifactMaterializationStage;
 use artifact_tree::ProcessingFuture;
@@ -63,19 +64,20 @@ use buck2_execute::materialize::materializer::DeferredMaterializerExtensions;
 use buck2_execute::materialize::materializer::EagerMaterializationGuard;
 use buck2_execute::materialize::materializer::HttpDownloadInfo;
 use buck2_execute::materialize::materializer::MaterializationError;
+use buck2_execute::materialize::materializer::MaterializationPurpose;
 use buck2_execute::materialize::materializer::Materializer;
 use buck2_execute::materialize::materializer::WriteRequest;
 use buck2_execute::re::manager::ReConnectionManager;
 use buck2_hash::StdBuckHashSet;
 use buck2_http::HttpClient;
 use buck2_util::threads::thread_spawn;
-use chrono::DateTime;
-use chrono::Duration;
-use chrono::Utc;
 use derivative::Derivative;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use futures::TryStreamExt;
 use futures::stream::BoxStream;
+use jiff::SignedDuration;
+use jiff::Timestamp;
 use parking_lot::RwLock;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -91,6 +93,7 @@ use crate::materializers::deferred::eager_materialization::EagerPathLeases;
 use crate::materializers::deferred::file_tree::FileTree;
 use crate::materializers::deferred::io_handler::DefaultIoHandler;
 use crate::materializers::deferred::io_handler::IoHandler;
+use crate::materializers::deferred::io_handler::NoDiskIoHandler;
 use crate::sqlite::materializer_db::MaterializerState;
 use crate::sqlite::materializer_db::MaterializerStateSqliteDb;
 
@@ -141,6 +144,7 @@ pub struct DeferredMaterializerAccessor<T: IoHandler + 'static> {
 }
 
 pub type DeferredMaterializer = DeferredMaterializerAccessor<DefaultIoHandler>;
+pub type NoDiskDeferredMaterializer = DeferredMaterializerAccessor<NoDiskIoHandler>;
 
 impl<T: IoHandler> Drop for DeferredMaterializerAccessor<T> {
     fn drop(&mut self) {
@@ -154,6 +158,42 @@ impl<T: IoHandler> Drop for DeferredMaterializerAccessor<T> {
 pub struct DeferredMaterializerStats {
     declares: AtomicU64,
     declares_reused: AtomicU64,
+    sizes: RwLock<MaterializerSizeStats>,
+}
+
+#[derive(Allocative, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MaterializerSizeStats {
+    pub(crate) final_output: u64,
+    pub(crate) intermediate_only: u64,
+}
+
+impl DeferredMaterializerStats {
+    pub(crate) fn sizes(&self) -> MaterializerSizeStats {
+        *self.sizes.read()
+    }
+
+    pub(crate) fn add_materialized(&self, classification: ArtifactClassification, size: u64) {
+        let mut sizes = self.sizes.write();
+        match classification {
+            ArtifactClassification::FinalOutput => sizes.final_output += size,
+            ArtifactClassification::IntermediateOnly => sizes.intermediate_only += size,
+        }
+    }
+
+    pub(crate) fn remove_materialized(&self, classification: ArtifactClassification, size: u64) {
+        let mut sizes = self.sizes.write();
+        let bucket = match classification {
+            ArtifactClassification::FinalOutput => &mut sizes.final_output,
+            ArtifactClassification::IntermediateOnly => &mut sizes.intermediate_only,
+        };
+        *bucket = bucket.saturating_sub(size);
+    }
+
+    pub(crate) fn promote_materialized(&self, size: u64) {
+        let mut sizes = self.sizes.write();
+        sizes.intermediate_only = sizes.intermediate_only.saturating_sub(size);
+        sizes.final_output += size;
+    }
 }
 
 pub struct DeferredMaterializerConfigs {
@@ -169,7 +209,7 @@ pub struct DeferredMaterializerConfigs {
 
 pub struct TtlRefreshConfiguration {
     pub frequency: std::time::Duration,
-    pub min_ttl: Duration,
+    pub min_ttl: SignedDuration,
     pub enabled: bool,
 }
 
@@ -275,7 +315,7 @@ struct MaterializerReceiver<T: 'static> {
 }
 
 struct TtlRefreshHistoryEntry {
-    at: DateTime<Utc>,
+    at: Timestamp,
     outcome: Option<buck2_error::Result<()>>,
 }
 
@@ -534,6 +574,7 @@ impl<T: IoHandler + Allocative> Materializer for DeferredMaterializerAccessor<T>
         self.command_sender
             .send(MaterializerCommand::Ensure(
                 artifact_paths,
+                MaterializationPurpose::IntermediateOnly,
                 get_dispatcher(),
                 current_span(),
                 sender,
@@ -545,12 +586,34 @@ impl<T: IoHandler + Allocative> Materializer for DeferredMaterializerAccessor<T>
         Ok(materialization_fut)
     }
 
+    async fn ensure_materialized(
+        &self,
+        artifact_paths: Vec<ProjectRelativePathBuf>,
+        purpose: MaterializationPurpose,
+    ) -> buck2_error::Result<()> {
+        let (sender, recv) = oneshot::channel();
+        self.command_sender
+            .send(MaterializerCommand::Ensure(
+                artifact_paths,
+                purpose,
+                get_dispatcher(),
+                current_span(),
+                sender,
+            ))
+            .buck_error_context("Sending Ensure() command.")?;
+        let materialization_fut = recv
+            .await
+            .buck_error_context("Receiving materialization future from command thread.")?;
+        Ok(materialization_fut.try_collect().await?)
+    }
+
     async fn try_materialize_final_artifact(
         &self,
         artifact_path: ProjectRelativePathBuf,
     ) -> buck2_error::Result<bool> {
         if self.materialize_final_artifacts {
-            self.ensure_materialized(vec![artifact_path]).await?;
+            self.ensure_materialized(vec![artifact_path], MaterializationPurpose::FinalOutput)
+                .await?;
             Ok(true)
         } else {
             Ok(false)
@@ -584,6 +647,9 @@ impl<T: IoHandler + Allocative> Materializer for DeferredMaterializerAccessor<T>
         snapshot.deferred_materializer_declares_reused =
             self.stats.declares_reused.load(Ordering::Relaxed);
         snapshot.deferred_materializer_queue_size = self.command_sender.counters.queue_size() as _;
+        let sizes = self.stats.sizes();
+        snapshot.deferred_materializer_final_output_logical_bytes = sizes.final_output;
+        snapshot.deferred_materializer_intermediate_only_logical_bytes = sizes.intermediate_only;
     }
 
     async fn get_artifact_entries_for_materialized_paths(
@@ -638,20 +704,15 @@ impl<T: IoHandler + Allocative> Materializer for DeferredMaterializerAccessor<T>
     }
 }
 
-impl DeferredMaterializerAccessor<DefaultIoHandler> {
+impl<T: IoHandler + Allocative> DeferredMaterializerAccessor<T> {
     /// Spawns two threads (`materialization_loop` and `command_loop`).
     /// Creates and returns a new `DeferredMaterializer` that aborts those
     /// threads when dropped.
-    pub fn new(
-        fs: ProjectRoot,
-        digest_config: DigestConfig,
-        buck_out_path: ProjectRelativePathBuf,
-        re_client_manager: Arc<ReConnectionManager>,
-        io_executor: Arc<dyn BlockingExecutor>,
+    fn new_with_io(
+        io: Arc<T>,
         configs: DeferredMaterializerConfigs,
         sqlite_db: Option<MaterializerStateSqliteDb>,
         sqlite_state: Option<MaterializerState>,
-        http_client: HttpClient,
         daemon_dispatcher: EventDispatcher,
     ) -> buck2_error::Result<Self> {
         let (high_priority_sender, high_priority_receiver) = mpsc::unbounded_channel();
@@ -673,6 +734,14 @@ impl DeferredMaterializerAccessor<DefaultIoHandler> {
         };
 
         let stats = Arc::new(DeferredMaterializerStats::default());
+        if let Some(sqlite_state) = &sqlite_state {
+            for entry in sqlite_state {
+                stats.add_materialized(
+                    entry.classification,
+                    artifact_tree::artifact_metadata_size(&entry.metadata),
+                );
+            }
+        }
 
         let num_entries_from_sqlite = sqlite_state.as_ref().map_or(0, |s| s.len()) as u64;
         let materializer_state_info = buck2_data::MaterializerStateInfo {
@@ -683,15 +752,6 @@ impl DeferredMaterializerAccessor<DefaultIoHandler> {
                 .then(StdBuckHashSet::new);
 
         let tree = ArtifactTree::initialize(sqlite_state);
-
-        let io = Arc::new(DefaultIoHandler::new(
-            fs,
-            digest_config,
-            buck_out_path,
-            re_client_manager,
-            io_executor,
-            http_client,
-        ));
 
         let command_processor = {
             let command_sender = command_sender.dupe();
@@ -745,6 +805,77 @@ impl DeferredMaterializerAccessor<DefaultIoHandler> {
             materializer_state_info,
             stats,
         })
+    }
+}
+
+impl DeferredMaterializerAccessor<DefaultIoHandler> {
+    pub fn new(
+        fs: ProjectRoot,
+        digest_config: DigestConfig,
+        buck_out_path: ProjectRelativePathBuf,
+        re_client_manager: Arc<ReConnectionManager>,
+        io_executor: Arc<dyn BlockingExecutor>,
+        configs: DeferredMaterializerConfigs,
+        sqlite_db: Option<MaterializerStateSqliteDb>,
+        sqlite_state: Option<MaterializerState>,
+        http_client: HttpClient,
+        daemon_dispatcher: EventDispatcher,
+    ) -> buck2_error::Result<Self> {
+        Self::new_with_io(
+            Arc::new(DefaultIoHandler::new(
+                fs,
+                digest_config,
+                buck_out_path,
+                re_client_manager,
+                io_executor,
+                http_client,
+            )),
+            configs,
+            sqlite_db,
+            sqlite_state,
+            daemon_dispatcher,
+        )
+    }
+}
+
+impl DeferredMaterializerAccessor<NoDiskIoHandler> {
+    pub fn new_no_disk(
+        fs: ProjectRoot,
+        digest_config: DigestConfig,
+        buck_out_path: ProjectRelativePathBuf,
+        configs: DeferredMaterializerConfigs,
+        daemon_dispatcher: EventDispatcher,
+    ) -> buck2_error::Result<Self> {
+        Self::new_with_io(
+            Arc::new(NoDiskIoHandler::new(fs, digest_config, buck_out_path)),
+            configs,
+            None,
+            None,
+            daemon_dispatcher,
+        )
+    }
+
+    pub fn testing_new_no_disk(fs: ProjectRoot) -> buck2_error::Result<Self> {
+        Self::new_no_disk(
+            fs,
+            DigestConfig::testing_default(),
+            ProjectRelativePathBuf::unchecked_new("buck-out/v2".to_owned()),
+            DeferredMaterializerConfigs {
+                materialize_final_artifacts: true,
+                defer_write_actions: true,
+                ttl_refresh: TtlRefreshConfiguration {
+                    frequency: std::time::Duration::default(),
+                    min_ttl: SignedDuration::ZERO,
+                    enabled: false,
+                },
+                update_access_times: AccessTimesUpdates::Disabled,
+                verbose_materializer_log: false,
+                clean_stale_config: None,
+                disable_eager_write_dispatch: true,
+                eager_materialization_enabled: false,
+            },
+            EventDispatcher::null(),
+        )
     }
 }
 

@@ -27,6 +27,7 @@ use dice::OkPagableValueSerialize;
 use dice::PagableValueSerialize;
 use dice::ValueSerialize;
 use dupe::Dupe;
+use dupe::ResultDupedErrExt;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 
@@ -34,20 +35,20 @@ use crate::legacy_configs::cells::BuckConfigBasedCells;
 use crate::legacy_configs::dice::HasLegacyConfigs;
 
 #[async_trait]
-pub trait HasCellResolver {
-    async fn get_cell_resolver(&mut self) -> buck2_error::Result<CellResolver>;
+pub trait HasCellResolver<'d> {
+    async fn get_cell_resolver(&mut self) -> buck2_error::Result<&'d CellResolver>;
 
     async fn is_cell_resolver_key_set(&mut self) -> buck2_error::Result<bool>;
 
     async fn get_cell_alias_resolver(
         &mut self,
         cell: CellName,
-    ) -> buck2_error::Result<CellAliasResolver>;
+    ) -> buck2_error::Result<&'d CellAliasResolver>;
 
     async fn get_cell_alias_resolver_for_dir(
         &mut self,
         dir: &ProjectRelativePath,
-    ) -> buck2_error::Result<CellAliasResolver>;
+    ) -> buck2_error::Result<&'d CellAliasResolver>;
 }
 
 pub trait SetCellResolver {
@@ -82,11 +83,14 @@ impl InjectedKey for CellResolverKey {
 }
 
 #[async_trait]
-impl HasCellResolver for DiceComputations<'_> {
-    async fn get_cell_resolver(&mut self) -> buck2_error::Result<CellResolver> {
-        self.compute(&CellResolverKey).await?.ok_or_else(|| {
-            panic!("Tried to retrieve CellResolverKey from the graph, but key has None value")
-        })
+impl<'d> HasCellResolver<'d> for DiceComputations<'d> {
+    async fn get_cell_resolver(&mut self) -> buck2_error::Result<&'d CellResolver> {
+        self.compute(&CellResolverKey)
+            .await?
+            .as_ref()
+            .ok_or_else(|| {
+                panic!("Tried to retrieve CellResolverKey from the graph, but key has None value")
+            })
     }
 
     async fn is_cell_resolver_key_set(&mut self) -> buck2_error::Result<bool> {
@@ -96,14 +100,17 @@ impl HasCellResolver for DiceComputations<'_> {
     async fn get_cell_alias_resolver(
         &mut self,
         cell: CellName,
-    ) -> buck2_error::Result<CellAliasResolver> {
-        Ok(self.compute(&CellAliasResolverKey(cell)).await??)
+    ) -> buck2_error::Result<&'d CellAliasResolver> {
+        self.compute(&CellAliasResolverKey(cell))
+            .await?
+            .as_ref()
+            .duped_err()
     }
 
     async fn get_cell_alias_resolver_for_dir(
         &mut self,
         dir: &ProjectRelativePath,
-    ) -> buck2_error::Result<CellAliasResolver> {
+    ) -> buck2_error::Result<&'d CellAliasResolver> {
         let cell = self.get_cell_resolver().await?.find(dir);
         self.get_cell_alias_resolver(cell).await
     }
@@ -133,7 +140,7 @@ impl Key for CellAliasResolverKey {
         CellAliasResolver::new_for_non_root_cell(
             self.0,
             root_aliases,
-            BuckConfigBasedCells::get_cell_aliases_from_config(&config)?,
+            BuckConfigBasedCells::get_cell_aliases_from_config(config)?,
         )
     }
 

@@ -103,12 +103,19 @@ def _cgo(
     unimport_runtime_cgo = standard and pkg_import_path == "runtime/cgo"
     unimport_syscall = standard and pkg_import_path in _syscall_import_exclude_list
 
+    # //line paths are resolved by the Go compiler against gen_dir.
+    trimpath_replaces = cmd_args(
+        [cmd_args(cmd_args(src, format = "%cwd%/{}"), cmd_args(src, relative_to = gen_dir), delimiter = "=>") for src in srcs],
+        delimiter = ";",
+    )
+
     cmd = cmd_args(
         go_toolchain.go_wrapper,
         ["--go", go_toolchain.cgo],
         "--",
         cmd_args(gen_dir.as_output(), format = "-objdir={}"),
-        ["-trimpath", "%cwd%"],
+        # todo: safe to remove once go1.28 is released
+        ["-trimpath", trimpath_replaces if go_toolchain.version and go_toolchain.version.minor >= 27 else "%cwd%"],
         ["-import_runtime_cgo=false"] if unimport_runtime_cgo else [],
         ["-import_syscall=false"] if unimport_syscall else [],
         "--",
@@ -120,7 +127,7 @@ def _cgo(
     env = get_toolchain_env_vars(go_toolchain)
     env["CC"] = _cxx_wrapper(actions, go_toolchain, cgo_build_context, own_pre)
 
-    actions.run(cmd, env = env, category = "go_cgo", identifier = pkg_import_path)
+    actions.run(cmd, env = env, category = "go_cgo", identifier = pkg_import_path, allow_cache_upload = go_toolchain.allow_cache_upload)
 
     return project_go_and_c_files(srcs, gen_dir), gen_dir
 

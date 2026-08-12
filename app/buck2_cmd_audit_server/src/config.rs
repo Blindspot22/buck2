@@ -29,6 +29,7 @@ use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::ctx::ServerCommandDiceContext;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
 use buck2_server_ctx::stdout_partial_output::StdoutPartialOutput;
+use dupe::Dupe;
 use gazebo::prelude::*;
 use serde_json::json;
 
@@ -337,10 +338,10 @@ impl ServerAuditSubcommand for AuditConfigCommand {
         _client_ctx: ClientContext,
     ) -> buck2_error::Result<()> {
         Ok(server_ctx
-            .with_dice_ctx(|server_ctx, mut ctx| async move {
+            .with_dice_ctx(|server_ctx, ctx| async move {
                 let cwd = server_ctx.working_dir();
-                let cell_resolver = ctx.get_cell_resolver().await?;
-                let cell_alias_resolver = ctx.get_cell_alias_resolver_for_dir(cwd).await?;
+                let cell_resolver = ctx.ctx().get_cell_resolver().await?;
+                let cell_alias_resolver = ctx.ctx().get_cell_alias_resolver_for_dir(cwd).await?;
 
                 let stdout = stdout.as_writer();
                 let mut renderer: Box<dyn CellConfigRenderer + Send> = match self.output_format() {
@@ -369,7 +370,7 @@ impl ServerAuditSubcommand for AuditConfigCommand {
 
                 if self.all_cells {
                     for (cell, _) in cell_resolver.cells() {
-                        let cell_config = ctx.get_legacy_config_for_cell(cell).await?;
+                        let cell_config = ctx.ctx().get_legacy_config_for_cell(cell).await?.dupe();
                         render_cell_config(renderer.as_mut(), None, cell, cell_config, &specs)?;
                     }
                 } else {
@@ -378,7 +379,7 @@ impl ServerAuditSubcommand for AuditConfigCommand {
 
                     {
                         // Render the target cell first
-                        let cell_config = ctx.get_legacy_config_for_cell(cell).await?;
+                        let cell_config = ctx.ctx().get_legacy_config_for_cell(cell).await?.dupe();
                         render_cell_config(
                             renderer.as_mut(),
                             Some(cell),
@@ -394,7 +395,7 @@ impl ServerAuditSubcommand for AuditConfigCommand {
                     let relevant_cell = Some(cell);
 
                     for cell in cells_to_render {
-                        let cell_config = ctx.get_legacy_config_for_cell(cell).await?;
+                        let cell_config = ctx.ctx().get_legacy_config_for_cell(cell).await?.dupe();
                         render_cell_config(
                             renderer.as_mut(),
                             relevant_cell,

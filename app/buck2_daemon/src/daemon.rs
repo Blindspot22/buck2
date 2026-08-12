@@ -328,6 +328,11 @@ impl DaemonCommand {
             (listener, process_info, endpoint)
         };
 
+        // Start the fragmentation dump watcher now that we are in the final
+        // (post-daemonize-fork) process; threads do not survive that fork.
+        #[cfg(buck2_memfrag)]
+        mem_frag::start_dump_watcher();
+
         let daemon_id = DaemonId::parse_from_str(&self.daemon_id)?;
         set_daemon_id_for_panics(daemon_id.dupe());
 
@@ -419,12 +424,12 @@ impl DaemonCommand {
 
         tracing::info!("Starting tokio runtime...");
 
-        let rt = builder
+        let worker_runtime = builder
             .build()
             .buck_error_context("Error creating Tokio runtime")?;
-        let handle = rt.handle().clone();
+        let handle = worker_runtime.handle().clone();
 
-        let rt = new_tokio_runtime("buck2-tn")
+        let tonic_runtime = new_tokio_runtime("buck2-tn")
             .enable_all()
             // These values are arbitrary, but I/O shouldn't take up many threads.
             .worker_threads(2)
@@ -432,7 +437,7 @@ impl DaemonCommand {
             .build()
             .buck_error_context("Error creating Tonic Tokio runtime")?;
 
-        rt.block_on(async move {
+        let result = tonic_runtime.block_on(async move {
             // Once any item is received on the hard_shutdown_receiver, the daemon process will exit immediately.
             let (hard_shutdown_sender, mut hard_shutdown_receiver) = mpsc::unbounded();
 
@@ -523,7 +528,18 @@ impl DaemonCommand {
                     Ok(())
                 },
             }
-        })
+        });
+
+        if !in_process {
+            // Shutting down a Tokio runtime immediately cancels all of the tasks; cancelling the
+            // tasks at the tokio level ends up breaking invariants that we expect around
+            // `CancellableFuture` from `dice_futures` being the only thing that causes cancellation
+            // which is pretty hard to deal with correctly. Forget the runtime so that things aren't
+            // cancelled. We're about to `libc::_exit` anyway so no real harm.
+            std::mem::forget(worker_runtime);
+        }
+
+        result
     }
 
     /// We start a dedicated thread to periodically check that the files in the daemon

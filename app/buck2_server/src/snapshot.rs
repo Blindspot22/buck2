@@ -17,11 +17,12 @@ use std::time::Instant;
 use buck2_core::io_counters::IoCounterKey;
 use buck2_error::BuckErrorContext;
 use buck2_events::EventSinkStats;
+use buck2_execute::dep_file_state::DEP_FILE_STORE;
 use buck2_execute::re::manager::ReConnectionManager;
 use buck2_fs::fs_util::DiskSpaceStats;
 use buck2_fs::fs_util::disk_space_stats;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
-use buck2_hash::StdBuckHashMap;
+use buck2_hash::IntentionallyStdHashMap;
 use buck2_util::process_stats::process_stats;
 use buck2_util::system_stats::UnixSystemStats;
 
@@ -149,6 +150,9 @@ impl SnapshotCollector {
     fn add_daemon_metrics(&self, snapshot: &mut buck2_data::Snapshot) {
         snapshot.blocking_executor_io_queue_size =
             self.daemon.blocking_executor.queue_size() as u64;
+        if let Ok(store) = DEP_FILE_STORE.get() {
+            snapshot.dep_file_db_queue_size = store.queue_size();
+        }
     }
 
     fn add_io_metrics(&self, snapshot: &mut buck2_data::Snapshot) {
@@ -294,7 +298,6 @@ impl SnapshotCollector {
     fn add_dice_metrics(&self, snapshot: &mut buck2_data::Snapshot) {
         let metrics = self.daemon.dice_manager.unsafe_dice().metrics();
         snapshot.dice_key_count = metrics.key_count as u64;
-        snapshot.dice_currently_active_key_count = metrics.currently_active_key_count as u64;
         snapshot.dice_active_transaction_count = metrics.active_transaction_count;
     }
 
@@ -356,7 +359,7 @@ impl SnapshotCollector {
                 })
                 .collect();
         } else {
-            snapshot.network_interface_stats = StdBuckHashMap::default();
+            snapshot.network_interface_stats = IntentionallyStdHashMap::default();
         }
     }
 

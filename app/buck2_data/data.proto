@@ -204,9 +204,37 @@ message StdoutStreamingOutput {
 /// Preemption of the running command was detected/allowed
 message CommandPreempted {}
 
+/// The result of a background idle page-out, once it finishes. Logged to the
+/// `buck2_page_outs` table (see the buck2_cleans pipeline).
+message PageOutSummary {
+  map<string, string> metadata = 1;
+  /// The command whose finalize triggered this idle page-out.
+  optional string command_uuid = 2;
+  /// Number of DICE values written out to disk.
+  uint64 paged_out_count = 3;
+  /// Wall-clock duration of the page-out.
+  uint64 duration_ms = 4;
+  /// True if a new command interrupted the page-out before it finished (a valid
+  /// state — the remaining values stay paged in).
+  bool cancelled = 5;
+  optional ErrorReport error = 6;
+  /// Process resident set size (bytes) before / after the page-out. Absent if
+  /// the platform doesn't report RSS.
+  optional uint64 resident_bytes_before = 7;
+  optional uint64 resident_bytes_after = 8;
+  /// jemalloc bytes allocated before / after the page-out. Absent when not
+  /// built with jemalloc.
+  optional uint64 allocated_bytes_before = 9;
+  optional uint64 allocated_bytes_after = 10;
+  /// On-disk size (bytes) of the pagable DICE store before / after the
+  /// page-out. Absent if pagable storage is not configured.
+  optional uint64 db_size_bytes_before = 11;
+  optional uint64 db_size_bytes_after = 12;
+}
+
 // An event that represents a single point in time.
 message InstantEvent {
-  reserved 2, 8, 9, 12, 13, 22, 24, 38, 41, 52, 53;
+  reserved 2, 8, 9, 12, 13, 22, 24, 38, 41, 52, 53, 60;
 
   oneof data {
     StructuredError structured_error = 1;
@@ -341,6 +369,10 @@ message InstantEvent {
     // recorder) can accumulate rule types without the producing command
     // having to thread them through its response.
     TargetRuleTypeName target_rule_type_name = 59;
+
+    PageOutSummary page_out_summary = 62;
+
+    PagingSummary paging_summary = 63;
   }
 }
 
@@ -444,6 +476,70 @@ message DiceKeyState {
   uint32 check_deps_finished = 4;
   uint32 compute_started = 5;
   uint32 compute_finished = 6;
+}
+
+// Page-in counters for one DICE key type (a paged-out value read back in).
+// A per-command delta in both Snapshot and InvocationRecord.
+message DicePageInKeyTypeStats {
+  uint64 count = 1;
+  // Microseconds fetching the top-level serialized blob. Nested PagableArc
+  // sub-values are fetched lazily during deserialize, so their I/O is in
+  // deser_us, not here.
+  uint64 fetch_us = 2;
+  // Microseconds deserializing, including the lazy fetch of nested PagableArc
+  // sub-values; dominates for arc-heavy values.
+  uint64 deser_us = 3;
+  // Top-level blob bytes only; excludes nested PagableArc sub-values, so
+  // near-zero for arc-heavy values.
+  uint64 bytes = 4;
+}
+
+// Per-command statistics about DICE pagable storage, emitted once at command
+// end.
+// Outcome of the idle page-out decision at the end of a command: either it was
+// started, or the reason it wasn't.
+enum PageOutStarted {
+  PAGE_OUT_STARTED_UNSPECIFIED = 0;
+  // A background idle page-out was scheduled.
+  PAGE_OUT_STARTED_STARTED = 1;
+  // Idle page-out is disabled (`buck2_hydration.page_out_on_idle` unset).
+  PAGE_OUT_STARTED_DISABLED = 2;
+  // Nothing to page out (no pagable candidates).
+  PAGE_OUT_STARTED_NOTHING_TO_PAGE_OUT = 3;
+  // Not enough free disk to write paged-out values to `buck-out`.
+  PAGE_OUT_STARTED_INSUFFICIENT_DISK_HEADROOM = 4;
+  // Free disk couldn't be determined (total or used disk unavailable).
+  PAGE_OUT_STARTED_FREE_DISK_UNKNOWN = 5;
+  // A page-out is already running (single-flight guard held).
+  PAGE_OUT_STARTED_ALREADY_RUNNING = 6;
+  // This command type does not take part in the idle page-out lifecycle.
+  PAGE_OUT_STARTED_COMMAND_OPTED_OUT = 7;
+  // Another command is active, so paging would contend with real work.
+  PAGE_OUT_STARTED_OTHER_COMMANDS_ACTIVE = 8;
+  // A prior idle page-out errored, so it is disabled for the rest of this
+  // daemon's lifetime.
+  PAGE_OUT_STARTED_DISABLED_AFTER_ERROR = 9;
+  // An idle page-out already ran in this daemon. Set
+  // `buck2_hydration.allow_multiple_idle_page_outs = true` to allow repeated
+  // runs.
+  PAGE_OUT_STARTED_ALREADY_RAN = 10;
+}
+
+message PagingSummary {
+  // DICE page-in counters per key type, as a delta vs the command-start
+  // baseline.
+  map<string, DicePageInKeyTypeStats> dice_page_in_by_key_type = 1;
+  // Size in bytes of the DICE pagable on-disk store, measured at command end.
+  optional uint64 paging_db_size_bytes = 2;
+  // Resident DICE node count, measured at command end.
+  optional uint64 resident_node_count = 3;
+  // Paged-out DICE node count, measured at command end.
+  optional uint64 paged_out_node_count = 4;
+  // Page-out candidate DICE node count, measured at command end.
+  optional uint64 candidate_node_count = 5;
+  // Whether a background idle page-out was started at the end of this command,
+  // or the reason it wasn't.
+  optional PageOutStarted page_out_started = 6;
 }
 
 message RemoteExecutionSessionCreated {
@@ -615,6 +711,16 @@ message CriticalPathEntry2 {
     string kind = 1;
   }
 
+  message PageIn {
+    // The DICE key type that was paged in, e.g. "analysis_key".
+    string key_type = 1;
+    // Number of page-ins represented by this entry. Older entries with the
+    // default value represent one page-in.
+    uint64 count = 2;
+    // Per-key-type breakdown when multiple page-ins are grouped together.
+    map<string, uint64> key_type_counts = 3;
+  }
+
   message Load {
     string package = 1;
   }
@@ -671,6 +777,7 @@ message CriticalPathEntry2 {
     DynamicAnalysis dynamic_analysis = 110;
     EnsureTransitiveSetProjection ensure_transitive_set_projection = 111;
     AnonAnalysis anon_analysis = 112;
+    PageIn page_in = 113;
   }
 }
 
@@ -889,6 +996,8 @@ message VersionControlRevision {
   // Unset: Unknown state.
   optional bool has_local_changes = 2;
   optional string command_error = 3;
+  // 40 characters hash for git revision.
+  optional string git_revision = 4;
 }
 
 // Event sent during build commands
@@ -909,6 +1018,7 @@ message TargetRuleTypeName {
 
 // A snapshot of current system state, with useful info.
 message Snapshot {
+  reserved 102, 120;
   // Resident set size in bytes of the buck2 daemon.
   // Does not include subprocesses (e.g. local actions).
   optional uint64 buck2_rss = 11;
@@ -1012,8 +1122,6 @@ message Snapshot {
   optional uint64 host_cpu_usage_user_ms = 13;
 
   uint64 dice_key_count = 101;
-  // the number of keys actively present in the per transaction cache
-  uint64 dice_currently_active_key_count = 102;
   uint32 dice_active_transaction_count = 103;
 
   uint64 deferred_materializer_queue_size = 104;
@@ -1045,6 +1153,8 @@ message Snapshot {
 
   uint64 deferred_materializer_declares = 200;
   uint64 deferred_materializer_declares_reused = 201;
+  uint64 deferred_materializer_final_output_logical_bytes = 202;
+  uint64 deferred_materializer_intermediate_only_logical_bytes = 203;
 
   optional UnixSystemStats unix_system_stats = 300;
 
@@ -1080,6 +1190,9 @@ message Snapshot {
 
   int64 local_cache_lookups = 440;
   int64 local_cache_lookup_latency_microseconds = 441; // Client side metrics.
+
+  // Persisted dep-file cache writes queued but not yet applied to sqlite.
+  uint64 dep_file_db_queue_size = 442;
 
   // Delay between time snapshot is created and time it is received
   // by the client.
@@ -1823,7 +1936,10 @@ message ActionExecutionEnd {
   // from the command, hybrid is turned on).
   optional bool eligible_for_full_hybrid = 33;
 
-  // Hostname of this action ran on. This is set only when the action fails.
+  // Hostname of the host this action ran on. Always set for locally-executed
+  // actions (which run on the buck2 daemon's host). Additionally set for any
+  // failed action regardless of execution kind, for logging in
+  // buck2_action_errors.
   optional string hostname = 34;
 
   // Fields related to the remote dep file cache
@@ -2069,6 +2185,7 @@ message AnalysisEnd {
   AnalysisProfile profile = 2;
   optional uint64 declared_actions = 6;
   optional uint64 declared_artifacts = 7;
+  optional string error = 8;
 }
 
 message AnalysisStageStart {
@@ -2580,11 +2697,22 @@ enum DaemonWasStartedReason {
   NO_DAEMON_PROCESS = 16;
 }
 
+// A single (percentile, concurrency) point of the action-concurrency
+// distribution reported on the InvocationRecord. Self-describing so the
+// reported set of percentiles can evolve without misinterpreting historical
+// data.
+message ActionConcurrencyPercentile {
+  // The percentile (e.g. 5, 10, 50, 99, 100).
+  uint32 percentile = 1;
+  // The number of actions executing concurrently at that percentile.
+  uint64 concurrency = 2;
+}
+
 // This is the origin for every sample in buck2_builds scuba table
 // It's sent from the client to Scribe at the end of each invocation
 message InvocationRecord {
   reserved 1, 22, 27, 28, 36, 61, 62, 66, 77, 82, 88, 89, 100, 234, 235, 400,
-      401;
+      401, 443;
 
   // Optional - present if ever sent to client.
   // Will be missing on a cancelled build.
@@ -2715,7 +2843,7 @@ message InvocationRecord {
   // The client has failed to connect to the daemon.
   optional bool daemon_connection_failure = 75;
   // Daemon was started by this command.
-  // Unset if the the command connected to existing daemon or did not start one.
+  // Unset if the command connected to existing daemon or did not start one.
   optional DaemonWasStartedReason daemon_was_started = 751;
   // Set if an event occurred that should trigger a command restart.
   optional bool should_restart = 752;
@@ -2784,6 +2912,8 @@ message InvocationRecord {
   optional bool has_local_changes = 107;
   // Errors encountered during version control operations.
   repeated string version_control_errors = 108;
+  // 40 characters hash for git revision.
+  optional string git_revision = 109;
 
   // Detailed per-backend RE stats.
   optional uint64 zdb_download_queries = 200;
@@ -2939,6 +3069,43 @@ message InvocationRecord {
 
   // Agent context entries passed via --agent-context.
   repeated AgentContextEntry agent_context = 437;
+
+  // DICE page-in overhead for this invocation, computed as the delta between
+  // the first and last snapshot of the command.
+  optional uint64 page_in_count = 438;
+  optional uint64 page_in_fetch_us = 439;
+  optional uint64 page_in_deser_us = 440;
+  optional uint64 page_in_bytes = 441;
+  // Per-DICE-key-type page-in breakdown for this invocation. Key types with no
+  // page-ins during the command are omitted.
+  map<string, DicePageInKeyTypeStats> page_in_by_key_type = 442;
+  // Size in bytes of the DICE pagable on-disk store, measured at command end.
+  optional uint64 paging_db_size_bytes = 444;
+  // Whether a background idle page-out was started at the end of this command,
+  // or the reason it wasn't (reflects the decision, not completion).
+  optional PageOutStarted page_out_started = 445;
+  // Resident (non-paged out) DICE node count at command end.
+  optional uint64 paging_resident_node_count = 446;
+  // Paged-out DICE node count at command end.
+  optional uint64 paging_paged_out_node_count = 447;
+  // Page-out candidate DICE node count at command end.
+  optional uint64 paging_candidate_node_count = 448;
+
+  // Total DICE page-in time on the critical path.
+  google.protobuf.Duration critical_path_page_in = 449;
+
+  // Distribution of how many actions were executing concurrently during this
+  // invocation (execution-only intervals; cache hits excluded), computed by the
+  // client-side InvocationRecorder, as (percentile, concurrency) pairs. Each
+  // entry is self-describing so the reported set of percentiles can change over
+  // time without misinterpreting historical data. Empty if no actions executed.
+  repeated ActionConcurrencyPercentile action_concurrency_percentiles = 450;
+  // Time-weighted mean number of concurrently-executing actions over the time
+  // at least one action was executing.
+  optional double action_avg_concurrency = 451;
+  // Total wall-clock time in milliseconds during which at least one action was
+  // executing.
+  optional uint64 action_active_duration_ms = 452;
 }
 
 enum InvocationOutcome {

@@ -37,6 +37,7 @@ use crate::directory::directory_data::DirectoryData;
 use crate::directory::directory_ref::DirectoryRef;
 use crate::directory::directory_ref::FingerprintedDirectoryRef;
 use crate::directory::entry::DirectoryEntry;
+use crate::directory::exhaustiveness::ExhaustivenessHash;
 use crate::directory::fingerprinted_directory::FingerprintedDirectory;
 use crate::directory::immutable_directory::ImmutableDirectory;
 use crate::directory::macros::impl_fingerprinted_directory;
@@ -196,6 +197,10 @@ where
         self.inner.data.fingerprint()
     }
 
+    pub fn exhaustiveness_hash(&self) -> ExhaustivenessHash {
+        self.inner.data.exhaustiveness_hash
+    }
+
     pub fn size(&self) -> u64 {
         self.inner.data.size
     }
@@ -230,14 +235,18 @@ where
         // Hard to convince the borrow checker that this is safe, so write this using indexing in
         // this slightly awkward way
         (0..self.inner.data.entries.len()).map(move |i| {
-            let (k, v) = self.inner.data.entries.get_key_value_at_index(i).unwrap();
+            let (k, v) = self.inner.data.entries.get_index(i).unwrap();
             (k.clone(), v.clone().map_dir(|v| v.into_builder()))
         })
     }
 }
 
 pub struct SharedDirectoryEntries<'a, L, H>(
-    sorted_vector_map::map::Iter<'a, FileNameBuf, DirectoryEntry<SharedDirectory<L, H>, L>>,
+    crate::directory::sorted_slice_map::Iter<
+        'a,
+        FileNameBuf,
+        DirectoryEntry<SharedDirectory<L, H>, L>,
+    >,
 )
 where
     H: DirectoryDigest;
@@ -349,7 +358,7 @@ mod tests {
             .lock()
             .expect("pagable shared directory test mutex should not be poisoned");
 
-        let mut builder = TestDirectoryBuilder::empty();
+        let mut builder = TestDirectoryBuilder::empty_non_exhaustive();
         builder
             .insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))
             .expect("test path should insert");
@@ -377,7 +386,7 @@ mod tests {
             .lock()
             .expect("pagable shared directory test mutex should not be poisoned");
 
-        let mut builder = TestDirectoryBuilder::empty();
+        let mut builder = TestDirectoryBuilder::empty_non_exhaustive();
         builder.insert(path("a/b"), DirectoryEntry::Leaf(NopEntry))?;
         let interner = <NopEntry as SharedDirectoryInternable<TestDigest>>::interner();
         let dir = builder.fingerprint(&TestHasher).shared(&interner);

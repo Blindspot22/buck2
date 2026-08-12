@@ -10,10 +10,13 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_common::file_ops::metadata::FileDigest;
+use buck2_common::file_ops::metadata::FileMetadata;
+use buck2_common::file_ops::metadata::TrackedFileDigest;
 use buck2_core::buck2_env;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
@@ -50,8 +53,6 @@ use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_hash::StdBuckHashMap;
 use buck2_hash::StdBuckHashSet;
 use buck2_http::HttpClient;
-use chrono::Duration;
-use chrono::Utc;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use futures::future::BoxFuture;
@@ -59,7 +60,8 @@ use futures::future::Future;
 use futures::future::FutureExt;
 use futures::future::TryFutureExt;
 use gazebo::prelude::VecExt;
-use once_cell::sync::Lazy;
+use jiff::SignedDuration;
+use jiff::Timestamp;
 use remote_execution::NamedDigest;
 use remote_execution::NamedDigestWithPermissions;
 use remote_execution::TCode;
@@ -90,6 +92,27 @@ pub struct DefaultIoHandler {
     /// Executor for blocking IO operations
     io_executor: Arc<dyn BlockingExecutor>,
     http_client: HttpClient,
+}
+
+#[derive(Allocative)]
+pub struct NoDiskIoHandler {
+    fs: ProjectRoot,
+    digest_config: DigestConfig,
+    buck_out_path: ProjectRelativePathBuf,
+}
+
+impl NoDiskIoHandler {
+    pub fn new(
+        fs: ProjectRoot,
+        digest_config: DigestConfig,
+        buck_out_path: ProjectRelativePathBuf,
+    ) -> Self {
+        Self {
+            fs,
+            digest_config,
+            buck_out_path,
+        }
+    }
 }
 
 struct MaterializationStat {
@@ -140,7 +163,7 @@ pub trait IoHandler: Sized + Sync + Send + 'static {
     fn create_ttl_refresh(
         self: &Arc<Self>,
         tree: &ArtifactTree,
-        min_ttl: Duration,
+        min_ttl: SignedDuration,
     ) -> Option<BoxFuture<'static, buck2_error::Result<()>>>;
 
     fn read_dir(&self, path: &AbsNormPathBuf) -> buck2_error::Result<ReadDir>;
@@ -451,7 +474,7 @@ impl IoHandler for DefaultIoHandler {
     fn create_ttl_refresh(
         self: &Arc<Self>,
         tree: &ArtifactTree,
-        min_ttl: Duration,
+        min_ttl: SignedDuration,
     ) -> Option<BoxFuture<'static, buck2_error::Result<()>>> {
         create_ttl_refresh(tree, &self.re_client_manager, min_ttl, self.digest_config)
             .map(|f| f.boxed())
@@ -478,11 +501,123 @@ impl IoHandler for DefaultIoHandler {
     }
 }
 
+#[async_trait]
+impl IoHandler for NoDiskIoHandler {
+    fn write<'a>(
+        self: &Arc<Self>,
+        path: ProjectRelativePathBuf,
+        _write: Arc<WriteFile>,
+        version: Version,
+        command_sender: Arc<MaterializerSender<Self>>,
+        _cancellations: &'a CancellationContext,
+    ) -> BoxFuture<'a, Result<(), SharedMaterializingError>> {
+        async move {
+            let _ignored = command_sender.send_low_priority(
+                LowPriorityMaterializerCommand::MaterializationFinished {
+                    path,
+                    timestamp: Timestamp::now(),
+                    version,
+                    result: Ok(()),
+                },
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    async fn immediate_write<'a>(
+        self: &Arc<Self>,
+        generate: Box<dyn FnOnce() -> buck2_error::Result<Vec<WriteRequest>> + Send + 'a>,
+    ) -> buck2_error::Result<Vec<ArtifactValue>> {
+        generate()?
+            .into_iter()
+            .map(|request| {
+                let digest = TrackedFileDigest::from_content(
+                    &request.content,
+                    self.digest_config.cas_digest_config(),
+                );
+                Ok(ArtifactValue::file(FileMetadata {
+                    digest,
+                    is_executable: request.is_executable,
+                }))
+            })
+            .collect()
+    }
+
+    fn clean_path<'a>(
+        self: &Arc<Self>,
+        path: ProjectRelativePathBuf,
+        version: Version,
+        command_sender: Arc<MaterializerSender<Self>>,
+        _cancellations: &'a CancellationContext,
+    ) -> BoxFuture<'a, buck2_error::Result<()>> {
+        async move {
+            let _ignored =
+                command_sender.send_low_priority(LowPriorityMaterializerCommand::CleanupFinished {
+                    path,
+                    version,
+                    result: Ok(()),
+                });
+            Ok(())
+        }
+        .boxed()
+    }
+
+    async fn clean_invalidated_path<'a>(
+        self: &Arc<Self>,
+        _request: CleanInvalidatedPathRequest,
+        _cancellations: &'a CancellationContext,
+    ) -> buck2_error::Result<()> {
+        Ok(())
+    }
+
+    async fn materialize_entry(
+        self: &Arc<Self>,
+        _path: ProjectRelativePathBuf,
+        _method: Arc<ArtifactMaterializationMethod>,
+        _entry: ActionDirectoryEntry<ActionSharedDirectory>,
+        _priority_control: DynamicPriorityHandle,
+        _event_dispatcher: EventDispatcher,
+        _cancellations: &CancellationContext,
+    ) -> Result<(), MaterializeEntryError> {
+        Ok(())
+    }
+
+    fn create_ttl_refresh(
+        self: &Arc<Self>,
+        _tree: &ArtifactTree,
+        _min_ttl: SignedDuration,
+    ) -> Option<BoxFuture<'static, buck2_error::Result<()>>> {
+        None
+    }
+
+    fn read_dir(&self, path: &AbsNormPathBuf) -> buck2_error::Result<ReadDir> {
+        fs_util::read_dir(path).categorize_internal()
+    }
+
+    fn buck_out_path(&self) -> &ProjectRelativePathBuf {
+        &self.buck_out_path
+    }
+
+    fn re_client_manager(&self) -> &Arc<ReConnectionManager> {
+        panic!("No-disk materializers do not have an RE client")
+    }
+
+    fn fs(&self) -> &ProjectRoot {
+        &self.fs
+    }
+
+    fn digest_config(&self) -> DigestConfig {
+        self.digest_config
+    }
+}
+
 /// This is used for testing to ingest digests (via BUCK2_TEST_TOMBSTONED_DIGESTS).
 fn maybe_tombstone_digest(digest: &FileDigest) -> buck2_error::Result<&FileDigest> {
     // This has to be of size 1 since size 0 will result in the RE client just producing an empty
     // instead of a not-found error.
-    static TOMBSTONE_DIGEST: Lazy<FileDigest> = Lazy::new(|| FileDigest::new_sha1([0; 20], 1));
+    static TOMBSTONE_DIGEST: LazyLock<FileDigest> =
+        LazyLock::new(|| FileDigest::new_sha1([0; 20], 1));
 
     fn convert_digests(val: &str) -> buck2_error::Result<StdBuckHashSet<FileDigest>> {
         val.split(' ')
@@ -517,12 +652,14 @@ fn maybe_tombstone_digest(digest: &FileDigest) -> buck2_error::Result<&FileDiges
 pub(super) fn create_ttl_refresh(
     tree: &ArtifactTree,
     re_manager: &Arc<ReConnectionManager>,
-    min_ttl: Duration,
+    min_ttl: SignedDuration,
     digest_config: DigestConfig,
 ) -> Option<impl Future<Output = buck2_error::Result<()>> + use<>> {
     let mut digests_to_refresh = StdBuckHashMap::<_, StdBuckHashSet<_>>::new();
 
-    let ttl_deadline = Utc::now() + min_ttl;
+    let ttl_deadline = Timestamp::now()
+        .checked_add(min_ttl)
+        .unwrap_or(Timestamp::MAX);
 
     for data in tree.iter_without_paths() {
         if let ArtifactMaterializationStage::Declared { entry, method } = &data.stage
@@ -639,7 +776,7 @@ impl IoRequest for WriteIoRequest {
         let _ignored = self.command_sender.send_low_priority(
             LowPriorityMaterializerCommand::MaterializationFinished {
                 path: self.path,
-                timestamp: Utc::now(),
+                timestamp: Timestamp::now(),
                 version: self.version,
                 result: res.dupe().map_err(SharedMaterializingError::Error),
             },

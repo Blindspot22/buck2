@@ -10,6 +10,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use allocative::Allocative;
 use buck2_build_api::bxl::result::BxlResult;
@@ -47,7 +48,6 @@ use dice::DiceTransaction;
 use dice_futures::cancellation::CancellationObserver;
 use dupe::Dupe;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use starlark::eval::Evaluator;
 use starlark::values::OwnedFrozenValueTyped;
 use starlark::values::UnpackValue;
@@ -69,7 +69,7 @@ use crate::bxl::starlark_defs::context::starlark_async::BxlDiceComputations;
 use crate::bxl::starlark_defs::eval_extra::BxlEvalExtra;
 use crate::bxl::starlark_defs::functions::BxlErrorWithoutStacktrace;
 
-pub(crate) static LIMITED_EXECUTOR: Lazy<Arc<LimitedExecutor>> = Lazy::new(|| {
+pub(crate) static LIMITED_EXECUTOR: LazyLock<Arc<LimitedExecutor>> = LazyLock::new(|| {
     Arc::new(LimitedExecutor::new(500)) // Default working thread of tokio is 512 threads. We set it to 500 for here to leave some room for other things.
 });
 
@@ -296,7 +296,8 @@ async fn eval_bxl_inner(
 ) -> Result<(BxlResult, Option<Arc<StarlarkProfileDataAndStats>>)> {
     let bxl_module = ctx
         .get_loaded_module(StarlarkModulePath::BxlFile(&key.label().bxl_path))
-        .await?;
+        .await?
+        .dupe();
 
     let digest_config = ctx.global_data().get_digest_config();
     let core_data = BxlContextCoreData::new(key.dupe(), ctx).await?;
@@ -327,6 +328,9 @@ fn eval_bxl<'v>(
     ctx: ValueTyped<'v, BxlContext<'v>>,
     force_print_stacktrace: bool,
 ) -> buck2_error::Result<()> {
+    let frozen_callable = eval
+        .heap()
+        .access_owned_frozen_value_typed(&frozen_callable);
     let bxl_impl = frozen_callable.implementation();
     let result = eval.eval_function(bxl_impl.to_value(), &[ctx.to_value()], &[]);
 
@@ -379,12 +383,12 @@ pub(crate) fn get_bxl_callable(
     Ok(callable.downcast_starlark::<FrozenBxlFunction>()?)
 }
 
-pub(crate) struct CliResolutionCtx<'a> {
+pub(crate) struct CliResolutionCtx<'d> {
     pub(crate) target_alias_resolver: BuckConfigTargetAliasResolver,
-    pub(crate) cell_resolver: CellResolver,
-    pub(crate) cell_alias_resolver: CellAliasResolver,
+    pub(crate) cell_resolver: &'d CellResolver,
+    pub(crate) cell_alias_resolver: &'d CellAliasResolver,
     pub(crate) relative_dir: PackageLabel,
-    pub(crate) dice: &'a DiceTransaction,
+    pub(crate) dice: &'d DiceTransaction,
     pub(crate) global_cfg_options: GlobalCfgOptions,
 }
 

@@ -14,6 +14,7 @@ load(
     "ArtifactTSet",
     "project_artifacts",
 )
+load("@prelude//utils:actions.bzl", "ActionExecutionAttributes")
 load(":cxx_context.bzl", "get_cxx_toolchain_info")
 
 CxxBoltOutput = record(
@@ -31,14 +32,18 @@ def bolt(
     external_debug_info: ArtifactTSet,
     identifier: [str, None],
     generate_dwp: bool,
+    action_execution_properties: ActionExecutionAttributes,
+    weight: int,
     allow_cache_upload: bool = False,
 ) -> CxxBoltOutput:
     output_name = prebolt_output.short_path.removesuffix("-wrapper")
     postbolt_output = ctx.actions.declare_output(output_name, has_content_based_path = False)
     dwo_output = None
-    bolt_msdk = get_cxx_toolchain_info(ctx).binary_utilities_info.bolt_msdk
+    cxx_toolchain_info = get_cxx_toolchain_info(ctx)
+    bolt_exe = cxx_toolchain_info.binary_utilities_info.bolt
+    bolt_msdk = cxx_toolchain_info.binary_utilities_info.bolt_msdk
 
-    if not bolt_msdk or not cxx_use_bolt(ctx):
+    if not (bolt_exe or bolt_msdk) or not cxx_use_bolt(ctx):
         fail("Cannot use bolt if bolt_msdk is not available or bolt profile is not available")
 
     materialized_external_debug_info = project_artifacts(ctx.actions, external_debug_info)
@@ -46,7 +51,7 @@ def bolt(
     # bolt command format:
     # {llvm_bolt} {input_bin} -o $OUT -data={fdata} {args}
     args = cmd_args(
-        cmd_args(bolt_msdk, format = "{}/bin/llvm-bolt"),
+        bolt_exe if bolt_exe else cmd_args(bolt_msdk, format = "{}/bin/llvm-bolt"),
         prebolt_output,
         "-o",
         postbolt_output.as_output(),
@@ -71,7 +76,11 @@ def bolt(
         args,
         category = "bolt",
         identifier = identifier,
-        local_only = get_cxx_toolchain_info(ctx).linker_info.link_binaries_locally,
+        prefer_local = action_execution_properties.prefer_local,
+        prefer_remote = action_execution_properties.prefer_remote,
+        local_only = action_execution_properties.local_only,
+        weight = weight,
+        force_full_hybrid_if_capable = action_execution_properties.full_hybrid,
         allow_cache_upload = allow_cache_upload and not strip_stapsdt,
     )
 

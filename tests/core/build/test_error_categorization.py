@@ -245,6 +245,155 @@ async def wait_for_daemon_pid(buck: Buck) -> int:
     raise Exception("Failed to find buckd pid")
 
 
+def read_daemon_cgroup(pid: int) -> str:
+    for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines():
+        if line.startswith("0::/"):
+            return line.removeprefix("0::")
+    raise AssertionError(f"Could not find cgroup v2 entry for daemon PID {pid}")
+
+
+def fake_dmesg_env(tmp_path: Path, output: str) -> tuple[dict[str, str], Path]:
+    dmesg_output = tmp_path / "dmesg-output"
+    dmesg_output.write_text(output)
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_dmesg = fake_bin / "dmesg"
+    fake_dmesg.write_text(
+        '#!/bin/sh\n: > "$BUCK2_TEST_DMESG_CALLED"\nexec /bin/cat "$BUCK2_TEST_DMESG_OUTPUT"\n'
+    )
+    fake_dmesg.chmod(0o755)
+    dmesg_called = tmp_path / "dmesg-called"
+    return (
+        {
+            "BUCK2_TEST_DMESG_CALLED": str(dmesg_called),
+            "BUCK2_TEST_DMESG_OUTPUT": str(dmesg_output),
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        },
+        dmesg_called,
+    )
+
+
+def current_dmesg_timestamp(seconds_ago: int = 0) -> str:
+    monotonic_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC) - (
+        seconds_ago * 1_000_000_000
+    )
+    seconds, nanoseconds = divmod(monotonic_ns, 1_000_000_000)
+    return f"{seconds}.{nanoseconds // 1_000:06d}"
+
+
+@buck_test(
+    skip_for_os=["darwin", "windows"],
+    write_invocation_record=True,
+)
+async def test_pre_daemon_oom_record_does_not_mask_daemon_crash(
+    buck: Buck, tmp_path: Path
+) -> None:
+    pre_daemon_timestamp = current_dmesg_timestamp(seconds_ago=60)
+    await buck.build()
+    daemon_cgroup = read_daemon_cgroup(await wait_for_daemon_pid(buck)).removeprefix(
+        "/"
+    )
+
+    dmesg_env, dmesg_called = fake_dmesg_env(
+        tmp_path,
+        f"<6>[{pre_daemon_timestamp}] oomd kill: 81.28 80.05 42.78 {daemon_cgroup} 1000 ruleset:[test]\n",
+    )
+
+    res = await expect_failure(buck.debug("crash", "panic", env=dmesg_env))
+    error = res.invocation_record().single_error()
+    assert dmesg_called.exists()
+    assert "DAEMON_OOM_KILLED" not in error["tags"]
+    assert error["best_tag"] == "SERVER_PANICKED"
+
+
+@buck_test(
+    skip_for_os=["darwin", "windows"],
+    write_invocation_record=True,
+)
+async def test_current_oomd_record_marks_daemon_crash_as_oom(
+    buck: Buck, tmp_path: Path
+) -> None:
+    await buck.build()
+    daemon_cgroup = read_daemon_cgroup(await wait_for_daemon_pid(buck)).removeprefix(
+        "/"
+    )
+    dmesg_env, dmesg_called = fake_dmesg_env(
+        tmp_path,
+        f"<6>[{current_dmesg_timestamp()}] oomd kill: 81.28 80.05 42.78 {daemon_cgroup} 1000 ruleset:[test]\n",
+    )
+
+    res = await expect_failure(buck.debug("crash", "panic", env=dmesg_env))
+    error = res.invocation_record().single_error()
+    assert dmesg_called.exists()
+    assert "DAEMON_OOM_KILLED" in error["tags"]
+    assert error["best_tag"] == "DAEMON_OOM_KILLED"
+
+
+@buck_test(
+    skip_for_os=["darwin", "windows"],
+    write_invocation_record=True,
+)
+async def test_oomd_kill_in_descendant_cgroup_does_not_mask_daemon_crash(
+    buck: Buck, tmp_path: Path
+) -> None:
+    await buck.build()
+    daemon_cgroup = read_daemon_cgroup(await wait_for_daemon_pid(buck)).removeprefix(
+        "/"
+    )
+    dmesg_env, dmesg_called = fake_dmesg_env(
+        tmp_path,
+        f"<6>[{current_dmesg_timestamp()}] oomd kill: 81.28 80.05 42.78 {daemon_cgroup}/child 1000 ruleset:[test]\n",
+    )
+
+    res = await expect_failure(buck.debug("crash", "panic", env=dmesg_env))
+    error = res.invocation_record().single_error()
+    assert dmesg_called.exists()
+    assert "DAEMON_OOM_KILLED" not in error["tags"]
+    assert error["best_tag"] == "SERVER_PANICKED"
+
+
+@buck_test(
+    skip_for_os=["darwin", "windows"],
+    write_invocation_record=True,
+)
+async def test_kernel_oom_victim_pid_marks_daemon_crash_as_oom(
+    buck: Buck, tmp_path: Path
+) -> None:
+    await buck.build()
+    daemon_pid = await wait_for_daemon_pid(buck)
+    dmesg_env, dmesg_called = fake_dmesg_env(
+        tmp_path,
+        f"<6>[{current_dmesg_timestamp()}] Memory cgroup out of memory: Killed process {daemon_pid} (buck2) total-vm:1000kB\n",
+    )
+
+    res = await expect_failure(buck.debug("crash", "panic", env=dmesg_env))
+    error = res.invocation_record().single_error()
+    assert dmesg_called.exists()
+    assert "DAEMON_OOM_KILLED" in error["tags"]
+    assert error["best_tag"] == "DAEMON_OOM_KILLED"
+
+
+@buck_test(
+    skip_for_os=["darwin", "windows"],
+    write_invocation_record=True,
+)
+async def test_kernel_oom_for_other_pid_does_not_mask_daemon_crash(
+    buck: Buck, tmp_path: Path
+) -> None:
+    await buck.build()
+    other_pid = await wait_for_daemon_pid(buck) + 1
+    dmesg_env, dmesg_called = fake_dmesg_env(
+        tmp_path,
+        f"<6>[{current_dmesg_timestamp()}] Memory cgroup out of memory: Killed process {other_pid} (buck2) total-vm:1000kB\n",
+    )
+
+    res = await expect_failure(buck.debug("crash", "panic", env=dmesg_env))
+    error = res.invocation_record().single_error()
+    assert dmesg_called.exists()
+    assert "DAEMON_OOM_KILLED" not in error["tags"]
+    assert error["best_tag"] == "SERVER_PANICKED"
+
+
 @buck_test(skip_for_os=["windows"])
 async def test_daemon_killed(buck: Buck, tmp_path: Path) -> None:
     record = tmp_path / "record.json"

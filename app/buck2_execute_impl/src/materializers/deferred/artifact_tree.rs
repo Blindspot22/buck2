@@ -29,14 +29,14 @@ use buck2_execute::materialize::materializer::CopiedArtifact;
 use buck2_execute::materialize::materializer::HttpDownloadInfo;
 use buck2_execute::materialize::utils::dynamic_priority_handle::DynamicPriorityHandle;
 use buck2_execute::output_size::OutputSize;
-use chrono::DateTime;
-use chrono::Utc;
 use derive_more::Display;
 use dupe::Dupe;
 use futures::future::BoxFuture;
 use futures::future::Shared;
+use jiff::Timestamp;
 use tracing::instrument;
 
+use crate::materializers::deferred::DeferredMaterializerStats;
 use crate::materializers::deferred::SharedMaterializingError;
 use crate::materializers::deferred::WriteFile;
 use crate::materializers::deferred::file_tree::FileTree;
@@ -72,12 +72,20 @@ pub struct Version(pub u64);
 pub struct ArtifactMaterializationData {
     /// Taken from `deps` of `ArtifactValue`. Used to materialize deps of the artifact.
     pub(crate) deps: Option<ActionSharedDirectory>,
+    pub(crate) classification: ArtifactClassification,
+    pub(crate) logical_size_bytes: u64,
     pub(crate) stage: ArtifactMaterializationStage,
     /// An optional future that may be processing something at the current path
     /// (for example, materializing or deleting). Any other future that needs to process
     /// this path would need to wait on the existing future to finish.
     /// TODO(scottcao): Turn this into a queue of pending futures.
     pub(crate) processing: Processing,
+}
+
+#[derive(Allocative, Clone, Copy, Debug, Dupe, Eq, PartialEq)]
+pub enum ArtifactClassification {
+    FinalOutput,
+    IntermediateOnly,
 }
 
 /// Represents a processing future + the version at which it was issued. When receiving
@@ -190,7 +198,7 @@ pub enum ArtifactMaterializationStage {
         /// check if materialized artifact matches declared artifact.
         metadata: ArtifactMetadata,
         /// Used to clean older artifacts from buck-out.
-        last_access_time: DateTime<Utc>,
+        last_access_time: Timestamp,
         /// Artifact declared by running daemon.
         /// Should not be deleted without invalidating DICE nodes, which currently
         /// means killing the daemon.
@@ -290,11 +298,15 @@ impl ArtifactTree {
                     path,
                     metadata,
                     last_access_time,
+                    classification,
                 } = entry;
+                let logical_size_bytes = artifact_metadata_size(&metadata);
                 tree.insert(
                     path.iter().map(|f| f.to_owned()),
                     Box::new(ArtifactMaterializationData {
                         deps: None,
+                        classification,
+                        logical_size_bytes,
                         stage: ArtifactMaterializationStage::Materialized {
                             metadata,
                             last_access_time,
@@ -434,12 +446,19 @@ impl ArtifactTree {
         &mut self,
         paths: Vec<ProjectRelativePathBuf>,
         sqlite_db: Option<&mut MaterializerStateSqliteDb>,
+        stats: &DeferredMaterializerStats,
     ) -> buck2_error::Result<Vec<(ProjectRelativePathBuf, ProcessingFuture)>> {
         let mut invalidated_paths = Vec::new();
         let mut futs = Vec::new();
 
         for path in paths {
             for (path, data) in self.remove_path(&path) {
+                if matches!(
+                    data.stage,
+                    ArtifactMaterializationStage::Materialized { .. }
+                ) {
+                    stats.remove_materialized(data.classification, data.logical_size_bytes);
+                }
                 if let Some(processing_fut) = data.processing.into_future() {
                     futs.push((path.clone(), processing_fut));
                 }

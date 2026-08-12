@@ -9,6 +9,23 @@ rust_library(
     srcs = glob(
         ["src/**/*.rs"],
     ),
+    autocargo = {
+        "cargo_toml_config": {
+            "dependencies_override": {
+                "target": {
+                    '\'cfg(any(target_os = "linux", target_os = "macos"))\'': {
+                        "dependencies": {
+                            "tikv-jemallocator": {
+                                "features": ["stats", "unprefixed_malloc_on_supported_platforms"],
+                                "path": None,
+                                "version": "0.6.1",
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
     deps = [
         "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:async-trait",
@@ -17,7 +34,6 @@ rust_library(
         "fbsource//third-party/rust:ref-cast",
         "//buck2/allocative/allocative:allocative",
         "//buck2/dice/dice:dice",
-        "//buck2/dice/dice_error:dice_error",
         "//buck2/dice/dice_futures:dice_futures",
         "//buck2/gazebo/dupe:dupe",
         "//buck2/gazebo/gazebo:gazebo",
@@ -32,7 +48,6 @@ rust_binary(
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:clap",
         "fbsource//third-party/rust:derive_more",
-        "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:tokio",
         "//buck2/allocative/allocative:allocative",
         "//buck2/dice/dice:dice",
@@ -49,7 +64,6 @@ rust_binary(
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:clap",
         "fbsource//third-party/rust:derive_more",
-        "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:tokio",
         "//buck2/allocative/allocative:allocative",
         "//buck2/dice/dice:dice",
@@ -69,7 +83,6 @@ rust_binary(
     deps = [
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:derive_more",
-        "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:tokio",
         "//buck2/allocative/allocative:allocative",
         "//buck2/dice/dice:dice",
@@ -94,7 +107,6 @@ rust_binary(
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:clap",
         "fbsource//third-party/rust:derive_more",
-        "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:jemalloc-ctl",
         "fbsource//third-party/rust:libc",
         "fbsource//third-party/rust:serde_json",

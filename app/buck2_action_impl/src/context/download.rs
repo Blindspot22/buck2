@@ -20,8 +20,6 @@ use buck2_error::BuckErrorContext;
 use buck2_execute::execute::request::OutputType;
 use buck2_execute::materialize::http::Checksum;
 use buck2_hash::buck_indexset;
-use chrono::TimeZone;
-use chrono::Utc;
 use starlark::environment::MethodsBuilder;
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
@@ -38,6 +36,9 @@ use crate::actions::impls::download_file::UnregisteredDownloadFileAction;
 enum CasArtifactError {
     #[error("is_tree and is_directory are mutually exclusive")]
     TreeAndDirectory,
+    #[error("Out-of-range value `{0}` for expires_after_timestamp")]
+    #[buck2(tag = Input)]
+    InvalidExpiration(i64),
 }
 
 #[starlark_module]
@@ -120,7 +121,12 @@ pub(crate) fn analysis_actions_methods_download(methods: &mut MethodsBuilder) {
 
         let use_case = RemoteExecutorUseCase::new(use_case.to_owned());
 
-        let expires_after_timestamp = Utc.timestamp_opt(expires_after_timestamp, 0).unwrap();
+        let expires_after_timestamp = jiff::Timestamp::from_second(expires_after_timestamp)
+            .map_err(|_| {
+                buck2_error::Error::from(CasArtifactError::InvalidExpiration(
+                    expires_after_timestamp,
+                ))
+            })?;
 
         let kind = match (is_tree, is_directory) {
             (true, true) => {

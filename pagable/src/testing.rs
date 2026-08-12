@@ -33,6 +33,7 @@
 //! let restored = MyType::pagable_deserialize(&mut de)?;
 //! ```
 
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -43,6 +44,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::PagableDeserializerRecipe;
+use crate::PageInScope;
 use crate::arc_erase::ArcEraseDyn;
 use crate::flavors::PagableSlice;
 use crate::flavors::PagableVecFlavor;
@@ -55,7 +57,7 @@ use crate::storage::traits::PagableStorage;
 use crate::traits::PagableCursor;
 use crate::traits::PagableDeserializer;
 use crate::traits::PagableSerializer;
-use crate::traits::SessionContext;
+use crate::traits::StorageContext;
 
 /// A simple in-memory serializer for testing pagable types.
 ///
@@ -66,11 +68,11 @@ use crate::traits::SessionContext;
 /// call [`finish`](Self::finish) to retrieve the serialized bytes and pointers.
 pub struct TestingSerializer {
     serde: postcard::Serializer<PagableVecFlavor>,
-    seen_arcs: HashSet<usize>,
+    seen_arcs: HashSet<(TypeId, usize)>,
     /// Only used to populate `PagableCursor::arc_index`. Not meaningful for
     /// testing because arcs are serialized inline in the byte stream.
     arc_count: usize,
-    session_context: SessionContext,
+    storage_context: StorageContext,
 }
 
 impl TestingSerializer {
@@ -82,7 +84,7 @@ impl TestingSerializer {
             },
             seen_arcs: HashSet::new(),
             arc_count: 0,
-            session_context: SessionContext::new(),
+            storage_context: StorageContext::new(),
         }
     }
 
@@ -108,7 +110,10 @@ impl PagableSerializer for TestingSerializer {
         // Always write identity first
         identity.serialize(self.serde())?;
 
-        if self.seen_arcs.insert(identity) {
+        if self
+            .seen_arcs
+            .insert((arc.as_arc_any().type_id(), identity))
+        {
             // First time seeing this arc, serialize its contents
             arc.serialize(self)?;
         }
@@ -124,8 +129,8 @@ impl PagableSerializer for TestingSerializer {
         }
     }
 
-    fn session_context(&mut self) -> &SessionContext {
-        &self.session_context
+    fn storage_context(&self) -> &StorageContext {
+        &self.storage_context
     }
 }
 
@@ -140,11 +145,12 @@ pub struct TestingDeserializer<'de> {
     bytes_arc: Arc<[u8]>,
     pos: SharedPosition,
     serde: postcard::Deserializer<'de, PagableSlice<'de>>,
-    seen_arcs: HashMap<usize, Box<dyn ArcEraseDyn>>,
+    seen_arcs: HashMap<(TypeId, usize), Box<dyn ArcEraseDyn>>,
     /// Only used to populate `PagableCursor::arc_index`. Not meaningful for
     /// testing because arcs are deserialized inline from the byte stream.
     arc_index: usize,
     storage: PagableStorageHandle,
+    page_in_scope: PageInScope,
 }
 
 impl<'de> TestingDeserializer<'de> {
@@ -154,18 +160,24 @@ impl<'de> TestingDeserializer<'de> {
     /// [`TestingSerializer::finish`].
     pub fn new(bytes: &'de [u8]) -> Self {
         let pos = SharedPosition::new();
+        let storage = PagableStorageHandle::new(Arc::new(EmptyPagableStorage::new()));
         Self {
             bytes_arc: Arc::from(bytes.to_vec().into_boxed_slice()),
             pos: pos.clone(),
             serde: postcard::Deserializer::from_flavor(PagableSlice::new(bytes, pos)),
             seen_arcs: HashMap::new(),
             arc_index: 0,
-            storage: PagableStorageHandle::new(Arc::new(EmptyPagableStorage::new())),
+            storage,
+            page_in_scope: PageInScope::new(DataKey::compute(0, bytes, &[])),
         }
     }
 
-    /// Construct a deserializer sharing an existing `Arc<[u8]>` and storage.
-    pub fn from_bytes_arc(bytes: &'de Arc<[u8]>, storage: PagableStorageHandle) -> Self {
+    /// Construct a deserializer sharing an existing `Arc<[u8]>` and page-in scope.
+    pub(crate) fn from_bytes_arc(
+        bytes: &'de Arc<[u8]>,
+        storage: PagableStorageHandle,
+        page_in_scope: PageInScope,
+    ) -> Self {
         let pos = SharedPosition::new();
         Self {
             bytes_arc: bytes.dupe(),
@@ -174,6 +186,7 @@ impl<'de> TestingDeserializer<'de> {
             seen_arcs: HashMap::new(),
             arc_index: 0,
             storage,
+            page_in_scope,
         }
     }
 }
@@ -197,7 +210,7 @@ impl<'de> PagableDeserializer<'de> for TestingDeserializer<'de> {
 
     fn deserialize_arc(
         &mut self,
-        _type_id: std::any::TypeId,
+        type_id: TypeId,
         deserialize_fn: for<'a> fn(
             &mut dyn PagableDeserializer<'a>,
             Arc<dyn PagableDeserializerRecipe>,
@@ -207,49 +220,55 @@ impl<'de> PagableDeserializer<'de> for TestingDeserializer<'de> {
         let identity: usize = Deserialize::deserialize(&mut self.serde)?;
 
         self.arc_index += 1;
-        if let Some(arc_dyn) = self.seen_arcs.get(&identity) {
+        if let Some(arc_dyn) = self.seen_arcs.get(&(type_id, identity)) {
             // Already seen - return a clone
             Ok(arc_dyn.clone_dyn())
         } else {
             // First time - deserialize, store in map, return
             let recipe: Arc<dyn PagableDeserializerRecipe> = Arc::new(TestingRecipe {
                 bytes: self.bytes_arc.dupe(),
+                page_in_scope: self.page_in_scope.dupe(),
             });
             let arc = deserialize_fn(self, recipe)?;
-            self.seen_arcs.insert(identity, arc.clone_dyn());
+            self.seen_arcs.insert((type_id, identity), arc.clone_dyn());
             Ok(arc)
         }
     }
 
     fn storage(&self) -> PagableStorageHandle {
-        self.storage.clone()
+        self.storage.dupe()
+    }
+
+    fn page_in_scope(&self) -> &PageInScope {
+        &self.page_in_scope
     }
 
     fn as_dyn(&mut self) -> &mut dyn crate::traits::PagableDeserializer<'de> {
         self
     }
 
-    fn session_context(&self) -> &SessionContext {
-        self.storage.backing_storage().session_context()
+    fn storage_context(&self) -> &StorageContext {
+        self.storage.backing_storage().storage_context()
     }
 }
 
 pub(crate) struct EmptyPagableStorage {
     arc_cache: DeserializedArcCache,
-    session_context: SessionContext,
+    storage_context: StorageContext,
 }
 
 impl EmptyPagableStorage {
     pub(crate) fn new() -> Self {
         Self {
             arc_cache: DeserializedArcCache::new(),
-            session_context: SessionContext::new(),
+            storage_context: StorageContext::new(),
         }
     }
 }
 
 pub(crate) struct TestingRecipe {
     bytes: Arc<[u8]>,
+    page_in_scope: PageInScope,
 }
 
 impl PagableDeserializerRecipe for TestingRecipe {
@@ -260,6 +279,7 @@ impl PagableDeserializerRecipe for TestingRecipe {
         Box::new(TestingDeserializer::from_bytes_arc(
             &self.bytes,
             storage.dupe(),
+            self.page_in_scope.dupe(),
         ))
     }
 }
@@ -286,8 +306,8 @@ impl PagableStorage for EmptyPagableStorage {
         // no-op
     }
 
-    fn session_context(&self) -> &SessionContext {
-        &self.session_context
+    fn storage_context(&self) -> &StorageContext {
+        &self.storage_context
     }
 
     fn store_data(&self, data: PagableData) -> anyhow::Result<DataKey> {

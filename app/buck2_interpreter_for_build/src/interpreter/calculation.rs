@@ -30,12 +30,12 @@ use buck2_interpreter::paths::package::PackageFilePath;
 use buck2_interpreter::paths::path::OwnedStarlarkPath;
 use buck2_interpreter::paths::path::StarlarkPath;
 use buck2_interpreter::prelude_path::PreludePath;
-use buck2_node::metadata::key::MetadataKey;
 use buck2_node::nodes::eval_result::EvaluationResult;
 use buck2_node::nodes::frontend::TARGET_GRAPH_CALCULATION_IMPL;
 use buck2_node::nodes::frontend::TargetGraphCalculation;
 use buck2_node::nodes::frontend::TargetGraphCalculationImpl;
 use buck2_node::package_values_calculation::PACKAGE_VALUES_CALCULATION;
+use buck2_node::package_values_calculation::PackageValues;
 use buck2_node::package_values_calculation::PackageValuesCalculation;
 use buck2_util::time_span::TimeSpan;
 use derive_more::Display;
@@ -45,13 +45,13 @@ use dice::OkPagableValueSerialize;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
+use dupe::ResultDupedErrExt;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use smallvec::SmallVec;
 use starlark::environment::Globals;
-use starlark_map::small_map::SmallMap;
 
 use crate::interpreter::dice_calculation_delegate::HasCalculationDelegate;
 use crate::interpreter::dice_calculation_delegate::testing::EvalImportKey;
@@ -128,13 +128,16 @@ impl TargetGraphCalculationImpl for TargetGraphCalculationInstance {
         }
     }
 
-    fn get_interpreter_results<'a>(
+    fn get_interpreter_results<'a, 'd>(
         &self,
-        ctx: &'a mut DiceComputations,
+        ctx: &'a mut DiceComputations<'d>,
         package: PackageLabel,
-    ) -> BoxFuture<'a, buck2_error::Result<Arc<EvaluationResult>>> {
+    ) -> BoxFuture<'a, buck2_error::Result<&'d Arc<EvaluationResult>>>
+    where
+        'd: 'a,
+    {
         ctx.compute(&InterpreterResultsKey(package.dupe()))
-            .map(|v| v?)
+            .map(|v| v?.as_ref().duped_err())
             .boxed()
     }
 }
@@ -183,13 +186,17 @@ impl Key for EvalImportKey {
 
 #[async_trait]
 impl InterpreterCalculationImpl for InterpreterCalculationInstance {
-    async fn get_loaded_module(
+    fn get_loaded_module<'a, 'd>(
         &self,
-        ctx: &mut DiceComputations<'_>,
+        ctx: &'a mut DiceComputations<'d>,
         starlark_path: StarlarkModulePath<'_>,
-    ) -> buck2_error::Result<LoadedModule> {
+    ) -> BoxFuture<'a, buck2_error::Result<&'d LoadedModule>>
+    where
+        'd: 'a,
+    {
         ctx.compute(&EvalImportKey(OwnedStarlarkModulePath::new(starlark_path)))
-            .await?
+            .map(|v| v?.as_ref().duped_err())
+            .boxed()
     }
 
     async fn get_module_deps(
@@ -265,11 +272,14 @@ impl PackageValuesCalculation for PackageValuesCalculationInstance {
         &self,
         ctx: &mut DiceComputations<'_>,
         package: PackageLabel,
-    ) -> buck2_error::Result<SmallMap<MetadataKey, serde_json::Value>> {
-        ctx.eval_package_file(package)
-            .await?
-            .package_values()
-            .package_values_json()
+    ) -> buck2_error::Result<PackageValues> {
+        let super_package = ctx.eval_package_file(package).await?;
+        Ok(PackageValues {
+            package_values: super_package.package_values().package_values_json()?,
+            visibility: super_package.visibility().to_json(),
+            within_view: super_package.within_view().to_json(),
+            visibility_cap: super_package.visibility_cap().to_json(),
+        })
     }
 }
 

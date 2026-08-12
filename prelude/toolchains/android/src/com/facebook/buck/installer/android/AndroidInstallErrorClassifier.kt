@@ -14,7 +14,7 @@ import com.facebook.buck.installer.InstallError
 
 object AndroidInstallErrorClassifier {
   fun fromErrorMessage(input: String): InstallError {
-    if (input.contains("No space left on device")) {
+    if (isInsufficientStorageFailure(input)) {
       return createInstallError(
           AndroidInstallErrorTag.NO_SPACE_LEFT_ON_DEVICE,
           "No space left on device. Free up space on the device and try again.",
@@ -28,10 +28,9 @@ object AndroidInstallErrorClassifier {
     return InstallError(input, AndroidInstallErrorTag.OTHER_INFRA)
   }
 
-  private val errorPatterns =
-      listOf<Pair<String, (String) -> InstallError>>(
-          "stderr message: " to this::decorateStdErrMessages,
-      )
+  private val errorPatterns = listOf<Pair<String, (String) -> InstallError>>(
+      "stderr message: " to this::decorateStdErrMessages,
+  )
 
   private fun decorateStdErrMessages(input: String): InstallError {
     val message = input.substringAfter("stderr message: ")

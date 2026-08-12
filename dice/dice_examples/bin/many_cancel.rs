@@ -62,13 +62,11 @@ use dice::Dice;
 use dice::DiceComputations;
 use dice::DiceData;
 use dice::DiceKeyDyn;
-use dice::GlobalStats;
 use dice::InjectedKey;
 use dice::Key;
 use dice::UserComputationData;
 use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
-use futures::FutureExt;
 use pagable::Pagable;
 use pagable::pagable_typetag;
 use tokio::sync::Semaphore;
@@ -144,22 +142,19 @@ impl Key for TopKey {
         if self.0 == config.chain_count {
             latches.dense_latch_release();
             ctx.compute2(
-                |ctx| async move { drop(ctx.compute(&DenseKey(config.dense_count)).await) }.boxed(),
-                |ctx| async move { drop(ctx.compute(&BottomKey(self.0)).await) }.boxed(),
+                async |ctx| drop(ctx.compute(&DenseKey(config.dense_count)).await),
+                async |ctx| drop(ctx.compute(&BottomKey(self.0)).await),
             )
             .await;
         } else {
             latches.chain_latch_release(self.0 as usize + 1);
             ctx.compute2(
-                |ctx| {
-                    async move {
-                        // This allows time to drop the graph of things below this before we re-request them.
-                        std::thread::sleep(Duration::from_millis(config.wait_millis));
-                        drop(ctx.compute(&TopKey(self.0 + 1)).await)
-                    }
-                    .boxed()
+                async |ctx| {
+                    // This allows time to drop the graph of things below this before we re-request them.
+                    std::thread::sleep(Duration::from_millis(config.wait_millis));
+                    drop(ctx.compute(&TopKey(self.0 + 1)).await)
                 },
-                |ctx| async move { drop(ctx.compute(&BottomKey(self.0)).await) }.boxed(),
+                async |ctx| drop(ctx.compute(&BottomKey(self.0)).await),
             )
             .await;
         }
@@ -233,8 +228,8 @@ impl Key for DenseKey {
             drop(ctx.compute(&BottomKey(config.chain_count)).await)
         } else {
             drop(
-                ctx.compute_join(0..self.0, |ctx, v| {
-                    async move { drop(ctx.compute(&DenseKey(v)).await) }.boxed()
+                ctx.compute_join(0..self.0, async |ctx, v| {
+                    drop(ctx.compute(&DenseKey(v)).await)
                 })
                 .await,
             );
@@ -299,7 +294,7 @@ pub struct Config {
 async fn main() {
     let config = Config::parse();
 
-    eprintln!("Using config {:?}", &config);
+    eprintln!("Using config {:?}", config);
 
     let builder = Dice::builder();
     let dice = if config.detect_cycles {
@@ -330,7 +325,7 @@ async fn main() {
 
         ctx.changed_to(vec![(Leaf, 0)]).unwrap();
 
-        let mut ctx = ctx.commit().await;
+        let ctx = ctx.commit().await;
         drop(ctx.compute(&TopKey(0)).await);
     }
 
@@ -349,11 +344,9 @@ async fn main() {
             ..Default::default()
         });
         ctx.changed_to(vec![(Leaf, 1)]).unwrap();
-        let mut ctx = ctx.commit().await;
+        let ctx = ctx.commit().await;
         drop(ctx.compute(&TopKey(0)).await);
     }
 
     eprintln!("recompute took {}s", first_done.elapsed().as_secs_f32());
-
-    eprintln!("cancellation count {}", GlobalStats::get().cancellations);
 }

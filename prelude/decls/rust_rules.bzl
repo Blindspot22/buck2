@@ -15,6 +15,7 @@ load("@prelude//rust:clippy_configuration.bzl", "ClippyConfiguration")
 load("@prelude//rust:link_info.bzl", "RustProcMacroPlugin")
 load("@prelude//rust:rust_binary.bzl", "rust_binary_impl", "rust_test_impl")
 load("@prelude//rust:rust_library.bzl", "rust_library_impl")
+load("@prelude//rust/rust-analyzer:provider.bzl", "RustAnalyzerTargetKind")
 load(":common.bzl", "RuntimeDependencyHandling", "buck", "prelude_rule")
 load(":cxx_common.bzl", "cxx_common")
 load(":native_common.bzl", "native_common")
@@ -43,6 +44,13 @@ def _rust_common_attributes(is_binary: bool):
         | cxx_common.default_deps_arg()
     )
 
+def _rust_analyzer_target_kind(kind: str) -> dict[str, Attr]:
+    return {
+        "_rust_analyzer_target_kind": attrs.default_only(
+            attrs.enum(RustAnalyzerTargetKind.values(), default = kind),
+        ),
+    }
+
 def _rust_binary_attrs_group(prefix: str) -> dict[str, Attr]:
     attrs = rust_common.deps_arg(is_binary = True) | rust_common.named_deps_arg(is_binary = True) | rust_common.linker_flags_arg() | native_common.link_style()
     return {prefix + name: v for name, v in attrs.items()}
@@ -52,9 +60,20 @@ _RUST_EXECUTABLE_ATTRIBUTES = {
     # Unlike cxx which supports pre-defined link groups, we only support
     # auto_link_groups in rust
     "auto_link_groups": attrs.bool(default = True),
-    # TODO: enable distributed thinlto
+    # BOLT post-link optimization only applies when deferred_link_enabled is True.
+    "bolt_flags": attrs.list(attrs.arg(), default = []),
+    "bolt_profile": attrs.option(attrs.source(), default = None),
     "enable_distributed_thinlto": attrs.bool(default = False),
     "extra_dwp_flags": attrs.list(attrs.string(), default = []),
+    # Opt the final executable output into content-based (immutable) buck-out
+    # pathing (default off). A bare static binary becomes a content-based exe.
+    # A binary with adjacent files (`resources` and/or a shared-lib tree)
+    # ships as a content-addressed `assembled_dir` dist bundle instead (exe
+    # copied in, adjacent files symlinked; `[dist]` subtarget). Bundle
+    # immutability is per-entry: copied entries always; symlinked entries only
+    # when their target is itself content-based -- config-based resources and
+    # the (deliberately config-based) shlib tree remain rewrite-in-place.
+    "has_content_based_path": attrs.bool(default = False),
     # Required by the rules but not supported, since Rust is auto-link groups only
     "link_group": attrs.default_only(attrs.option(attrs.string(), default = None)),
     "link_group_map": LINK_GROUP_MAP_ATTR,
@@ -139,6 +158,7 @@ rust_binary = prelude_rule(
         | rust_common.env_arg()
         | _rust_binary_attrs_group(prefix = "")
         | _rust_common_attributes(is_binary = True)
+        | _rust_analyzer_target_kind("bin")
         | _RUST_EXECUTABLE_ATTRIBUTES
         | rust_common.cxx_toolchain_arg()
         | rust_common.rust_toolchain_arg()
@@ -207,6 +227,7 @@ rust_library = prelude_rule(
         | native_common.link_style()
         | native_common.link_whole(link_whole_type = attrs.option(attrs.bool(), default = None))
         | _rust_common_attributes(is_binary = False)
+        | _rust_analyzer_target_kind("lib")
         | {
             "crate_dynamic": attrs.option(attrs.dep(), default = None),
             "doc_env": rust_common.env_arg()["env"],
@@ -216,6 +237,19 @@ rust_library = prelude_rule(
             "supports_python_dlopen": attrs.option(attrs.bool(), default = None),
         }
         | _rust_binary_attrs_group(prefix = "doc_")
+        | {
+            "doc_remote_execution": attrs.option(
+                re_test_common.opts_for_tests_arg(),
+                default = None,
+                doc = """
+                Remote execution properties for this library's rustdoc test. Only a
+                property dict is accepted, not the name of a profile on the remote test
+                execution toolchain, so that `rust_library` does not have to depend on
+                that toolchain. When unset, the rustdoc test carries no executor and
+                runs wherever the test framework would otherwise place it.
+            """,
+            ),
+        }
         | rust_common.cxx_toolchain_arg()
         | rust_common.rust_toolchain_arg()
         | rust_common.workspaces_arg()
@@ -283,6 +317,7 @@ rust_test = prelude_rule(
         | rust_common.build_and_run_env_arg()
         | _rust_binary_attrs_group(prefix = "")
         | _rust_common_attributes(is_binary = True)
+        | _rust_analyzer_target_kind("test")
         | _RUST_EXECUTABLE_ATTRIBUTES
         | {
             "framework": attrs.bool(

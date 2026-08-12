@@ -120,7 +120,6 @@ def cpp_library(
     visibility = ["PUBLIC"],
     auto_headers = None,
     modular_headers = None,
-    arch_compiler_flags = None,
     labels = None,
     linker_flags = None,
     private_linker_flags = None,
@@ -138,7 +137,7 @@ def cpp_library(
     if oss_depends_on_folly and header_base_path.startswith("folly"):
         header_base_path = header_base_path.replace("folly/", "", 1)
 
-    _unused = (undefined_symbols, modular_headers, arch_compiler_flags, labels, propagated_pp_flags, feature, preferred_linkage)  # @unused
+    _unused = (undefined_symbols, modular_headers, labels, propagated_pp_flags, feature, preferred_linkage)  # @unused
     if headers == None:
         headers = []
     if labels != None and "oss_dependency" in labels:
@@ -216,12 +215,11 @@ def cpp_binary(
     visibility = ["PUBLIC"],
     dlopen_enabled = None,
     compiler_specific_flags = None,
-    os_linker_flags = None,
     allocator = None,
     modules = None,
     **kwargs,
 ):
-    _unused = (dlopen_enabled, compiler_specific_flags, os_linker_flags, allocator, modules)  # @unused
+    _unused = (dlopen_enabled, compiler_specific_flags, allocator, modules)  # @unused
     prelude.cxx_binary(name = name, deps = _fix_deps(deps + external_deps_to_targets(external_deps)), visibility = visibility, **kwargs)
 
 def java_binary(name, jar_style = None, runtime = None, *args, **kwargs):

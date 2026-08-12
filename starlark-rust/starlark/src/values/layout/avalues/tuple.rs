@@ -22,7 +22,6 @@ use allocative::Key;
 use allocative::Visitor;
 use pagable::PagableDeserialize;
 use pagable::PagableSerialize;
-use starlark_syntax::slice_vec_ext::SliceExt;
 
 use crate::collections::maybe_uninit_backport::maybe_uninit_write_slice;
 use crate::pagable::vtable_register::register_special_avalue_frozen;
@@ -48,7 +47,7 @@ fn tuple_avalue<'v>(len: usize) -> AValueImpl<'v, AValueTuple> {
 }
 
 fn frozen_tuple_avalue<'fv>(len: usize) -> AValueImpl<'fv, AValueFrozenTuple> {
-    AValueImpl::<AValueFrozenTuple>::new(unsafe { FrozenTuple::new(len) })
+    AValueImpl::<AValueFrozenTuple>::new(unsafe { Tuple::new(len) })
 }
 
 struct AValueTuple;
@@ -97,12 +96,12 @@ impl<'v> AValue<'v> for AValueTuple {
                 ForwardPtr::new_frozen(fv),
             );
 
-            // TODO: this allocation is unnecessary
-            let frozen_values = content.try_map(|v| freezer.freeze(*v))?;
-            r.fill(FrozenTuple::new(content.len()));
-
             let extra = &mut *extra;
-            maybe_uninit_write_slice(extra, &frozen_values);
+            assert_eq!(extra.len(), content.len());
+            for (elem_place, elem) in extra.iter_mut().zip(content) {
+                elem_place.write(freezer.freeze(*elem)?);
+            }
+            r.fill(FrozenTuple::new(content.len()));
 
             Ok(fv)
         }
@@ -143,11 +142,11 @@ impl<'v> AValue<'v> for AValueTuple {
 struct AValueFrozenTuple;
 
 impl<'v> AValue<'v> for AValueFrozenTuple {
-    type StarlarkValue = FrozenTuple;
+    type StarlarkValue = Tuple<'v>;
 
     type ExtraElem = FrozenValue;
 
-    fn extra_len(value: &FrozenTuple) -> usize {
+    fn extra_len(value: &Tuple<'v>) -> usize {
         value.len()
     }
 
@@ -187,7 +186,7 @@ impl<'v> AValue<'v> for AValueFrozenTuple {
         let content = value.content();
         content.len().pagable_serialize(ctx.pagable())?;
         for elem in content {
-            ctx.serialize_frozen_value(*elem)?;
+            crate::pagable::StarlarkSerialize::starlark_serialize(elem, ctx)?;
         }
         Ok(())
     }
@@ -198,7 +197,7 @@ impl<'v> AValue<'v> for AValueFrozenTuple {
     ) -> crate::Result<()> {
         let len = usize::pagable_deserialize(ctx.pagable())?;
         unsafe {
-            ptr::write(&mut (*me).payload, FrozenTuple::new(len));
+            ptr::write(&mut (*me).payload, Tuple::new(len));
             let extra_offset = AValueRepr::<Self::StarlarkValue>::offset_of_payload()
                 + <Self as AValue>::offset_of_extra();
             let extra_ptr = (me as *mut u8).add(extra_offset) as *mut MaybeUninit<FrozenValue>;

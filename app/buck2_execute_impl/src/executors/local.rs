@@ -70,6 +70,7 @@ use buck2_execute::knobs::ExecutorGlobalKnobs;
 use buck2_execute::materialize::materializer::CopiedArtifact;
 use buck2_execute::materialize::materializer::DeclareArtifactPayload;
 use buck2_execute::materialize::materializer::MaterializationError;
+use buck2_execute::materialize::materializer::MaterializationPurpose;
 use buck2_execute::materialize::materializer::Materializer;
 use buck2_execute_local::CommandResult;
 use buck2_execute_local::DefaultKillProcess;
@@ -100,7 +101,6 @@ use futures::future;
 use futures::future::Either;
 use futures::future::FutureExt;
 use futures::future::Shared;
-use futures::future::join_all;
 use futures::stream::StreamExt;
 use gazebo::prelude::*;
 use host_sharing::HostSharingBroker;
@@ -299,8 +299,8 @@ impl LocalExecutor {
                     create_output_dirs(
                         &self.artifact_fs,
                         request,
-                        self.materializer.dupe(),
-                        self.blocking_executor.dupe(),
+                        self.materializer.as_ref(),
+                        &*self.blocking_executor,
                         cancellations,
                     ),
                     prep_scratch_path(scratch_path, &self.artifact_fs),
@@ -937,8 +937,9 @@ impl LocalExecutor {
                         // wrote outputs at "placeholder" paths, not the final content-based paths (because
                         // they are not know until the output is produced), and (b) other actions can declare
                         // outputs at the same content-based path. Note that only remote actions can do that
-                        // concurrently (with this local action), as we prevent any local actions with any of
-                        // the same placeholder output paths from running at the same time.
+                        // concurrently (with this local action), as we prevent any local run actions with any of
+                        // the same placeholder output paths from running at the same time (see
+                        // NamedSemaphores and HostSharingRequirements).
                         // We do the following:
                         // (1) We create a symlink from the configuration-based path to the content-based path
                         //     (for any users/tooling that only has access to the configuration-based path)
@@ -1028,7 +1029,10 @@ impl LocalExecutor {
         .await?;
 
         self.materializer
-            .ensure_materialized(configuration_paths)
+            .ensure_materialized(
+                configuration_paths,
+                MaterializationPurpose::IntermediateOnly,
+            )
             .await?;
 
         Ok((
@@ -1221,7 +1225,7 @@ impl LocalExecutor {
 
             // The materialization we do for incremental action outputs is best-effort. The copy
             // will fail if the materialization failed, and that's okay.
-            join_all(copy_futs).await;
+            buck2_util::future::join_all(copy_futs).await;
         }
 
         Ok(())
@@ -1251,6 +1255,14 @@ impl PreparedCommandExecutor for LocalExecutor {
             prepared_action,
             digest_config,
         } = command;
+
+        // `All` makes the forkserver skip the network namespace; see
+        // `CommandExecutionRequest::disable_local_network_isolation`.
+        let network_access = if request.disable_local_network_isolation() {
+            Some(NetworkAccess::All)
+        } else {
+            prepared_action.network_access
+        };
 
         manager.start_waiting_category(WaitingCategory::LocalQueued);
         let local_resource_holders = executor_stage_async(
@@ -1297,7 +1309,7 @@ impl PreparedCommandExecutor for LocalExecutor {
                     cancellations,
                     *digest_config,
                     &local_resource_holders,
-                    prepared_action.network_access,
+                    network_access,
                 )
             })
             .await
@@ -1554,7 +1566,9 @@ async fn materialize_build_outputs(
         }
     }
 
-    materializer.ensure_materialized(paths.clone()).await?;
+    materializer
+        .ensure_materialized(paths.clone(), MaterializationPurpose::IntermediateOnly)
+        .await?;
 
     Ok(paths)
 }
@@ -1565,8 +1579,8 @@ async fn materialize_build_outputs(
 pub async fn create_output_dirs(
     artifact_fs: &ArtifactFs,
     request: &CommandExecutionRequest,
-    materializer: Arc<dyn Materializer>,
-    blocking_executor: Arc<dyn BlockingExecutor>,
+    materializer: &dyn Materializer,
+    blocking_executor: &dyn BlockingExecutor,
     cancellations: &CancellationContext,
 ) -> buck2_error::Result<()> {
     let outputs: Vec<_> = request
@@ -1775,11 +1789,11 @@ mod tests {
     use buck2_core::fs::project::ProjectRoot;
     use buck2_core::fs::project::ProjectRootTemp;
     use buck2_execute::execute::blocking::testing::DummyBlockingExecutor;
-    use buck2_execute::materialize::nodisk::NoDiskMaterializer;
     use buck2_hash::StdBuckHashMap;
     use host_sharing::HostSharingStrategy;
 
     use super::*;
+    use crate::materializers::deferred::NoDiskDeferredMaterializer;
 
     fn artifact_fs(project_fs: ProjectRoot) -> ArtifactFs {
         ArtifactFs::new(
@@ -1799,7 +1813,9 @@ mod tests {
 
         let executor = LocalExecutor::new(
             artifact_fs,
-            Arc::new(NoDiskMaterializer),
+            Arc::new(NoDiskDeferredMaterializer::testing_new_no_disk(
+                project_fs.dupe(),
+            )?),
             Arc::new(IncrementalDbState::db_disabled()),
             Arc::new(DummyBlockingExecutor {
                 fs: project_fs.dupe(),

@@ -133,6 +133,13 @@ impl<'v> AllocValue<'v> for Dict<'v> {
     }
 }
 
+impl<'v> Heap<'v> {
+    /// Allocate a dictionary with pre-allocated and pre-hashed keys and values.
+    pub fn alloc_dict(self, content: SmallMap<Value<'v>, Value<'v>>) -> Value<'v> {
+        self.alloc(Dict::new(content))
+    }
+}
+
 impl StarlarkTypeRepr for FrozenDictData {
     type Canonical = <DictType<FrozenValue, FrozenValue> as StarlarkTypeRepr>::Canonical;
 
@@ -141,7 +148,7 @@ impl StarlarkTypeRepr for FrozenDictData {
     }
 }
 
-impl AllocFrozenValue for FrozenDictData {
+impl<'fv> AllocFrozenValue<'fv> for FrozenDictData {
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         if self.content.is_empty() {
             VALUE_EMPTY_FROZEN_DICT.to_frozen_value()

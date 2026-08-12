@@ -52,8 +52,8 @@ internment.workspace = true
 inventory.workspace = true
 itertools.workspace = true
 linkme.workspace = true
+mini_vec.workspace = true
 multimap.workspace = true
-once_cell.workspace = true
 pagable.workspace = true
 ref-cast.workspace = true
 regex.workspace = true
@@ -65,13 +65,9 @@ smallvec.workspace = true
 sorted_vector_map.workspace = true
 starlark.workspace = true
 starlark_map.workspace = true
-static_assertions.workspace = true
 strong_hash.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-buck2_certs.workspace = true
 
 [lints]
 workspace = true

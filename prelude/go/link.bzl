@@ -145,11 +145,23 @@ def link(
 
     cmd.add(go_toolchain.go_wrapper)
     cmd.add(["--go", go_toolchain.linker])
+
+    # Give internally-linked Go binaries a content-hash NT_GNU_BUILD_ID note.
+    # Buck has no artifact content at analysis time, so reserve a zeroed note here
+    # (-B 0x00..00) that the wrapper fills with sha256 post-link -- rewriting only a
+    # still-all-zero descriptor, so an external link keeps its C++-set build-id.
+    elf_go_os = ["linux", "android", "freebsd", "netbsd", "openbsd", "dragonfly", "illumos", "solaris"]
+    emit_build_id = build_mode in [GoBuildMode("exe"), GoBuildMode("pie")] and link_mode in [None, "internal"] and go_toolchain.env_go_os in elf_go_os
+    if emit_build_id:
+        cmd.add("--gnu-build-id")  # wrapper flag, must precede "--"
+
     cmd.add("--")
     cmd.add(go_toolchain.linker_flags)
 
     cmd.add("-buildmode=" + _build_mode_param(build_mode))
     cmd.add("-buildid=")  # Setting to a static buildid helps make the binary reproducible.
+    if emit_build_id:
+        cmd.add("-B", "0x" + "00" * 20)  # reserve a 20-byte NT_GNU_BUILD_ID slot in PT_NOTE
 
     if go_toolchain.race:
         cmd.add("-race")
@@ -200,6 +212,11 @@ def link(
             [ext_links],
         )
         ext_link_args = cmd_args(hidden = ext_link_args_output.hidden, quote = "shell")
+
+        # Toolchain linker_flags must precede the objects, not go via cmd/link's -extldflags (which
+        # it emits last): otherwise -Wl,-Bsymbolic-functions overrides cmd/link's own -Wl,-Bsymbolic
+        # for c-shared, leaving runtime cgo data symbols preemptible and breaking the link.
+        ext_link_args.add(cxx_toolchain.linker_info.linker_flags)
         ext_link_args.add(executable_args.extra_link_args)
         ext_link_args.add(external_linker_flags)
         ext_link_args.add(ext_link_args_output.link_args)
@@ -235,10 +252,11 @@ def link(
             has_content_based_path = True,
         )
         cmd.add("-extld", linker_wrapper, cmd_args(hidden = [cxx_link_cmd, ext_link_args, ext_link_args_output.hidden]))
+        # Kept here (not in the argfile) because these carry libraries (-lc, -ldl, ...) that must
+        # follow the objects, and cmd/link emits -extldflags last.
         cmd.add(
             "-extldflags",
             cmd_args(
-                cxx_toolchain.linker_info.linker_flags,
                 go_toolchain.external_linker_flags,
                 delimiter = " ",
                 quote = "shell",
@@ -259,6 +277,7 @@ def link(
             shared = use_shared_code,
             identifier = identifier_prefix,
             out = output.as_output(),
+            allow_cache_upload = go_toolchain.allow_cache_upload,
         )
     )
 
@@ -280,6 +299,7 @@ def _link_impl(
     shared: bool,
     identifier: str,
     out: OutputArtifact,
+    allow_cache_upload: bool | None,
 ) -> list[Provider]:
     go_stdlib_value = go_stdlib_value.providers[GoStdlibDynamicValue]
 
@@ -293,7 +313,7 @@ def _link_impl(
         ["-o", out],
         main_pkg_o,
     ]
-    actions.run(cmd, env = env_vars, category = "go_link", identifier = identifier)
+    actions.run(cmd, env = env_vars, category = "go_link", identifier = identifier, allow_cache_upload = allow_cache_upload)
     return []
 
 _link = dynamic_actions(
@@ -308,5 +328,6 @@ _link = dynamic_actions(
         "shared": dynattrs.value(bool),
         "identifier": dynattrs.value(str),
         "out": dynattrs.output(),
+        "allow_cache_upload": dynattrs.value(bool | None),
     },
 )

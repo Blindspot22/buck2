@@ -21,6 +21,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.util.Optional
 import java.util.UUID
 import java.util.regex.Pattern
@@ -35,6 +36,8 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
       verifyTempWritable: Boolean,
       stagedInstallMode: Boolean,
       userId: String?,
+      allowFastDeploy: Boolean,
+      packageName: String,
   ): Boolean {
     val elapsed = measureTimeMillis {
       if (verifyTempWritable) {
@@ -49,32 +52,151 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
         }
       }
 
-      val installArgs = buildString {
-        append("-r -d")
-        // --fastdeploy has a bug, it hides INSTALL_FAILED_UPDATE_INCOMPATIBLE error when there is a
-        // mismatch between the apk on the device and the one being installed. The operation will
-        // appear as successful without the apk being updated.
-        // https://issuetracker.google.com/231040652
-        // if (shouldUseFastDeploy()) append(" --fastdeploy")
-
-        if (stagedInstallMode) append(" --staged")
-        if (userId != null) append(" --user $userId")
+      var installCommand: String
+      // Fast path: use --fastdeploy on SDK-supported devices.
+      // On any failure we fall back to a plain install.
+      if (allowFastDeploy && !stagedInstallMode && sdkSupportsFastDeploy()) {
+        installCommand = buildInstallCommand(apk, true, stagedInstallMode, userId)
+        try {
+          executeAdbCommandCatching(
+              installCommand,
+              "Failed to install ${apk.name} with --fastdeploy.",
+          )
+          verifyInstalledApkMatches(apk, packageName)
+          return@measureTimeMillis
+        } catch (e: AndroidInstallException) {
+          LOG.warn(
+              "The fast install failed or left the on-device apk missing or stale: ${e.message}.\n" +
+                  "Reinstalling ${apk.name} without --fastdeploy to recover.",
+          )
+        }
       }
 
-      executeAdbCommandCatching(
-          "install $installArgs ${apk.absolutePath}",
-          "Failed to install ${apk.name}.",
-      )
+      installCommand = buildInstallCommand(apk, false, stagedInstallMode, userId)
+      try {
+        executeAdbCommand(installCommand)
+      } catch (e: AdbCommandFailedException) {
+        val conflictingPackage = extractSignatureMismatchPackage(e.message)
+        if (conflictingPackage == null) {
+          throw AndroidInstallException.adbCommandFailedException(
+              "Failed to install ${apk.name}.",
+              e.message,
+          )
+        }
+        LOG.warn(
+            "Install of ${apk.name} failed because $conflictingPackage is already installed with a" +
+                " mismatched signature; uninstalling it and retrying the install.",
+        )
+        executeAdbCommandCatching(
+            "uninstall $conflictingPackage",
+            "Failed to uninstall $conflictingPackage while recovering from a signature mismatch.",
+        )
+        executeAdbCommandCatching(
+            installCommand,
+            "Failed to install ${apk.name} after uninstalling $conflictingPackage.",
+        )
+      }
+
+      if (!stagedInstallMode) {
+        verifyInstalledApkMatches(apk, packageName)
+      }
     }
     val userSuffix = if (userId != null) " for user $userId" else ""
     val kbps = (apk.length() / 1024.0) / (elapsed / 1000.0)
     LOG.info(
-        "Installed ${apk.name}$userSuffix (${apk.length()} bytes) in ${elapsed/1000.0} s ($kbps kB/s)"
+        "Installed ${apk.name}$userSuffix (${apk.length()} bytes) in ${elapsed/1000.0} s ($kbps kB/s)",
     )
     return true
   }
 
-  private fun shouldUseFastDeploy(): Boolean {
+  /**
+   * Verifies that the apk installed for [packageName] matches [apk] byte-for-byte (adb stores it
+   * verbatim). Always throws [AndroidInstallException] on failure: tagged
+   * [AndroidInstallErrorTag.INSTALLED_APK_MISMATCH] if the package is absent or the on-device apk
+   * differs, and tagged [AndroidInstallErrorTag.ADB_COMMAND_FAILED] if the on-device apk cannot be
+   * read back.
+   */
+  private fun verifyInstalledApkMatches(apk: File, packageName: String) {
+    val installedApk =
+        getPackageInfo(packageName).orElseThrow {
+          AndroidInstallException.installedApkMismatch(
+              "Install of ${apk.name} could not be verified: $packageName is not present on the" +
+                  " device after installing.",
+          )
+        }
+    val installedHash =
+        try {
+          getContentHash(installedApk.apkPath)
+        } catch (e: AdbCommandFailedException) {
+          throw AndroidInstallException.adbCommandFailedException(
+              "Could not read the on-device apk for $packageName to verify the install of" +
+                  " ${apk.name}.",
+              e.message,
+          )
+        }
+    val localApkHash = sha256Hex(apk)
+    if (!installedHash.equals(localApkHash, ignoreCase = true)) {
+      throw AndroidInstallException.installedApkMismatch(
+          "Install of ${apk.name} could not be verified: the on-device apk for $packageName does" +
+              " not match the local apk after installing.",
+      )
+    }
+  }
+
+  @Throws(Exception::class)
+  override fun getContentHash(path: String): String {
+    val output = executeAdbShellCommand("sha256sum $path").trim()
+    val hash = output.split(Regex("\\s+")).first()
+    // `sha256sum` can report an error on stdout (e.g. a missing file) while adb still exits 0, so
+    // the first token is not always a digest. Treat any non-hex output as a read failure so the
+    // caller surfaces ADB_COMMAND_FAILED rather than a misleading apk mismatch.
+    if (!hash.matches(Regex("[0-9a-fA-F]{64}"))) {
+      throw AdbCommandFailedException("sha256sum returned unexpected output for $path: \"$output\"")
+    }
+    return hash
+  }
+
+  private fun sha256Hex(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+      val buffer = ByteArray(8192)
+      var read = input.read(buffer)
+      while (read >= 0) {
+        digest.update(buffer, 0, read)
+        read = input.read(buffer)
+      }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+  }
+
+  /**
+   * Returns the package name from an adb `INSTALL_FAILED_UPDATE_INCOMPATIBLE` failure (signature
+   * mismatch), or null if the failure is not a signature mismatch. The package name is parsed from
+   * adb's message, e.g. "Existing package com.meta.ar.helixserver signatures do not match ...".
+   */
+  private fun extractSignatureMismatchPackage(message: String?): String? {
+    if (message == null || !message.contains(INSTALL_FAILED_UPDATE_INCOMPATIBLE)) {
+      return null
+    }
+    return SIGNATURE_MISMATCH_PACKAGE_PATTERN.find(message)?.groupValues?.getOrNull(1)?.takeIf {
+      PACKAGE_NAME_PATTERN.matches(it)
+    }
+  }
+
+  private fun buildInstallCommand(
+      apk: File,
+      fastDeploy: Boolean,
+      stagedInstallMode: Boolean,
+      userId: String?,
+  ): String = buildString {
+    append("install -r -d")
+    if (fastDeploy) append(" --fastdeploy")
+    if (stagedInstallMode) append(" --staged")
+    if (userId != null) append(" --user $userId")
+    append(" ${apk.absolutePath}")
+  }
+
+  private fun sdkSupportsFastDeploy(): Boolean {
     val sdkVersion =
         try {
           getProperty("ro.build.version.sdk").toInt()
@@ -119,7 +241,7 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
       } catch (e: AdbCommandFailedException) {
         if ((e.message ?: "").contains("INSTALL_FAILED_VERIFICATION_FAILURE: Staged session ")) {
           throw AndroidInstallException.rebootRequired(
-              "Device is already staged; You need to run 'adb reboot' on your device."
+              "Device is already staged; You need to run 'adb reboot' on your device.",
           )
         }
 
@@ -127,7 +249,7 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
         // retry without the --force-non-staged flag. Then reboot automatically.
         if (
             (e.message ?: "").contains(
-                "INSTALL_FAILED_INTERNAL_ERROR: APEX installation failed: Set of native libs required"
+                "INSTALL_FAILED_INTERNAL_ERROR: APEX installation failed: Set of native libs required",
             )
         ) {
           // try install again without --force-non-staged
@@ -139,7 +261,7 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
               "Installed ${apex.name} on device; however --force-non-staged doesn't work when the" +
                   " native lib dependencies of an apex have changed. You need to run 'adb" +
                   " reboot' on your device to complete the install. See also:" +
-                  " https://www.internalfb.com/intern/wiki/RL/RL_Release_and_Reliability/Build_and_Release_Infra/APEX_in_fbsource/Pit_falls/"
+                  " https://www.internalfb.com/intern/wiki/RL/RL_Release_and_Reliability/Build_and_Release_Infra/APEX_in_fbsource/Pit_falls/",
           )
         }
 
@@ -148,7 +270,7 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
         if ((e.message ?: "").contains("INSTALL_FAILED_PACKAGE_CHANGED")) {
           LOG.info(
               "INSTALL_FAILED_PACKAGE_CHANGED for ${apex.name}, " +
-                  "attempting fallback install via remount and push"
+                  "attempting fallback install via remount and push",
           )
           try {
             // Remount so that we can write to /system_ext/apex
@@ -194,7 +316,7 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
             "--force-non-staged is not available on device" +
                 "(is the device running an older build?); " +
                 "${apex.name} was installed successfully but will not be active until " +
-                "you run 'adb reboot' on your device"
+                "you run 'adb reboot' on your device",
         )
       }
 
@@ -211,7 +333,7 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
           }
         } catch (e: AdbCommandFailedException) {
           throw AndroidInstallException.rebootRequired(
-              "Failed to stop+start shell; ${apex.name} was installed successfully but device will be in an unknown state until you run 'adb reboot'"
+              "Failed to stop+start shell; ${apex.name} was installed successfully but device will be in an unknown state until you run 'adb reboot'",
           )
         }
       }
@@ -299,13 +421,23 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
 
   @Throws(Exception::class)
   override fun getPackageInfo(packageName: String): Optional<PackageInfo> {
-    try {
-      val output: String = executeAdbShellCommand("pm path $packageName")
-      return Optional.of(PackageInfo(output.removePrefix("package:"), "", ""))
-    } catch (e: AdbCommandFailedException) {
-      LOG.warn("Failed to get package info for $packageName: ${e.message}")
-      return Optional.empty()
-    }
+    val output: String =
+        try {
+          executeAdbShellCommand("pm path $packageName")
+        } catch (e: AdbCommandFailedException) {
+          LOG.warn("Failed to get package info for $packageName: ${e.message}")
+          return Optional.empty()
+        }
+    // `pm path` prints one `package:<path>` line per installed apk (base plus any config splits),
+    // and prints nothing for a package that is not installed. Use the base apk (first line); treat
+    // output with no `package:` line as "not installed".
+    val apkPath =
+        output
+            .lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("package:") }
+            ?.removePrefix("package:") ?: return Optional.empty()
+    return Optional.of(PackageInfo(apkPath, "", ""))
   }
 
   @Throws(Exception::class)
@@ -314,13 +446,12 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
   }
 
   @Throws(Exception::class)
-  override fun getSignature(packagePath: String): String {
+  override fun getApkManifestDigest(packagePath: String): String {
     val entry: String =
         executeAdbShellCommand("unzip -l $packagePath | grep -E -o 'META-INF/[A-Z]+\\.SF'").trim()
-    val result: String =
-        executeAdbShellCommand(
-            "unzip -p $packagePath $entry | grep -E 'SHA1-Digest-Manifest:|SHA-256-Digest-Manifest:'"
-        )
+    val result: String = executeAdbShellCommand(
+        "unzip -p $packagePath $entry | grep -E 'SHA1-Digest-Manifest:|SHA-256-Digest-Manifest:'",
+    )
     val (_, digest) = result.split(":", limit = 2)
     return digest.trim()
   }
@@ -350,7 +481,7 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
       val tempFile = File.createTempFile("files_to_delete", ".txt")
       try {
         tempFile.writeText(
-            filesToDelete.joinToString("\n") { Paths.get(dirPath).resolve(it).toString() }
+            filesToDelete.joinToString("\n") { Paths.get(dirPath).resolve(it).toString() },
         )
         executeAdbCommand("push -z brotli ${tempFile.absolutePath} /data/local/tmp")
         executeAdbShellCommand("cat /data/local/tmp/${tempFile.name} | xargs rm -f")
@@ -612,5 +743,15 @@ class AndroidDeviceImpl(val serial: String, val adbUtils: AdbUtils) : AndroidDev
     // --fastdeploy is only supported on Android 10+ (API 29+)
     // https://developer.android.com/tools/releases/platform-tools#2905_october_2019
     private const val MIN_SDK_VERSION_FOR_FASTDEPLOY = 29
+
+    private const val INSTALL_FAILED_UPDATE_INCOMPATIBLE = "INSTALL_FAILED_UPDATE_INCOMPATIBLE"
+
+    // Matches the package name in adb's signature-mismatch message, which is phrased as either
+    // "Existing package <pkg> signatures do not match ..." or "Package <pkg> signatures do not
+    // match ..." depending on the Android version.
+    private val SIGNATURE_MISMATCH_PACKAGE_PATTERN =
+        Regex("package (\\S+) signatures do not match", RegexOption.IGNORE_CASE)
+
+    private val PACKAGE_NAME_PATTERN = Regex("[\\w.]+")
   }
 }

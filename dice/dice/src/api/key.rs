@@ -38,13 +38,13 @@ use crate::introspection::graph::short_type_name;
 /// The Key will need to be cloned. This occurs whenever the key is recomputed
 /// and needs to be stored. During normal lookups, only a reference is needed.
 ///
-/// The result also needs to be cloned whenever it is requested from DICE.
-/// Cloning therefore should be cheap.
+/// Values are only ever handed out by reference, so they need not be cloneable at all. Callers
+/// that want ownership of a value are responsible for cloning it themselves.
 #[async_trait]
 pub trait Key:
     Allocative + Debug + Display + Clone + Eq + Hash + Send + Sync + Pagable + PagableTagged + 'static
 {
-    type Value: Allocative + Dupe + Send + Sync + 'static;
+    type Value: Allocative + Send + Sync + 'static;
 
     /// Provides a short informative name for this key type.
     fn key_type_name() -> &'static str {

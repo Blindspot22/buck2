@@ -18,11 +18,13 @@ use crate::PagableDeserializer;
 use crate::PagableDeserializerRecipe;
 use crate::PagableDeserializerRecipeImpl;
 use crate::PagableSerializer;
+use crate::PageInScope;
 use crate::arc_erase::ArcEraseDyn;
 use crate::storage::data::DataKey;
+use crate::storage::data::PagableData;
 use crate::storage::handle::PagableStorageHandle;
 use crate::traits::PagableCursor;
-use crate::traits::SessionContext;
+use crate::traits::StorageContext;
 
 /// Concrete implementation of [`PagableSerializer`] backed by postcard.
 ///
@@ -31,7 +33,7 @@ use crate::traits::SessionContext;
 pub struct PagableSerializerImpl {
     pub(crate) inner: postcard::Serializer<crate::flavors::PagableVecFlavor>,
     arcs: Vec<Box<dyn ArcEraseDyn>>,
-    session_context: SessionContext,
+    storage_context: StorageContext,
 }
 
 /// Result of serialization containing the raw bytes and nested arc references.
@@ -51,7 +53,7 @@ impl PagableSerializerImpl {
                 output: crate::flavors::PagableVecFlavor::new(),
             },
             arcs: Vec::new(),
-            session_context: SessionContext::new(),
+            storage_context: StorageContext::new(),
         }
     }
 
@@ -81,8 +83,8 @@ impl PagableSerializer for PagableSerializerImpl {
         }
     }
 
-    fn session_context(&mut self) -> &SessionContext {
-        &self.session_context
+    fn storage_context(&self) -> &StorageContext {
+        &self.storage_context
     }
 }
 
@@ -100,19 +102,25 @@ pub struct PagableDeserializerImpl<'de, 's> {
     inner: postcard::Deserializer<'de, crate::flavors::PagableSlice<'de>>,
     arcs: &'de [DataKey],
     storage: &'s PagableStorageHandle,
+    page_in_scope: PageInScope,
 }
 
 impl<'de, 's> PagableDeserializerImpl<'de, 's> {
-    pub fn new(data: &'de [u8], arcs: &'de [DataKey], storage: &'s PagableStorageHandle) -> Self {
+    pub(crate) fn new(
+        data: &'de PagableData,
+        storage: &'s PagableStorageHandle,
+        page_in_scope: PageInScope,
+    ) -> Self {
         let pos = crate::flavors::SharedPosition::new();
         Self {
             pos: pos.clone(),
             inner: postcard::Deserializer::from_flavor(crate::flavors::PagableSlice::new(
-                data, pos,
+                &data.data, pos,
             )),
-            arcs,
+            arcs: &data.arcs,
             arc_index: 0,
             storage,
+            page_in_scope,
         }
     }
 }
@@ -137,17 +145,22 @@ impl<'de, 's> PagableDeserializer<'de> for PagableDeserializerImpl<'de, 's> {
         self.arc_index += 1;
 
         let storage = self.storage.backing_storage();
+        if let Some(arc) = storage.arc_cache().get(&type_id, key) {
+            return Ok(arc);
+        }
         let cell = storage.arc_cache().get_or_create_cell(type_id, *key);
 
         // First thread to reach here deserializes; others block.
         let arc = cell.get_or_try_init(|| -> crate::Result<Box<dyn ArcEraseDyn>> {
             let data = storage.fetch_data_blocking(key)?;
-            let mut deserializer =
-                PagableDeserializerImpl::new(&data.data, &data.arcs, self.storage);
+            let mut deserializer = self.page_in_scope.deserializer(&data, self.storage);
             // Build a recipe for deferred deserialization.
-            let recipe: Arc<dyn PagableDeserializerRecipe> =
-                Arc::new(PagableDeserializerRecipeImpl::new(data.dupe()));
-            deserialize_fn(&mut deserializer, recipe)
+            let recipe: Arc<dyn PagableDeserializerRecipe> = Arc::new(
+                PagableDeserializerRecipeImpl::new(data.dupe(), self.page_in_scope.dupe()),
+            );
+            let arc = deserialize_fn(&mut deserializer, recipe)?;
+            storage.associate_arc_with_data_key(&*arc, *key);
+            Ok(arc)
         })?;
         Ok(arc.clone_dyn())
     }
@@ -165,14 +178,18 @@ impl<'de, 's> PagableDeserializer<'de> for PagableDeserializerImpl<'de, 's> {
     }
 
     fn storage(&self) -> PagableStorageHandle {
-        self.storage.clone()
+        self.storage.dupe()
+    }
+
+    fn page_in_scope(&self) -> &PageInScope {
+        &self.page_in_scope
     }
 
     fn as_dyn(&mut self) -> &mut dyn PagableDeserializer<'de> {
         self
     }
 
-    fn session_context(&self) -> &SessionContext {
-        self.storage.backing_storage().session_context()
+    fn storage_context(&self) -> &StorageContext {
+        self.storage.backing_storage().storage_context()
     }
 }

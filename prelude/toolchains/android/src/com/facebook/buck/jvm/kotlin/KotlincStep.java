@@ -70,8 +70,10 @@ public class KotlincStep implements IsolatedStep {
   private final RelPath configuredBuckOut;
   private final ImmutableMap<String, AbsPath> resolvedKosabiPluginOptionPath;
   private final @Nullable String kosabiEarlyTerminationMessagePrefix;
-  private final boolean kosabiShouldEnableMixedCompilation;
-  private final ImmutableList<AbsPath> sourceOnlyAbiClasspath;
+  // For SO-ABI builds: reduced classpath (rfsoa deps only), used as kotlinc -classpath.
+  // For library builds: full dep set, used only by KosabiStubgen/KSP — NOT for applicability.
+  private final ImmutableList<AbsPath> compilationClasspath;
+  // Reduced SO-ABI classpath for the applicability plugin (rfsoa + source_only_abi_deps only).
   private final ImmutableList<AbsPath> applicabilityClasspath;
   private final boolean verifySourceOnlyAbiConstraints;
   private ImmutableList<IsolatedStep> postKotlinCompilationFailureSteps;
@@ -99,8 +101,7 @@ public class KotlincStep implements IsolatedStep {
       RelPath configuredBuckOut,
       ImmutableMap<String, AbsPath> resolvedKosabiPluginOptionPath,
       @Nullable String kosabiEarlyTerminationMessagePrefix,
-      boolean kosabiShouldEnableMixedCompilation,
-      ImmutableList<AbsPath> sourceOnlyAbiClasspath,
+      ImmutableList<AbsPath> compilationClasspath,
       ImmutableList<AbsPath> applicabilityClasspath,
       boolean verifySourceOnlyAbiConstraints,
       ImmutableList<IsolatedStep> postKotlinCompilationFailureSteps,
@@ -124,8 +125,7 @@ public class KotlincStep implements IsolatedStep {
     this.configuredBuckOut = configuredBuckOut;
     this.resolvedKosabiPluginOptionPath = resolvedKosabiPluginOptionPath;
     this.kosabiEarlyTerminationMessagePrefix = kosabiEarlyTerminationMessagePrefix;
-    this.kosabiShouldEnableMixedCompilation = kosabiShouldEnableMixedCompilation;
-    this.sourceOnlyAbiClasspath = sourceOnlyAbiClasspath;
+    this.compilationClasspath = compilationClasspath;
     this.applicabilityClasspath = applicabilityClasspath;
     this.verifySourceOnlyAbiConstraints = verifySourceOnlyAbiConstraints;
     this.postKotlinCompilationFailureSteps = postKotlinCompilationFailureSteps;
@@ -292,7 +292,7 @@ public class KotlincStep implements IsolatedStep {
         // generation. applicabilityClasspath contains only deps with
         // required_for_source_only_abi=True or in source_only_abi_deps — an
         // empty list is valid (no deps on SO-ABI classpath, checker flags all
-        // external type refs). Never fall back to sourceOnlyAbiClasspath here
+        // external type refs). Never fall back to compilationClasspath here
         // as it contains the full library classpath during library builds.
         if (!applicabilityClasspath.isEmpty()) {
           String classpathValue =
@@ -350,16 +350,10 @@ public class KotlincStep implements IsolatedStep {
       ImmutableList.Builder<String> builder,
       LanguageVersion languageVersion,
       AbsPath ruleCellRoot) {
-    if (languageVersion.getSupportsK2()
-        && resolvedKosabiPluginOptionPath.containsKey(
-            KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_K2_PLUGIN)) {
+    if (resolvedKosabiPluginOptionPath.containsKey(
+        KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_K2_PLUGIN)) {
       AbsPath stubPlugin =
           resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_K2_PLUGIN);
-      builder.add(X_PLUGIN_ARG + stubPlugin);
-    } else if (resolvedKosabiPluginOptionPath.containsKey(
-        KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_PLUGIN)) {
-      AbsPath stubPlugin =
-          resolvedKosabiPluginOptionPath.get(KosabiConfig.PROPERTY_KOSABI_STUBS_GEN_PLUGIN);
       builder.add(X_PLUGIN_ARG + stubPlugin);
     }
 
@@ -386,7 +380,7 @@ public class KotlincStep implements IsolatedStep {
       }
     }
 
-    addClasspath(builder, this.sourceOnlyAbiClasspath);
+    addClasspath(builder, this.compilationClasspath);
   }
 
   private boolean shouldEnableComposeAbiEmulation() {

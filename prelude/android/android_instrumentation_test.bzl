@@ -28,9 +28,20 @@ ANDROID_EMULATOR_ABI_LABEL_PREFIX = "tpx-re-config::"
 DEFAULT_ANDROID_SUBPLATFORM = "android-30"
 DEFAULT_ANDROID_PLATFORM = "android-emulator"
 DEFAULT_ANDROID_INSTRUMENTATION_TESTS_USE_CASE = "instrumentation-tests"
-RIOT_USE_CASES = ["horizon-os-diff", "horizon-os-other", "horizon-os-human-lease", "wearables-diff", "wearables-other", "wearables-human-lease"]
+RIOT_USE_CASES = [
+    "foundation-diff",
+    "horizon-experiences-diff",
+    "horizon-os-codemod-diff",
+    "horizon-os-diff",
+    "horizon-os-human-lease",
+    "horizon-os-other",
+    "vr-diff",
+    "wearables-diff",
+    "wearables-human-lease",
+    "wearables-other",
+]
 SUPPORTED_POOLS = ["EUREKA_POOL", "HOLLYWOOD_POOL", "STAGE_DELPHI_POOL", "PANTHER_POOL", "SEACLIFF_POOL"]
-SUPPORTED_PLATFORMS = ["riot", "android-emulator"]
+SUPPORTED_PLATFORMS = ["riot", "android-emulator", "rl-emulator"]
 SUPPORTED_USE_CASES = RIOT_USE_CASES + [DEFAULT_ANDROID_INSTRUMENTATION_TESTS_USE_CASE]
 
 def android_instrumentation_test_impl(ctx: AnalysisContext):
@@ -72,7 +83,10 @@ def android_instrumentation_test_impl(ctx: AnalysisContext):
     expect(apk_info != None, "Provided APK must have AndroidApkInfo!")
 
     instrumentation_apk_info = ctx.attrs.apk.get(AndroidInstrumentationApkInfo)
-    if instrumentation_apk_info != None:
+    # A self-instrumenting apk already bundles the app-under-test's contents, and its manifest's
+    # targetPackage is the self apk itself rather than the un-merged app-under-test apk's package,
+    # so there is no separate app-under-test to install.
+    if instrumentation_apk_info != None and not instrumentation_apk_info.is_self_instrumenting:
         cmd.extend(["--apk-under-test-path", instrumentation_apk_info.apk_under_test])
     if ctx.attrs.is_self_instrumenting:
         cmd.extend(["--is-self-instrumenting"])
@@ -283,6 +297,11 @@ def _compute_emulator_platform(labels: list[str]) -> str:
         "multiple 're_platform_' labels were found:[{}], there must be only one!".format(", ".join(emulator_platform_labels)),
     )
     if len(emulator_platform_labels) == 0:
+        subplatform = _compute_emulator_subplatform(labels)
+        if "aarch64" in subplatform:
+            return "android-emulator-aarch64"
+        if subplatform == "android-33-google-arm64":
+            return "android-emulator-mac"
         return DEFAULT_ANDROID_PLATFORM
     else:  # len(emulator_platform_labels) == 1:
         return emulator_platform_labels[0].replace("re_platform_", "")

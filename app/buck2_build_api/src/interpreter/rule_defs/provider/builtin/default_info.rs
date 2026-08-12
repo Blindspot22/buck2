@@ -20,15 +20,13 @@ use buck2_error::BuckErrorContext;
 use buck2_error::internal_error;
 use dupe::Dupe;
 use starlark::any::ProvidesStaticType;
-use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
-use starlark::values::Freeze;
+use starlark::values::FreezeBranded;
 use starlark::values::FreezeError;
 use starlark::values::FrozenHeap;
 use starlark::values::FrozenValue;
-use starlark::values::FrozenValueOfUnchecked;
 use starlark::values::FrozenValueTyped;
 use starlark::values::Heap;
 use starlark::values::StarlarkPagable;
@@ -37,14 +35,13 @@ use starlark::values::Trace;
 use starlark::values::UnpackAndDiscard;
 use starlark::values::UnpackValue;
 use starlark::values::Value;
-use starlark::values::ValueLifetimeless;
 use starlark::values::ValueLike;
 use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
-use starlark::values::ValueOfUncheckedGeneric;
+use starlark::values::ValueTyped;
 use starlark::values::dict::AllocDict;
+use starlark::values::dict::DictRef;
 use starlark::values::dict::DictType;
-use starlark::values::dict::FrozenDictRef;
 use starlark::values::dict::UnpackDictEntries;
 use starlark::values::list::AllocList;
 use starlark::values::list::ListRef;
@@ -134,39 +131,38 @@ use crate::interpreter::rule_defs::provider::collection::FrozenProviderCollectio
 #[derive(
     Clone,
     Debug,
-    Freeze,
+    FreezeBranded,
     Trace,
-    Coerce,
     ProvidesStaticType,
     Allocative,
     StarlarkPagable
 )]
-#[freeze(validator = validate_default_info, bounds = "V: ValueLike<'freeze>")]
+#[freeze_branded(validator = validate_default_info)]
 #[repr(C)]
-pub struct DefaultInfoGen<V: ValueLifetimeless> {
+pub struct DefaultInfo<'v> {
     /// A mapping of names to `ProviderCollection`s. The keys are used when resolving the
     /// `ProviderName` portion of a `ProvidersLabel` in order to access the providers for a
     /// subtarget, such as when doing `buck2 build cell//foo:bar[baz]`. Just like any
     /// `ProviderCollection`, this collection must include at least a `DefaultInfo` provider. The
     /// subtargets can have their own subtargets as well, which can be accessed by chaining them,
     /// e.g.: `buck2 build cell//foo:bar[baz][qux]`.
-    sub_targets: ValueOfUncheckedGeneric<V, DictType<String, FrozenProviderCollection>>,
+    sub_targets: ValueOfUnchecked<'v, DictType<String, FrozenProviderCollection>>,
     /// A list of `Artifact`s that are built by default if this rule is requested
     /// explicitly (via CLI or `$(location)` etc), or depended on as as a "source"
     /// (i.e., `attrs.source()`).
-    default_outputs: ValueOfUncheckedGeneric<V, ListType<ValueIsInputArtifactAnnotation>>,
+    default_outputs: ValueOfUnchecked<'v, ListType<ValueIsInputArtifactAnnotation>>,
     /// A list of `ArtifactTraversable`. The underlying `Artifact`s they define will
     /// be built by default if this rule is requested (via CLI or `$(location)` etc),
     /// but _not_ when it's depended on as as a "source" (i.e., `attrs.source()`).
     /// `ArtifactTraversable` can be an `Artifact` (which yields itself), or
     /// `cmd_args`, which expand to all their inputs.
-    other_outputs: ValueOfUncheckedGeneric<V, ListType<ValueAsCommandLineLike<'static>>>,
+    other_outputs: ValueOfUnchecked<'v, ListType<ValueAsCommandLineLike<'static>>>,
 }
 
-fn validate_default_info(info: &FrozenDefaultInfo) -> buck2_error::Result<()> {
+fn validate_default_info<'v>(info: &DefaultInfo<'v>) -> buck2_error::Result<()> {
     // Check length of default outputs
-    let default_output_list = ListRef::from_value(info.default_outputs.get().to_value())
-        .expect("should be a list from constructor");
+    let default_output_list =
+        ListRef::from_value(info.default_outputs.get()).expect("should be a list from constructor");
     if default_output_list.len() > 1 {
         tracing::info!("DefaultInfo.default_output should only have a maximum of 1 item.");
         // TODO use soft_error when landed
@@ -180,9 +176,7 @@ fn validate_default_info(info: &FrozenDefaultInfo) -> buck2_error::Result<()> {
     for output in info.default_outputs_impl()? {
         output?;
     }
-    for sub_target in info.sub_targets_impl()? {
-        sub_target?;
-    }
+    info.sub_targets_impl()?;
 
     Ok(())
 }
@@ -198,37 +192,33 @@ impl<'v> DefaultInfo<'v> {
             other_outputs,
         }
     }
-}
 
-impl FrozenDefaultInfo {
-    pub(crate) fn testing_empty(heap: &FrozenHeap) -> FrozenValueTyped<'static, FrozenDefaultInfo> {
-        let sub_targets = heap
-            .alloc_typed_unchecked(AllocDict(
-                iter::empty::<(String, FrozenProviderCollection)>(),
-            ))
-            .cast();
+    pub(crate) fn testing_empty(heap: &'v FrozenHeap) -> FrozenValueTyped<'v, DefaultInfo<'v>> {
+        let sub_targets = ValueOfUnchecked::<DictType<_, _>>::new(
+            heap.alloc(AllocDict(iter::empty::<(String, ProviderCollection)>()))
+                .to_value(),
+        );
         let default_outputs =
-            FrozenValueOfUnchecked::<ListType<_>>::new(heap.alloc(AllocList::EMPTY));
+            ValueOfUnchecked::<ListType<_>>::new(heap.alloc(AllocList::EMPTY).to_value());
         let other_outputs =
-            FrozenValueOfUnchecked::<ListType<_>>::new(heap.alloc(AllocList::EMPTY));
-        FrozenValueTyped::new_err(heap.alloc(FrozenDefaultInfo {
+            ValueOfUnchecked::<ListType<_>>::new(heap.alloc(AllocList::EMPTY).to_value());
+        heap.alloc_simple_typed(DefaultInfo {
             sub_targets,
             default_outputs,
             other_outputs,
-        }))
-        .unwrap()
+        })
     }
 
     fn get_sub_target_providers_impl(
         &self,
         name: &str,
-    ) -> buck2_error::Result<Option<FrozenValueTyped<'static, FrozenProviderCollection>>> {
-        FrozenDictRef::from_frozen_value(self.sub_targets.get())
+    ) -> buck2_error::Result<Option<ValueTyped<'v, ProviderCollection<'v>>>> {
+        DictRef::from_value(self.sub_targets.get())
             .ok_or_else(|| internal_error!("sub_targets should be a dict-like object"))?
             .get_str(name)
             .map(|v| {
-                FrozenValueTyped::new_err(v).buck_error_context(
-                    "Values inside of a frozen provider should be frozen provider collection",
+                ValueTyped::new_err(v).buck_error_context(
+                    "Values inside of `sub_targets` should be provider collections",
                 )
             })
             .transpose()
@@ -237,80 +227,64 @@ impl FrozenDefaultInfo {
     pub fn get_sub_target_providers(
         &self,
         name: &str,
-    ) -> Option<FrozenValueTyped<'static, FrozenProviderCollection>> {
+    ) -> Option<ValueTyped<'v, ProviderCollection<'v>>> {
         self.get_sub_target_providers_impl(name).unwrap()
     }
 
     fn default_outputs_impl(
         &self,
     ) -> buck2_error::Result<impl Iterator<Item = buck2_error::Result<StarlarkArtifact>> + '_> {
-        let list = ListRef::from_frozen_value(self.default_outputs.get())
+        let list = ListRef::from_value(self.default_outputs.get())
             .ok_or_else(|| internal_error!("Should be list of artifacts"))?;
 
         Ok(list.iter().map(|v| {
-            let frozen_value = v
-                .unpack_frozen()
-                .ok_or_else(|| internal_error!("should be frozen"))?;
-
             Ok(
-                if let Some(starlark_artifact) = frozen_value.downcast_ref::<StarlarkArtifact>() {
+                if let Some(starlark_artifact) = v.downcast_ref::<StarlarkArtifact>() {
                     starlark_artifact.dupe()
                 } else {
-                    // This code path is for StarlarkPromiseArtifact. We have to create a `StarlarkArtifact` object here.
-                    let artifact_like =
-                        ValueAsInputArtifactLike::unpack_value(frozen_value.to_value())?
-                            .ok_or_else(|| internal_error!("Should be list of artifacts"))?;
-                    artifact_like.0.get_bound_starlark_artifact()?
+                    ValueAsInputArtifactLike::unpack_value_err(v)?
+                        .0
+                        .get_bound_starlark_artifact()?
                 },
             )
         }))
     }
 
-    pub fn default_outputs(&self) -> Vec<StarlarkArtifact> {
-        self.default_outputs_impl()
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
+    pub fn default_outputs(&self) -> buck2_error::Result<Vec<StarlarkArtifact>> {
+        self.default_outputs_impl()?.collect()
     }
 
-    pub fn default_outputs_raw(&self) -> FrozenValue {
+    pub fn default_outputs_raw(&self) -> Value<'v> {
         self.default_outputs.get()
     }
 
     fn sub_targets_impl(
         &self,
-    ) -> buck2_error::Result<
-        impl Iterator<
-            Item = buck2_error::Result<(&str, FrozenValueTyped<'static, FrozenProviderCollection>)>,
-        > + '_,
-    > {
-        let sub_targets = FrozenDictRef::from_frozen_value(self.sub_targets.get())
+    ) -> buck2_error::Result<SmallMap<&'v str, ValueTyped<'v, ProviderCollection<'v>>>> {
+        let sub_targets = DictRef::from_value(self.sub_targets.get())
             .ok_or_else(|| internal_error!("sub_targets should be a dict-like object"))?;
 
-        Ok(sub_targets.iter().map(|(k, v)| {
-            buck2_error::Ok((
-                k.to_value()
-                    .unpack_str()
-                    .ok_or_else(|| internal_error!("sub_targets should have string keys"))?,
-                FrozenValueTyped::new(v).ok_or_else(|| {
-                    internal_error!(
-                        "Values inside of a frozen provider should be frozen provider collection",
-                    )
-                })?,
-            ))
-        }))
+        sub_targets
+            .iter()
+            .map(|(k, v)| {
+                buck2_error::Ok((
+                    k.unpack_str()
+                        .ok_or_else(|| internal_error!("sub_targets should have string keys"))?,
+                    ValueTyped::new(v).ok_or_else(|| {
+                        internal_error!(
+                            "Values inside of `sub_targets` should be provider collections",
+                        )
+                    })?,
+                ))
+            })
+            .collect()
     }
 
-    pub fn sub_targets(
-        &self,
-    ) -> SmallMap<&str, FrozenValueTyped<'static, FrozenProviderCollection>> {
-        self.sub_targets_impl()
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
+    pub fn sub_targets(&self) -> SmallMap<&'v str, ValueTyped<'v, ProviderCollection<'v>>> {
+        self.sub_targets_impl().unwrap()
     }
 
-    pub fn sub_targets_raw(&self) -> FrozenValue {
+    pub fn sub_targets_raw(&self) -> Value<'v> {
         self.sub_targets.get()
     }
 
@@ -383,10 +357,10 @@ impl FrozenDefaultInfo {
 
     fn for_each_in_list(
         &self,
-        value: FrozenValue,
-        mut processor: impl FnMut(Value) -> buck2_error::Result<()>,
+        value: Value<'v>,
+        mut processor: impl FnMut(Value<'v>) -> buck2_error::Result<()>,
     ) -> buck2_error::Result<()> {
-        let outputs_list = ListRef::from_frozen_value(value)
+        let outputs_list = ListRef::from_value(value)
             .unwrap_or_else(|| panic!("expected list, got `{value:?}` from info `{self:?}`"));
 
         for value in outputs_list.iter() {
@@ -397,7 +371,7 @@ impl FrozenDefaultInfo {
     }
 }
 
-impl PartialEq for FrozenDefaultInfo {
+impl<'v> PartialEq for DefaultInfo<'v> {
     // frozen default infos can be compared by ptr for a simple equality
     fn eq(&self, other: &Self) -> bool {
         ptr::eq(self, other)

@@ -6,6 +6,7 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
+load("@prelude//apple:apple_toolchain_types.bzl", "AppleToolsInfo")
 load("@prelude//apple:apple_utility.bzl", "expand_relative_prefixed_sdk_path")
 load("@prelude//apple/swift:swift_pcm_compilation.bzl", "get_compiled_pcm_deps_tset")
 load("@prelude//apple/swift:swift_types.bzl", "SWIFTMODULE_EXTENSION")
@@ -37,9 +38,24 @@ def get_swift_interface_anon_targets(ctx: AnalysisContext, uncompiled_sdk_deps: 
         (
             _swift_interface_compilation,
             {
+                # There's an "implicit" arg being passed - the execution platform
+                # of the rule that's requesting the anon-targets. In this case,
+                # callers of `get_swift_interface_anon_targets()` will call
+                # `ctx.actions.anon_targets()`, so the exec platform will get
+                # inherited.
+                #
+                # This has an important implication - the exact same SDK target
+                # might get duplicated if it's requested `apple_library()`
+                # targets which have different execution platforms, even if
+                # everything else is the same - including the same toolchain.
+                #
+                # Because Swift compilation aggregates SDK modules from deps
+                # and SDK modules from the target itself, a duplication of the
+                # same compiled SDK module can occur in the module map.
                 "dep": d,
                 "has_content_based_path": True,
                 "name": d.label,
+                "_apple_tools": ctx.attrs._apple_tools,
                 "_swift_toolchain": get_swift_toolchain_info_dep(ctx),
             },
         )
@@ -168,6 +184,7 @@ _swift_interface_compilation = rule(
     attrs = {
         "dep": attrs.dep(),
         "has_content_based_path": attrs.bool(),
+        "_apple_tools": attrs.dep(providers = [AppleToolsInfo]),
         "_swift_toolchain": attrs.dep(),
     },
 )

@@ -37,10 +37,10 @@ use tokio::runtime::Runtime;
 
 use crate::client_cpu_tracker::ClientCpuTracker;
 use crate::command_outcome::CommandOutcome;
+use crate::console_interaction_stream::ConsoleInteraction;
 use crate::console_interaction_stream::ConsoleInteractionStream;
 use crate::console_interaction_stream::NoopSuperConsoleInteraction;
 use crate::console_interaction_stream::SuperConsoleInteraction;
-use crate::console_interaction_stream::SuperConsoleToggle;
 use crate::daemon::client::BuckdClient;
 use crate::daemon::client::NoPartialResultHandler;
 use crate::daemon::client::tonic_status_to_error;
@@ -188,13 +188,13 @@ impl<'a> DaemonEventsCtx<'a> {
                 Ok(next) => next,
                 Err(e) => {
                     self.inner.handle_events(events, shutdown).await?;
-                    let is_oom = self.inner.is_daemon_oom_killed().await?;
-                    return if is_oom {
+                    let oom_reason = self.inner.daemon_oom_reason().await?;
+                    return if let Some(oom_reason) = oom_reason {
                         Err(e)
                             .buck_error_context(
-                                "Buck2 daemon was killed by an OOM killer due to high memory pressure. \
+                                format!("Buck2 daemon was killed by an OOM killer due to high memory pressure ({oom_reason}). \
                                 Common causes are large or numerous build or test targets or \
-                                too many Buck2 daemons running simultaneously.")
+                                too many Buck2 daemons running simultaneously."))
                             .tag(ErrorTag::ClientGrpcStream)
                             .tag(ErrorTag::DaemonOomKilled)
                     } else {
@@ -291,8 +291,8 @@ impl<'a> DaemonEventsCtx<'a> {
                     Some(event) = self.tailers.recv() => {
                         self.dispatch_tailer_event(event).await?;
                     }
-                    c = console_interaction.toggle() => {
-                        self.inner.handle_console_interaction(&c?).await?;
+                    interaction = console_interaction.interaction() => {
+                        self.inner.handle_console_interaction(&interaction?).await?;
                     }
                     tick = self.ticker.tick() => {
                         self.inner.tick(&tick).await?;
@@ -468,7 +468,9 @@ pub struct EventsCtx {
     // which is always available. This differs from `daemon_cgroup_path` in buck2_resource_control
     // which is a child cgroup created under the root cgroup (i.e. {root}/daemon) and is only
     // available when daemon cgroup mode is enabled.
+    pub daemon_pid: Option<i64>,
     pub cgroup_path_of_buck2_daemon: Option<String>,
+    pub daemon_start_instant: Option<Instant>,
     /// Whether a superconsole was actually constructed for this command.
     /// Set by `streaming.rs` from the authoritative answer returned by
     /// `get_console_with_root`. Defaults to `false` for non-streaming entry
@@ -488,24 +490,33 @@ impl EventsCtx {
             buck_log_dir: None,
             command_report_path: None,
             log_invocation_record: true,
+            daemon_pid: None,
             cgroup_path_of_buck2_daemon: None,
+            daemon_start_instant: None,
             used_superconsole: false,
         }
     }
 
-    pub(crate) async fn is_daemon_oom_killed(&self) -> buck2_error::Result<bool> {
-        #[cfg(target_os = "linux")]
-        {
-            let Some(path) = self.cgroup_path_of_buck2_daemon.as_deref() else {
-                return Ok(false);
-            };
-            let daemon_disconnect_time = SystemTime::now();
-            crate::subscribers::oom::check_daemon_oom_killed(path, daemon_disconnect_time).await
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(false)
-        }
+    /// Describes why the daemon is believed to have been OOM-killed, if it was.
+    ///
+    /// The evidence is read from `dmesg`, so this never reports anything off Linux.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn daemon_oom_reason(&self) -> buck2_error::Result<Option<String>> {
+        let Some(pid) = self.daemon_pid else {
+            return Ok(None);
+        };
+        let evidence = crate::subscribers::oom::find_daemon_oom_evidence(
+            pid,
+            self.cgroup_path_of_buck2_daemon.as_deref(),
+            self.daemon_start_instant,
+        )
+        .await?;
+        Ok(evidence.map(|evidence| evidence.to_string()))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) async fn daemon_oom_reason(&self) -> buck2_error::Result<Option<String>> {
+        Ok(None)
     }
 
     async fn handle_tailer_stderr(&mut self, stderr: &[u8]) -> buck2_error::Result<()> {
@@ -517,10 +528,12 @@ impl EventsCtx {
 
     async fn handle_console_interaction(
         &mut self,
-        toggle: &Option<SuperConsoleToggle>,
+        interaction: &ConsoleInteraction,
     ) -> buck2_error::Result<()> {
-        self.try_for_each_subscriber(|subscriber| subscriber.handle_console_interaction(toggle))
-            .await
+        self.try_for_each_subscriber(|subscriber| {
+            subscriber.handle_console_interaction(interaction)
+        })
+        .await
     }
 
     async fn handle_events(

@@ -47,9 +47,9 @@ Options:
 
 
       --filter-category <FILTER_CATEGORY>
-          Regular expression to filter commands by given action category (i.e. type of of actions
-          that are similar but operate on different inputs, such as invocations of a C++ compiler
-          (whose category would be `cxx_compile`)). Matches by full string
+          Regular expression to filter commands by given action category (i.e. type of actions that
+          are similar but operate on different inputs, such as invocations of a C++ compiler (whose
+          category would be `cxx_compile`)). Matches by full string
 
   -h, --help
           Print help (see a summary with '-h')
@@ -87,6 +87,9 @@ Universal Options:
           Metadata key-value pairs to inject into Buck2's logging. Client metadata must be of the
           form `key=value`, where `key` is a snake_case identifier, and will be sent to backend
           datasets
+
+      --setting <KEY=VALUE>
+          Override a Buck setting using `key=value` or `section.key=value`
 
       --agent-context <AGENT_CONTEXT>
           Agent context key=value pairs for telemetry. Used by AI agents to pass structured

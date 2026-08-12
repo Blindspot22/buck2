@@ -82,7 +82,7 @@ impl DiceHasCommandExecutor for DiceComputations<'_> {
             .get::<HasCommandExecutorHolder>()
             .map_err(|e| from_any_with_tag(e, buck2_error::ErrorTag::Tier0))
             .buck_error_context("CommandExecutorDelegate should be set")?;
-        holder.delegate.get_command_executor(&artifact_fs, config)
+        holder.delegate.get_command_executor(artifact_fs, config)
     }
 }
 
@@ -112,7 +112,7 @@ pub trait SetReClient {
 }
 
 pub trait GetReClient {
-    fn get_re_client(&self) -> UnconfiguredRemoteExecutionClient;
+    fn get_re_client(&self) -> &UnconfiguredRemoteExecutionClient;
 }
 
 impl SetReClient for UserComputationData {
@@ -122,11 +122,10 @@ impl SetReClient for UserComputationData {
 }
 
 impl GetReClient for UserComputationData {
-    fn get_re_client(&self) -> UnconfiguredRemoteExecutionClient {
+    fn get_re_client(&self) -> &UnconfiguredRemoteExecutionClient {
         self.data
             .get::<UnconfiguredRemoteExecutionClient>()
-            .expect("Materializer should be set")
-            .dupe()
+            .expect("RE client should be set")
     }
 }
 

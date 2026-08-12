@@ -12,6 +12,7 @@
 
 use std::io::Write;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -58,6 +59,34 @@ fn write_str(outputter: &mut dyn Write, s: &mut String) -> buck2_error::Result<(
     Ok(())
 }
 
+struct PackageConcurrency {
+    loads: NonZeroUsize,
+    tasks: NonZeroUsize,
+}
+
+fn package_concurrency(threads: Option<usize>) -> buck2_error::Result<PackageConcurrency> {
+    let max = Semaphore::MAX_PERMITS.min(usize::MAX / 2);
+    let loads = match threads {
+        Some(value) => {
+            let Some(value) = NonZeroUsize::new(value).filter(|value| value.get() <= max) else {
+                return Err(TargetsError::InvalidThreadCount { value, max }.into());
+            };
+            value
+        }
+        None => NonZeroUsize::new(buck2_util::threads::available_parallelism().min(max))
+            .expect("available parallelism and the semaphore limit are non-zero"),
+    };
+    let tasks = NonZeroUsize::new(
+        loads
+            .get()
+            .checked_mul(2)
+            .expect("load concurrency is limited to `usize::MAX / 2`"),
+    )
+    .expect("twice a non-zero value is non-zero");
+
+    Ok(PackageConcurrency { loads, tasks })
+}
+
 /// Run the targets command in streaming mode.
 ///
 /// # Arguments
@@ -68,7 +97,7 @@ fn write_str(outputter: &mut dyn Write, s: &mut String) -> buck2_error::Result<(
 ///   Passing from cli args `--imports` from `app/buck2_client/src/commands/targets.rs`.
 pub(crate) async fn targets_streaming(
     server_ctx: &dyn ServerCommandContextTrait,
-    mut dice: DiceTransaction,
+    dice: DiceTransaction,
     formatter: Arc<dyn TargetFormatter>,
     outputter: &mut (dyn Write + Send),
     parsed_patterns: Vec<ParsedPattern<TargetPatternExtra>>,
@@ -79,7 +108,8 @@ pub(crate) async fn targets_streaming(
     threads: Option<usize>,
 ) -> buck2_error::Result<Stats> {
     let imported = Arc::new(Mutex::new(SmallSet::new()));
-    let threads = Arc::new(Semaphore::new(threads.unwrap_or(Semaphore::MAX_PERMITS)));
+    let concurrency = package_concurrency(threads)?;
+    let threads = Arc::new(Semaphore::new(concurrency.loads.get()));
 
     let cloned_dice = dice.clone();
     let mut packages = stream_packages(&cloned_dice, parsed_patterns)
@@ -87,16 +117,25 @@ pub(crate) async fn targets_streaming(
             let formatter = formatter.dupe();
             let imported = imported.dupe();
             let threads = threads.dupe();
-            let mut ctx = cloned_dice.dupe();
+            let ctx = cloned_dice.dupe();
 
             spawn_dropcancel(
-                |_cancellation| {
+                |cancellation| {
                     {
                         async move {
                             let (package, spec) = x?;
                             let res = process_package(
-                                &mut ctx, formatter, package, spec, cached, keep_going, imports,
-                                fast_hash, threads, imported,
+                                &mut ctx.ctx(),
+                                cancellation,
+                                formatter,
+                                package,
+                                spec,
+                                cached,
+                                keep_going,
+                                imports,
+                                fast_hash,
+                                threads,
+                                imported,
                             )
                             .await;
                             buck2_error::Ok(res)
@@ -108,8 +147,8 @@ pub(crate) async fn targets_streaming(
                 cloned_dice.per_transaction_data(),
             )
         })
-        // Use unlimited parallelism - tokio will restrict us anyway
-        .buffer_unordered(1000000);
+        // Keep package loading full while completed loads are formatted and buffered for output.
+        .buffer_unordered(concurrency.tasks.get());
 
     let mut buffer = String::new();
     formatter.begin(&mut buffer);
@@ -156,7 +195,7 @@ pub(crate) async fn targets_streaming(
                 // and there aren't many, so we just do it on the main thread.
                 // We ignore errors as these will bubble up as BUCK file errors already.
                 if let Ok(Some((package_file_path, imports))) =
-                    package_imports(&mut dice, x.dupe()).await
+                    package_imports(&mut dice.ctx(), x.dupe()).await
                 {
                     if needs_separator {
                         formatter.separator(&mut buffer);
@@ -187,7 +226,7 @@ pub(crate) async fn targets_streaming(
             }
             needs_separator = true;
             // No need to parallelise these this step because it will already be on the DICE graph
-            let loaded = dice.get_loaded_module_from_import_path(&path).await?;
+            let loaded = dice.ctx().get_loaded_module_from_import_path(&path).await?;
             let imports = loaded.imports().cloned().collect::<Vec<_>>();
             formatter.imports(path.path(), &imports, None, &mut buffer);
             todo.extend(imports);
@@ -279,7 +318,8 @@ impl PreparePackageResult {
 }
 
 async fn process_package(
-    ctx: &mut DiceTransaction,
+    ctx: &mut DiceComputations<'_>,
+    cancellation: &CancellationContext,
     formatter: Arc<dyn TargetFormatter>,
     package: PackageLabel,
     spec: PackageSpec<TargetPatternExtra>,
@@ -294,7 +334,7 @@ async fn process_package(
     let targets = {
         // This bit of code is the heavy CPU stuff, so guard it with the threads
         let _permit = threads.acquire().await.unwrap();
-        load_targets(ctx, package.dupe(), spec, cached, keep_going).await
+        load_targets(ctx, cancellation, package.dupe(), spec, cached, keep_going).await
     };
 
     match targets {
@@ -357,11 +397,14 @@ enum TargetsError {
         _1.iter().map(|x| format!("`{x}`")).join(", ")
     )]
     MissingTargets(PackageLabel, Vec<TargetName>),
+    #[error("`--num-threads` must be between 1 and {max}, got {value}")]
+    InvalidThreadCount { value: usize, max: usize },
 }
 
 /// Load the targets from a package. If `keep_going` is specified then it may return a `Some` error in the triple.
 async fn load_targets(
     dice: &mut DiceComputations<'_>,
+    cancellation: &CancellationContext,
     package: PackageLabel,
     spec: PackageSpec<TargetPatternExtra>,
     cached: bool,
@@ -372,14 +415,11 @@ async fn load_targets(
     Option<buck2_error::Error>,
 )> {
     let result = if cached {
-        dice.get_interpreter_results(package.dupe()).await?
+        dice.get_interpreter_results(package.dupe()).await?.dupe()
     } else {
-        dice.get_interpreter_results_uncached(
-            package.dupe(),
-            CancellationContext::never_cancelled(),
-        )
-        .await
-        .1?
+        dice.get_interpreter_results_uncached(package.dupe(), cancellation)
+            .await
+            .1?
     };
 
     match spec {
@@ -423,4 +463,23 @@ async fn package_imports(
         .get()?
         .get_package_file_deps(dice, path)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_concurrency_rejects_invalid_values() {
+        assert!(package_concurrency(Some(0)).is_err());
+        assert!(package_concurrency(Some(Semaphore::MAX_PERMITS.min(usize::MAX / 2) + 1)).is_err());
+    }
+
+    #[test]
+    fn package_concurrency_uses_explicit_value() {
+        let concurrency =
+            package_concurrency(Some(7)).expect("positive concurrency should be valid");
+        assert_eq!(7, concurrency.loads.get());
+        assert_eq!(14, concurrency.tasks.get());
+    }
 }

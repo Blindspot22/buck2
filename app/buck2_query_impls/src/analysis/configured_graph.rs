@@ -31,7 +31,7 @@ use dice_futures::cancellation::CancellationContext;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use dupe::OptionDupedExt;
-use futures::FutureExt;
+use dupe::ResultDupedErrExt;
 use pagable::Pagable;
 use pagable::StaticStr;
 use pagable::pagable_typetag;
@@ -40,7 +40,7 @@ use crate::analysis::environment::ConfiguredGraphQueryEnvironmentDelegate;
 use crate::analysis::environment::get_from_template_placeholder_info;
 
 pub(crate) struct AnalysisDiceQueryDelegate<'c, 'd> {
-    pub(crate) ctx: &'c LinearRecomputeDiceComputations<'d>,
+    pub(crate) ctx: LinearRecomputeDiceComputations<'c, 'd>,
 }
 
 impl AnalysisDiceQueryDelegate<'_, '_> {
@@ -81,7 +81,7 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
 
         #[async_trait]
         impl Key for TemplatePlaceholderInfoQueryKey {
-            type Value = buck2_error::Result<Arc<TargetSet<ConfiguredGraphNodeRef>>>;
+            type Value = buck2_error::Result<TargetSet<ConfiguredGraphNodeRef>>;
 
             async fn compute(
                 &self,
@@ -90,30 +90,22 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
             ) -> Self::Value {
                 let (targets, label_to_artifact) = {
                     ctx.try_compute2(
-                        |ctx| {
-                            async move {
-                                ctx.try_compute_join(self.targets.iter(), |ctx, target| {
-                                    async move {
-                                        ctx.get_configured_target_node(target)
-                                            .await
-                                            .require_compatible()
-                                    }
-                                    .boxed()
-                                })
-                                .await
-                            }
-                            .boxed()
+                        async |ctx| {
+                            ctx.try_compute_join(self.targets.iter(), async |ctx, target| {
+                                ctx.get_configured_target_node(target)
+                                    .await
+                                    .require_compatible()
+                                    .map(|n| n.dupe())
+                            })
+                            .await
                         },
-                        |ctx| {
-                            async move {
-                                get_from_template_placeholder_info(
-                                    ctx,
-                                    self.template_name,
-                                    self.targets.iter().duped(),
-                                )
-                                .await
-                            }
-                            .boxed()
+                        async |ctx| {
+                            get_from_template_placeholder_info(
+                                ctx,
+                                self.template_name,
+                                self.targets.iter().duped(),
+                            )
+                            .await
                         },
                     )
                     .await?
@@ -124,7 +116,7 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
                     .map(ConfiguredGraphNodeRef::new)
                     .collect();
                 let targets = find_target_nodes(targets, label_to_artifact)?;
-                Ok(Arc::new(targets))
+                Ok(targets)
             }
 
             fn equality(_: &Self::Value, _: &Self::Value) -> bool {
@@ -141,18 +133,17 @@ impl ConfiguredGraphQueryEnvironmentDelegate for AnalysisConfiguredGraphQueryDel
             .into_iter()
             .map(|target| target.label().dupe())
             .collect();
-        let targets = self
+        Ok(self
             .dice_query_delegate
             .ctx()
             .compute(&TemplatePlaceholderInfoQueryKey {
                 template_name,
                 targets: Arc::new(targets),
             })
-            .await??;
-
-        // TODO(scottcao): Make all query functions return an Arc as an output so we can avoid making an unnecessary
-        // clone here
-        Ok(targets.as_ref().clone())
+            .await?
+            .as_ref()
+            .duped_err()?
+            .clone())
     }
 }
 

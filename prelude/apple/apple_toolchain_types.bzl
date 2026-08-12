@@ -6,6 +6,7 @@
 # of this source tree. You may select, at your option, one of the
 # above-listed licenses.
 
+load("@prelude//apple/validation:required_reasons_tools.bzl", "RequiredReasonsToolsInfo")
 load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxPlatformInfo", "CxxToolchainInfo")
 
 AppleToolchainInfo = provider(
@@ -37,6 +38,7 @@ AppleToolchainInfo = provider(
         "momc": provider_field(RunInfo),
         "objdump": provider_field(RunInfo | None, default = None),
         "platform_path": provider_field(str | Artifact),
+        "required_reasons_tools": provider_field(RequiredReasonsToolsInfo),
         "sdk_build_version": provider_field(str | None, default = None),
         # SDK name to be passed to tools (e.g. actool), equivalent to ApplePlatform::getExternalName() in v1.
         "sdk_name": provider_field(str),
@@ -58,6 +60,7 @@ AppleToolsInfo = provider(
         "dry_codesign_tool": provider_field(RunInfo),
         "adhoc_codesign_tool": provider_field(RunInfo),
         "codesign_manifest_tree_postprocessor": provider_field(RunInfo),
+        "dedupe_swift_module_map": provider_field(RunInfo),
         "signing_context_tree_postprocessor": provider_field(RunInfo),
         "selective_debugging_scrubber": provider_field(RunInfo),
         "info_plist_processor": provider_field(RunInfo),

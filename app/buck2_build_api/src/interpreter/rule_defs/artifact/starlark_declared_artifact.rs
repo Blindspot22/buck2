@@ -29,7 +29,7 @@ use starlark::collections::StarlarkHasher;
 use starlark::environment::Methods;
 use starlark::values::AllocValue;
 use starlark::values::Demand;
-use starlark::values::Freeze;
+use starlark::values::FreezeBranded;
 use starlark::values::FreezeError;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
@@ -287,9 +287,10 @@ impl<'v> CommandLineArgLike<'v> for StarlarkDeclaredArtifact<'v> {
     }
 }
 
-impl Freeze for StarlarkDeclaredArtifact<'_> {
-    type Frozen = StarlarkArtifact;
-    fn freeze(self, _freezer: &Freezer) -> FreezeResult<Self::Frozen> {
+impl<'v> FreezeBranded for StarlarkDeclaredArtifact<'v> {
+    type Frozen<'fv> = StarlarkArtifact;
+
+    fn freeze<'fv>(self, _freezer: &Freezer<'fv>) -> FreezeResult<StarlarkArtifact> {
         // ensure_bound() moves out of self and so we can't construct the error
         // after calling that, so we need to check first.
         if !self.artifact.is_bound() {
@@ -315,7 +316,7 @@ impl Freeze for StarlarkDeclaredArtifact<'_> {
 
 impl<'v> AllocValue<'v> for StarlarkDeclaredArtifact<'v> {
     fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
-        heap.alloc_complex(self)
+        heap.alloc_complex_branded(self)
     }
 }
 

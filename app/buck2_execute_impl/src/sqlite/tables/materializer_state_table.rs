@@ -10,6 +10,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use buck2_common::external_symlink::ExternalSymlink;
 use buck2_common::file_ops::metadata::FileDigest;
@@ -24,6 +25,7 @@ use buck2_directory::directory::entry::DirectoryEntry;
 use buck2_directory::directory::walk::unordered_entry_walk;
 use buck2_error::BuckErrorContext;
 use buck2_error::conversion::from_any_with_tag;
+use buck2_error::conversion::rusqlite::Buck2ErrorAsRusqliteError;
 use buck2_error::internal_error;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::directory::ActionDirectoryBuilder;
@@ -33,20 +35,25 @@ use buck2_execute::directory::ActionSharedDirectory;
 use buck2_execute::directory::INTERNER;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
 use buck2_hash::StdBuckHashMap;
-use chrono::DateTime;
-use chrono::TimeZone;
-use chrono::Utc;
 use gazebo::prelude::*;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
+use jiff::Timestamp;
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use rusqlite::types::FromSql;
+use rusqlite::types::FromSqlError;
+use rusqlite::types::FromSqlResult;
+use rusqlite::types::ToSql;
+use rusqlite::types::ToSqlOutput;
+use rusqlite::types::Value;
+use rusqlite::types::ValueRef;
 
 use crate::materializers::artifact_type::ARTIFACT_TYPE_DIRECTORY;
 use crate::materializers::artifact_type::ARTIFACT_TYPE_EXTERNAL_SYMLINK;
 use crate::materializers::artifact_type::ARTIFACT_TYPE_FILE;
 use crate::materializers::artifact_type::ARTIFACT_TYPE_SYMLINK;
 use crate::materializers::artifact_type::ArtifactType;
+use crate::materializers::deferred::artifact_tree::ArtifactClassification;
 use crate::materializers::deferred::artifact_tree::ArtifactMetadata;
 use crate::sqlite::materializer_db::MaterializerState;
 use crate::sqlite::materializer_db::MaterializerStateEntry;
@@ -54,7 +61,7 @@ use crate::sqlite::materializer_db::MaterializerStateEntry;
 const STATE_TABLE_NAME: &str = "materializer_state";
 
 #[derive(buck2_error::Error, Debug, PartialEq, Eq)]
-#[buck2(tag = Tier0)]
+#[buck2(tag = InternalError)]
 enum MaterializerStateTableError {
     #[error("Internal error: expected field `{}` to be not null for artifact type '{}'", .field, .artifact_type)]
     ExpectedFieldIsMissing {
@@ -69,6 +76,35 @@ enum MaterializerStateTableError {
     CodePathNotSupportedForDirEntry,
     #[error("Internal error: missing an sqlite entry representing directory artifact `{0}`")]
     DirectoryArtifactEntryMissing(ProjectRelativePathBuf),
+    #[error("Internal error: expected classification to be present for an artifact")]
+    ArtifactClassificationMissing,
+}
+
+impl ArtifactClassification {
+    fn sqlite_value(self) -> i64 {
+        match self {
+            Self::IntermediateOnly => 0,
+            Self::FinalOutput => 1,
+        }
+    }
+}
+
+impl ToSql for ArtifactClassification {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Owned(Value::Integer(self.sqlite_value())))
+    }
+}
+
+impl FromSql for ArtifactClassification {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_i64()? {
+            0 => Ok(Self::IntermediateOnly),
+            1 => Ok(Self::FinalOutput),
+            invalid => Err(FromSqlError::Other(Box::new(Buck2ErrorAsRusqliteError(
+                internal_error!("invalid artifact classification `{invalid}`"),
+            )))),
+        }
+    }
 }
 
 /// Sqlite representation of sha1. Can be converted directly into BLOB type
@@ -101,6 +137,7 @@ struct SqliteEntry<'a> {
     /// Path of the directory artifact which this entry belongs to.
     /// Entry represents the actual artifact when the value is not present.
     parent_path: Option<Cow<'a, str>>,
+    classification: Option<ArtifactClassification>,
 }
 
 impl<'a> SqliteEntry<'a> {
@@ -114,6 +151,7 @@ impl<'a> SqliteEntry<'a> {
         symlink_target: Option<String>,
         last_access_time: Option<i64>,
         parent_path: Option<String>,
+        classification: Option<ArtifactClassification>,
     ) -> Self {
         Self {
             path: Cow::Owned(path),
@@ -125,6 +163,7 @@ impl<'a> SqliteEntry<'a> {
             symlink_target: symlink_target.map(Cow::Owned),
             last_access_time,
             parent_path: parent_path.map(Cow::Owned),
+            classification,
         }
     }
 }
@@ -140,15 +179,17 @@ fn digest_parts(digest: &TrackedFileDigest) -> (u64, &[u8], u8) {
 fn convert_artifact_metadata_to_sqlite_entries<'a>(
     path: &'a ProjectRelativePath,
     metadata: &'a ArtifactMetadata,
-    timestamp: &'_ DateTime<Utc>,
+    timestamp: &'_ Timestamp,
+    classification: ArtifactClassification,
 ) -> Vec<SqliteEntry<'a>> {
-    let last_access_time = timestamp.timestamp();
+    let last_access_time = timestamp.as_second();
     match metadata {
         DirectoryEntry::Dir(action_shared_directory) => {
             convert_action_shared_directory_to_sqlite_entries(
                 path,
                 action_shared_directory,
                 last_access_time,
+                classification,
             )
         }
         DirectoryEntry::Leaf(action_directory_member) => {
@@ -157,6 +198,7 @@ fn convert_artifact_metadata_to_sqlite_entries<'a>(
                 action_directory_member,
                 Some(last_access_time),
                 None,
+                Some(classification),
             )]
         }
     }
@@ -166,6 +208,7 @@ fn convert_action_shared_directory_to_sqlite_entries<'a>(
     path: &'a ProjectRelativePath,
     action_shared_directory: &'a ActionSharedDirectory,
     last_access_time: i64,
+    classification: ArtifactClassification,
 ) -> Vec<SqliteEntry<'a>> {
     let artifact_path = Cow::Borrowed(path.as_str());
     let mut result = vec![SqliteEntry {
@@ -178,6 +221,7 @@ fn convert_action_shared_directory_to_sqlite_entries<'a>(
         symlink_target: None,
         last_access_time: Some(last_access_time),
         parent_path: None,
+        classification: Some(classification),
     }];
     // Now create and entry for each transitive member of this directory
     let mut walk = unordered_entry_walk(DirectoryEntry::Dir(action_shared_directory));
@@ -199,6 +243,7 @@ fn convert_action_shared_directory_to_sqlite_entries<'a>(
                 symlink_target: None,
                 last_access_time: None,
                 parent_path,
+                classification: None,
             },
             DirectoryEntry::Leaf(action_directory_member) => {
                 convert_action_directory_member_to_sqlite_entry(
@@ -206,6 +251,7 @@ fn convert_action_shared_directory_to_sqlite_entries<'a>(
                     action_directory_member,
                     None,
                     parent_path,
+                    None,
                 )
             }
         });
@@ -218,6 +264,7 @@ fn convert_action_directory_member_to_sqlite_entry<'a>(
     action_directory_member: &'a ActionDirectoryMember,
     last_access_time: Option<i64>,
     parent_path: Option<Cow<'a, str>>,
+    classification: Option<ArtifactClassification>,
 ) -> SqliteEntry<'a> {
     match action_directory_member {
         ActionDirectoryMember::File(file_metadata) => {
@@ -232,6 +279,7 @@ fn convert_action_directory_member_to_sqlite_entry<'a>(
                 symlink_target: None,
                 last_access_time,
                 parent_path,
+                classification,
             }
         }
         ActionDirectoryMember::Symlink(symlink) => SqliteEntry {
@@ -244,6 +292,7 @@ fn convert_action_directory_member_to_sqlite_entry<'a>(
             symlink_target: Some(Cow::Borrowed(symlink.target().as_str())),
             last_access_time,
             parent_path,
+            classification,
         },
         ActionDirectoryMember::ExternalSymlink(external_symlink) => SqliteEntry {
             path,
@@ -255,6 +304,7 @@ fn convert_action_directory_member_to_sqlite_entry<'a>(
             symlink_target: Some(Cow::Borrowed(external_symlink.target_str())),
             last_access_time,
             parent_path,
+            classification,
         },
     }
 }
@@ -265,7 +315,8 @@ fn convert_sqlite_entries_to_materializer_state(
 ) -> buck2_error::Result<MaterializerState> {
     #[derive(Default)]
     struct DirectoryData<'a> {
-        timestamp: Option<DateTime<Utc>>,
+        timestamp: Option<Timestamp>,
+        classification: Option<ArtifactClassification>,
         children: Vec<SqliteEntry<'a>>,
     }
 
@@ -290,14 +341,20 @@ fn convert_sqlite_entries_to_materializer_state(
             let Some(last_access_time) = entry.last_access_time else {
                 return Err(MaterializerStateTableError::ExpectedLastAccessTimeForArtifact.into());
             };
-            let last_access_time = Utc
-                .timestamp_opt(last_access_time, 0)
-                .single()
-                .ok_or_else(|| internal_error!("invalid timestamp"))?;
+            let last_access_time = Timestamp::from_second(last_access_time)
+                .map_err(|_| internal_error!("invalid timestamp"))?;
             match entry.artifact_type {
                 ArtifactType::Directory => {
-                    let DirectoryData { timestamp, .. } = directories.entry(path).or_default();
+                    let classification = entry
+                        .classification
+                        .ok_or(MaterializerStateTableError::ArtifactClassificationMissing)?;
+                    let DirectoryData {
+                        timestamp,
+                        classification: stored_classification,
+                        ..
+                    } = directories.entry(path).or_default();
                     _ = timestamp.insert(last_access_time);
+                    _ = stored_classification.insert(classification);
                 }
                 _ => {
                     let state_entry =
@@ -317,12 +374,13 @@ fn convert_sqlite_entries_to_materializer_state(
         path,
         DirectoryData {
             timestamp,
+            classification,
             children,
         },
     ) in directories
     {
         let dir = {
-            let mut builder = ActionDirectoryBuilder::empty();
+            let mut builder = ActionDirectoryBuilder::empty_non_exhaustive();
             for child in children {
                 let child_path = child.path.clone();
                 let parent_dir_rel_path = {
@@ -339,16 +397,21 @@ fn convert_sqlite_entries_to_materializer_state(
                     builder.insert(parent_dir_rel_path, DirectoryEntry::Leaf(member))?;
                 }
             }
+            // A materialized directory artifact reloaded from sqlite is complete content.
+            builder.mark_uniformly_exhaustive();
             let fingerprint = builder.fingerprint(digest_config.as_directory_serializer());
             fingerprint.shared(&*INTERNER)
         };
         let Some(last_access_time) = timestamp else {
             return Err(MaterializerStateTableError::DirectoryArtifactEntryMissing(path).into());
         };
+        let classification =
+            classification.ok_or(MaterializerStateTableError::ArtifactClassificationMissing)?;
         results.push(MaterializerStateEntry {
             path,
             metadata: ActionDirectoryEntry::Dir(dir),
             last_access_time,
+            classification,
         })
     }
 
@@ -357,16 +420,20 @@ fn convert_sqlite_entries_to_materializer_state(
 
 fn convert_non_directory_sqlite_entry_to_materializer_state_entry(
     sqlite_entry: SqliteEntry,
-    last_access_time: DateTime<Utc>,
+    last_access_time: Timestamp,
     digest_config: DigestConfig,
 ) -> buck2_error::Result<MaterializerStateEntry> {
     let path = ProjectRelativePathBuf::unchecked_new(sqlite_entry.path.clone().into_owned());
+    let classification = sqlite_entry
+        .classification
+        .ok_or(MaterializerStateTableError::ArtifactClassificationMissing)?;
     let member =
         convert_non_directory_sqlite_entry_to_action_directory_member(sqlite_entry, digest_config)?;
     Ok(MaterializerStateEntry {
         path,
         metadata: DirectoryEntry::Leaf(member),
         last_access_time,
+        classification,
     })
 }
 
@@ -476,7 +543,8 @@ impl MaterializerStateSqliteTable {
                 file_is_executable      INTEGER NULL DEFAULT NULL,
                 symlink_target          TEXT NULL DEFAULT NULL,
                 last_access_time        INTEGER NULL DEFAULT NULL,
-                parent_path             TEXT NULL DEFAULT NULL
+                parent_path             TEXT NULL DEFAULT NULL,
+                classification          INTEGER NULL DEFAULT NULL CHECK(classification IN (0, 1))
             )",
         );
         tracing::trace!(sql = %*sql, "creating table");
@@ -507,12 +575,14 @@ impl MaterializerStateSqliteTable {
         &self,
         path: &ProjectRelativePath,
         metadata: &ArtifactMetadata,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
+        classification: ArtifactClassification,
     ) -> buck2_error::Result<()> {
-        let entries = convert_artifact_metadata_to_sqlite_entries(path, metadata, &timestamp);
-        static SQL: Lazy<String> = Lazy::new(|| {
+        let entries =
+            convert_artifact_metadata_to_sqlite_entries(path, metadata, &timestamp, classification);
+        static SQL: LazyLock<String> = LazyLock::new(|| {
             format!(
-                "INSERT INTO {STATE_TABLE_NAME} (path, artifact_type, digest_size, entry_hash, entry_hash_kind, file_is_executable, symlink_target, last_access_time, parent_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                "INSERT INTO {STATE_TABLE_NAME} (path, artifact_type, digest_size, entry_hash, entry_hash_kind, file_is_executable, symlink_target, last_access_time, parent_path, classification) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
             )
         });
         let mut conn = self.connection.lock();
@@ -531,6 +601,7 @@ impl MaterializerStateSqliteTable {
                     entry.symlink_target,
                     entry.last_access_time,
                     entry.parent_path,
+                    entry.classification,
                 ],
             )
             .with_buck_error_context(|| {
@@ -551,12 +622,38 @@ impl MaterializerStateSqliteTable {
             let sql = format!(
                 "UPDATE {} SET last_access_time = {} WHERE path IN ({})",
                 STATE_TABLE_NAME,
-                Utc::now().timestamp(),
+                Timestamp::now().as_second(),
                 itertools::repeat_n("?", chunk.len()).join(","),
             );
             tracing::trace!(sql = %sql, chunk = ?chunk, "updating last_access_times");
             tx.execute(&sql, rusqlite::params_from_iter(chunk.map(|p| p.as_str())))
                 .with_buck_error_context(|| format!("updating sqlite table {STATE_TABLE_NAME}"))?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn update_classifications(
+        &self,
+        paths: &[ProjectRelativePathBuf],
+        classification: ArtifactClassification,
+    ) -> buck2_error::Result<()> {
+        let mut conn = self.connection.lock();
+        let tx = conn.transaction()?;
+        for chunk in paths.chunks(100) {
+            let sql = format!(
+                "UPDATE {STATE_TABLE_NAME} SET classification = {} WHERE path IN ({}) AND parent_path IS NULL",
+                classification.sqlite_value(),
+                itertools::repeat_n("?", chunk.len()).join(","),
+            );
+            tracing::trace!(sql = %sql, chunk = ?chunk, "updating classifications");
+            tx.execute(
+                &sql,
+                rusqlite::params_from_iter(chunk.iter().map(|path| path.as_str())),
+            )
+            .with_buck_error_context(|| {
+                format!("updating classifications in sqlite table {STATE_TABLE_NAME}")
+            })?;
         }
         tx.commit()?;
         Ok(())
@@ -573,9 +670,9 @@ impl MaterializerStateSqliteTable {
     }
 
     fn read_all_entries(&self) -> buck2_error::Result<Vec<SqliteEntry<'_>>> {
-        static SQL: Lazy<String> = Lazy::new(|| {
+        static SQL: LazyLock<String> = LazyLock::new(|| {
             format!(
-                "SELECT path, artifact_type, digest_size, entry_hash, entry_hash_kind, file_is_executable, symlink_target, last_access_time, parent_path FROM {STATE_TABLE_NAME}",
+                "SELECT path, artifact_type, digest_size, entry_hash, entry_hash_kind, file_is_executable, symlink_target, last_access_time, parent_path, classification FROM {STATE_TABLE_NAME}",
             )
         });
         tracing::trace!(sql = %*SQL, "reading all from table");
@@ -592,6 +689,7 @@ impl MaterializerStateSqliteTable {
                 row.get(6)?,
                 row.get(7)?,
                 row.get(8)?,
+                row.get(9)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()
@@ -692,11 +790,11 @@ mod tests {
         let digest_config = DigestConfig::testing_default();
 
         let path = ProjectRelativePath::new("artifact_path").unwrap();
-        let last_access_time = DateTime::from_timestamp_nanos(0);
+        let last_access_time = Timestamp::UNIX_EPOCH;
 
         let metadata = {
             let directory = {
-                let mut builder = DirectoryBuilder::empty();
+                let mut builder = DirectoryBuilder::empty_non_exhaustive();
                 {
                     let digest =
                         TrackedCasDigest::from_content(b"hello", digest_config.cas_digest_config());
@@ -710,13 +808,14 @@ mod tests {
                         .unwrap();
                 }
                 {
-                    let empty_directory = DirectoryEntry::Dir(DirectoryBuilder::empty());
+                    let empty_directory =
+                        DirectoryEntry::Dir(DirectoryBuilder::empty_non_exhaustive());
                     builder
                         .insert(ForwardRelativePath::unchecked_new("bar"), empty_directory)
                         .unwrap();
                 }
                 {
-                    let mut directory_builder = DirectoryBuilder::empty();
+                    let mut directory_builder = DirectoryBuilder::empty_non_exhaustive();
                     let symlink =
                         ActionDirectoryMember::Symlink(Arc::new(Symlink::new("../foo".into())));
                     directory_builder
@@ -738,8 +837,13 @@ mod tests {
             ActionDirectoryEntry::Dir(directory)
         };
 
-        let entries =
-            convert_artifact_metadata_to_sqlite_entries(path, &metadata, &last_access_time);
+        let classification = ArtifactClassification::FinalOutput;
+        let entries = convert_artifact_metadata_to_sqlite_entries(
+            path,
+            &metadata,
+            &last_access_time,
+            classification,
+        );
 
         let mut state =
             convert_sqlite_entries_to_materializer_state(entries, digest_config).unwrap();
@@ -750,11 +854,13 @@ mod tests {
             path: result_path,
             metadata: result_metadata,
             last_access_time: result_last_access_time,
+            classification: result_classification,
         } = state.pop().unwrap();
 
         assert_eq!(path, result_path);
         assert!(artifact_metadata_eq(&metadata, &result_metadata));
         assert_eq!(last_access_time, result_last_access_time);
+        assert_eq!(classification, result_classification);
     }
 
     #[test]
@@ -767,10 +873,15 @@ mod tests {
             is_executable: false,
         }));
         let path = ProjectRelativePath::new("foo/bar").unwrap();
-        let last_access_time = DateTime::from_timestamp_nanos(0);
+        let last_access_time = Timestamp::UNIX_EPOCH;
 
-        let entries =
-            convert_artifact_metadata_to_sqlite_entries(path, &metadata, &last_access_time);
+        let classification = ArtifactClassification::IntermediateOnly;
+        let entries = convert_artifact_metadata_to_sqlite_entries(
+            path,
+            &metadata,
+            &last_access_time,
+            classification,
+        );
 
         let mut state =
             convert_sqlite_entries_to_materializer_state(entries, digest_config).unwrap();
@@ -781,11 +892,13 @@ mod tests {
             path: result_path,
             metadata: result_metadata,
             last_access_time: result_last_access_time,
+            classification: result_classification,
         } = state.pop().unwrap();
 
         assert_eq!(path, result_path);
         assert!(artifact_metadata_eq(&metadata, &result_metadata));
         assert_eq!(last_access_time, result_last_access_time);
+        assert_eq!(classification, result_classification);
     }
 
     #[test]
@@ -799,10 +912,15 @@ mod tests {
 
         let metadata = DirectoryEntry::Leaf(symlink);
         let path = ProjectRelativePath::new("foo/bar").unwrap();
-        let last_access_time = DateTime::from_timestamp_nanos(0);
+        let last_access_time = Timestamp::UNIX_EPOCH;
 
-        let entries =
-            convert_artifact_metadata_to_sqlite_entries(path, &metadata, &last_access_time);
+        let classification = ArtifactClassification::FinalOutput;
+        let entries = convert_artifact_metadata_to_sqlite_entries(
+            path,
+            &metadata,
+            &last_access_time,
+            classification,
+        );
 
         let mut state =
             convert_sqlite_entries_to_materializer_state(entries, digest_config).unwrap();
@@ -813,11 +931,13 @@ mod tests {
             path: result_path,
             metadata: result_metadata,
             last_access_time: result_last_access_time,
+            classification: result_classification,
         } = state.pop().unwrap();
 
         assert_eq!(path, result_path);
         assert!(artifact_metadata_eq(&metadata, &result_metadata));
         assert_eq!(last_access_time, result_last_access_time);
+        assert_eq!(classification, result_classification);
     }
 
     #[test]
@@ -837,10 +957,15 @@ mod tests {
 
         let metadata = DirectoryEntry::Leaf(external_symlink);
         let path = ProjectRelativePath::new("foo/bar").unwrap();
-        let last_access_time = DateTime::from_timestamp_nanos(0);
+        let last_access_time = Timestamp::UNIX_EPOCH;
 
-        let entries =
-            convert_artifact_metadata_to_sqlite_entries(path, &metadata, &last_access_time);
+        let classification = ArtifactClassification::IntermediateOnly;
+        let entries = convert_artifact_metadata_to_sqlite_entries(
+            path,
+            &metadata,
+            &last_access_time,
+            classification,
+        );
 
         let mut state =
             convert_sqlite_entries_to_materializer_state(entries, digest_config).unwrap();
@@ -851,11 +976,13 @@ mod tests {
             path: result_path,
             metadata: result_metadata,
             last_access_time: result_last_access_time,
+            classification: result_classification,
         } = state.pop().unwrap();
 
         assert_eq!(path, result_path);
         assert!(artifact_metadata_eq(&metadata, &result_metadata));
         assert_eq!(last_access_time, result_last_access_time);
+        assert_eq!(classification, result_classification);
     }
 
     #[test]

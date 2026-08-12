@@ -11,6 +11,7 @@
 
 import contextlib
 import hashlib
+import inspect
 import json
 import os
 import platform
@@ -161,7 +162,9 @@ async def buck_fixture(  # noqa C901 : "too complex"
             current_test = (
                 __manifest__.fbmake["build_rule"] + os.environ["PYTEST_CURRENT_TEST"]
             )
-            isolation_prefix = hashlib.sha1(current_test.encode("utf-8")).hexdigest()
+            isolation_prefix = hashlib.sha256(current_test.encode("utf-8")).hexdigest()[
+                :40
+            ]
             # FIXME(T136079642): Buck2 on Windows has problem with relative symlinks over 260 chars, shorten the hash
             if is_windows:
                 isolation_prefix = isolation_prefix[:5]
@@ -218,6 +221,10 @@ async def buck_fixture(  # noqa C901 : "too complex"
             for line in extra_config_lines:
                 f.write(line)
         env["BUCK2_TEST_EXTRA_EXTERNAL_CONFIG"] = extra_config
+
+        settings_home_dir = os.path.join(base_dir, "settings_home")
+        os.makedirs(settings_home_dir, exist_ok=True)
+        env["BUCK2_TEST_SETTINGS_HOME_DIR"] = settings_home_dir
 
         buck = Buck(
             Path(test_executable),
@@ -497,6 +504,37 @@ BuckTestFn = Callable[..., Awaitable[None]]
 SKIPPABLE_PLATFORMS = ["darwin", "linux", "windows"]
 
 
+def _make_passing_test_for_skipped_platform(
+    fn: Callable[..., Any],
+) -> Callable[..., Any]:
+    def always_pass(*args: Any, **kwargs: Any) -> None:
+        pass
+
+    always_pass.__name__ = fn.__name__
+    always_pass.__qualname__ = fn.__qualname__
+    always_pass.__module__ = fn.__module__
+    always_pass.__doc__ = fn.__doc__
+
+    signature = inspect.signature(fn)
+    always_pass.__signature__ = signature.replace(  # pyre-ignore[16]
+        parameters=[
+            parameter
+            for name, parameter in signature.parameters.items()
+            if name != "buck"
+        ],
+    )
+
+    parametrize_marks = [
+        mark
+        for mark in getattr(fn, "pytestmark", [])
+        if getattr(mark, "name", None) == "parametrize"
+    ]
+    if parametrize_marks:
+        always_pass.pytestmark = parametrize_marks  # pyre-ignore[16]
+
+    return always_pass
+
+
 def buck_test(
     inplace: bool | None = None,
     data_dir: Optional[str] = "",
@@ -559,7 +597,7 @@ def buck_test(
         if p not in SKIPPABLE_PLATFORMS:
             raise Exception(f"skip_for_os must specifiy one of {SKIPPABLE_PLATFORMS}")
     if platform.system().lower() in skip_for_os:
-        return lambda *args: None
+        return _make_passing_test_for_skipped_platform
 
     if data_dir is not None and inplace:
         raise Exception(

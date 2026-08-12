@@ -41,7 +41,6 @@ use dice::DiceComputations;
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use either::Either;
-use futures::FutureExt;
 use starlark::collections::SmallSet;
 use starlark::values::Heap;
 use starlark::values::UnpackValue;
@@ -169,12 +168,12 @@ pub(crate) enum ConfiguredTargetListExprArg<'v> {
 }
 
 impl<'v> TargetListExpr<'v, TargetNode> {
-    pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = TargetExpr<'v, TargetNode>> + '_> {
+    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = TargetExpr<'v, TargetNode>> {
         match &self {
-            Self::One(one) => Box::new(iter::once(one.clone())),
-            Self::Iterable(iterable) => Box::new(iterable.iter().cloned()),
+            Self::One(one) => Either::Left(Either::Left(iter::once(one.clone()))),
+            Self::Iterable(iterable) => Either::Left(Either::Right(iterable.iter().cloned())),
             Self::TargetSet(target_set) => {
-                Box::new(target_set.iter().map(|s| TargetExpr::Node(s.clone())))
+                Either::Right(target_set.iter().map(|s| TargetExpr::Node(s.clone())))
             }
         }
     }
@@ -185,8 +184,8 @@ impl<'v> TargetListExpr<'v, TargetNode> {
         ctx: &mut DiceComputations<'_>,
     ) -> buck2_error::Result<Cow<'v, TargetSet<TargetNode>>> {
         let set = ctx
-            .try_compute_join(self.iter(), |ctx, node_or_ref| {
-                async move { node_or_ref.get_from_dice(ctx).await }.boxed()
+            .try_compute_join(self.iter(), async |ctx, node_or_ref| {
+                node_or_ref.get_from_dice(ctx).await
             })
             .await?
             .into_iter()
@@ -220,7 +219,7 @@ pub(crate) enum TargetExprError {
 }
 
 impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
-    fn iter(&self) -> Box<dyn Iterator<Item = TargetExpr<'v, ConfiguredTargetNode>> + '_> {
+    fn iter(&self) -> Box<dyn ExactSizeIterator<Item = TargetExpr<'v, ConfiguredTargetNode>> + '_> {
         match &self {
             Self::One(one) => Box::new(iter::once(one.clone())),
             Self::Iterable(iterable) => Box::new(iterable.iter().cloned()),
@@ -237,13 +236,11 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
         self,
         dice: &mut DiceComputations<'_>,
     ) -> buck2_error::Result<Vec<MaybeCompatible<ConfiguredTargetNode>>> {
-        dice.compute_join(self.iter(), |ctx, node_or_ref| {
-            async move {
-                ctx.get_configured_target_node(node_or_ref.node_ref())
-                    .await
-                    .ok()
-            }
-            .boxed()
+        dice.compute_join(self.iter(), async |ctx, node_or_ref| {
+            ctx.get_configured_target_node(node_or_ref.node_ref())
+                .await
+                .ok()
+                .map(|n| n.map(|n| n.dupe()))
         })
         .await
         .into_iter()
@@ -259,7 +256,8 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
             Self::One(node_or_ref) => Some(
                 dice.get_configured_target_node(node_or_ref.node_ref())
                     .await
-                    .ok()?,
+                    .ok()?
+                    .map(|n| n.dupe()),
             ),
             _ => None,
         })
@@ -472,19 +470,18 @@ impl<'v> TargetListExpr<'v, ConfiguredTargetNode> {
             }
             ConfiguredTargetListArg::TargetSet(s) => {
                 let results: Vec<ResultMaybeCompatible<ConfiguredTargetNode>> = dice
-                    .compute_join(s.0.iter(), |dice, node| {
-                        async move {
-                            Self::check_allow_unconfigured(
-                                allow_unconfigured,
-                                &node.label().to_string(),
-                                global_cfg_options,
-                            )?;
-                            let label = dice
-                                .get_configured_target(node.label(), global_cfg_options)
-                                .await?;
-                            dice.get_configured_target_node(&label).await
-                        }
-                        .boxed()
+                    .compute_join(s.0.iter(), async |dice, node| {
+                        Self::check_allow_unconfigured(
+                            allow_unconfigured,
+                            &node.label().to_string(),
+                            global_cfg_options,
+                        )?;
+                        let label = dice
+                            .get_configured_target(node.label(), global_cfg_options)
+                            .await?;
+                        dice.get_configured_target_node(&label)
+                            .await
+                            .map(|n| n.dupe())
                     })
                     .await;
 
@@ -670,7 +667,7 @@ async fn unpack_string_literal(
             let compatible_node = dice.get_configured_target_node(&label).await.ok()?;
             compatible_node
                 .require_compatible()
-                .map(SingleOrCompatibleConfiguredTargets::Single)
+                .map(|n| SingleOrCompatibleConfiguredTargets::Single(n.dupe()))
         }
         pattern => {
             let loaded_patterns =
@@ -730,6 +727,7 @@ impl OwnedTargetNodeOrTargetLabel {
         dice.get_configured_target_node(&configured_label)
             .await
             .require_compatible()
+            .map(|n| n.dupe())
     }
 
     pub(crate) async fn to_unconfigured_target_node(
@@ -788,7 +786,7 @@ impl OwnedConfiguredTargetNodeArg {
                 let compatible = dice.get_configured_target_node(label.label()).await.ok()?;
                 compatible
                     .require_compatible()
-                    .map(SingleOrCompatibleConfiguredTargets::Single)
+                    .map(|n| SingleOrCompatibleConfiguredTargets::Single(n.dupe()))
             }
             OwnedConfiguredTargetNodeArg::String(str) => {
                 unpack_string_literal(str, global_cfg_options, ctx, dice).await

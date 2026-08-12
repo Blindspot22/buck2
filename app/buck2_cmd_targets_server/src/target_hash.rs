@@ -42,7 +42,6 @@ use dupe::Dupe;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::future::Shared;
-use futures::future::join_all;
 use futures::join;
 use futures::stream::FuturesUnordered;
 use os_str_bytes::OsStrBytes;
@@ -165,11 +164,11 @@ impl FileHasher for PathsAndContentsHasher {
                     }
                     PathMetadata::Directory => {
                         res.push(2u8);
-                        let files = DiceFileComputations::read_dir(ctx, cell_path.dupe())
+                        let files = &DiceFileComputations::read_dir(ctx, cell_path.dupe())
                             .await?
                             .included;
                         res.extend(files.len().to_be_bytes());
-                        for x in &*files {
+                        for x in files.iter() {
                             let name = x.file_name.as_str();
                             res.extend(name.len().to_be_bytes());
                             res.extend(name.as_bytes());
@@ -186,7 +185,7 @@ impl FileHasher for PathsAndContentsHasher {
         }
 
         let mut res = Vec::new();
-        hash_item(&mut self.dice.clone(), cell_path.as_ref(), &mut res).await?;
+        hash_item(&mut self.dice.ctx(), cell_path.as_ref(), &mut res).await?;
         Ok(res)
     }
 }
@@ -327,8 +326,10 @@ impl TargetHashes {
                                 })?;
                             }
 
-                            let (dep_hashes, input_hashes) =
-                                join!(join_all(dep_futures), join_all(input_futs));
+                            let (dep_hashes, input_hashes) = join!(
+                                buck2_util::future::join_all(dep_futures),
+                                buck2_util::future::join_all(input_futs)
+                            );
 
                             TargetHashes::hash_deps(dep_hashes, &mut *hasher)?;
                             TargetHashes::hash_files(input_hashes, &mut *hasher)?;
@@ -351,6 +352,7 @@ impl TargetHashes {
             targets.iter_names(),
             QueryTargetDepsSuccessors,
             visit,
+            false, // allow_partial_graph
         )
         .await?;
 
@@ -408,7 +410,7 @@ impl TargetHashes {
                                 buck2_error::Ok(())
                             })?;
 
-                            let input_hashes = join_all(input_futs).await;
+                            let input_hashes = buck2_util::future::join_all(input_futs).await;
                             TargetHashes::hash_files(input_hashes, &mut *hasher)?;
                         }
 
@@ -422,7 +424,10 @@ impl TargetHashes {
             .collect();
 
         let target_mapping: StdBuckHashMap<TargetLabel, buck2_error::Result<BuckTargetHash>> =
-            join_all(hashing_futures).await.into_iter().collect();
+            buck2_util::future::join_all(hashing_futures)
+                .await
+                .into_iter()
+                .collect();
         Ok(Self { target_mapping })
     }
 
@@ -433,7 +438,7 @@ impl TargetHashes {
     }
 
     pub(crate) async fn compute<T: TargetHashingTargetNode, L: AsyncNodeLookup<T>>(
-        mut dice: DiceTransaction,
+        dice: DiceTransaction,
         lookup: L,
         targets: Vec<(
             PackageLabelWithModifiers,
@@ -447,7 +452,7 @@ impl TargetHashes {
     where
         T::Key: ConfiguredOrUnconfiguredTargetLabel,
     {
-        let targets = T::get_target_nodes(&mut dice, targets, global_cfg_options).await?;
+        let targets = T::get_target_nodes(&mut dice.ctx(), targets, global_cfg_options).await?;
         let file_hasher = Self::new_file_hasher(dice.dupe(), file_hash_mode);
         if target_hash_recursive {
             Self::compute_recursive_target_hashes(dice, lookup, targets, file_hasher, use_fast_hash)

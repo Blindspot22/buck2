@@ -18,6 +18,7 @@ use std::cmp;
 use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Formatter;
+use std::num::NonZeroUsize;
 use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::ops::Sub;
@@ -25,6 +26,8 @@ use std::ops::Sub;
 use allocative::Allocative;
 use derive_more::Display;
 use dupe::Dupe;
+use gazebo::cmp_chain;
+use mini_vec::MiniVec;
 
 use crate::arc::Arc;
 
@@ -33,26 +36,38 @@ use crate::arc::Arc;
 // split this due to formatters not agreeing
 #[derive(PartialEq, Hash, Clone, Ord, PartialOrd, Allocative)]
 #[display("v{}", _0)]
-pub struct VersionNumber(pub(crate) usize);
+pub struct VersionNumber(NonZeroUsize);
 
 impl VersionNumber {
-    /// First transaction has version number zero.
-    pub(crate) const ZERO: VersionNumber = VersionNumber(0);
+    /// First transaction has version number one. Zero is not a valid version number, which lets
+    /// `Option<VersionNumber>` use the same 8 bytes as a bare `VersionNumber`.
+    pub(crate) const FIRST: VersionNumber = VersionNumber(NonZeroUsize::new(1).unwrap());
 
+    /// Panics if `num` is zero, since version numbers start at one.
+    #[cfg(test)]
     pub(crate) fn new(num: usize) -> Self {
-        VersionNumber(num)
+        VersionNumber(NonZeroUsize::new(num).expect("version numbers are non-zero"))
     }
 
     pub(crate) fn inc(&mut self) {
-        self.0 += 1;
+        self.0 = self.0.checked_add(1).expect("version number overflow");
     }
 
     pub(crate) fn dec(&mut self) {
-        self.0 = self.0.checked_sub(1).expect("shouldn't underflow");
+        self.0 =
+            NonZeroUsize::new(self.0.get() - 1).expect("cannot decrement below the first version");
     }
 
-    pub fn value(&self) -> usize {
-        self.0
+    pub(crate) fn next(self) -> Self {
+        let mut next = self;
+        next.inc();
+        next
+    }
+
+    /// Only for use in dice_tests
+    #[doc(hidden)]
+    pub fn testing_value(self) -> usize {
+        self.0.get()
     }
 }
 
@@ -60,7 +75,7 @@ impl Sub for VersionNumber {
     type Output = isize;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        self.0 as isize - rhs.0 as isize
+        self.0.get() as isize - rhs.0.get() as isize
     }
 }
 
@@ -69,7 +84,7 @@ mod introspection {
 
     impl VersionNumber {
         pub fn to_introspectable(self) -> crate::introspection::graph::VersionNumber {
-            crate::introspection::graph::VersionNumber(self.0)
+            crate::introspection::graph::VersionNumber(self.0.get())
         }
     }
 }
@@ -113,9 +128,8 @@ impl VersionRange {
         VersionRange::new(begin, None)
     }
 
-    #[allow(unused)] // TODO(cjhopman): This will be used.
     pub(crate) fn into_ranges(self) -> VersionRanges {
-        VersionRanges(vec![self])
+        VersionRanges(std::iter::once(self).collect())
     }
 
     pub(crate) fn intersect(&self, other: &VersionRange) -> Option<Self> {
@@ -255,7 +269,7 @@ impl Ord for VersionRange {
 /// 3, and 4 would not be in the sequence of ranges, but 1, 2, 5, would be. This is essentially
 /// a list of numerical end-exclusive intervals.
 #[derive(Allocative, Eq, Debug, PartialEq, Hash, Clone, PartialOrd, Ord)]
-pub(crate) struct VersionRanges(Vec<VersionRange>);
+pub(crate) struct VersionRanges(MiniVec<VersionRange>);
 
 impl Display for VersionRanges {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -354,9 +368,9 @@ impl VersionRanges {
     pub(crate) fn union(&self, other: &VersionRanges) -> VersionRanges {
         // Pre-allocate with exact upper bound: merging can only reduce
         // the count, so the output is at most self.len() + other.len().
-        // This avoids Vec's doubling growth (0→4→8) which leaves
+        // This avoids the doubling growth (0→4→8) which leaves
         // significant unused capacity on the hot revalidation path.
-        let mut out = Vec::with_capacity(self.0.len() + other.0.len());
+        let mut out = MiniVec::with_capacity(self.0.len() + other.0.len());
         let mut this = self.0.iter().peekable();
         let mut other = other.0.iter().peekable();
         let mut pending: Option<VersionRange> = None;
@@ -404,7 +418,7 @@ impl VersionRanges {
     pub(crate) fn intersect(&self, other: &VersionRanges) -> VersionRanges {
         // A single range from one side can intersect multiple ranges
         // from the other, self.len() + other.len() is a safe upper bound.
-        let mut out = Vec::with_capacity(self.0.len() + other.0.len());
+        let mut out = MiniVec::with_capacity(self.0.len() + other.0.len());
         let mut this = self.0.iter().peekable();
         let mut other = other.0.iter().peekable();
         // Pending is the last range we saw that has the largest end point, which is not the
@@ -570,7 +584,7 @@ impl VersionRanges {
     }
 
     pub(crate) fn testing_new(ranges: Vec<VersionRange>) -> Self {
-        Self(ranges)
+        Self(ranges.into())
     }
 }
 
@@ -585,12 +599,10 @@ mod tests {
     #[track_caller]
     fn into_range(range: (i32, i32)) -> VersionRange {
         let (b, e) = range;
+        let begin = VersionNumber::new((b + 1).try_into().unwrap());
         match e {
-            -1 => VersionRange::begins_with(VersionNumber::new(b.try_into().unwrap())),
-            e => VersionRange::bounded(
-                VersionNumber::new(b.try_into().unwrap()),
-                VersionNumber::new(e.try_into().unwrap()),
-            ),
+            -1 => VersionRange::begins_with(begin),
+            e => VersionRange::bounded(begin, VersionNumber::new((e + 1).try_into().unwrap())),
         }
     }
 
@@ -620,38 +632,8 @@ mod tests {
 
     #[test]
     fn version_range_intersects() {
-        let r1 = VersionRange::bounded(VersionNumber::new(0), VersionNumber::new(4));
-        let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(5));
-        assert_eq!(
-            r1.intersect(&r2),
-            Some(VersionRange::bounded(
-                VersionNumber::new(1),
-                VersionNumber::new(4)
-            ))
-        );
-
-        let r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
-        let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(5));
-        assert_eq!(
-            r1.intersect(&r2),
-            Some(VersionRange::bounded(
-                VersionNumber::new(1),
-                VersionNumber::new(4)
-            ))
-        );
-
-        let r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
-        let r2 = VersionRange::begins_with(VersionNumber::new(0));
-        assert_eq!(
-            r1.intersect(&r2),
-            Some(VersionRange::bounded(
-                VersionNumber::new(1),
-                VersionNumber::new(4)
-            ))
-        );
-
-        let r1 = VersionRange::begins_with(VersionNumber::new(2));
-        let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(5));
+        let r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(5));
+        let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(6));
         assert_eq!(
             r1.intersect(&r2),
             Some(VersionRange::bounded(
@@ -660,111 +642,141 @@ mod tests {
             ))
         );
 
-        let r1 = VersionRange::begins_with(VersionNumber::new(2));
+        let r1 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
+        let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(6));
+        assert_eq!(
+            r1.intersect(&r2),
+            Some(VersionRange::bounded(
+                VersionNumber::new(2),
+                VersionNumber::new(5)
+            ))
+        );
+
+        let r1 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
         let r2 = VersionRange::begins_with(VersionNumber::new(1));
         assert_eq!(
             r1.intersect(&r2),
-            Some(VersionRange::begins_with(VersionNumber::new(2)))
+            Some(VersionRange::bounded(
+                VersionNumber::new(2),
+                VersionNumber::new(5)
+            ))
         );
 
-        let r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(2));
-        let r2 = VersionRange::bounded(VersionNumber::new(3), VersionNumber::new(4));
+        let r1 = VersionRange::begins_with(VersionNumber::new(3));
+        let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(6));
+        assert_eq!(
+            r1.intersect(&r2),
+            Some(VersionRange::bounded(
+                VersionNumber::new(3),
+                VersionNumber::new(6)
+            ))
+        );
+
+        let r1 = VersionRange::begins_with(VersionNumber::new(3));
+        let r2 = VersionRange::begins_with(VersionNumber::new(2));
+        assert_eq!(
+            r1.intersect(&r2),
+            Some(VersionRange::begins_with(VersionNumber::new(3)))
+        );
+
+        let r1 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(3));
+        let r2 = VersionRange::bounded(VersionNumber::new(4), VersionNumber::new(5));
         assert_eq!(r1.intersect(&r2), None);
     }
 
     #[test]
     fn version_range_splits() {
-        let mut r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
-        assert_eq!(r1.split(VersionNumber::new(0)), None);
+        let mut r1 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
+        assert_eq!(r1.split(VersionNumber::new(1)), None);
         assert_eq!(
             r1,
-            VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4))
+            VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5))
         );
 
-        let mut r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
-        assert_eq!(r1.split(VersionNumber::new(5)), None);
+        let mut r1 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
+        assert_eq!(r1.split(VersionNumber::new(6)), None);
         assert_eq!(
             r1,
-            VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4))
+            VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5))
         );
 
-        let mut r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
+        let mut r1 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
         assert_eq!(
-            r1.split(VersionNumber::new(3)),
+            r1.split(VersionNumber::new(4)),
             Some(VersionRange::bounded(
-                VersionNumber::new(3),
-                VersionNumber::new(4)
+                VersionNumber::new(4),
+                VersionNumber::new(5)
             )),
         );
         assert_eq!(
             r1,
-            VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(3))
+            VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(4))
         );
 
-        let mut r1 = VersionRange::begins_with(VersionNumber::new(2));
-        assert_eq!(r1.split(VersionNumber::new(1)), None);
-        assert_eq!(r1, VersionRange::begins_with(VersionNumber::new(2)));
+        let mut r1 = VersionRange::begins_with(VersionNumber::new(3));
+        assert_eq!(r1.split(VersionNumber::new(2)), None);
+        assert_eq!(r1, VersionRange::begins_with(VersionNumber::new(3)));
 
-        let mut r1 = VersionRange::begins_with(VersionNumber::new(2));
+        let mut r1 = VersionRange::begins_with(VersionNumber::new(3));
         assert_eq!(
-            r1.split(VersionNumber::new(4)),
-            Some(VersionRange::begins_with(VersionNumber::new(4)))
+            r1.split(VersionNumber::new(5)),
+            Some(VersionRange::begins_with(VersionNumber::new(5)))
         );
         assert_eq!(
             r1,
-            VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(4))
+            VersionRange::bounded(VersionNumber::new(3), VersionNumber::new(5))
         );
     }
 
     #[test]
     #[allow(clippy::nonminimal_bool)]
     fn version_range_ops() {
-        let r1 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
-        let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
+        let r1 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
+        let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
 
         assert!(r1 == r2);
         assert!(!(r1 < r2));
         assert!(!(r1 > r2));
 
-        let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
+        let r2 = VersionRange::bounded(VersionNumber::new(3), VersionNumber::new(6));
         assert!(!(r1 == r2));
         assert!(r1 < r2);
         assert!(!(r1 > r2));
 
-        let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(3));
+        let r2 = VersionRange::bounded(VersionNumber::new(3), VersionNumber::new(4));
         assert!(!(r1 == r2));
         assert!(r1 < r2);
         assert!(!(r1 > r2));
 
-        let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(3));
-        assert!(!(r1 == r2));
-        assert!(!(r1 < r2));
-        assert!(r1 > r2);
-
-        let r2 = VersionRange::begins_with(VersionNumber::new(2));
-        assert!(!(r1 == r2));
-        assert!(r1 < r2);
-        assert!(!(r1 > r2));
-
-        let r2 = VersionRange::begins_with(VersionNumber::new(0));
-        assert!(!(r1 == r2));
-        assert!(!(r1 < r2));
-        assert!(r1 > r2);
-
-        let r1 = VersionRange::begins_with(VersionNumber::new(1));
-        let r2 = VersionRange::bounded(VersionNumber::new(1), VersionNumber::new(4));
-        assert!(!(r1 == r2));
-        assert!(!(r1 < r2));
-        assert!(r1 > r2);
-
-        let r1 = VersionRange::begins_with(VersionNumber::new(1));
         let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(4));
         assert!(!(r1 == r2));
+        assert!(!(r1 < r2));
+        assert!(r1 > r2);
+
+        let r2 = VersionRange::begins_with(VersionNumber::new(3));
+        assert!(!(r1 == r2));
         assert!(r1 < r2);
         assert!(!(r1 > r2));
 
-        let r1 = VersionRange::begins_with(VersionNumber::new(1));
         let r2 = VersionRange::begins_with(VersionNumber::new(1));
+        assert!(!(r1 == r2));
+        assert!(!(r1 < r2));
+        assert!(r1 > r2);
+
+        let r1 = VersionRange::begins_with(VersionNumber::new(2));
+        let r2 = VersionRange::bounded(VersionNumber::new(2), VersionNumber::new(5));
+        assert!(!(r1 == r2));
+        assert!(!(r1 < r2));
+        assert!(r1 > r2);
+
+        let r1 = VersionRange::begins_with(VersionNumber::new(2));
+        let r2 = VersionRange::bounded(VersionNumber::new(3), VersionNumber::new(5));
+        assert!(!(r1 == r2));
+        assert!(r1 < r2);
+        assert!(!(r1 > r2));
+
+        let r1 = VersionRange::begins_with(VersionNumber::new(2));
+        let r2 = VersionRange::begins_with(VersionNumber::new(2));
         assert!(r1 == r2);
         assert!(!(r1 < r2));
         assert!(!(r1 > r2));

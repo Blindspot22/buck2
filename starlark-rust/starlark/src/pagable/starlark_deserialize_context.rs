@@ -25,16 +25,20 @@ use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::ThreadId;
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use dupe::Dupe;
 use pagable::PagableCursor;
 use pagable::PagableDeserialize;
 use pagable::PagableDeserializer;
 use pagable::PagableDeserializerRecipe;
+use pagable::PageInState;
+use pagable::StorageState;
 use pagable::storage::handle::PagableStorageHandle;
 
 use crate::pagable::DeserTypeId;
@@ -43,11 +47,16 @@ use crate::pagable::heap_ref_id::HeapRefId;
 use crate::pagable::lookup_vtable;
 use crate::pagable::serialized_frozen_value::SerializedFrozenValue;
 use crate::pagable::starlark_deserialize::StarlarkDeserializeContext;
+use crate::pagable::starlark_serialize_context::StarlarkSerState;
 use crate::pagable::static_value::get_frozen_value_by_static_id;
 use crate::values::FrozenValue;
 use crate::values::layout::heap::allocator::alloc::allocator::ChunkAllocator;
 use crate::values::layout::heap::arena::Arena;
 use crate::values::layout::heap::arena::BumpKind;
+use crate::values::layout::heap::arena::ChunkInfo;
+use crate::values::layout::heap::heap_type::FrozenHeapPtr;
+use crate::values::layout::heap::heap_type::FrozenHeapRef;
+use crate::values::layout::heap::heap_type::WeakFrozenHeapRef;
 use crate::values::layout::heap::repr::AValueHeader;
 use crate::values::layout::vtable::AValueVTable;
 use crate::values::layout::vtable::StarlarkValueRawPtr;
@@ -237,21 +246,38 @@ pub(crate) struct HeapMetadata {
     base_pos: PagableCursor,
     /// Per-slot init state. See [`AtomicSlotState`].
     init_states: Vec<AtomicSlotState>,
+    /// Reverse map from each claimed payload address to its original recipe
+    /// index. Lazy allocation order is not necessarily recipe order.
+    ///
+    /// Populated when a slot is claimed: the mapping is a
+    /// property of the arena allocation, and recording it up front means no
+    /// reader can observe a payload address without also finding its index. An
+    /// aborted claim therefore leaves a correct-but-unreferenced entry, which is
+    /// preferable to the address resolving to nothing.
+    original_indices_by_payload: RwLock<HashMap<usize, u32>>,
     /// Coordinates waiters that lost a per-slot initialization race.
     init_waiters: InitWaiters,
+}
+
+struct HeapArenaState {
+    arena: NonNull<Arena<ChunkAllocator>>,
+    serialization_index_dirty: bool,
 }
 
 /// Locked pointer to the owning `FrozenFrozenHeap`'s arena plus the
 /// information needed to lazily parse this heap's slot metadata from its
 /// recipe. The metadata is materialized only on first `try_claim`.
 pub(crate) struct HeapDeserializationState {
+    heap_id: HeapRefId,
+    /// Scope state that owns cross-heap resolution for this heap's recipe.
+    scope: Arc<StarlarkDeserScope>,
     /// Cursor within the recipe's data where the lazy metadata region starts
     metadata_start: PagableCursor,
     /// Reopen this heap's data to lazily parse metadata.
     recipe: Arc<dyn PagableDeserializerRecipe>,
-    /// Locked pointer into the owning `FrozenFrozenHeap`'s arena. The mutex
-    /// serializes concurrent `alloc_raw_one` calls during partial deseralization.
-    arena: Mutex<NonNull<Arena<ChunkAllocator>>>,
+    /// Locked pointer into the owning `FrozenFrozenHeap`'s arena and the state
+    /// needed to refresh its serialization index after lazy allocation.
+    arena: Mutex<HeapArenaState>,
     /// Lazy: parsed on first `try_claim` / `value_count` call.
     metadata: OnceLock<HeapMetadata>,
 }
@@ -267,17 +293,28 @@ impl HeapDeserializationState {
     /// `FrozenFrozenHeap` will be kept alive for at least
     /// as long as this `HeapDeserializationState`.
     pub(crate) unsafe fn new(
+        scope: Arc<StarlarkDeserScope>,
+        heap_id: HeapRefId,
         metadata_start: PagableCursor,
         recipe: Arc<dyn PagableDeserializerRecipe>,
         arena: *const Arena<ChunkAllocator>,
     ) -> Self {
         Self {
+            scope,
+            heap_id,
             metadata_start,
             recipe,
-            // SAFETY: caller's contract — `arena` is a valid pointer.
-            arena: Mutex::new(unsafe { NonNull::new_unchecked(arena as *mut _) }),
+            arena: Mutex::new(HeapArenaState {
+                // SAFETY: caller's contract — `arena` is a valid pointer.
+                arena: unsafe { NonNull::new_unchecked(arena as *mut _) },
+                serialization_index_dirty: true,
+            }),
             metadata: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn unregister_heap(&self, heap_ptr: FrozenHeapPtr) {
+        self.scope.unregister_heap(self.heap_id, heap_ptr);
     }
 
     /// Number of values in this heap.
@@ -338,6 +375,7 @@ impl HeapDeserializationState {
             slots,
             base_pos,
             init_states,
+            original_indices_by_payload: RwLock::new(HashMap::new()),
             init_waiters: InitWaiters::new(),
         })
     }
@@ -358,12 +396,51 @@ impl HeapDeserializationState {
         m.init_states[index].load(Ordering::Acquire).done_ptr()
     }
 
+    /// Return the original recipe index for a claimed payload pointer.
+    pub(crate) fn original_value_index(&self, raw_ptr: usize) -> Option<u32> {
+        self.metadata
+            .get()?
+            .original_indices_by_payload
+            .read()
+            .expect("original index map lock poisoned")
+            .get(&raw_ptr)
+            .copied()
+    }
+
+    pub(crate) fn serialization_index_is_dirty(&self) -> bool {
+        self.arena
+            .lock()
+            .expect("arena lock poisoned")
+            .serialization_index_dirty
+    }
+
+    pub(crate) fn refresh_serialization_index(
+        &self,
+        is_registered: impl FnOnce() -> bool,
+        register: impl FnOnce(Vec<ChunkInfo>),
+    ) {
+        let mut state = self.arena.lock().expect("arena lock poisoned");
+        if !state.serialization_index_dirty && is_registered() {
+            return;
+        }
+
+        // SAFETY: `state.arena` remains valid for this state's lifetime, and
+        // the lock excludes lazy allocation while the index is constructed.
+        let entries = unsafe { state.arena.as_ref().build_chunk_index() };
+        register(entries);
+        state.serialization_index_dirty = false;
+    }
+
     /// Try to claim a slot for deserialization.
     ///
     /// Claims are serialized by the arena lock: the winner allocates the header
     /// and publishes its pointer into the slot's atomic *before* releasing the
     /// lock, so a claimed slot always carries its pointer and no reader ever has
     /// to wait for it to appear. This is why observing a started slot never blocks.
+    ///
+    /// The winner also records this slot's `payload address -> recipe index`
+    /// mapping before publishing, so the wire identity of a lazily allocated
+    /// value is in place for the whole time that value is reachable.
     ///
     /// On win, returns `Claimed(recipe)` with a freshly-allocated `header_ptr`
     /// pointing to a sentinel-vtable header in the arena. The caller must run
@@ -387,7 +464,7 @@ impl HeapDeserializationState {
         // The arena lock serializes claims: its holder performs the not-started
         // -> in-progress transition and publishes the header pointer before
         // releasing, so an in-progress slot is never visible without its pointer.
-        let arena = self.arena.lock().expect("arena lock poisoned");
+        let mut arena = self.arena.lock().expect("arena lock poisoned");
 
         // Re-check under the lock; the slot may have been claimed since the load
         // above.
@@ -400,9 +477,11 @@ impl HeapDeserializationState {
         // concurrent allocation is excluded.
         let header_ptr = unsafe {
             arena
+                .arena
                 .as_ref()
                 .alloc_raw_one(slot.bump_kind, slot.alloc_size)
         };
+        arena.serialization_index_dirty = true;
         // SAFETY: sentinel vtable so any access before `starlark_deserialize`
         // would panic.
         unsafe {
@@ -411,10 +490,19 @@ impl HeapDeserializationState {
                 AValueHeader(AValueVTable::uninitialized_sentinel()),
             );
         }
+        // SAFETY: the claim owns this header. `payload_ptr` is address
+        // arithmetic and never reads the (still sentinel) vtable.
+        let raw_ptr = unsafe { StarlarkValueRawPtr::new_header(&*header_ptr) };
+        m.original_indices_by_payload
+            .write()
+            .expect("original index map lock poisoned")
+            .insert(
+                raw_ptr.ptr as usize,
+                u32::try_from(index).expect("recipe index should fit in u32"),
+            );
         state.publish_in_progress(header_ptr);
         drop(arena);
 
-        let raw_ptr = unsafe { StarlarkValueRawPtr::new_header(&*header_ptr) };
         Ok(ClaimResult::Claimed(DeserializeRecipe {
             abs_pos: PagableCursor {
                 byte_pos: m.base_pos.byte_pos + slot.stream_offset as usize,
@@ -490,20 +578,29 @@ impl HeapDeserializationState {
     }
 }
 
-/// Shared deserialization state across all heaps deserialized in a session.
-/// Stored in `SessionContext` as `Arc<StarlarkDeserState>` so that
-/// independently-deserialized heaps (via pagable arcs) can all register
-/// their per-value addresses and resolve cross-heap references.
-pub(crate) struct StarlarkDeserState {
-    /// Per-heap `HeapDeserializationState`. Holds the slot array (immutable
-    /// metadata) and `init_states` (per-slot atomic that doubles as the
-    /// header-pointer lookup table once finalized).
-    heap_deser_states: DashMap<HeapRefId, Arc<HeapDeserializationState>>,
-    /// Cross-thread wait-for graph for cyclic-deser deadlock detection.
-    wait_graph: Arc<WaitForGraph>,
+/// Heap bindings shared by Starlark deserialization within one root page-in.
+pub(crate) struct StarlarkDeserScope {
+    /// Weak heap index used to resolve a heap ID while retaining the exact
+    /// owning heap for every access to its arena-backed deserialization state.
+    heap_bindings: DashMap<HeapRefId, WeakFrozenHeapRef>,
 }
 
-/// Cross-thread "wait-for" graph for detecting cyclic-deserialization deadlocks.
+impl PageInState for StarlarkDeserScope {}
+
+/// Exact process-local value identity used only while a claim or wait guard is
+/// active. The caller retains the owning heap, so `heap_ptr` cannot be reused
+/// while this identity is present in the graph.
+#[derive(Debug, Clone, Copy, Dupe, Eq, PartialEq, Hash)]
+struct HeapValueId {
+    heap_ptr: FrozenHeapPtr,
+    value_index: u32,
+}
+
+/// Storage-scoped wait-for graph for detecting cyclic-deserialization deadlocks.
+///
+/// The Arc cache can share a partially deserialized heap between root page-in
+/// scopes, so every root using the same storage must coordinate through one
+/// graph. Exact heap pointers keep unrelated same-name heaps independent.
 ///
 /// Keyed by [`ThreadId`], which identifies one in-flight deserialization only
 /// because the deserialize path is synchronous and blocks by parking the OS
@@ -512,27 +609,29 @@ pub(crate) struct StarlarkDeserState {
 /// ATTENTION: if deserialization ever becomes async, one thread could drive two
 /// at once and corrupt these keys — key by a per-deserialization token instead.
 #[derive(Default)]
-struct WaitForGraph {
-    inner: Mutex<WaitForGraphInner>,
+struct StarlarkDeserWaitGraph {
+    inner: Mutex<StarlarkDeserWaitGraphInner>,
 }
+
+impl StorageState for StarlarkDeserWaitGraph {}
 
 #[derive(Default)]
-struct WaitForGraphInner {
-    /// Maps `(heap_id, value_index)` → the thread currently deserializing it.
-    claimers: HashMap<(HeapRefId, u32), ThreadId>,
-    /// Maps thread → the `(heap_id, value_index)` it is blocked waiting on.
-    waiters: HashMap<ThreadId, (HeapRefId, u32)>,
+struct StarlarkDeserWaitGraphInner {
+    /// Maps an exact heap value to the thread currently deserializing it.
+    claimers: HashMap<HeapValueId, ThreadId>,
+    /// Maps a thread to the exact heap value it is blocked waiting on.
+    waiters: HashMap<ThreadId, HeapValueId>,
 }
 
-impl WaitForGraph {
-    fn lock(&self) -> MutexGuard<'_, WaitForGraphInner> {
+impl StarlarkDeserWaitGraph {
+    fn lock(&self) -> MutexGuard<'_, StarlarkDeserWaitGraphInner> {
         self.inner.lock().expect("wait-for graph lock poisoned")
     }
 
     /// Record that `thread` has claimed `value` for deserialization. The
     /// returned guard removes the `claimers` edge on drop, so every exit path
     /// from a claimed deserialization unwinds it exactly once.
-    fn claim(self: &Arc<Self>, value: (HeapRefId, u32), thread: ThreadId) -> ClaimGuard {
+    fn claim(self: &Arc<Self>, value: HeapValueId, thread: ThreadId) -> ClaimGuard {
         self.lock().claimers.insert(value, thread);
         ClaimGuard {
             graph: self.dupe(),
@@ -546,7 +645,7 @@ impl WaitForGraph {
     fn begin_wait_and_check_cycle(
         self: &Arc<Self>,
         thread: ThreadId,
-        value: (HeapRefId, u32),
+        value: HeapValueId,
     ) -> (WaitGuard, bool) {
         let mut inner = self.lock();
         inner.waiters.insert(thread, value);
@@ -562,10 +661,10 @@ impl WaitForGraph {
     }
 }
 
-impl WaitForGraphInner {
+impl StarlarkDeserWaitGraphInner {
     /// True if blocking on `start_value` would deadlock: the wait-for chain
     /// leads back to `my_thread` (covers same-thread re-entry too).
-    fn has_cycle(&self, my_thread: ThreadId, start_value: (HeapRefId, u32)) -> bool {
+    fn has_cycle(&self, my_thread: ThreadId, start_value: HeapValueId) -> bool {
         let mut current = start_value;
         for _ in 0..self.claimers.len() {
             let Some(&claimer) = self.claimers.get(&current) else {
@@ -586,8 +685,8 @@ impl WaitForGraphInner {
 /// Clears a claim's `claimers` edge on drop, so every exit path from a claimed
 /// deserialization unwinds it exactly once.
 struct ClaimGuard {
-    graph: Arc<WaitForGraph>,
-    value: (HeapRefId, u32),
+    graph: Arc<StarlarkDeserWaitGraph>,
+    value: HeapValueId,
 }
 
 impl Drop for ClaimGuard {
@@ -598,7 +697,7 @@ impl Drop for ClaimGuard {
 
 /// Clears this thread's `waiters` edge on drop.
 struct WaitGuard {
-    graph: Arc<WaitForGraph>,
+    graph: Arc<StarlarkDeserWaitGraph>,
     thread: ThreadId,
 }
 
@@ -608,61 +707,130 @@ impl Drop for WaitGuard {
     }
 }
 
-impl StarlarkDeserState {
+/// Describe a heap-identity collision. Cold because naming the heap allocates a
+/// `String` that the (overwhelmingly common) non-conflicting path never needs.
+#[cold]
+fn conflicting_heap_binding(
+    heap_id: HeapRefId,
+    bound: &FrozenHeapRef,
+    bound_heap_ptr: FrozenHeapPtr,
+    conflicting_heap_ptr: FrozenHeapPtr,
+) -> PagableError {
+    PagableError::ConflictingHeapBinding {
+        heap_id,
+        heap_name: bound
+            .name()
+            .map_or_else(|| "<unnamed>".to_owned(), |name| name.to_string()),
+        bound_heap_ptr: bound_heap_ptr.addr(),
+        conflicting_heap_ptr: conflicting_heap_ptr.addr(),
+    }
+}
+
+impl StarlarkDeserScope {
     pub(crate) fn new() -> Self {
         Self {
-            heap_deser_states: DashMap::new(),
-            wait_graph: Arc::new(WaitForGraph::default()),
+            heap_bindings: DashMap::new(),
         }
     }
 
-    /// Register a heap's deserialization state.
-    pub(crate) fn register_heap(&self, heap_id: HeapRefId, state: Arc<HeapDeserializationState>) {
-        self.heap_deser_states.insert(heap_id, state);
+    /// Register a heap for cross-heap value resolution.
+    pub(crate) fn register_heap(
+        &self,
+        heap_id: HeapRefId,
+        heap: WeakFrozenHeapRef,
+    ) -> Result<(), PagableError> {
+        let heap_ptr = heap.heap_ptr();
+        match self.heap_bindings.entry(heap_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(heap);
+            }
+            Entry::Occupied(mut entry) => {
+                if entry.get().heap_ptr() == heap_ptr {
+                    return Ok(());
+                }
+                if let Some(bound) = entry.get().upgrade() {
+                    return Err(conflicting_heap_binding(
+                        heap_id,
+                        &bound,
+                        entry.get().heap_ptr(),
+                        heap_ptr,
+                    ));
+                }
+                entry.insert(heap);
+            }
+        }
+        Ok(())
     }
 
-    pub(crate) fn get_heap(&self, heap_id: &HeapRefId) -> Option<Arc<HeapDeserializationState>> {
-        self.heap_deser_states.get(heap_id).map(|r| r.dupe())
+    pub(crate) fn is_heap_bound(
+        &self,
+        heap_id: HeapRefId,
+        heap_ptr: FrozenHeapPtr,
+    ) -> Result<bool, PagableError> {
+        let Some(entry) = self.heap_bindings.get(&heap_id) else {
+            return Ok(false);
+        };
+        if entry.heap_ptr() == heap_ptr {
+            return Ok(true);
+        }
+        if let Some(bound) = entry.upgrade() {
+            return Err(conflicting_heap_binding(
+                heap_id,
+                &bound,
+                entry.heap_ptr(),
+                heap_ptr,
+            ));
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn unregister_heap(&self, heap_id: HeapRefId, heap_ptr: FrozenHeapPtr) {
+        if let Entry::Occupied(entry) = self.heap_bindings.entry(heap_id)
+            && entry.get().heap_ptr() == heap_ptr
+        {
+            entry.remove();
+        }
+    }
+
+    pub(crate) fn get_heap(&self, heap_id: &HeapRefId) -> Option<FrozenHeapRef> {
+        self.heap_bindings
+            .get(heap_id)
+            .and_then(|heap| heap.upgrade())
     }
 }
 
 /// Concrete implementation of StarlarkDeserializeContext.
 ///
-/// Wraps a `PagableDeserializer` and a shared `StarlarkDeserState` to
+/// Wraps a `PagableDeserializer` and a shared `StarlarkDeserScope` to
 /// resolve `FrozenValue` references during deserialization.
 pub struct StarlarkDeserializerImpl<'a, 'de> {
     pagable: &'a mut dyn PagableDeserializer<'de>,
     /// Shared registry of per-heap deserialization state. Cross-heap pointer
     /// resolution looks up the target heap by `heap_id` here.
-    state: Arc<StarlarkDeserState>,
+    scope: Arc<StarlarkDeserScope>,
 }
 
 impl<'a, 'de> StarlarkDeserializerImpl<'a, 'de> {
     /// Recover a `StarlarkDeserializerImpl` after a hop through a pagable-only
     /// boundary (typically `serialize_arc` / `deserialize_arc`). All heap
-    /// state is reachable via the shared `StarlarkDeserState` registry.
+    /// state is reachable via the root's `StarlarkDeserScope` registry.
     pub fn recover_from_pagable(
         deserializer: &'a mut dyn PagableDeserializer<'de>,
     ) -> crate::Result<Self> {
-        let state = Self::get_or_create_state(deserializer);
-        Ok(Self::new(deserializer, state))
+        let scope = Self::get_or_create_scope(deserializer);
+        Ok(Self {
+            pagable: deserializer,
+            scope,
+        })
     }
 
-    /// Create a new deserializer with shared state.
-    pub(crate) fn new(
-        pagable: &'a mut dyn PagableDeserializer<'de>,
-        state: Arc<StarlarkDeserState>,
-    ) -> Self {
-        Self { pagable, state }
-    }
-
-    /// Get or create the shared `StarlarkDeserState` from the deserializer's `SessionContext`.
-    pub(crate) fn get_or_create_state(
+    /// Get or create the Starlark scope belonging to this root page-in.
+    pub(crate) fn get_or_create_scope(
         deserializer: &mut dyn PagableDeserializer<'_>,
-    ) -> Arc<StarlarkDeserState> {
+    ) -> Arc<StarlarkDeserScope> {
         deserializer
-            .session_context()
-            .get_or_insert_with(|| Arc::new(StarlarkDeserState::new()))
+            .page_in_scope()
+            .get_or_init(StarlarkDeserScope::new)
     }
 }
 
@@ -704,10 +872,33 @@ impl<'a, 'de> StarlarkDeserializerImpl<'a, 'de> {
         value_index: u32,
         is_str: bool,
     ) -> crate::Result<FrozenValue> {
-        let target_state = self
-            .state
+        let target_heap = self
+            .scope
             .get_heap(&heap_id)
-            .ok_or(PagableError::HeapBasesNotRegistered { heap_id })?;
+            .ok_or(PagableError::HeapNotBoundInPageInScope { heap_id })?;
+        let target_heap_ptr = target_heap
+            .downgrade()
+            .expect("a registered deserialization heap must have an allocation")
+            .heap_ptr();
+        let Some(target_state) = target_heap.deser_state() else {
+            // Page-in reused a native heap that remained resident after page-out.
+            // Use the serialization state to resolve its value.
+            let Some(value) = self
+                .pagable
+                .storage_context()
+                .get::<StarlarkSerState>()
+                .and_then(|state| {
+                    state.lookup_registered_value(target_heap_ptr, value_index, is_str)
+                })
+            else {
+                return Err(PagableError::NativeHeapValueNotRegistered {
+                    heap_id,
+                    value_index,
+                }
+                .into());
+            };
+            return Ok(value);
+        };
 
         let storage = self.pagable.storage();
 
@@ -728,8 +919,16 @@ impl<'a, 'de> StarlarkDeserializerImpl<'a, 'de> {
             return Ok(FrozenValue::new_ptr(header, is_str));
         }
 
-        // Identifies this value for the cycle bookkeeping in the match below.
-        let in_progress_key = (heap_id, value_index);
+        let wait_graph = self
+            .pagable
+            .storage_context()
+            .get_or_init(StarlarkDeserWaitGraph::default);
+        // Process-local heap identity prevents unrelated same-name heaps from
+        // sharing active claim/wait edges in the storage-global graph.
+        let in_progress_key = HeapValueId {
+            heap_ptr: target_heap_ptr,
+            value_index,
+        };
         let my_thread = std::thread::current().id();
 
         // Slow path: try to claim. The current `self.pagable` (PagableDeserializer)
@@ -739,7 +938,7 @@ impl<'a, 'de> StarlarkDeserializerImpl<'a, 'de> {
         match target_state.try_claim(value_index as usize, &storage)? {
             ClaimResult::Claimed(target) => {
                 // Guard clears the `claimers` edge on every exit below.
-                let _claim = self.state.wait_graph.claim(in_progress_key, my_thread);
+                let _claim = wait_graph.claim(in_progress_key, my_thread);
 
                 // `recipe.open()` produces a fresh deserializer so concurrent `ensure_initialized`
                 // calls on the same heap have independent cursors.
@@ -752,8 +951,7 @@ impl<'a, 'de> StarlarkDeserializerImpl<'a, 'de> {
                     // position in the recipe's bytes for this heap.
                     unsafe { de.seek(target.abs_pos) };
                     let nested_de: &mut dyn PagableDeserializer<'_> = &mut *de;
-                    let mut nested_ctx =
-                        StarlarkDeserializerImpl::new(nested_de, self.state.dupe());
+                    let mut nested_ctx = StarlarkDeserializerImpl::recover_from_pagable(nested_de)?;
                     (target.vtable.starlark_deserialize)(target.raw_ptr, &mut nested_ctx)
                 };
 
@@ -769,10 +967,8 @@ impl<'a, 'de> StarlarkDeserializerImpl<'a, 'de> {
                 // Slot is mid-deserialization (re-entrant or another thread).
                 // `_wait` must outlive the block below so other threads' cycle
                 // checks observe this wait.
-                let (_wait, cycle) = self
-                    .state
-                    .wait_graph
-                    .begin_wait_and_check_cycle(my_thread, in_progress_key);
+                let (_wait, cycle) =
+                    wait_graph.begin_wait_and_check_cycle(my_thread, in_progress_key);
                 if cycle {
                     // Break the cycle by handing back the in-progress header.
                     // Safe only because if the claimer fails, the whole deser

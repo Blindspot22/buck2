@@ -114,7 +114,6 @@ def _python_executable_attrs():
             "static_extension_utils": attrs.source(default = "prelude//python/tools:static_extension_utils.cpp"),
             "strip_libpar": attrs.enum(StripLibparStrategy, default = "none"),
             "strip_stapsdt": attrs.bool(default = False),
-            "supports_pyc_content_based_paths": attrs.bool(default = False),  # TODO(kasrag) Delete this when content-based paths are fulled rolled out
             "use_anon_target_for_analysis": attrs.bool(
                 default = False
             ),  # TODO(dcssiva) Delete this when we change the default analysis method to use anon targets
@@ -367,13 +366,26 @@ prebuilt_python_library = prelude_rule(
         # @unsorted-dict-items
         buck.labels_arg()
         | {
-            "binary_src": attrs.source(
+            "binary_src": attrs.option(
+                attrs.source(),
+                default = None,
                 doc = """
-                The path to the `.whl` or `.egg` to use.
+                The path to the `.whl`, `.egg`, or `.tar.gz` archive to extract.
 
-                 Note: `.egg` files have a very particular naming convention
-                 that must be followed - otherwise it will not be found at runtime!
-            """
+                 Exactly one of `binary_src` and `source_dir` must be set. Note:
+                 `.egg` files have a very particular naming convention that must
+                 be followed, otherwise they will not be found at runtime.
+            """,
+            ),
+            "source_dir": attrs.option(
+                attrs.source(allow_directory = True),
+                default = None,
+                doc = """
+                A directory containing an already-materialized Python package.
+
+                 The directory is manifested in place without being copied or
+                 archived. Exactly one of `binary_src` and `source_dir` must be set.
+            """,
             ),
         }
         | python_common.deps_arg()
@@ -554,7 +566,6 @@ python_library = prelude_rule(
                  from the Python standard library.
             """,
             ),
-            "supports_pyc_content_based_paths": attrs.bool(default = False),
             "type_stubs": attrs.named_set(attrs.source(), sorted = True, default = []),
             "use_lifeguard_incremental": attrs.bool(default = False),
             "versioned_resources": attrs.option(attrs.versioned(attrs.named_set(attrs.source(), sorted = True)), default = None),

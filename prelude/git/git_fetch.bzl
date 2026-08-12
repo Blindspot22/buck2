@@ -38,12 +38,18 @@ def git_fetch_impl(ctx: AnalysisContext) -> list[Provider]:
         short_path = "work-tree"
     work_tree = ctx.actions.declare_output(short_path, dir = True, has_content_based_path = False)
 
+    if ctx.attrs.update_submodules:
+        update_submodules = cmd_args("--update-submodules")
+    else:
+        update_submodules = cmd_args()
+
     cmd = [
         ctx.attrs._git_fetch_tool[RunInfo],
         cmd_args("--git-dir=", git_dir.as_output(), delimiter = ""),
         cmd_args("--work-tree=", work_tree.as_output(), delimiter = ""),
         cmd_args("--repo=", ctx.attrs.repo, delimiter = ""),
         cmd_args("--rev=", rev, delimiter = ""),
+        update_submodules,
     ]
     if ctx.attrs.git != None:
         cmd.append(cmd_args("--git=", ctx.attrs.git, delimiter = ""))
@@ -57,9 +63,16 @@ def git_fetch_impl(ctx: AnalysisContext) -> list[Provider]:
         allow_cache_upload = ctx.attrs.allow_cache_upload,
     )
 
+    sub_targets = {path: [DefaultInfo(default_output = work_tree.project(path))] for path in ctx.attrs.sub_targets}
+
+    # The repository itself, for consumers that need to serve the fetch as a local git remote
+    # rather than read the checked-out files. git refuses to track a path named ".git", so no
+    # requested work-tree projection can ever claim this key.
+    sub_targets[".git"] = [DefaultInfo(default_output = git_dir)]
+
     return [
         DefaultInfo(
             default_output = work_tree,
-            sub_targets = {path: [DefaultInfo(default_output = work_tree.project(path))] for path in ctx.attrs.sub_targets},
+            sub_targets = sub_targets,
         )
     ]

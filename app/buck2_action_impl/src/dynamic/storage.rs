@@ -33,7 +33,7 @@ use starlark::values::DynStarlark;
 use starlark::values::Freeze;
 use starlark::values::FreezeResult;
 use starlark::values::Freezer;
-use starlark::values::OwnedRefFrozenRef;
+use starlark::values::OwnedFrozenRef;
 use starlark::values::Trace;
 use starlark::values::Tracer;
 use starlark_map::small_map::SmallMap;
@@ -124,17 +124,17 @@ impl<'v> DynamicLambdaParamsStorageImpl<'v> {
 
 impl FrozenDynamicLambdaParamsStorageImpl {
     pub(crate) fn lookup_lambda<'f>(
-        storage: OwnedRefFrozenRef<'f, FrozenAnalysisValueStorage>,
+        storage: OwnedFrozenRef<'f, &'static FrozenAnalysisValueStorage<'static>>,
         key: &DynamicLambdaResultsKey,
-    ) -> buck2_error::Result<OwnedRefFrozenRef<'f, FrozenDynamicLambdaParams>> {
-        if key.holder_key() != &storage.as_ref().self_key {
+    ) -> buck2_error::Result<OwnedFrozenRef<'f, &'static FrozenDynamicLambdaParams>> {
+        if key.holder_key() != &storage.value().self_key {
             return Err(internal_error!(
                 "Wrong owner for lambda: expecting `{}`, got `{}`",
-                storage.as_ref().self_key,
+                storage.value().self_key,
                 key
             ));
         }
-        storage.try_map_result(|s| {
+        storage.try_map::<&'static FrozenDynamicLambdaParams, buck2_error::Error, _>(|s| {
             s.lambda_params
                 .as_any()
                 .downcast_ref::<FrozenDynamicLambdaParamsStorageImpl>()

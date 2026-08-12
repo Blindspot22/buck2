@@ -44,7 +44,7 @@ use buck2_fs::working_dir::AbsWorkingDir;
 use superconsole::Line;
 use superconsole::Span;
 
-use crate::commands::build::print_buck_ui_and_rating;
+use crate::commands::build::print_buck_ui;
 use crate::commands::build::print_build_result;
 
 fn forward_output_to_path(
@@ -182,21 +182,27 @@ If include patterns are present, regardless of whether exclude patterns are pres
     #[clap(name = "TEST_EXECUTOR_ARGS", raw = true)]
     test_executor_args: Vec<String>,
 
-    /// Also build DefaultInfo provider, which is what `buck2 build` command builds (this is not the default)
+    /// Also build DefaultInfo provider, which is what `buck2 build` builds.
+    ///
+    /// This overrides the `buck2.test_builds_targets` buckconfig.
     #[clap(long, group = "default-info")]
     build_default_info: bool,
 
-    /// Do not build DefaultInfo provider (this is the default)
-    #[allow(unused)]
+    /// Do not build DefaultInfo provider.
+    ///
+    /// This overrides the `buck2.test_builds_targets` buckconfig.
     #[clap(long, group = "default-info")]
     skip_default_info: bool,
 
-    /// Also build RunInfo provider, which builds artifacts needed for `buck2 run` (this is not the default)
+    /// Also build RunInfo provider, which builds artifacts needed for `buck2 run`.
+    ///
+    /// This overrides the `buck2.test_builds_targets` buckconfig.
     #[clap(long, group = "run-info")]
     build_run_info: bool,
 
-    /// Do not build RunInfo provider (this is the default)
-    #[allow(unused)]
+    /// Do not build RunInfo provider.
+    ///
+    /// This overrides the `buck2.test_builds_targets` buckconfig.
     #[clap(long, group = "run-info")]
     skip_run_info: bool,
 
@@ -388,6 +394,23 @@ impl StreamingCommand for TestCommand {
         }
 
         let context = ctx.client_context(matches, &self)?;
+
+        let build_default_info = if self.skip_default_info {
+            Some(false)
+        } else if self.build_default_info {
+            Some(true)
+        } else {
+            None
+        };
+
+        let build_run_info = if self.skip_run_info {
+            Some(false)
+        } else if self.build_run_info {
+            Some(true)
+        } else {
+            None
+        };
+
         let response = buckd
             .with_flushing()
             .test(
@@ -411,8 +434,8 @@ impl StreamingCommand for TestCommand {
                     }),
                     timeout: self.timeout_options.overall_timeout()?,
                     ignore_tests_attribute: self.ignore_tests_attribute,
-                    build_default_info: self.build_default_info,
-                    build_run_info: self.build_run_info,
+                    build_default_info,
+                    build_run_info,
                 },
                 events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
@@ -465,7 +488,7 @@ impl StreamingCommand for TestCommand {
             console.print_error(&format!("{} BUILDS FAILED", statuses.build_errors))?;
         }
 
-        print_buck_ui_and_rating(&console, ctx, events_ctx.used_superconsole)?;
+        print_buck_ui(&console, ctx, events_ctx.used_superconsole)?;
 
         let mut line = Line::default();
         line.push(Span::new_unstyled_lossy("Tests finished: "));

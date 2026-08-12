@@ -29,6 +29,7 @@ use buck2_common::invocation_paths::InvocationPaths;
 use buck2_common::io::IoProvider;
 use buck2_common::legacy_configs::cells::BuckConfigBasedCells;
 use buck2_common::legacy_configs::key::BuckconfigKeyRef;
+use buck2_common::legacy_configs::parse_buckconfig_metadata;
 use buck2_common::sqlite::sqlite_db::SqliteDb;
 use buck2_common::sqlite::sqlite_db::SqliteIdentity;
 use buck2_core::buck2_env;
@@ -38,6 +39,7 @@ use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::is_open_source;
 use buck2_core::rollout_percentage::RolloutPercentage;
+use buck2_core::soft_error;
 use buck2_core::tag_result;
 use buck2_error::BuckErrorContext;
 use buck2_error::ErrorTag;
@@ -48,6 +50,7 @@ use buck2_events::dispatch::EventDispatcher;
 use buck2_events::sink::remote;
 use buck2_events::sink::tee::TeeSink;
 use buck2_events::source::ChannelEventSource;
+use buck2_execute::dep_file_state::DEP_FILE_STORE;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::execute::blocking::BuckBlockingExecutor;
@@ -62,6 +65,7 @@ use buck2_execute_impl::materializers::deferred::DeferredMaterializerConfigs;
 use buck2_execute_impl::materializers::deferred::TtlRefreshConfiguration;
 use buck2_execute_impl::materializers::deferred::clean_stale::CleanStaleConfig;
 use buck2_execute_impl::re::paranoid_download::ParanoidDownloader;
+use buck2_execute_impl::sqlite::dep_file_state_db::PersistedDepFileStore;
 use buck2_execute_impl::sqlite::incremental_state_db::IncrementalDbState;
 use buck2_execute_impl::sqlite::materializer_db::MaterializerState;
 use buck2_execute_impl::sqlite::materializer_db::MaterializerStateSqliteDb;
@@ -93,12 +97,15 @@ use crate::ctx::BaseServerCommandContext;
 use crate::daemon::check_working_dir;
 use crate::daemon::disk_state::DiskStateOptions;
 use crate::daemon::disk_state::delete_unknown_disk_state;
+use crate::daemon::disk_state::maybe_initialize_dep_file_sqlite_db;
 use crate::daemon::disk_state::maybe_initialize_incremental_sqlite_db;
 use crate::daemon::disk_state::maybe_initialize_materializer_sqlite_db;
 use crate::daemon::forkserver::maybe_launch_forkserver;
 use crate::daemon::io_provider::create_io_provider;
 use crate::daemon::panic::DaemonStatePanicDiceDump;
 use crate::daemon::server::BuckdServerInitPreferences;
+use crate::daemon::tenting_provider::create_tenting_acl_provider;
+use crate::paging::PageOutThresholds;
 
 /// For a buckd process there is a single DaemonState created at startup and never destroyed.
 #[derive(Allocative)]
@@ -212,6 +219,17 @@ pub struct DaemonStateData {
     /// Semaphores for running actions locally. These need to be shared across commands.
     #[allocative(skip)]
     pub named_semaphores_for_run_actions: Arc<NamedSemaphores>,
+
+    pub buckconfig_metadata: StdBuckHashMap<String, String>,
+
+    /// Idle page-out config: the resource-pressure thresholds, `Some` iff
+    /// `buck2_hydration.page_out_on_idle` is enabled (a `DaemonStartupConfig`, so
+    /// fixed for the daemon's lifetime). Read per command in `finalize` to decide
+    /// whether to schedule a background page-out; `None` disables it.
+    pub(crate) page_out_on_idle: Option<PageOutThresholds>,
+
+    /// Running more than one automatic idle page-out during this daemon's lifetime.
+    pub(crate) allow_multiple_idle_page_outs: bool,
 }
 
 impl DaemonStateData {
@@ -493,7 +511,7 @@ impl DaemonState {
                     defer_write_actions,
                     ttl_refresh: TtlRefreshConfiguration {
                         frequency: std::time::Duration::from_secs(ttl_refresh_frequency),
-                        min_ttl: chrono::Duration::seconds(ttl_refresh_min_ttl),
+                        min_ttl: jiff::SignedDuration::from_secs(ttl_refresh_min_ttl),
                         enabled: ttl_refresh_enabled,
                     },
                     update_access_times,
@@ -516,8 +534,8 @@ impl DaemonState {
                 .unwrap_or(cfg!(any(target_os = "macos", target_os = "windows")));
 
             tracing::info!("Creating materializer...");
-            let (io, _, (materializer_db, materializer_state), incremental_db_state) =
-                futures::future::try_join4(
+            let (io, _, (materializer_db, materializer_state), incremental_db_state, dep_file_db) =
+                futures::future::try_join5(
                     create_io_provider(
                         fb,
                         fs.dupe(),
@@ -550,8 +568,38 @@ impl DaemonState {
                         root_config,
                         &daemon_id,
                     ),
+                    maybe_initialize_dep_file_sqlite_db(
+                        &disk_state_options,
+                        paths.clone(),
+                        blocking_executor.dupe() as Arc<dyn BlockingExecutor>,
+                        root_config,
+                        &daemon_id,
+                    ),
                 )
                 .await?;
+
+            // Install the persisted dep-file store into the process-global dep-file cache
+            // (`buck2_action_impl`), which reads it on demand at lookup time. No entries are loaded
+            // eagerly here. `DEP_FILE_STORE` is set only here, and this runs once per daemon.
+            if let Some(dep_file_db) = dep_file_db {
+                // The cache is opt-in and best-effort, so a store that cannot be built leaves the
+                // daemon running without persistence rather than failing startup.
+                match PersistedDepFileStore::try_new(dep_file_db, digest_config) {
+                    Ok(store) => DEP_FILE_STORE.init(Arc::new(store)),
+                    Err(e) => {
+                        let _unused = soft_error!(
+                            "dep_file_store_init",
+                            buck2_error::buck2_error!(
+                                buck2_error::ErrorTag::Tier0,
+                                "Failed to start the persisted dep-file cache; continuing without \
+                                 it. {}",
+                                e
+                            ),
+                            quiet: true
+                        );
+                    }
+                }
+            }
 
             let http_client = http_client_from_startup_config(&init_ctx.daemon_startup_config)
                 .await
@@ -612,9 +660,18 @@ impl DaemonState {
             )
             .await?;
 
+            tracing::info!("Creating tenting ACL provider...");
+            let tenting_acl_provider = create_tenting_acl_provider(fb, paths.project_root());
+
             tracing::info!("Constructing DICE...");
             let dice = init_ctx
-                .construct_dice(io.dupe(), digest_config, root_config)
+                .construct_dice(
+                    io.dupe(),
+                    digest_config,
+                    root_config,
+                    tenting_acl_provider,
+                    paths.dice_state_path().as_ref(),
+                )
                 .await?;
 
             tracing::info!("Creating file watcher...");
@@ -744,6 +801,22 @@ impl DaemonState {
                 daemon_id: daemon_id.dupe(),
                 daemon_originating_cgroup: init_ctx.daemon_originating_cgroup,
                 named_semaphores_for_run_actions: Arc::new(NamedSemaphores::new()),
+                buckconfig_metadata: parse_buckconfig_metadata(root_config),
+                // `Some` (with thresholds) iff idle page-out is enabled; `None`
+                // otherwise. Defaults live in `HydrationConfig::from_config`, not here.
+                page_out_on_idle: init_ctx
+                    .daemon_startup_config
+                    .hydration
+                    .as_ref()
+                    .filter(|h| h.page_out_on_idle)
+                    .map(|h| PageOutThresholds {
+                        min_free_disk_gb: h.page_out_min_free_disk_gb,
+                    }),
+                allow_multiple_idle_page_outs: init_ctx
+                    .daemon_startup_config
+                    .hydration
+                    .as_ref()
+                    .is_some_and(|h| h.allow_multiple_idle_page_outs),
             }))
         };
         let daemon_listener_span = tracing::Span::current();
@@ -1019,6 +1092,7 @@ async fn http_client_from_startup_config(
 mod tests {
 
     use buck2_common::legacy_configs::configs::testing::parse;
+    use buck2_common::settings::BuckSettings;
     use indoc::indoc;
 
     use super::*;
@@ -1063,7 +1137,7 @@ mod tests {
             )],
             "config",
         )?;
-        let startup_config = DaemonStartupConfig::new(&config)?;
+        let startup_config = DaemonStartupConfig::new(&config, &BuckSettings::empty(), false)?;
         let builder = http_client_from_startup_config(&startup_config).await?;
         assert_eq!(5, builder.max_redirects().unwrap());
         assert_eq!(Some(Duration::from_millis(10)), builder.connect_timeout());
@@ -1091,7 +1165,7 @@ mod tests {
             )],
             "config",
         )?;
-        let startup_config = DaemonStartupConfig::new(&config)?;
+        let startup_config = DaemonStartupConfig::new(&config, &BuckSettings::empty(), false)?;
         let builder = http_client_from_startup_config(&startup_config).await?;
         assert_eq!(None, builder.connect_timeout());
         assert_eq!(

@@ -31,14 +31,13 @@ class SamePackageClassStubsGenerator : StubsGenerator {
     val allKnownSymbols = mutableSetOf<String>()
 
     // Kotlin/Java built-in, stdlib types
-    val sdkInternalTypes =
-        setOf(
-                PlainKTStdlibTypes,
-                PlainKTBuiltInTypes,
-                PlainKTJavaTypeAlias,
-                PlainJavaLangTypes,
-            )
-            .flatMap { it.all() }
+    val sdkInternalTypes = setOf(
+        PlainKTStdlibTypes,
+        PlainKTBuiltInTypes,
+        PlainKTJavaTypeAlias,
+        PlainJavaLangTypes,
+    )
+        .flatMap { it.all() }
 
     allKnownSymbols.addAll(sdkInternalTypes)
 
@@ -52,7 +51,7 @@ class SamePackageClassStubsGenerator : StubsGenerator {
                 context.declaredTypes +
                 autoImportedExternalTypes +
                 context.fullQualifierTypes)
-            .flatMap { it.segments + it.names }
+            .flatMap { it.segments + it.names },
     )
 
     // Alias & type parameter names
@@ -62,7 +61,7 @@ class SamePackageClassStubsGenerator : StubsGenerator {
     allKnownSymbols.addAll(
         context.annotationEntries
             .mapNotNull { it.typeReference?.getChildOfType<KtUserType>() }
-            .mapNotNull { it.referencedName }
+            .mapNotNull { it.referencedName },
     )
 
     val maybeUnknownClasses =

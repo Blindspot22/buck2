@@ -23,7 +23,7 @@ use dice::NoValueSerialize;
 use dice::ValueSerialize;
 use dice_futures::cancellation::CancellationContext;
 use pagable::Pagable;
-use pagable::PagableTagged;
+use pagable::PagableTypeTag;
 use pagable::pagable_typetag;
 
 #[tokio::test]
@@ -53,15 +53,9 @@ async fn test_a_multiversion_bug() {
         #[display("Derived::Mid")]
         Mid,
     }
-    impl PagableTagged for Derived {
-        fn pagable_type_tag(&self) -> &'static str {
+    impl PagableTypeTag for Derived {
+        fn pagable_type_tag_static() -> &'static str {
             "Derived"
-        }
-        fn pagable_serialize_body(
-            &self,
-            ser: &mut dyn pagable::PagableSerializer,
-        ) -> pagable::Result<()> {
-            <Self as pagable::PagableSerialize>::pagable_serialize(self, ser)
         }
     }
 
@@ -79,8 +73,8 @@ async fn test_a_multiversion_bug() {
             _cancellations: &CancellationContext,
         ) -> Self::Value {
             match self {
-                Derived::Top => ctx.compute(&Derived::Mid).await.unwrap(),
-                Derived::Mid => ctx.compute(&Leaf).await.unwrap(),
+                Derived::Top => *ctx.compute(&Derived::Mid).await.unwrap(),
+                Derived::Mid => *ctx.compute(&Leaf).await.unwrap(),
             }
         }
 
@@ -94,30 +88,30 @@ async fn test_a_multiversion_bug() {
         builder.build(DetectCycles::Enabled)
     };
 
-    let mut ctx1 = {
+    let ctx1 = {
         let mut updater = dice.updater();
         updater.changed_to(vec![(Leaf, 1)]).unwrap();
         updater.commit().await
     };
 
-    let mut ctx2 = {
+    let ctx2 = {
         let mut updater = dice.updater();
         updater.changed_to(vec![(Leaf, 2)]).unwrap();
         updater.commit().await
     };
 
-    let mut ctx3 = {
+    let ctx3 = {
         let mut updater = dice.updater();
         updater.changed_to(vec![(Leaf, 1)]).unwrap();
         updater.commit().await
     };
 
-    assert_eq!(ctx1.compute(&Derived::Mid).await.unwrap(), 1);
-    assert_eq!(ctx3.compute(&Derived::Mid).await.unwrap(), 1);
+    assert_eq!(*ctx1.compute(&Derived::Mid).await.unwrap(), 1);
+    assert_eq!(*ctx3.compute(&Derived::Mid).await.unwrap(), 1);
 
-    assert_eq!(ctx2.compute(&Derived::Mid).await.unwrap(), 2);
-    assert_eq!(ctx2.compute(&Derived::Top).await.unwrap(), 2);
+    assert_eq!(*ctx2.compute(&Derived::Mid).await.unwrap(), 2);
+    assert_eq!(*ctx2.compute(&Derived::Top).await.unwrap(), 2);
 
-    assert_eq!(ctx1.compute(&Derived::Top).await.unwrap(), 1);
-    assert_eq!(ctx3.compute(&Derived::Top).await.unwrap(), 1);
+    assert_eq!(*ctx1.compute(&Derived::Top).await.unwrap(), 1);
+    assert_eq!(*ctx3.compute(&Derived::Top).await.unwrap(), 1);
 }

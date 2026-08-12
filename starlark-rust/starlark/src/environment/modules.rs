@@ -114,7 +114,7 @@ impl PagableSerialize for FrozenModule {
         // chunk indices now so the upcoming starlark serializer can resolve
         // FrozenValue pointers. Same trick as `OwnedFrozenValue`.
         let state = StarlarkSerializerImpl::get_or_create_state(serializer);
-        state.ensure_chunk_index_registered(&self.heap);
+        state.ensure_chunk_index_registered(&self.heap)?;
         let mut ctx = StarlarkSerializerImpl::new(serializer, state);
 
         self.module
@@ -138,10 +138,10 @@ impl<'de> PagableDeserialize<'de> for FrozenModule {
     ) -> pagable::Result<Self> {
         let heap = FrozenHeapRef::pagable_deserialize(deserializer)?;
 
-        // The preceding heap deserialization registers its heap state in the
-        // session, so Starlark fields can resolve `FrozenValue` pointers.
-        let state = StarlarkDeserializerImpl::get_or_create_state(deserializer.as_dyn());
-        let mut ctx = StarlarkDeserializerImpl::new(deserializer.as_dyn(), state);
+        // The preceding heap deserialization registers its heap state in this
+        // page-in scope, so Starlark fields can resolve `FrozenValue` pointers.
+        let mut ctx = StarlarkDeserializerImpl::recover_from_pagable(deserializer.as_dyn())
+            .map_err(|e: crate::Error| e.into_anyhow())?;
 
         let module = <FrozenAnyValue<FrozenModuleData>>::starlark_deserialize(&mut ctx)
             .map_err(|e: crate::Error| e.into_anyhow())?;

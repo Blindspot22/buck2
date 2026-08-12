@@ -46,7 +46,8 @@ use buck2_http::HttpClient;
 use dupe::Dupe;
 use pagable::Pagable;
 use pagable::pagable_typetag;
-use starlark::values::OwnedFrozenValue;
+use starlark::values::OwnedFrozen;
+use starlark::values::Value;
 
 use crate::actions::impls::offline;
 
@@ -92,8 +93,8 @@ impl UnregisteredAction for UnregisteredDownloadFileAction {
     fn register(
         self: Box<Self>,
         outputs: BuckIndexSet<BuildArtifact>,
-        _starlark_data: Option<OwnedFrozenValue>,
-        _error_handler: Option<OwnedFrozenValue>,
+        _starlark_data: Option<OwnedFrozen<Value<'static>>>,
+        _error_handler: Option<OwnedFrozen<Value<'static>>>,
     ) -> buck2_error::Result<Box<dyn Action>> {
         Ok(Box::new(DownloadFileAction::new(outputs, *self)?))
     }
@@ -357,7 +358,7 @@ impl Action for DownloadFileAction {
         // If we're tracing I/O, get the materializer to copy to the offline cache
         // so we can include it in the offline archive manifest later.
         let io_provider = ctx.io_provider();
-        if let Some(tracer) = TracingIoProvider::from_io(&*io_provider) {
+        if let Some(tracer) = TracingIoProvider::from_io(io_provider) {
             let offline_cache_path =
                 offline::declare_copy_to_offline_output_cache(ctx, self.output(), value.dupe())
                     .await?;
